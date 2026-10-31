@@ -8,7 +8,7 @@
 
 use {
     crate::airgap::Origin,
-    crate::vault::{Book, Fingerprint, Source, Words, unreadable},
+    crate::vault::{Book, Fingerprint, Source, StoredAccount, Words, unreadable},
     chainv4::crypto::keypair::{KeyType, Keypair, PublicKey},
     chainv4::crypto::mnemonic::Seed,
     chainv4::structs::address::Address,
@@ -259,14 +259,14 @@ fn removable(book: &Book, index: usize) -> Result<Fingerprint, String> {
     book.phrases.get(index).and_then(Words::fingerprint).ok_or_else(|| "Those words are gone from this wallet.".to_string())
 }
 
-/// Every account in a book, unlocked, or why the wallet stays shut: none is ever left out, as
-/// Wallet::store writes back only what is here, so one left out would go for good with the next
-/// save. A key damaged, or in a scheme this build lacks, refuses like a phrase that is not there.
+/// Every account in a book this build can read, unlocked, or why the wallet stays shut. One it cannot
+/// read has no holder: Wallet::store writes it back as it came, from `Book::unread`.
 pub fn open(book: &Book) -> Result<Vec<Holder>, String> {
     book.check()?;
 
     book.accounts
         .iter()
+        .filter(|stored| stored.readable())
         .map(|stored| {
             let unread = || unreadable(&stored.name);
             let keys = match &stored.source {
@@ -274,8 +274,11 @@ pub fn open(book: &Book) -> Result<Vec<Holder>, String> {
                     let seed = book.phrase_of(*from).and_then(Words::seed).ok_or_else(unread)?;
                     let mut keys = derive(seed, *account);
 
+                    // One in a scheme this build lacks stays in the source, unused here.
                     for extra in extra {
-                        keys.push(seed.key_at(extra.scheme.parse().map_err(|_| unread())?, *account, extra.index));
+                        if let Ok(scheme) = extra.scheme.parse() {
+                            keys.push(seed.key_at(scheme, *account, extra.index));
+                        }
                     }
 
                     keys
@@ -294,11 +297,23 @@ pub fn open(book: &Book) -> Result<Vec<Holder>, String> {
         .collect()
 }
 
+/// What a book's accounts become from its holders: theirs, and the ones this build could not read,
+/// which have none and go back as they came.
+pub fn stored(holders: &[Holder], book: &Book) -> Vec<StoredAccount> {
+    holders
+        .iter()
+        .map(|holder| StoredAccount {
+            name: holder.name.clone(),
+            source: holder.source.clone(),
+        })
+        .chain(book.unread())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use {
         super::*,
-        crate::vault::StoredAccount,
         chainv4::crypto::mnemonic::Phrase,
     };
 
@@ -391,7 +406,32 @@ mod tests {
             ..Book::default()
         };
 
-        assert!(open(&broken).err().unwrap().contains("cannot read the account Broken"), "one whose keys do not read is never left out: the wallet stays shut");
+        assert!(open(&broken).unwrap().is_empty(), "one whose keys do not read has no holder");
+        assert_eq!(broken.unread(), broken.accounts, "and is kept to go back as it came");
+    }
+
+    #[test]
+    fn an_account_with_no_holder_comes_through_a_save_and_a_change_to_the_rest() {
+        let mut book = Book {
+            phrases: vec![Words::new(TEST.to_string(), String::new())],
+            accounts: vec![
+                StoredAccount { name: "Unread".to_string(), source: Source::Key { key: "dilithium:0x01".to_string() } },
+                StoredAccount { name: "Main".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from: None } },
+            ],
+            ..Book::default()
+        };
+        let mut holders = open(&book).unwrap();
+        holders[0].name = "Renamed".to_string();
+        book.accounts = stored(&holders, &book);
+
+        assert_eq!(book.accounts.iter().map(|account| account.name.as_str()).collect::<Vec<_>>(), ["Renamed", "Unread"]);
+        assert_eq!(book.accounts[1].source, Source::Key { key: "dilithium:0x01".to_string() });
+
+        // And again, with the accounts it can read all gone.
+        holders.clear();
+        book.accounts = stored(&holders, &book);
+
+        assert_eq!(book.accounts.iter().map(|account| account.name.as_str()).collect::<Vec<_>>(), ["Unread"]);
     }
 
     #[test]

@@ -169,9 +169,13 @@ at least 8 characters, or none (`wallet/src/vault.rs`):
 - **What storage shows:** without the password, the salt, the nonce, and how long the sealed
   accounts are.
 
-**Where it is kept:** the app's storage directory on the desktop, the page origin's
-`localStorage` in the browser, and a file in the app's private data folder on Android. Clearing
-the site's data, or the app's, deletes the keys, so keep the words written down.
+**Where it is kept:** a file of its own in `wallet-store`, in the app's storage directory on the
+desktop and its private data folder on a phone, or the page origin's `localStorage` in the browser
+(see [What it remembers](#what-it-remembers)). Clearing the site's data, or the app's, deletes the
+keys, so keep the words written down.
+
+**Showing an account's private keys** asks for what opens the wallet first, in every mode, as showing
+its words does. Only a wallet that opens with a tap has nothing to ask for.
 
 **Unlocking:** the password opens the vault. While unlocked, the wallet keeps the stretched key in
 memory, so every change seals the accounts again without asking. Locking drops the keys and that
@@ -223,11 +227,15 @@ so an older build keeps reading it. Once it has a second, an older build says it
 writes nothing, rather than open half of it and save the rest away, and it stays that way until
 this build removes the further phrases.
 
-**An account this build cannot read.** A vault with an account naming words it does not hold, or a
-key damaged or in a scheme this build was made without, stays shut: the lock screen says which
-account, and nothing is written. The wallet saves only the accounts it opened, so opening without
-one would delete it with the next save. Open it with a build that reads it, or bring the accounts
-back from their words.
+**An account this build cannot read.** An account whose key is damaged, or in a scheme this build was
+made without, does not keep the wallet shut. Accounts lists it by name as one this build cannot read,
+and it cannot send or sign. Every save writes it back as it came, so a build that reads it finds it
+whole. Removing it takes a typed yes. An account from words opens with the keys this build has, and
+any further key in a scheme it lacks stays in the account unused.
+
+A vault with an account naming words it does not hold stays shut: nothing can be made from them, and
+nothing is written. The vault is sealed as one piece under one key, so damage to its bytes does not
+cost one account: it fails to open at all, and the file's copy is what helps then.
 
 **Changing the password:** the current one, then the new one twice, or nothing to have none. The
 accounts are sealed again under a new salt. Biometrics of the older kind kept the key the old
@@ -303,11 +311,13 @@ are written at once, and the old key is forgotten only when settings saying so a
 app next starts, so being killed at any step leaves a vault and the key it needs. A key made and
 left behind by a kill is an orphan: nothing names it and it opens nothing.
 
-**An older build** sees a wallet needing biometrics as asking for a password that is always wrong,
-with biometrics it says were turned on elsewhere. It writes nothing, and keeps the record as it
-saves its settings, so going back to this build finds the wallet whole. The mode is carried by a tag
-at the start of the record it already kept, `biometric-v1:` or `both-v1:`, rather than by a new field
-an older build's save would drop.
+**An older build** on a phone or a desktop now finds no wallets at all, as they moved out of the file
+it reads (see [What it remembers](#what-it-remembers)), and going back to this build finds them whole.
+In the browser, where they did not move, it sees a wallet needing biometrics as asking for a password
+that is always wrong, with biometrics it says were turned on elsewhere. It writes nothing, and keeps
+the record as it saves its settings. The mode is carried by a tag at the start of the record it
+already kept, `biometric-v1:` or `both-v1:`, rather than by a new field an older build's save would
+drop.
 
 **The lock screen** shows the prompt by itself when the app starts on Android, iOS and macOS, except
 for a wallet needing both, which takes its password first. After **Lock** or the timeout it waits
@@ -1133,8 +1143,10 @@ client's own is what it does anyway: what it follows and proves is asked again a
 
 ## What it remembers
 
-Everything is in app storage under one key, `chainv4-wallet`, saved by eframe every 30 seconds,
-on exit, and when Android sends the app to the background:
+On a phone or a desktop, each wallet has a file of its own and the rest has one more, in a private
+`wallet-store` folder, saved every 30 seconds if anything changed, on exit, when Android sends the
+app to the background, and at once when what opens a wallet changes. In the browser all of it is in
+localStorage under one key, `chainv4-wallet`. Either way it holds:
 - the node, the proxy, and the genesis pinned at each node;
 - the nodes trusted for [fast resume](#trust);
 - the mining pool's node, for a pool on another node;
@@ -1143,6 +1155,19 @@ on exit, and when Android sends the app to the background:
 - the chain's name its node last said, by genesis, for the titles before the node answers;
 - what it sent that is not final yet, and what it proved, the newest 2,000;
 - the wallet last opened, the lock time, and the theme.
+
+**A kill never loses a wallet.** Each file is written beside itself, flushed, read back, and only
+then renamed into place, so a kill or a lost battery leaves it as it was or as it became, and only
+what changed is written. Each has a copy, written just after and holding the same, for when the
+first will not read: never what it held before, or a password changed would still open the copy. A
+wallet neither of whose files reads is set aside as `….unreadable-…`, never written over, and the
+app says so across the top while every other wallet opens. So do settings that will not read, which
+cost no wallet. A failed save, such as on a full disk, says so too, and is tried again.
+
+**From older builds.** An older build kept everything in eframe's one file. The first start moves it
+all, and takes the wallets out of that file only once their own are written. An older build run
+afterwards finds no wallets and leaves them alone; any wallet it makes is added to the list when the
+newer build starts again.
 
 Only the vaults are secret.
 

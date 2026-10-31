@@ -478,11 +478,19 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   prove it: keep it as it is.
 - **An account of a further phrase names it by fingerprint, `Source::Phrase::from`.** Absent means
   the first phrase, which is why the first can never be removed by itself, and why `from` is never
-  written for it. `Book::check` runs on every open and seal: an account whose phrase is not there,
-  or of any kind this build cannot read, a key damaged or in a scheme it was built without, fails
-  both. `keys::open` returns an error rather than a shorter list, because `Wallet::store` rebuilds
-  the book's accounts from the holders, so one left out goes for good. Add a kind of account, and
-  add it to `check`.
+  written for it. `Book::check` runs on every open and seal: an account whose phrase is not there
+  fails both.
+- **An account this build cannot read has no holder and still gets saved.** `keys::open` leaves out a
+  key damaged or in a scheme it was built without, and `keys::stored`, which every save rebuilds the
+  book's accounts with, puts `Book::unread` back after the holders. Build the accounts any other way
+  and those go for good. Add a kind of account, and add it to `StoredAccount::readable`.
+- **Off the web, wallets are not in eframe's storage.** eframe empties its file and then writes it, so
+  a kill between loses all of it, and a torn file reads as empty. `wallet/src/store.rs` keeps a file
+  and a copy per wallet, and for settings, each flushed, read back and renamed into place. The copy
+  holds the same as the first, never an older version, or a changed password would still open it.
+  Wallet files go before settings naming them, and a removed wallet's go before settings stop naming
+  it, so a kill never brings one back after its hardware key is forgotten. Only a wallet's own text
+  changing writes its file.
 - **A `Book`'s `Debug` holds no secret.** `Words`, `Source::Key` and a swap's secret print as
   hidden, and `Stored` has no `Debug`. Keep it so for any new secret field: `assert_eq!` on a book
   prints it when a test fails.

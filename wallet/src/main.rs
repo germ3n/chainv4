@@ -9,7 +9,8 @@ const DEFAULT_NODE: &str = chainv4_ui::PUBLIC_NODE;
 /// or to the public one; Settings names another.
 #[cfg(target_os = "ios")]
 fn main() -> eframe::Result {
-    chainv4_ui::ios::run("chainv4 wallet", "wallet.ron", |creation| chainv4_wallet::wallet(creation, None, DEFAULT_NODE))
+    let folder = std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Library/Application Support"));
+    chainv4_ui::ios::run("chainv4 wallet", "wallet.ron", move |creation| chainv4_wallet::wallet(creation, None, DEFAULT_NODE, folder))
 }
 
 /// Runs the desktop app: `wallet --node http://host:port`, or CHAINV4_NODE, or the node it talked
@@ -44,7 +45,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "chainv4 wallet",
         options,
-        Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, DEFAULT_NODE))),
+        Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, DEFAULT_NODE, eframe::storage_dir("chainv4 wallet")))),
     )
 }
 
@@ -88,7 +89,7 @@ fn main() {
             .start(
                 canvas,
                 eframe::WebOptions::default(),
-                Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, &fallback))),
+                Box::new(move |creation| Ok(chainv4_wallet::wallet(creation, node, &fallback, None))),
             )
             .await;
 

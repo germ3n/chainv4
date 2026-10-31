@@ -4,9 +4,10 @@
 //!
 //! A guard is read from what `WalletEntry` always held, so an older build's save keeps it: a record
 //! in `biometric` that starts with a tag of this file's is one of the two guards that need hardware,
-//! and says how its key is made. An older build takes such a record for one from elsewhere, says so
-//! and writes nothing, and its password says wrong password, whichever it is given. A new field
-//! instead would be dropped by an older build's first save, and with it the only way into the vault.
+//! and says how its key is made. An older build in a browser, where wallets stay where it reads them,
+//! takes such a record for one from elsewhere, says so and writes nothing, and its password says wrong
+//! password, whichever it is given. A new field instead would be dropped by its first save, and with
+//! it the only way into the vault.
 //!
 //! What needs hardware can be locked out for good, as hardware can lose its key, so a wallet may
 //! need it only when its words bring back everything it holds: `refusal` says when not, and `hint`
@@ -364,6 +365,7 @@ mod tests {
 
     fn entry(biometric: Option<&str>, unprotected: bool) -> WalletEntry {
         WalletEntry {
+            id: String::new(),
             name: "Mine".to_string(),
             vault: Sealed { salt: String::new(), nonce: String::new(), sealed: String::new() },
             current: String::new(),
@@ -658,7 +660,7 @@ mod tests {
         let secret = fresh_secret().unwrap();
         let (_, biometric) = sealed_anew(&Factors::Biometric(&secret), book).unwrap();
         let (_, both) = sealed_anew(&Factors::Both("correct horse", &secret), book).unwrap();
-        let entry = |vault: Sealed, guard: Guard| WalletEntry { name: "Mine".to_string(), vault, current: "ed25519:0x01".to_string(), biometric: tagged(guard, &enrolled), unprotected: false };
+        let entry = |vault: Sealed, guard: Guard| WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: "ed25519:0x01".to_string(), biometric: tagged(guard, &enrolled), unprotected: false };
 
         vec![(Guard::Biometric, entry(biometric, Guard::Biometric), secret.clone()), (Guard::Both, entry(both, Guard::Both), secret)]
     }
@@ -758,7 +760,7 @@ mod tests {
         let book = book();
         let old_secret = fresh_secret().unwrap();
         let (_, old_sealed) = sealed_anew(&Factors::Both("correct horse", &old_secret), &book).unwrap();
-        let old = WalletEntry { name: "Mine".to_string(), vault: old_sealed, current: String::new(), biometric: Some("both-v1:fake:old".to_string()), unprotected: false };
+        let old = WalletEntry { id: String::new(), name: "Mine".to_string(), vault: old_sealed, current: String::new(), biometric: Some("both-v1:fake:old".to_string()), unprotected: false };
         let mut settings = Settings::with_wallets(vec![old.clone()]);
         let disk = |settings: &Settings| {
             let mut storage = Storage::default();

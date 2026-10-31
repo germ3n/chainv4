@@ -23,7 +23,7 @@ use {
     argon2::Argon2,
     chacha20poly1305::aead::{Aead, KeyInit},
     chacha20poly1305::{ChaCha20Poly1305, Key, Nonce},
-    chainv4::crypto::keypair::{KeyType, Keypair, PublicKey},
+    chainv4::crypto::keypair::{Keypair, PublicKey},
     chainv4::crypto::mnemonic::{Phrase, Seed},
     chainv4::structs::hex::{from_hex, to_hex},
     hkdf::Hkdf,
@@ -196,9 +196,9 @@ impl Book {
     /// a one-phrase book lacks would read, in an older build, as the only phrase's account of that
     /// number: other keys than its own. A list of phrases must all read and none be there twice,
     /// or nothing could tell which one a fingerprint names. One phrase that does not read, with
-    /// no account from it, opens as it always did. An account this build cannot read at all, a key
-    /// damaged or in a scheme it was built without, is refused the same way: `Wallet::store` writes
-    /// back only the accounts that opened. What this says never holds the words or a key.
+    /// no account from it, opens as it always did. An account of words it holds always opens, and
+    /// any further key in a scheme it lacks stays in the account unused. An account with a key it
+    /// cannot read does not stop the rest: see `unread`. What this says never holds the words or a key.
     pub fn check(&self) -> Result<(), String> {
         if self.phrases.len() > 1 {
             let mut seen = Vec::with_capacity(self.phrases.len());
@@ -217,36 +217,32 @@ impl Book {
         let first = self.phrases.first().and_then(Words::fingerprint);
 
         for account in &self.accounts {
-            let readable = match &account.source {
-                Source::Phrase { from, extra, .. } => {
-                    // Only an account of another phrase names one: the first, named, would count
-                    // apart from the accounts that name none, and take their numbers.
-                    if from.is_some() && *from == first {
-                        return Err(format!("the vault is damaged: the account {} names the first words, as none should", account.name));
-                    }
-
-                    if self.phrase_of(*from).and_then(Words::seed).is_none() {
-                        return Err(format!("the vault is damaged: the account {} comes from words it does not hold", account.name));
-                    }
-
-                    extra.iter().all(|extra| extra.scheme.parse::<KeyType>().is_ok())
+            if let Source::Phrase { from, .. } = &account.source {
+                // Only an account of another phrase names one: the first, named, would count
+                // apart from the accounts that name none, and take their numbers.
+                if from.is_some() && *from == first {
+                    return Err(format!("the vault is damaged: the account {} names the first words, as none should", account.name));
                 }
-                Source::Key { key } => Keypair::from_key_file(key).is_ok(),
-                Source::Watch { keys, .. } => keys.iter().all(|key| key.parse::<PublicKey>().is_ok()),
-                Source::MetaMask { key } => key.parse::<PublicKey>().is_ok(),
-            };
 
-            if !readable {
-                return Err(unreadable(&account.name));
+                if self.phrase_of(*from).and_then(Words::seed).is_none() {
+                    return Err(format!("the vault is damaged: the account {} comes from words it does not hold", account.name));
+                }
             }
         }
 
         Ok(())
     }
+
+    /// The accounts this build cannot use, a key damaged or in a scheme it was built without. They
+    /// stay as they are in every save, for a build that reads them, and never sign.
+    pub fn unread(&self) -> Vec<StoredAccount> {
+        self.accounts.iter().filter(|account| !account.readable()).cloned().collect()
+    }
 }
 
-/// Why a wallet stays shut for an account this build cannot read. Parsing's own errors are left out
-/// of it, as they may quote what they were given.
+/// Why a wallet stays shut for an account that read one moment and not the next, which should never
+/// be: left out, it would go with the next save. Parsing's own errors are left out of this, as they
+/// may quote what they were given.
 pub fn unreadable(name: &str) -> String {
     format!("This build cannot read the account {name}: its key is damaged, or in a scheme this build does not have. The wallet stays closed and nothing is written: open it with a build that reads it.")
 }
@@ -483,6 +479,20 @@ pub struct Extra {
 pub struct StoredAccount {
     pub name: String,
     pub source: Source,
+}
+
+impl StoredAccount {
+    /// Whether this build can use it. An account from words always can, by its first keys at least;
+    /// its words are `Book::check`'s to ask after. Parsing's own errors are not kept, as they may
+    /// quote the key they were given.
+    pub fn readable(&self) -> bool {
+        match &self.source {
+            Source::Phrase { .. } => true,
+            Source::Key { key } => Keypair::from_key_file(key).is_ok(),
+            Source::Watch { keys, .. } => keys.iter().all(|key| key.parse::<PublicKey>().is_ok()),
+            Source::MetaMask { key } => key.parse::<PublicKey>().is_ok(),
+        }
+    }
 }
 
 /// Where an account's keys come from.
@@ -1298,41 +1308,59 @@ mod tests {
             ("a watched key in a scheme it lacks", Source::Watch { keys: vec![scheme.clone()], origin: None }),
             ("one watched key of several", Source::Watch { keys: vec![good, scheme.clone()], origin: None }),
             ("MetaMask's key in a scheme it lacks", Source::MetaMask { key: scheme }),
-            ("a further key in a scheme it lacks", Source::Phrase { account: 0, extra: vec![Extra { scheme: "dilithium".to_string(), index: 1 }], from: None }),
         ]
     }
 
     #[test]
-    fn an_account_this_build_cannot_read_keeps_the_wallet_shut_and_nothing_is_written() {
+    fn an_account_this_build_cannot_read_leaves_the_wallet_open_and_stays_as_it_was_in_every_save() {
         let vault = Vault::create("correct horse").unwrap();
 
         for (what, source) in unreadable_accounts() {
+            let unread = StoredAccount { name: "Unread".to_string(), source };
             let book = Book {
                 phrases: vec![Words::new(TEST.to_string(), String::new())],
                 accounts: vec![
                     StoredAccount { name: "Main".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from: None } },
-                    StoredAccount { name: "Unread".to_string(), source },
+                    unread.clone(),
                 ],
                 ..Book::default()
             };
             let form = serde_json::to_vec(&book).unwrap();
             let kept = sealed_as(&vault, &form);
 
-            // It says so in words, naming the account, by password and by biometrics alike.
-            for why in [Vault::open(&kept, "correct horse").err().unwrap(), Vault::open_with_key(&kept, &vault.key()).err().unwrap()] {
-                assert!(why.contains("cannot read the account Unread") && why.contains("nothing is written"), "{what}: {why}");
-                assert!(!why.contains("dilithium:") && !why.contains("0101") && !why.contains("not hex"), "{what}, and quotes no key: {why}");
-                assert_ne!(why, "wrong password", "{what}: the password was right");
-            }
+            // By password and by biometrics alike, it opens, with the rest ready to use.
+            let (_, by_password) = Vault::open(&kept, "correct horse").unwrap();
+            let (_, by_key) = Vault::open_with_key(&kept, &vault.key()).unwrap();
+            assert_eq!(by_password, book, "{what}");
+            assert_eq!(by_key, book, "{what}");
 
-            // No holders to save from, and no way to seal it over what is kept.
-            assert!(crate::keys::open(&book).is_err(), "{what}");
-            assert!(vault.seal(&book).is_err(), "{what}");
+            let holders = crate::keys::open(&by_password).unwrap();
+            assert_eq!(holders.iter().map(|holder| holder.name.as_str()).collect::<Vec<_>>(), ["Main"], "{what}: nothing to sign with");
+            assert_eq!(by_password.unread(), std::slice::from_ref(&unread), "{what}");
 
-            // What is in storage still holds it whole, for a build that reads it.
-            assert_eq!(unsealed(&vault, &kept), form, "{what}");
-            assert_eq!(serde_json::from_slice::<Book>(&unsealed(&vault, &kept)).unwrap(), book, "{what}");
+            // Sealed again, it is still there whole, for a build that reads it.
+            let again = vault.seal(&by_password).unwrap();
+            assert_eq!(unsealed(&vault, &again), form, "{what}");
         }
+    }
+
+    #[test]
+    fn a_further_key_in_a_scheme_this_build_lacks_stays_in_an_account_that_still_opens() {
+        let source = Source::Phrase { account: 0, extra: vec![Extra { scheme: "dilithium".to_string(), index: 3 }], from: None };
+        let book = Book {
+            phrases: vec![Words::new(TEST.to_string(), String::new())],
+            accounts: vec![StoredAccount { name: "Main".to_string(), source: source.clone() }],
+            ..Book::default()
+        };
+        let plain = Book {
+            accounts: vec![StoredAccount { name: "Main".to_string(), source: Source::Phrase { account: 0, extra: Vec::new(), from: None } }],
+            ..book.clone()
+        };
+
+        assert!(book.unread().is_empty());
+        let holders = crate::keys::open(&book).unwrap();
+        assert_eq!(holders[0].addresses(), crate::keys::open(&plain).unwrap()[0].addresses(), "its first keys, and no more");
+        assert_eq!(holders[0].source, source, "and what it could not use goes back with it");
     }
 
     #[test]
@@ -1342,10 +1370,10 @@ mod tests {
         let origin = crate::airgap::Origin { account: 3, fingerprint: [1, 2, 3, 4] };
         let mut book = two_phrases();
         let every_scheme: Vec<String> = crate::keys::derive(Words::new(TEST.to_string(), String::new()).seed().unwrap(), 5).iter().map(|key| key.public().to_string()).collect();
-        let further = KeyType::ALL.iter().map(|scheme| Extra { scheme: scheme.name().to_string(), index: 7 }).collect();
+        let further = chainv4::crypto::keypair::KeyType::ALL.iter().map(|scheme| Extra { scheme: scheme.name().to_string(), index: 7 }).collect();
         let mut accounts = vec![StoredAccount { name: "Further".to_string(), source: Source::Phrase { account: 1, extra: further, from: None } }];
 
-        for scheme in KeyType::ALL {
+        for scheme in chainv4::crypto::keypair::KeyType::ALL {
             accounts.push(StoredAccount { name: format!("Key {}", scheme.name()), source: Source::Key { key: Keypair::generate(*scheme).unwrap().to_key_file() } });
         }
 

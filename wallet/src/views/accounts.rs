@@ -10,6 +10,7 @@ use {
     crate::airgap::Message,
     crate::app::Role,
     crate::format,
+    crate::guard,
     crate::keys::{self, Holder},
     crate::lock::{self, Writing},
     crate::theme,
@@ -45,6 +46,8 @@ pub struct AccountsState {
     proving_reveal: crate::biometrics::Proof,
     revealing: Option<usize>,
     removing: Option<usize>,
+    /// An account this build cannot read, being removed: its place among them, and the yes typed.
+    removing_unread: Option<(usize, String)>,
     /// Reading a signer's account, on a watch-only sender.
     scan: Scan,
     /// MetaMask's account once it connected, or why it did not.
@@ -98,6 +101,7 @@ impl AccountsState {
         self.asking_reveal = None;
         self.revealing = None;
         self.removing = None;
+        self.removing_unread = None;
     }
 }
 
@@ -155,6 +159,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
     }
 
     reveal_question(ui, ctx, state);
+    unread_accounts(ui, ctx, state);
 
     if let Some(index) = removed {
         let mut current = ctx.settings.current().to_string();
@@ -599,9 +604,66 @@ fn holder(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState, index: usize) -
     remove
 }
 
+/// The accounts this build cannot read, each by name: kept as they are, and never used. Only a typed
+/// yes takes one out, as a build that reads it may be the only way to what it holds.
+fn unread_accounts(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
+    let palette = *ctx.palette;
+    let unread = ctx.book.unread();
+    let mut gone = None;
+
+    for (index, account) in unread.iter().enumerate() {
+        theme::card(ui, &palette, |ui| {
+            ui.label(RichText::new(account.name.as_str()).strong().color(palette.ink));
+            ui.colored_label(palette.bad, "This build cannot read this account");
+            ui.label(RichText::new("Its key is damaged, or in a scheme this build does not have. It cannot send or sign here. It stays in the wallet as it is, so a build that reads it still can.").small().color(palette.muted));
+            ui.add_space(6.0);
+
+            match &mut state.removing_unread {
+                Some((at, yes)) if *at == index => {
+                    let warning = match account.source {
+                        Source::Key { .. } => "Its key leaves this wallet for good. Without another copy of it, what the account holds is out of reach. Type yes to remove it.",
+                        _ => "It leaves this wallet for good. Type yes to remove it.",
+                    };
+                    ui.colored_label(palette.bad, warning);
+                    ui.add(egui::TextEdit::singleline(yes).hint_text("type yes").desired_width(f32::INFINITY));
+                    let sure = guard::confirmed(yes);
+
+                    ui.horizontal_wrapped(|ui| {
+                        if theme::primary(ui, &palette, "Remove it", sure).clicked() && sure {
+                            gone = Some(index);
+                        }
+
+                        if theme::quiet(ui, &palette, "Keep it").clicked() {
+                            state.removing_unread = None;
+                        }
+                    });
+                }
+                _ => {
+                    if theme::quiet(ui, &palette, "Remove").clicked() {
+                        state.removing_unread = Some((index, String::new()));
+                    }
+                }
+            }
+        });
+        ui.add_space(10.0);
+    }
+
+    if let Some(index) = gone {
+        let target = &unread[index];
+
+        if let Some(at) = ctx.book.accounts.iter().position(|account| account == target) {
+            ctx.book.accounts.remove(at);
+        }
+
+        state.removing_unread = None;
+        *ctx.changed = true;
+    }
+}
+
 /// Asks, in a box over the page, whether to show an account's private key, which anyone who sees it
-/// can spend from. A wallet that needs hardware asks for what opens it too, as it would for its
-/// words: what such a wallet says it guards is not one tap away once it is open.
+/// can spend from. It asks for what opens the wallet too, as it would for its words: what a wallet
+/// says it guards is not one tap away once it is open. A wallet that opens with a tap has nothing
+/// to ask for.
 fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
     let Some(index) = state.asking_reveal else {
         return;
@@ -614,7 +676,7 @@ fn reveal_question(ui: &mut Ui, ctx: &Ctx, state: &mut AccountsState) {
     let palette = *ctx.palette;
     let name = holder.name.clone();
     let mut answer = None;
-    let asks_proof = ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.guard().needs_hardware());
+    let asks_proof = ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| !entry.opens_with_a_tap());
 
     let modal = egui::Modal::new(ui.make_persistent_id("reveal key"))
         .frame(egui::Frame::new().fill(palette.card).stroke(egui::Stroke::new(1.0, palette.line)).corner_radius(12.0).inner_margin(egui::Margin::same(20)))
@@ -1190,7 +1252,7 @@ mod tests {
         fake::fresh();
         let secret = fresh_secret().unwrap();
         let vault = Vault::keyed(&secret).unwrap();
-        let entry = crate::app::WalletEntry { name: "Mine".to_string(), vault: vault.seal(book).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false };
+        let entry = crate::app::WalletEntry { id: String::new(), name: "Mine".to_string(), vault: vault.seal(book).unwrap(), current: String::new(), biometric: tagged(Guard::Biometric, &fake::keep(&secret)), unprotected: false };
 
         crate::views::drawn::World { settings: crate::app::Settings::with_wallets(vec![entry]), vault: Some(vault), ..crate::views::drawn::World::default() }
     }
@@ -1236,12 +1298,112 @@ mod tests {
     }
 
     #[test]
-    fn a_wallet_with_a_password_or_none_shows_keys_as_it_always_did() {
+    fn a_wallet_that_opens_with_a_tap_has_nothing_to_ask_before_keys_show() {
         let mut book = crate::views::drawn::two_phrases();
         let mut holders = keys::open(&book).unwrap();
         let mut state = AccountsState { asking_reveal: Some(0), ..AccountsState::default() };
-        crate::views::drawn::tap(&mut book, &mut holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, &mut state));
+        let said = crate::views::drawn::tap(&mut book, &mut holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, &mut state));
 
         assert_eq!((state.revealing, state.asking_reveal), (Some(0), None));
+        assert!(!said.contains("password"), "{said}");
+    }
+
+    /// A world whose wallet opens with this password, and with biometrics too when they are named.
+    fn with_password(book: &Book, password: &str, biometric: Option<String>) -> crate::views::drawn::World {
+        let vault = crate::vault::Vault::create(password).unwrap();
+        let mut settings = crate::app::Settings::default();
+        settings.wallets = vec![crate::app::WalletEntry {
+            id: String::new(),
+            name: "Mine".to_string(),
+            vault: vault.seal(book).unwrap(),
+            current: String::new(),
+            biometric,
+            unprotected: false,
+        }];
+
+        crate::views::drawn::World { settings, vault: Some(vault), ..Default::default() }
+    }
+
+    #[test]
+    fn a_wallet_with_a_password_asks_for_it_before_keys_show() {
+        // Biometrics that are an alternative to the password do not stand in for it here.
+        for biometric in [None, Some("kept elsewhere".to_string())] {
+            let mut book = crate::views::drawn::two_phrases();
+            let mut holders = keys::open(&book).unwrap();
+            let mut world = with_password(&book, "correct horse", biometric);
+            let mut state = AccountsState { asking_reveal: Some(0), ..AccountsState::default() };
+            let tap = |world: &mut crate::views::drawn::World, book: &mut Book, holders: &mut Vec<Holder>, state: &mut AccountsState| {
+                crate::views::drawn::tap_in(world, book, holders, (360.0, 740.0), "Show them", |ui, ctx| reveal_question(ui, ctx, state))
+            };
+
+            // With nothing typed, the tap does nothing.
+            tap(&mut world, &mut book, &mut holders, &mut state);
+            assert_eq!((state.revealing, state.asking_reveal), (None, Some(0)));
+
+            // A wrong one says so.
+            *state.proving_reveal.password = "not it at all".to_string();
+            tap(&mut world, &mut book, &mut holders, &mut state);
+            assert_eq!((state.revealing, state.asking_reveal), (None, Some(0)));
+            assert_eq!(state.proving_reveal.error.as_deref(), Some("not the wallet's password"));
+
+            // The right one shows them, and is not kept.
+            *state.proving_reveal.password = "correct horse".to_string();
+            tap(&mut world, &mut book, &mut holders, &mut state);
+            assert_eq!((state.revealing, state.asking_reveal), (Some(0), None));
+            assert!(state.proving_reveal.password.is_empty());
+        }
+    }
+
+    fn with_unread() -> Book {
+        let mut book = crate::views::drawn::two_phrases();
+        book.accounts.push(crate::vault::StoredAccount { name: "Unread".to_string(), source: Source::Key { key: "dilithium:0x01".to_string() } });
+
+        book
+    }
+
+    #[test]
+    fn an_account_this_build_cannot_read_shows_by_name_on_every_screen_and_quotes_no_key() {
+        for size in crate::views::drawn::SCREENS {
+            let mut book = with_unread();
+            let before = book.clone();
+            let mut holders = keys::open(&book).unwrap();
+            let mut state = AccountsState { seen: holders.len(), ..AccountsState::default() };
+            let (width, changed) = crate::views::drawn::page(&mut book, &mut holders, size, |ui, ctx| show(ui, ctx, &mut state));
+            // Tall enough to hold all of it, as what is scrolled out of sight is not drawn.
+            let said = crate::views::drawn::said(&mut book, &mut holders, (size.0, 4000.0), |ui, ctx| show(ui, ctx, &mut state));
+
+            assert!(width <= size.0 + 0.5, "{width} on a screen {} wide", size.0);
+            assert!(!changed && book == before, "drawing it changes nothing");
+            assert_eq!(holders.len(), 2, "and it has no holder to sign with");
+            assert!(said.contains("Unread") && said.contains("cannot read this account"), "{said}");
+            assert!(!said.contains("dilithium"), "{said}");
+        }
+    }
+
+    #[test]
+    fn removing_an_account_this_build_cannot_read_takes_a_typed_yes() {
+        let mut book = with_unread();
+        let mut holders = keys::open(&book).unwrap();
+        let mut state = AccountsState::default();
+        let size = (360.0, 740.0);
+
+        let said = crate::views::drawn::tap(&mut book, &mut holders, size, "Remove", |ui, ctx| unread_accounts(ui, ctx, &mut state));
+        assert!(said.contains("out of reach") && said.contains("Type yes"), "a key says what it costs: {said}");
+
+        for typed in ["", "y", "yes please"] {
+            state.removing_unread = Some((0, typed.to_string()));
+            crate::views::drawn::tap(&mut book, &mut holders, size, "Remove it", |ui, ctx| unread_accounts(ui, ctx, &mut state));
+
+            assert_eq!(book.unread().len(), 1, "{typed:?}");
+        }
+
+        state.removing_unread = Some((0, "yes".to_string()));
+        crate::views::drawn::tap(&mut book, &mut holders, size, "Keep it", |ui, ctx| unread_accounts(ui, ctx, &mut state));
+        assert_eq!((book.unread().len(), state.removing_unread.is_none()), (1, true), "kept");
+
+        state.removing_unread = Some((0, "yes".to_string()));
+        crate::views::drawn::tap(&mut book, &mut holders, size, "Remove it", |ui, ctx| unread_accounts(ui, ctx, &mut state));
+        assert!(book.unread().is_empty());
+        assert_eq!(book.accounts.len(), 2, "and the rest stay");
     }
 }

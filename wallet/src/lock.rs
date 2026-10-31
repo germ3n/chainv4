@@ -632,6 +632,7 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
     match vault.seal(&book) {
         Ok(sealed) => {
             settings.wallets.push(WalletEntry {
+                id: String::new(),
                 name,
                 vault: sealed,
                 current: String::new(),
@@ -663,6 +664,7 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
     match vault.seal(&book) {
         Ok(sealed) => {
             settings.wallets.push(WalletEntry {
+                id: String::new(),
                 name,
                 vault: sealed,
                 current: String::new(),
@@ -840,7 +842,7 @@ mod tests {
             _ => Vault::keyed(&secret).unwrap(),
         };
         let sealed = vault.seal(&book).unwrap();
-        let entry = WalletEntry { name: "Mine".to_string(), vault: sealed, current: String::new(), biometric: guard::tagged(guard, &fake::keep(&secret)), unprotected: false };
+        let entry = WalletEntry { id: String::new(), name: "Mine".to_string(), vault: sealed, current: String::new(), biometric: guard::tagged(guard, &fake::keep(&secret)), unprotected: false };
 
         (Settings::with_wallets(vec![entry]), book)
     }

@@ -24,21 +24,25 @@ mod metamask;
 mod miner;
 mod node;
 mod steps;
+#[cfg(not(target_arch = "wasm32"))]
+mod store;
 mod theme;
 mod updates;
 mod vault;
 mod views;
 
 /// The wallet, for eframe to run. It talks to this node, or else to the one it talked to last, or
-/// else to the fallback.
-pub fn wallet(creation: &eframe::CreationContext, node: Option<String>, fallback: &str) -> Box<dyn eframe::App> {
-    Box::new(app::Wallet::new(creation, node, fallback))
+/// else to the fallback. Its wallets are kept under this folder of the app's, or, in a browser, which
+/// has none, in eframe's storage.
+pub fn wallet(creation: &eframe::CreationContext, node: Option<String>, fallback: &str, folder: Option<std::path::PathBuf>) -> Box<dyn eframe::App> {
+    Box::new(app::Wallet::new(creation, node, fallback, folder))
 }
 
-/// Where Android starts the app, in the NativeActivity's own thread. App storage, the vault in it,
-/// is a file in the app's private data folder.
+/// Where Android starts the app, in the NativeActivity's own thread. Its storage is in the app's
+/// private data folder.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: chainv4_ui::android::AndroidApp) {
-    chainv4_ui::android::run(app, "chainv4 wallet", "chainv4-wallet", "wallet.ron", |creation| wallet(creation, None, chainv4_ui::PUBLIC_NODE));
+    let folder = app.internal_data_path();
+    chainv4_ui::android::run(app, "chainv4 wallet", "chainv4-wallet", "wallet.ron", move |creation| wallet(creation, None, chainv4_ui::PUBLIC_NODE, folder));
 }

@@ -1168,7 +1168,7 @@ mod tests {
         const PHONE: (f32, f32) = (360.0, 740.0);
 
         fn entry(vault: Sealed, biometric: Option<String>) -> WalletEntry {
-            WalletEntry { name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected: false }
+            WalletEntry { id: String::new(), name: "Mine".to_string(), vault, current: String::new(), biometric, unprotected: false }
         }
 
         /// A wallet of this guard, open, with two phrases.

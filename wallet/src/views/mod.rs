@@ -676,6 +676,7 @@ pub(crate) mod drawn {
         let vault = Vault::create("").unwrap();
         let mut settings = Settings::default();
         settings.wallets = vec![crate::app::WalletEntry {
+            id: String::new(),
             name: "Mine".to_string(),
             vault: vault.seal(&Book::default()).unwrap(),
             current: holders.first().map(Holder::id).unwrap_or_default(),

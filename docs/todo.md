@@ -756,6 +756,12 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **A kill during a save could lose every wallet on a device.** eframe empties its file and then
+  writes it. Off the web, each wallet and the settings now have a file and a copy of their own, each
+  flushed, read back and renamed into place; what will not read is set aside, not written over.
+- [x] **One unreadable account kept a wallet shut.** It is listed by name now, kept as it came in every
+  save, never used to sign, and removed only by a typed yes.
+- [x] **Showing private keys asked nothing of a wallet with a password.** It asks for what opens the wallet.
 - [x] **Real unlock modes for the wallet's vault.** Password only, biometric only (a random key only
   hardware or a passkey keeps), or both required (HKDF of the password's stretch and a hardware
   secret), chosen per wallet in Settings on Android, iOS and the browser. Lockout means restoring

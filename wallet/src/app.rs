@@ -10,7 +10,7 @@ use {
     crate::node::{Ask, Node},
     crate::theme::{self, DARK, LIGHT, Palette},
     crate::updates::Updates,
-    crate::vault::{Book, Sealed, StoredAccount, Vault},
+    crate::vault::{Book, Sealed, Vault},
     crate::views::{self, Ctx, Page},
     chainv4::structs::address::Address,
     chainv4_ui::asks::{PageAsks, Reload},
@@ -229,6 +229,9 @@ pub struct SavedContract {
 /// A wallet on this device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletEntry {
+    /// What its files are named, on a device or a desktop: see crate::store. Empty until first saved.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     pub name: String,
     /// Its seed phrase and accounts, sealed by what opens it.
     pub vault: Sealed,
@@ -325,6 +328,7 @@ impl Settings {
     fn migrated(mut self) -> Settings {
         if let Some(vault) = self.vault.take() {
             self.wallets.insert(0, WalletEntry {
+                id: String::new(),
                 name: "Wallet 1".to_string(),
                 vault,
                 current: std::mem::take(&mut self.current),
@@ -442,15 +446,45 @@ pub struct Wallet {
     pull: Pull,
     /// What reads EVM calls and logs, each once.
     reader: chainv4::abi::known::AbiReader,
+    /// Where wallets and settings are kept, off the web: None if there is nowhere, and eframe's
+    /// storage is used as the web's is.
+    #[cfg(not(target_arch = "wasm32"))]
+    store: Option<crate::store::Store>,
+    /// Whether eframe's file still holds wallets, to take out once they are kept elsewhere.
+    #[cfg(not(target_arch = "wasm32"))]
+    eframes_to_clear: bool,
+    /// What to tell the person of what storage could not read or write, until they have seen it.
+    storage_trouble: Vec<String>,
 }
 
 impl Wallet {
-    pub fn new(creation: &eframe::CreationContext, node: Option<String>, fallback: &str) -> Wallet {
-        let mut settings = creation
-            .storage
-            .and_then(|storage| eframe::get_value::<Settings>(storage, STORAGE_KEY))
-            .unwrap_or_default()
-            .migrated();
+    pub fn new(creation: &eframe::CreationContext, node: Option<String>, fallback: &str, folder: Option<std::path::PathBuf>) -> Wallet {
+        let eframes = creation.storage.and_then(|storage| eframe::get_value::<Settings>(storage, STORAGE_KEY));
+        #[cfg(not(target_arch = "wasm32"))]
+        let eframes_to_clear = eframes.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut store = folder.and_then(|folder| crate::store::Store::new(&folder).map_err(|why| log::error!("{why}")).ok());
+        #[cfg(target_arch = "wasm32")]
+        let _ = folder;
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut storage_trouble = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let (mut settings, heal) = match &mut store {
+            Some(store) => {
+                let loaded = store.load();
+                let heal = loaded.heal || eframes_to_clear;
+                storage_trouble.clone_from(&loaded.trouble);
+
+                (crate::store::combined(loaded, eframes).migrated(), heal)
+            }
+            None => (eframes.unwrap_or_default().migrated(), false),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let mut settings = eframes.unwrap_or_default().migrated();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            settings.persist_now |= heal;
+        }
         settings.node = node
             .or_else(|| Some(settings.node.clone()).filter(|node| !node.is_empty()))
             .unwrap_or_else(|| fallback.to_string())
@@ -502,6 +536,11 @@ impl Wallet {
             reloading: Reload::default(),
             pull: Pull::default(),
             reader: chainv4::abi::known::AbiReader::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            store,
+            #[cfg(not(target_arch = "wasm32"))]
+            eframes_to_clear,
+            storage_trouble,
         }
     }
 
@@ -538,17 +577,50 @@ impl Wallet {
         self.reloading.start(asks, time);
     }
 
-    /// Seals the wallet's accounts again after a change.
+    /// Waits for the save just asked for, says if it failed, and only with it safely written takes
+    /// the wallets out of eframe's file, which would otherwise offer them again as an older build's.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn settled(&mut self, storage: &mut dyn eframe::Storage) {
+        let Some(store) = &mut self.store else {
+            return;
+        };
+
+        if store.wait() {
+            if std::mem::take(&mut self.eframes_to_clear) {
+                storage.remove_string(STORAGE_KEY);
+            }
+        } else if let Some(why) = store.failed.clone().filter(|why| !self.storage_trouble.contains(why)) {
+            self.storage_trouble.push(why);
+        }
+    }
+
+    /// A line across the top for what storage could not read or write, until it is dismissed.
+    fn storage_said(&mut self, ui: &mut Ui) {
+        if self.storage_trouble.is_empty() {
+            return;
+        }
+
+        let palette = self.palette;
+        let mut seen = false;
+
+        egui::Panel::top("storage trouble").frame(egui::Frame::new().fill(palette.card).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
+            for why in &self.storage_trouble {
+                ui.colored_label(palette.bad, why.as_str());
+            }
+
+            seen = theme::quiet(ui, &palette, "OK").clicked();
+        });
+
+        if seen {
+            self.storage_trouble.clear();
+        }
+    }
+
+    /// Seals the wallet's accounts again after a change. Those this build cannot read have no holder
+    /// and go back as they came.
     fn store(&mut self) -> Result<(), String> {
         let vault = self.vault.as_ref().ok_or("the wallet is locked")?;
-        self.book.accounts = self
-            .holders
-            .iter()
-            .map(|holder| StoredAccount {
-                name: holder.name.clone(),
-                source: holder.source.clone(),
-            })
-            .collect();
+        self.book.accounts = keys::stored(&self.holders, &self.book);
         let sealed = vault.seal(&self.book)?;
         self.settings.wallets.get_mut(self.settings.wallet).ok_or("the wallet is gone")?.vault = sealed;
 
@@ -1147,6 +1219,8 @@ impl eframe::App for Wallet {
             && let Some(storage) = frame.storage_mut()
         {
             self.save(storage);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.settled(storage);
             storage.flush();
         }
 
@@ -1160,6 +1234,8 @@ impl eframe::App for Wallet {
         self.title(ui.ctx());
         chainv4_ui::layout::suit_touch(ui.ctx());
         let palette = self.palette;
+
+        self.storage_said(ui);
 
         // A wallet too old for the network goes no further, locked or open.
         if self.updates.blocks() {
@@ -1357,6 +1433,22 @@ impl eframe::App for Wallet {
             self.settings.light.insert(genesis, state);
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        match &mut self.store {
+            Some(store) => {
+                store.save(&mut self.settings);
+
+                if let Some(why) = store.failed.clone().filter(|why| !self.storage_trouble.contains(why)) {
+                    self.storage_trouble.push(why);
+                }
+
+                if self.eframes_to_clear {
+                    self.settled(storage);
+                }
+            }
+            None => eframe::set_value(storage, STORAGE_KEY, &self.settings),
+        }
+        #[cfg(target_arch = "wasm32")]
         eframe::set_value(storage, STORAGE_KEY, &self.settings);
 
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
@@ -1469,6 +1561,7 @@ mod tests {
         let settings = serde_json::from_value::<Settings>(old).unwrap().migrated();
 
         assert_eq!(settings.wallets, vec![WalletEntry {
+            id: String::new(),
             name: "Wallet 1".to_string(),
             vault: sealed,
             current: "ed25519:0x01".to_string(),
@@ -1486,6 +1579,7 @@ mod tests {
     #[test]
     fn a_wallets_biometrics_are_kept_with_it_and_absent_while_off() {
         let entry = WalletEntry {
+            id: String::new(),
             name: "Main".to_string(),
             vault: Sealed {
                 salt: "0x00".to_string(),
