@@ -12,7 +12,7 @@ which shows as `cannot reach the node: timeout`.
 
 ```sh
 B=~/.chainv4-pow/bin/chainv4
-N=https://66-78-40-94.sslip.io       # the public node's API, behind nginx
+N=https://chain.homepage.gs       # the public node's API, behind nginx
 K=~/.chainv4-pow/owner.key
 VPS=root@66.78.40.94; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
 ```

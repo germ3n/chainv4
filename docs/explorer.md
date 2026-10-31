@@ -31,7 +31,7 @@ Where it looks for the node:
 - `--node`;
 - else `CHAINV4_NODE`;
 - else the node it talked to last;
-- else the public devnet, `https://66-78-40-94.sslip.io` (`chainv4_ui::PUBLIC_NODE`).
+- else the public devnet, `https://chain.homepage.gs` (`chainv4_ui::PUBLIC_NODE`).
 
 The node can be changed under Settings at any time, and on the desktop and on Android so can the
 proxy every request goes through, such as Orbot's. See [Through a proxy](#through-a-proxy).

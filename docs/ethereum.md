@@ -92,7 +92,7 @@ Add the network by hand, in MetaMask's settings:
 | Field | Value |
 | --- | --- |
 | Network name | Anything, such as chainv4 |
-| RPC URL | The node's API and `/rpc`, such as `https://66-78-40-94.sslip.io/rpc` |
+| RPC URL | The node's API and `/rpc`, such as `https://chain.homepage.gs/rpc` |
 | Chain ID | `chain_id` from `GET /status` |
 | Currency symbol | The chain's coin, such as DEV |
 
