@@ -756,6 +756,11 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **`gen_notices.py` stopped at hex_lit,** which names MITNFA and ships no text of it. Its standard
+  text is in `notices/`, and the notices are generated again in full.
+- [x] **A phone's status bar icons were pale on the light theme.** The app sets them from its theme now.
+- [x] **The explorer's sidebar was one long list.** Its groups fold, and remember it.
+
 - [x] **A Bitcoin reorganization stopped the relay for good:** `relay-sync` sent the headers from just
   past the relay's tip, which built on nothing it held. It goes back to where the two agree now.
 

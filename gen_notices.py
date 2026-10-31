@@ -212,6 +212,10 @@ def extra_text(p):
     if p["name"] == "sha3-asm":
         return [os.path.join(crate_dir(p), "cryptogams", "LICENSE")]
 
+    # hex_lit, in the wallet's lockfile, names MITNFA and ships no text of it.
+    if p["name"] == "hex_lit":
+        return [os.path.join(ROOT, "notices", "hex_lit-MITNFA.txt")]
+
     return []
 
 

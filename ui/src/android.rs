@@ -10,6 +10,7 @@
 
 use {
     crate::{
+        theme::Changed,
         biometric::{
             self, Failure,
             android::{Asked, Came},
@@ -44,6 +45,7 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
         Box::new(|creation| {
             let picker = class(&app, "org.chainv4.ui.Picker");
             files::android::set_can_pick(&creation.egui_ctx, picker.is_some());
+            let bars = class(&app, "org.chainv4.ui.Bars");
             let biometric = class(&app, "org.chainv4.ui.Biometric");
             #[cfg(feature = "camera")]
             let camera = class(&app, "org.chainv4.ui.Camera");
@@ -59,6 +61,8 @@ pub fn run(app: AndroidApp, title: &str, log_tag: &str, storage_file: &str, make
                 editing: Editing::default(),
                 picker,
                 waiting: None,
+                bars,
+                bars_told: Changed::default(),
                 biometric,
                 checking: None,
                 level_at: 0.0,
@@ -91,6 +95,9 @@ struct OnAndroid {
     picker: Option<Global<JClass<'static>>>,
     /// What a pick is handed to once the picker is done.
     waiting: Option<files::Done>,
+    /// The class that sets the system bars' icons, when the APK carries it, and what it was last told.
+    bars: Option<Global<JClass<'static>>>,
+    bars_told: Changed<bool>,
     /// The biometric class, when the APK carries it.
     biometric: Option<Global<JClass<'static>>>,
     /// What a biometric check under way is handed to once it is done.
@@ -125,6 +132,26 @@ impl OnAndroid {
 
         if let Err(err) = moved {
             log::warn!("could not move the app to the background: {err}");
+        }
+    }
+
+    /// Keeps the system bars' icons readable on the page: dark ones on a light page, light ones on a
+    /// dark page, when the app's theme changes as when it starts.
+    fn keep_bars(&mut self, ctx: &egui::Context) {
+        let dark_icons = !ctx.global_style().visuals.dark_mode;
+
+        let Some(class) = self.bars.as_ref().filter(|_| self.bars_told.is_new(dark_icons)) else {
+            return;
+        };
+
+        let told = java(&self.app, |env, activity| {
+            env.call_static_method(&**class, jni_str!("icons"), jni_sig!("(Landroid/app/Activity;Z)V"), &[JValue::Object(activity), JValue::Bool(dark_icons)])?;
+
+            Ok(())
+        });
+
+        if let Err(err) = told {
+            log::warn!("could not set the system bars' icons: {err}");
         }
     }
 
@@ -824,6 +851,7 @@ impl eframe::App for OnAndroid {
 
         let ctx = ui.ctx().clone();
         self.back_out(&ctx);
+        self.keep_bars(&ctx);
         self.editing.show(&ctx, &mut AndroidClipboard(&self.app));
         self.keep_keyboard(&ctx);
         self.copy(&ctx);

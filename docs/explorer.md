@@ -372,7 +372,7 @@ Mempool, Tokens, NFTs, Multisig, Names, Rich list & supply), Markets (DEX, Swaps
 Network (Network, Finality, Governance, Mining pool) and Tools (Tools, Send, Faucet, Settings). Under them sit the node's address, whether it answers and how, how old its tip is,
 and the light client's state, which keep the sidebar's bottom while the pages above them scroll
 in a window too short for them all (`chainv4_ui::layout::sidebar`, shared with the wallet).
-Over the page are back and forward, the search box and the chain's height.
+Over the page are back and forward, the search box and the chain's height. Tapping a group's heading folds it, and the app remembers which are folded. A folded group still lists the page open now, so the sidebar always says where you are.
 
 **The chain's name** heads the sidebar, or the bar on a phone, and titles the window or the
 browser's tab, such as `chainv4 testnet explorer`. It comes from `GET /status`'s `name`, which

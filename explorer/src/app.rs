@@ -785,9 +785,20 @@ impl Explorer {
                 ui.spacing_mut().item_spacing.y = chainv4_ui::Density::COMFORTABLE.spacing.y;
 
                 for (group, pages) in View::GROUPS {
-                    widgets::caps(ui, &palette, group);
+                    let folded = app.settings.folded.contains(group);
+
+                    if widgets::group_heading(ui, &palette, group, folded).clicked() {
+                        match folded {
+                            true => app.settings.folded.remove(group),
+                            false => app.settings.folded.insert(group.to_string()),
+                        };
+                    }
 
                     for (view, name) in pages {
+                        if !app.view.lists(view, folded) {
+                            continue;
+                        }
+
                         if widgets::nav_entry(ui, &palette, name, app.view.marks(view)).clicked() {
                             app.go(view.clone());
                         }

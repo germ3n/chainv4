@@ -23,7 +23,8 @@ Cargo.lock files of the node, the explorer and the wallet: chainv4's own MIT lic
 texts and copyright lines of every crate, and the C/C++ and fonts they bundle (Luau, RocksDB and
 its compression libraries, Android GameActivity, the apps' and the wiki's fonts). Run it after
 changing dependencies, and ship the file with any binary. It stops, naming what to update, when a
-crate or file it expects is gone.
+crate or file it expects is gone. A crate that names a license and ships no text of it gets one in
+`notices/`, as `hex_lit` does, added in `extra_text`.
 
 **The contracts workspace,** `contracts/`, holds the Rust SDK and the example contracts:
 - it builds for `wasm32-unknown-unknown`, through its own `.cargo/config.toml`;

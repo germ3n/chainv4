@@ -12,7 +12,7 @@ use {
     egui::{Color32, RichText, Ui},
     serde::{Deserialize, Serialize},
     serde_json::{Value, json},
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
 };
 
 pub mod account;
@@ -148,6 +148,12 @@ impl View {
         self == entry || matches!((self, entry), (View::Multisig(_), View::Multisig(_)))
     }
 
+    /// Whether the sidebar lists this entry, on this page: all of them, or of a group folded only the
+    /// page open now, so the sidebar still says where you are.
+    pub fn lists(&self, entry: &View, folded: bool) -> bool {
+        !folded || self.marks(entry)
+    }
+
     /// Which tab a page belongs under on a phone: a page of its own, or More for the rest.
     pub fn tab(&self) -> View {
         match self {
@@ -207,6 +213,8 @@ pub struct Settings {
     pub light_theme: bool,
     /// The chain's name as each node last gave it, for the header before the node answers.
     pub names: HashMap<String, String>,
+    /// The sidebar's groups folded, by name.
+    pub folded: HashSet<String>,
 }
 
 /// The look a page is drawn in: its colors, and whether the screen is a phone's.
@@ -903,6 +911,21 @@ pub(crate) fn render_frames(store: &Store, light: &mut crate::light::Light, widt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folded_group_lists_only_the_page_open_and_settings_remember_which_are() {
+        assert!(View::Overview.lists(&View::Dex, false));
+        assert!(!View::Overview.lists(&View::Dex, true));
+        assert!(View::Dex.lists(&View::Dex, true), "where you are stays in sight");
+        assert!(View::Multisig("multisig:0x01".to_string()).lists(&View::Multisig(String::new()), true), "any multisig is that page");
+
+        let settings = Settings { folded: HashSet::from(["Markets".to_string()]), ..Settings::default() };
+        let again: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(again.folded.contains("Markets"));
+
+        let older: Settings = serde_json::from_str(r#"{ "node": "http://node" }"#).unwrap();
+        assert!(older.folded.is_empty(), "settings from before there were folds open every group");
+    }
 
     #[test]
     fn a_table_rules_a_hairline_under_each_row_in_its_look() {

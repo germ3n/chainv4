@@ -1221,6 +1221,7 @@ out when it builds without one, as Android refuses an app that declares code it 
 - **The node:** `http://10.0.2.2:8080` at first, which is the machine running the emulator, as the
   emulator sees it. On a phone, name the node under Settings, such as `http://192.168.1.20:8080`.
 - **The keyboard** comes up when a field is focused, and its keys arrive as key events.
+- **The bars' icons:** dark on the light theme and light on the dark one, set by the app (`ui/android/Bars.java`), as the manifest's theme follows the phone's setting rather than the app's.
 - **The bars:** the app draws behind the status bar, the navigation bar and the keyboard, and keeps
   its content in the part Android says can be seen.
 - **Storage:** it saves when the app goes to the background, and every 30 seconds.

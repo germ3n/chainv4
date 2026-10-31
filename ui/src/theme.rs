@@ -165,6 +165,28 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Says when a value differs from the one before, for telling a system only what it does not know.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct Changed<T>(Option<T>);
+
+impl<T> Default for Changed<T> {
+    fn default() -> Self {
+        Changed(None)
+    }
+}
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+impl<T: PartialEq> Changed<T> {
+    /// Whether this one is new, the first always; it is remembered either way.
+    pub(crate) fn is_new(&mut self, now: T) -> bool {
+        let new = self.0.as_ref() != Some(&now);
+        self.0 = Some(now);
+
+        new
+    }
+}
+
 /// Dresses egui in a palette and a density. The palette picks the theme, so the system's own
 /// preference never swaps it for egui's.
 pub fn apply(ctx: &egui::Context, palette: &Palette, density: &Density) {
@@ -222,6 +244,16 @@ pub fn apply(ctx: &egui::Context, palette: &Palette, density: &Density) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_first_value_and_a_different_one_are_new() {
+        let mut told = Changed::default();
+
+        assert!(told.is_new(true), "nothing was said before");
+        assert!(!told.is_new(true));
+        assert!(told.is_new(false));
+        assert!(!told.is_new(false));
+    }
 
     /// How far the two are apart in lightness, by the WCAG's measure, 1 to 21.
     fn contrast(one: Color32, other: Color32) -> f32 {

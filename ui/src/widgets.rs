@@ -43,6 +43,10 @@ fn title_lead(ui: &mut Ui, palette: &Palette, lead: &str, size: f32) {
 
 /// A small label in capitals, spaced out: a section's heading.
 pub fn caps(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
+    ui.label(caps_job(palette, text))
+}
+
+fn caps_job(palette: &Palette, text: &str) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
     job.append(&text.to_uppercase(), 0.0, egui::TextFormat {
         font_id: FontId::new(10.5, FontFamily::Name(SEMIBOLD.into())),
@@ -51,7 +55,26 @@ pub fn caps(ui: &mut Ui, palette: &Palette, text: &str) -> Response {
         ..Default::default()
     });
 
-    ui.label(job)
+    job
+}
+
+/// A sidebar group's heading, as [`caps`] looks, that folds the group when tapped: its whole width
+/// takes the tap, tall enough for a finger, with a triangle at its end that says which way it is.
+pub fn group_heading(ui: &mut Ui, palette: &Palette, text: &str, folded: bool) -> Response {
+    let galley = ui.painter().layout_job(caps_job(palette, text));
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), galley.size().y.max(28.0)), egui::Sense::click());
+    let color = if response.hovered() { palette.ink } else { palette.heading };
+    let left = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(left, galley, color);
+    let middle = egui::pos2(rect.right() - 12.0, rect.center().y);
+    let points = match folded {
+        true => vec![middle + egui::vec2(-2.5, -4.0), middle + egui::vec2(3.0, 0.0), middle + egui::vec2(-2.5, 4.0)],
+        false => vec![middle + egui::vec2(-4.0, -2.5), middle + egui::vec2(4.0, -2.5), middle + egui::vec2(0.0, 3.0)],
+    };
+    ui.painter().add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
+
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// One line of text that shrinks to fit the width there is, down to smallest, and is cut short past
@@ -765,6 +788,26 @@ mod tests {
             egui::epaint::Shape::Text(shape) if shape.galley.text() == says => Some(shape.galley.rect.translate(shape.pos.to_vec2())),
             _ => None,
         })
+    }
+
+    #[test]
+    fn a_group_heading_takes_a_tap_across_its_width_and_says_the_name_in_capitals() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 300.0));
+        let mut heading = egui::Rect::NOTHING;
+        let mut text = None;
+
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                heading = group_heading(ui, &PALETTE, "Markets", true).rect;
+            });
+            output.textures_delta.clear();
+            text = drawn_text(&output, "MARKETS");
+        }
+
+        assert!(text.is_some(), "as the other headings read");
+        assert!(heading.width() > 200.0, "the whole width: {heading:?}");
+        assert!(heading.height() >= 28.0, "for a finger: {heading:?}");
     }
 
     #[test]
