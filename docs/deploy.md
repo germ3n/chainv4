@@ -100,7 +100,7 @@ hold blocks from height 0.
 
 **More machines:** `push` takes one `docker/.env` and one `validator.key` to wherever it is pointed,
 and the faucet's key too, so with several machines copy the repository with `rsync` as `push` does,
-excluding `/docker/.env` and `/docker/config/*.token` as well, then give each its own: `.env`,
+excluding `/docker/.env`, `/docker/config/*.token` and `/validator-mnemonics.txt` as well, then give each its own: `.env`,
 `config/validator.key`, `config/report.token`, and the faucet's key to the public node alone. Each
 `.env` has that machine's `REWARD_TO`, `SERVER_NAME` and the others' addresses in `PEERS`; the public
 node has `TLS_MODE=letsencrypt`, `--archive`, `POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`,

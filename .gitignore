@@ -13,3 +13,6 @@
 /docker/config/genesis.json.old*
 /docker/config/report.token
 /docker/config/genesis.json
+
+# Seed phrases of validator accounts: they stay on this machine.
+/validator-mnemonics.txt

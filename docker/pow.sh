@@ -439,7 +439,7 @@ push() {
     rsync -az --delete -e "$ssh" \
         --include '/docker/config/validator.key' --include '/docker/config/faucet.key' \
         --exclude 'target/' --exclude 'dist/' --exclude '.git/' --exclude '*.db/' \
-        --exclude '*.key' --exclude '/docker/certs/*.pem' \
+        --exclude '*.key' --exclude '/docker/certs/*.pem' --exclude '/validator-mnemonics.txt' \
         "$root/" "$target:$dir/"
     say "next, on the VPS: $ssh $target, then cd $dir && docker/pow.sh up"
 }
