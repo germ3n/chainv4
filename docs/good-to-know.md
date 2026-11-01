@@ -515,6 +515,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   comes to hundreds of proofs. It has 8 out at a time (`PROOFS_AT_ONCE`), asks nothing again at a block
   it holds a proof at, as a block's state never changes, and spaces its rounds at 15 a second over the
   round (`PROOFS_A_SECOND`). A 429 is only shown once it comes 4 times running: it waits and asks again.
+- **A transaction's id does not say which chain it is on.** The chain's own signature covers the transaction,
+  nonce, fee offer and signer, not the genesis, so the same keys sending the same thing on a new chain make the
+  same id. The wallet keeps what it proved by id with its genesis, and goes by both (`Checked::on`).
 - **Behind a proxy on another host or container, the API's per-IP limits need `--trusted-proxy`.** Without
   it every visitor is one client, and shares one faucet wait and one limit on requests. The Docker stack
   sets it to `nginx`, by name, as a container's address can change.

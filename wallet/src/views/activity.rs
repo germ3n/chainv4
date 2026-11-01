@@ -256,7 +256,8 @@ fn ask_filtered(ctx: &mut Ctx, state: &mut ActivityState, addresses: &[String], 
     }
 
     state.proved = ctx.now;
-    let unsettled = under.into_iter().flat_map(|listed| &listed.mentions).filter(|(tx, _)| !ctx.settings.checked.get(tx).is_some_and(|checked| checked.final_));
+    let genesis = ctx.settings.chain_shown(ctx.chain.genesis);
+    let unsettled = under.into_iter().flat_map(|listed| &listed.mentions).filter(|(tx, _)| !ctx.settings.checked_on(tx, genesis.as_deref()).is_some_and(|checked| checked.final_));
 
     for (tx, _) in unsettled.take(PROVEN_AT_ONCE) {
         ctx.node.ask(Ask::Receipt(tx.clone()));
@@ -269,16 +270,16 @@ fn ask_filtered(ctx: &mut Ctx, state: &mut ActivityState, addresses: &[String], 
 fn entries_under<'a>(ctx: &'a Ctx, addresses: &[String], listed: &Listed, filter: &TxFilter) -> Vec<Entry<'a>> {
     let mut seen = HashSet::new();
     let mut found = Vec::new();
+    let genesis = ctx.settings.chain_shown(ctx.chain.genesis);
 
     if !ctx.settings.read_blocks && listed.answered.filtered && ctx.chain.indexes_addresses != Some(false) {
         for (tx, height) in &listed.mentions {
             if seen.insert(tx.clone()) {
-                found.push(Entry { tx: tx.clone(), checked: ctx.settings.checked.get(tx), sent: None, height: Some(*height) });
+                found.push(Entry { tx: tx.clone(), checked: ctx.settings.checked_on(tx, genesis.as_deref()), sent: None, height: Some(*height) });
             }
         }
     } else {
-        let genesis = ctx.chain.genesis.map(|genesis| genesis.to_string());
-        let here = |kept: &str| genesis.as_deref().is_none_or(|genesis| kept == genesis);
+        let here = |kept: &str| shows(genesis.as_deref(), kept);
 
         for (tx, checked) in ctx.settings.checked.iter().filter(|(_, checked)| here(&checked.genesis)) {
             let ours = addresses.contains(&checked.sender) || checked.for_account(addresses).next().is_some() || listed.mentions.iter().any(|(listed, _)| listed == tx);
@@ -299,7 +300,8 @@ fn entries_under<'a>(ctx: &'a Ctx, addresses: &[String], listed: &Listed, filter
 fn further(ui: &mut Ui, ctx: &mut Ctx, query: &str, listed: &Listed, on: usize, shown: usize) {
     let palette = *ctx.palette;
     let older = !listed.answered.filtered && listed.read;
-    let waiting = listed.mentions.iter().filter(|(tx, _)| !ctx.settings.checked.contains_key(tx)).count();
+    let genesis = ctx.settings.chain_shown(ctx.chain.genesis);
+    let waiting = listed.mentions.iter().filter(|(tx, _)| ctx.settings.checked_on(tx, genesis.as_deref()).is_none()).count();
     let mut note = filters::said(shown, !listed.next.is_empty(), &listed.answered, on).unwrap_or_default();
 
     if older && waiting > 0 {
@@ -489,23 +491,29 @@ pub fn list(ui: &mut Ui, ctx: &Ctx, limit: usize) {
     }
 }
 
+/// Whether something kept shows as this chain's. With no chain known yet, only what was kept before
+/// chains were said: another chain's history is not this wallet's, whatever is keeping it from one.
+fn shows(genesis: Option<&str>, kept: &str) -> bool {
+    genesis.map_or(kept.is_empty(), |genesis| kept == genesis)
+}
+
 fn entries<'a>(ctx: &'a Ctx, addresses: &[String]) -> Vec<Entry<'a>> {
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
+    // The chain followed now, or that this node is pinned to.
+    let genesis = ctx.settings.chain_shown(ctx.chain.genesis);
     let mut add = |tx: &str, sent: Option<&'a Sent>, height: Option<u64>| {
         if seen.insert(tx.to_string()) {
             entries.push(Entry {
                 tx: tx.to_string(),
-                checked: ctx.settings.checked.get(tx),
+                checked: ctx.settings.checked_on(tx, genesis.as_deref()),
                 sent,
                 height,
             });
         }
     };
 
-    // The chain followed now; until it is known, everything kept.
-    let genesis = ctx.chain.genesis.map(|genesis| genesis.to_string());
-    let here = |kept: &str| genesis.as_deref().is_none_or(|genesis| kept == genesis);
+    let here = |kept: &str| shows(genesis.as_deref(), kept);
 
     for sent in ctx.settings.sent.iter().filter(|sent| addresses.contains(&sent.from) && here(&sent.genesis)) {
         add(&sent.id, Some(sent), None);
@@ -1097,6 +1105,63 @@ mod tests {
         let evm = with_evm_forms(&[holder.addresses()[0].to_string()]).pop().unwrap();
 
         (holder, evm)
+    }
+
+    /// What Activity lists for this address, with one line of each chain kept under one id each and the
+    /// same id mentioned by the node followed.
+    fn listed_with_old_rows(followed: bool, pinned: Option<&str>) -> Vec<(String, Option<u64>)> {
+        let (mut chain, genesis) = following();
+        let (me, other) = ("ed25519:me", "ed25519:other");
+        chain.mentions.insert(me.to_string(), vec![crate::chain::Mention { tx: "0xshared".to_string(), height: 7 }]);
+
+        if !followed {
+            chain.genesis = None;
+            chain.mentions.clear();
+        }
+
+        let row = |height, genesis: &str| Checked { height, final_: true, genesis: genesis.to_string(), ..checked(me, other, true) };
+
+        with_ctx(&chain, Vec::new(), |_, ctx| {
+            ctx.settings.checked.insert("0xshared".to_string(), row(9000, "0xoldchain"));
+            ctx.settings.checked.insert("0xoldonly".to_string(), row(9001, "0xoldchain"));
+            ctx.settings.checked.insert("0xnewonly".to_string(), row(3, &genesis));
+
+            if let Some(pinned) = pinned {
+                ctx.settings.pinned.insert(ctx.settings.node.clone(), pinned.to_string());
+            }
+
+            let mut listed: Vec<_> = entries(ctx, &[me.to_string()]).iter().map(|entry| (entry.tx.clone(), entry.checked.map(|checked| checked.height))).collect();
+            listed.sort();
+
+            listed
+        })
+        .0
+    }
+
+    #[test]
+    fn a_row_from_another_chain_does_not_stand_in_for_the_same_id_here_nor_show_by_itself() {
+        // The same id on the chain followed has nothing proven here yet, rather than the old chain's
+        // height and time. What was only on the old chain does not show, and this one's does.
+        assert_eq!(listed_with_old_rows(true, None), [("0xnewonly".to_string(), Some(3)), ("0xshared".to_string(), None)]);
+    }
+
+    #[test]
+    fn with_no_chain_followed_it_shows_only_what_the_node_is_pinned_to_and_otherwise_nothing_of_any_chain() {
+        // Refusing another chain, or before an answer: what it trusts here, and not every chain kept.
+        let old = listed_with_old_rows(false, Some("0xoldchain"));
+        assert_eq!(old, [("0xoldonly".to_string(), Some(9001)), ("0xshared".to_string(), Some(9000))]);
+
+        // Its pin forgotten, or a node never reached.
+        assert_eq!(listed_with_old_rows(false, None), []);
+    }
+
+    #[test]
+    fn a_row_kept_before_chains_were_said_still_goes_with_this_one() {
+        assert!(Checked { genesis: String::new(), ..checked("a", "b", true) }.on(Some("0xnew")));
+        assert!(!Checked { genesis: "0xold".to_string(), ..checked("a", "b", true) }.on(Some("0xnew")));
+        assert!(!Checked { genesis: "0xold".to_string(), ..checked("a", "b", true) }.on(None));
+        assert!(shows(None, ""), "before any chain, what was kept before chains were said");
+        assert!(!shows(Some("0xnew"), ""), "listed by itself only once a node mentions it");
     }
 
     /// A chain followed from this genesis, and the same to keep a line under.

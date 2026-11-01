@@ -245,6 +245,13 @@ pub fn kind_words(kind: ChangeKind) -> String {
 }
 
 impl Checked {
+    /// Whether it may be taken as what became of a transaction on this chain. A transaction's id says
+    /// nothing of its chain: the same keys sending the same thing on a new chain make the same id, which
+    /// is proven there afresh. One kept before its chain was said goes with any, until a node mentions it.
+    pub fn on(&self, genesis: Option<&str>) -> bool {
+        self.genesis.is_empty() || Some(self.genesis.as_str()) == genesis
+    }
+
     pub fn of(proven: &Proven<Landed>) -> Checked {
         let Landed { signed, receipt, time } = &proven.value;
         let done = !receipt.outcome.failed();

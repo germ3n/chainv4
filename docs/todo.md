@@ -789,6 +789,14 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [ ] **A chain's own signature on a transaction is not bound to its chain.** `signing_bytes` covers the transaction,
+  nonce, fee offer and signer, while votes, EIP-155 and EIP-712 name the genesis. So a transaction signed on one
+  chain is valid on another where its account has that nonce: with the keys reused, as across the devnet's
+  genesises, anyone can send it again there. Binding it changes what every signer signs, so it needs every node
+  and app at once, and a new genesis.
+- [x] **After a new chain, Activity showed the old one's transactions.** A row kept from the old chain stood in for
+  a transaction with the same id on the new one, and being final was never proven again. With no chain followed,
+  it listed every chain's. Each is kept with its genesis and goes by it now, the pinned one with none followed.
 - [x] **In the Docker stack, every visitor would have counted as nginx.** `--trusted-proxy` took only an address, which
   a container's can change, and the stack passed none. It takes a host's name now, looked up again every few
   seconds, and the stack names `nginx`.

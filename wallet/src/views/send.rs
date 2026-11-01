@@ -947,7 +947,8 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, id: &str) {
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Sent");
         ui.add_space(4.0);
-        let (text, color) = match ctx.settings.checked.get(id) {
+        let genesis = ctx.settings.chain_shown(ctx.chain.genesis);
+        let (text, color) = match ctx.settings.checked_on(id, genesis.as_deref()) {
             Some(checked) if !checked.done => ("It landed, and failed: it used its nonce and paid its fee.".to_string(), palette.bad),
             Some(checked) if checked.final_ => (format!("Final at block {}.", checked.height), palette.good),
             Some(checked) if ctx.settings.read_blocks => (format!("Included in block {}, not final: the reading has not reached it yet.", checked.height), palette.accent),

@@ -387,6 +387,17 @@ impl Settings {
         self.role.unwrap_or(Role::Online)
     }
 
+    /// The chain what is kept is shown for: the one followed, or, with none followed yet, the one this
+    /// node is pinned to, as a wallet refusing another chain is still on that one. None before either.
+    pub fn chain_shown(&self, followed: Option<chainv4::structs::hash::Hash>) -> Option<String> {
+        followed.map(|genesis| genesis.to_string()).or_else(|| self.pinned.get(&self.node).cloned())
+    }
+
+    /// What became of a transaction, as proven on this chain.
+    pub fn checked_on<'s>(&'s self, tx: &str, genesis: Option<&str>) -> Option<&'s Checked> {
+        self.checked.get(tx).filter(|checked| checked.on(genesis))
+    }
+
     /// The account in use in the wallet open, by its first address.
     pub fn current(&self) -> &str {
         self.wallets.get(self.wallet).map_or("", |entry| entry.current.as_str())
@@ -795,7 +806,7 @@ impl Wallet {
             // Its own sent transaction, looked up while reading blocks, stands until the reading
             // reaches it and takes over: included, whatever the block's finality, and not final.
             if self.settings.read_blocks {
-                if self.settings.checked.get(&tx).is_none_or(|known| known.came != Origin::Read) {
+                if self.settings.checked_on(&tx, Some(&genesis)).is_none_or(|known| known.came != Origin::Read) {
                     self.settings.checked.insert(tx, Checked { genesis: genesis.clone(), final_: false, came: Origin::Looked, ..Checked::of(&proven) });
                 }
 
@@ -835,7 +846,7 @@ impl Wallet {
 
         // Sent ones that are final are the history's now; the log keeps only what waits.
         let checked = &self.settings.checked;
-        self.settings.sent.retain(|sent| !checked.get(&sent.id).is_some_and(|checked| checked.final_));
+        self.settings.sent.retain(|sent| !checked.get(&sent.id).is_some_and(|checked| checked.final_ && checked.on(Some(&sent.genesis))));
 
         // The name the node says is kept with its chain, for the titles before it answers again.
         if !genesis.is_empty()
@@ -962,10 +973,12 @@ impl Wallet {
 
         let mentioned = current.iter().flat_map(|address| self.chain.mentions.get(address).into_iter().flatten()).map(|mention| mention.tx.clone());
         let sent = self.settings.sent.iter().filter(|sent| current.contains(&sent.from)).map(|sent| sent.id.clone());
+        let genesis = self.settings.chain_shown(self.chain.genesis);
         let unsettled: Vec<String> = sent
             .chain(mentioned)
-            // Final ones are settled; the rest are proven again until they are.
-            .filter(|tx| !self.settings.checked.get(tx).is_some_and(|checked| checked.final_))
+            // Final ones are settled; the rest are proven again until they are. Final on another chain
+            // says nothing of this one, though the id be the same.
+            .filter(|tx| !self.settings.checked_on(tx, genesis.as_deref()).is_some_and(|checked| checked.final_))
             .take(40)
             .collect();
 
@@ -1025,7 +1038,8 @@ impl Wallet {
 
         if time - self.asked_history >= HISTORY_EVERY {
             self.asked_history = time;
-            let unknown: Vec<String> = self.settings.sent.iter().filter(|sent| !self.settings.checked.contains_key(&sent.id)).map(|sent| sent.id.clone()).take(40).collect();
+            let genesis = self.settings.chain_shown(self.chain.genesis);
+            let unknown: Vec<String> = self.settings.sent.iter().filter(|sent| self.settings.checked_on(&sent.id, genesis.as_deref()).is_none()).map(|sent| sent.id.clone()).take(40).collect();
 
             for tx in unknown {
                 self.node.ask(Ask::SentReceipt(tx));
