@@ -247,7 +247,7 @@ other pages explain each part in full; this one is the short list to keep in min
   [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint).
 - **A secp256k1 key signs chainv4's own form or EIP-712's.** Nodes check both, the second bound to
   the chain by its genesis id (`SignedTx::verify_on`), so MetaMask and hardware wallets sign for
-  the browser wallet. Plain `verify` refuses an EIP-712 signature: it knows no chain. See
+  the browser wallet, as chainv4's own is bound by signing the genesis id. See
   [Typed data (EIP-712)](crypto.md#typed-data-eip-712).
 - **An offline signer has no network client at all.** The wallet's role is picked once per
   install. A signer's requests fail before they start, and it polls nothing, nor does a new install
@@ -515,9 +515,29 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   comes to hundreds of proofs. It has 8 out at a time (`PROOFS_AT_ONCE`), asks nothing again at a block
   it holds a proof at, as a block's state never changes, and spaces its rounds at 15 a second over the
   round (`PROOFS_A_SECOND`). A 429 is only shown once it comes 4 times running: it waits and asks again.
-- **A transaction's id does not say which chain it is on.** The chain's own signature covers the transaction,
-  nonce, fee offer and signer, not the genesis, so the same keys sending the same thing on a new chain make the
-  same id. The wallet keeps what it proved by id with its genesis, and goes by both (`Checked::on`).
+- **A transaction names its chain by signing it, and rows from before did not.** A signature covers the genesis id,
+  so a transaction signed for one chain fails on any other, and the same keys sending the same thing on a new chain
+  make another id. Older builds' rows may hold ids a new chain could share, as signatures then named no chain, so the
+  wallet still keeps what it proved by id with its genesis, and goes by both (`Checked::on`).
+- **Binding a transaction's signature to its chain needs a new genesis, every node and app at once.** It changes what
+  every signer signs, and there is no compatibility path: a chain's old transactions fail their signatures, so a node
+  on the new rules cannot replay an old chain from its genesis, and an old app's transactions are refused. Only the
+  signature's content changed: no tag or field encoding moved. The new genesis must have a new id, or it has not parted
+  from the old chain at all: a file run again as it was, same timestamp and all, makes the same chain, whose transactions
+  hold on the new one. Change its `timestamp` or anything else it commits to.
+- **A signature is for the chain whoever gives it the genesis id says.** The wallet and the explorer take it from the
+  light client, which holds it against the genesis pinned at the node, and sign nothing with none known: never a pinned
+  one not yet checked, nor a zero. `chainv4 send` takes it from `GET /status`, so `--node` chooses the chain, as it
+  does the nonce and fee; `--genesis` refuses any other before signing. A wrong or lying node gets a signature for
+  the chain it names, of a transaction you asked for, and without `--genesis` nothing here can tell.
+- **The offline signer holds a request's chain against Your chain by its id alone.** That is the genesis id's first
+  6 bytes, as for EIP-155, so a sender could make another genesis id that passes, by about 2^48 tries: a signature for
+  a chain of that id, and for no other. The signer shows the whole genesis id to check. With Your chain unset it has
+  nothing to hold it against and says so. It does not name a native request's chain as MetaMask's are named, such as
+  Ethereum: those first bytes are the sender's to choose.
+- **A request's code grew by a genesis id, 33 bytes.** A token transfer's request is now about 310 bytes, so one code
+  holds up to 340 (`ONE_CODE`), about 700 characters, while a long message's animated parts stay at 300 (`FRAGMENT`).
+  If a phone struggles with that one code, setting `ONE_CODE` back to 300 makes those requests animate instead.
 - **Behind a proxy on another host or container, the API's per-IP limits need `--trusted-proxy`.** Without
   it every visitor is one client, and shares one faucet wait and one limit on requests. The Docker stack
   sets it to `nginx`, by name, as a container's address can change.
@@ -893,7 +913,9 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **The pairing code shows every Ethereum address the words make.** It is the extended public key
   at m/44'/60'/0', so whoever sees it can list every account below it, as MetaMask does. No key.
 - **The signer signs for any chain.** It is offline and cannot tell which chain is real: set
-  **Your chain** in its Settings, and any other is named and warned of on the review.
+  **Your chain** in its Settings, and any other is named and warned of on the review. A native
+  request or a multisig's bundle for any other is refused outright: those come from your own
+  sender, for your own chain, while MetaMask may rightly ask for many.
 - **v is what MetaMask's keyring expects for each kind:** a typed transaction's parity alone, a
   legacy one's EIP-155 v, as many bytes as it takes for a large chain id, and 27 or 28 for messages
   and typed data.

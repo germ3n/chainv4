@@ -10,6 +10,15 @@ fn key() -> Keypair {
     Keypair::from_seed([7; 32])
 }
 
+/// The chain the requests here are for, and another a hostile sender might name.
+fn chain() -> Hash {
+    Hasher::digest(HashType::default_chain(), b"the chain the sender is on")
+}
+
+fn another_chain() -> Hash {
+    Hasher::digest(HashType::default_chain(), b"another chain of the same keys")
+}
+
 /// Someone else's address, a real key's, as an Ed25519 address must be.
 fn someone(seed: u8) -> Address {
     Keypair::from_seed([seed; 32]).public().address()
@@ -34,6 +43,7 @@ fn transfer(key: &Keypair) -> Request {
             decimals: 18,
         },
         token: None,
+        genesis: chain(),
     }
 }
 
@@ -91,7 +101,7 @@ fn every_message_reads_back_from_its_ur_and_a_short_one_fits_one_code() {
         keys: KeyType::ALL.iter().map(|scheme| Keypair::from_seed([*scheme as u8 + 1; 32]).public()).collect(),
         origin: Some(crate::airgap::Origin { account: 3, fingerprint: [0x73, 0xc5, 0xda, 0x0a] }),
     };
-    let signed = sign(&transfer(&key), &key).unwrap();
+    let signed = sign(&transfer(&key), &key, None).unwrap();
     let account = chainv4::structs::address::Address::Multisig([5; 32]);
     let mut bundle = chainv4::registry::multisig::MultisigBundle {
         genesis: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()),
@@ -120,7 +130,7 @@ fn every_message_reads_back_from_its_ur_and_a_short_one_fits_one_code() {
         assert_eq!(Message::from_text(&format!("  {}\r\n", text.to_ascii_lowercase())), Ok(message.clone()), "pasted, in either case, with what pasting brings");
         assert!(text.bytes().all(|byte| b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:".contains(&byte)), "all in a QR code's alphanumeric mode");
         assert_eq!(Message::from_ur(message.ur_type(), &message.bytes()), Ok(message.clone()));
-        assert!(message.bytes().len() <= FRAGMENT, "{} fits one code: {} bytes", message.name(), message.bytes().len());
+        assert!(message.bytes().len() <= ONE_CODE, "{} fits one code: {} bytes", message.name(), message.bytes().len());
     }
 }
 
@@ -172,10 +182,10 @@ fn codes_read_off_photos_and_files_alike() {
 fn the_signer_signs_only_with_the_key_asked_for_and_only_what_the_chain_takes() {
     let key = key();
     let request = transfer(&key);
-    let signed = sign(&request, &key).unwrap();
+    let signed = sign(&request, &key, None).unwrap();
 
-    assert_eq!(signed, SignedTx::sign(request.tx.clone(), 3, request.fee, &key));
-    assert!(sign(&request, &Keypair::from_seed([8; 32])).unwrap_err().contains("not the one"));
+    assert_eq!(signed, SignedTx::sign(request.tx.clone(), 3, request.fee, &key, &chain()));
+    assert!(sign(&request, &Keypair::from_seed([8; 32]), None).unwrap_err().contains("not the one"));
 
     // A transfer from someone else's address, signed with this key, is one the chain refuses.
     let mut theirs = transfer(&key);
@@ -185,14 +195,14 @@ fn the_signer_signs_only_with_the_key_asked_for_and_only_what_the_chain_takes() 
         amount: Amount::U128(1),
     };
 
-    assert!(sign(&theirs, &key).unwrap_err().contains("chain would refuse"));
+    assert!(sign(&theirs, &key, None).unwrap_err().contains("chain would refuse"));
 }
 
 #[test]
 fn the_sender_takes_back_only_the_transaction_it_asked_for() {
     let key = key();
     let request = transfer(&key);
-    let signed = sign(&request, &key).unwrap();
+    let signed = sign(&request, &key, None).unwrap();
 
     assert_eq!(check(&request, &signed), Ok(()));
 
@@ -200,7 +210,7 @@ fn the_sender_takes_back_only_the_transaction_it_asked_for() {
     other_nonce.nonce = 4;
     let mut forged = signed.clone();
     forged.signature = Signature::Ed25519([9; 64]);
-    let other_signer = sign(&Request { signer: Keypair::from_seed([8; 32]).public(), ..request.clone() }, &Keypair::from_seed([8; 32]));
+    let other_signer = sign(&Request { signer: Keypair::from_seed([8; 32]).public(), ..request.clone() }, &Keypair::from_seed([8; 32]), None);
 
     assert!(check(&other_nonce, &signed).unwrap_err().contains("not the transaction"));
     assert!(check(&request, &forged).unwrap_err().contains("signature"));
@@ -213,10 +223,135 @@ fn a_probe_has_a_signature_of_the_signers_scheme_and_signs_nothing() {
     for scheme in KeyType::ALL {
         let key = Keypair::from_seed([*scheme as u8 + 3; 32]);
         let probe = probe(transfer(&key).tx, 5, key.public());
-        let real = SignedTx::sign(probe.tx.clone(), 5, FeeOffer::NONE, &key);
+        let real = SignedTx::sign(probe.tx.clone(), 5, FeeOffer::NONE, &key, &chain());
 
         assert_eq!(wincode::serialized_size(&probe).unwrap(), wincode::serialized_size(&real).unwrap(), "{scheme:?}: priced as the real one");
-        assert!(probe.verify().is_err(), "and never valid");
+        assert!(probe.verify_on(&chain()).is_err(), "and never valid");
+    }
+}
+
+#[test]
+fn a_fee_past_what_fits_shows_as_the_most_there_is_and_not_as_what_it_wraps_to() {
+    let key = key();
+    let fee = FeeOffer { gas_limit: u64::MAX, max_price: u256::MAX, tip: u256::ZERO };
+    let shown = describe(&Request { fee, ..transfer(&key) });
+
+    assert!(shown.fee.contains("115,792,089,237,316,195,423,570,985,008,687,907,853,269,984,665,640,564,039,457"), "{}", shown.fee);
+}
+
+#[test]
+fn a_token_transfers_request_naming_its_chain_reads_off_one_code_in_a_photo() {
+    let message = Message::Sign(token_transfer(&key()));
+
+    assert!(message.bytes().len() > FRAGMENT, "denser than a part");
+    assert!(message.bytes().len() <= ONE_CODE);
+    assert_eq!(read(&encoded(&photo(&message.to_text(), 3, 1_400), image::ImageFormat::Png)), Ok(message));
+}
+
+#[test]
+fn a_request_carries_its_chain_and_what_is_signed_holds_there_alone() {
+    let key = key();
+    let request = transfer(&key);
+    let bytes = Message::Sign(request.clone()).bytes();
+    let Message::Sign(read) = Message::from_ur(SIGN_TYPE, &bytes).unwrap() else { unreachable!() };
+
+    assert_eq!(read.genesis, chain(), "the chain comes through the code");
+    assert_eq!(describe(&read).chain, chainv4::crypto::ethereum::chain_id(&chain()), "and shows by the id Settings takes");
+
+    let signed = sign(&read, &key, None).unwrap();
+
+    assert_eq!(signed.verify_on(&chain()), Ok(()));
+    assert_eq!(signed.verify_on(&another_chain()), Err(chainv4::crypto::verifiable::VerifyError::InvalidSignature));
+
+    // What a sender asked for on one chain is not what it takes back from a signer told another.
+    let elsewhere = Request { genesis: another_chain(), ..request.clone() };
+
+    assert!(check(&elsewhere, &signed).unwrap_err().contains("signature"));
+    assert_eq!(check(&request, &signed), Ok(()));
+}
+
+#[test]
+fn a_signer_told_its_chain_refuses_a_request_for_another_and_a_signer_told_none_signs_what_it_shows() {
+    let key = key();
+    let request = transfer(&key);
+    let ours = chainv4::crypto::ethereum::chain_id(&chain());
+    let theirs = chainv4::crypto::ethereum::chain_id(&another_chain());
+
+    assert!(sign(&request, &key, Some(ours)).is_ok());
+    assert!(sign(&request, &key, None).is_ok(), "told none, it has nothing to hold it against");
+
+    let refused = sign(&request, &key, Some(theirs)).unwrap_err();
+
+    assert!(refused.contains(&ours.to_string()) && refused.contains(&theirs.to_string()), "{refused}");
+    assert_eq!(wrong_chain(&chain(), Some(ours)), None);
+    assert_eq!(wrong_chain(&chain(), None), None);
+    assert!(wrong_chain(&chain(), Some(theirs)).is_some());
+}
+
+/// A request as it was before it named its chain, as a signer of that age reads and writes one.
+#[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
+struct OlderRequest {
+    tx: Tx,
+    nonce: u64,
+    fee: FeeOffer,
+    signer: PublicKey,
+    coin: Shown,
+    token: Option<Shown>,
+}
+
+#[test]
+fn a_request_from_before_it_named_its_chain_is_refused_and_so_is_a_new_one_on_an_older_signer() {
+    let key = key();
+    let request = transfer(&key);
+    let older = OlderRequest { tx: request.tx.clone(), nonce: request.nonce, fee: request.fee, signer: request.signer, coin: request.coin.clone(), token: None };
+    let bytes = wincode::serialize(&older).unwrap();
+
+    assert_eq!(Message::from_ur(SIGN_TYPE, &bytes).unwrap_err(), "a code that does not decode", "this signer, on an older sender's code");
+
+    // An older signer reads every field it knew, and finds the chain left over.
+    assert_eq!(whole::<OlderRequest>(&Message::Sign(request).bytes()).unwrap_err(), "a code with more in it than it should hold");
+}
+
+#[test]
+fn hostile_bytes_in_a_request_never_panic_and_what_does_read_can_be_shown() {
+    let key = key();
+    let good = Message::Sign(transfer(&key)).bytes();
+    let read = |bytes: &[u8]| {
+        if let Ok(Message::Sign(request)) = Message::from_ur(SIGN_TYPE, bytes) {
+            let _ = describe(&request);
+            let _ = wrong_chain(&request.genesis, Some(1));
+            let _ = sign(&request, &key, None);
+        }
+    };
+
+    // Cut short anywhere, and each byte in turn set to what might mislead a length or a tag.
+    for length in 0..good.len() {
+        read(&good[..length]);
+    }
+
+    for at in 0..good.len() {
+        for byte in [0, 1, 0x7f, 0x80, 0xff] {
+            let mut changed = good.clone();
+            changed[at] = byte;
+            read(&changed);
+        }
+    }
+
+    // Noise, the same every run.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+
+    for size in 0..400 {
+        let noise: Vec<u8> = (0..size)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+
+                state as u8
+            })
+            .collect();
+
+        read(&noise);
     }
 }
 

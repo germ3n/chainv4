@@ -6,8 +6,6 @@ use {
     super::send::{TlsArgs, agent, fetch, ok},
     crate::faucet::{enough_work, faucet_hash, faucet_window},
     crate::structs::address::Address,
-    crate::structs::hash::{Hash, HashType},
-    crate::structs::hex::from_hex,
     serde_json::json,
 };
 
@@ -34,8 +32,7 @@ pub fn faucet(args: FaucetArgs) -> CliResult<()> {
     }
 
     let to = recipient(&agent, node, &args.to)?;
-    let hash: HashType = status["hash"].as_str().and_then(|name| name.parse().ok()).ok_or("the node sent no hash")?;
-    let genesis = status["genesis"].as_str().and_then(from_hex).and_then(|bytes| Hash::from_bytes(hash, &bytes)).ok_or("the node sent no genesis id that reads")?;
+    let genesis = super::send::genesis_of(&status)?;
     let bits = u32::try_from(faucet["work_bits"].as_u64().ok_or("the node sent no work_bits")?)?;
     let window = faucet_window(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64);
     let symbol = status["coin"]["symbol"].as_str().unwrap_or("coins").to_string();

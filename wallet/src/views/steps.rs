@@ -346,6 +346,7 @@ mod tests {
             signer: key.public(),
             coin: Shown { symbol: "DEV".to_string(), decimals: 18 },
             token: None,
+            genesis: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()),
         };
         let described = airgap::describe(&request);
         let laid = described.steps.expect("a batch's steps");
@@ -356,11 +357,11 @@ mod tests {
         assert_eq!(laid.steps.iter().map(|step| step.kind.as_str()).collect::<Vec<_>>(), ["Send DEV", "Burn DEV", "Clear the primary name"]);
 
         // Signed, it is the very request: and one the chain would refuse is refused here.
-        assert!(airgap::check(&request, &airgap::sign(&request, &key).unwrap()).is_ok());
+        assert!(airgap::check(&request, &airgap::sign(&request, &key, None).unwrap()).is_ok());
 
         let refused = Request { tx: Tx::Batch { steps: vec![Tx::Mint { to: me(), amount: Amount::U128(1) }] }, ..request };
 
-        assert!(airgap::sign(&refused, &key).unwrap_err().contains("the chain would refuse"));
+        assert!(airgap::sign(&refused, &key, None).unwrap_err().contains("the chain would refuse"));
         assert!(airgap::refused(&refused).is_some_and(|why| why.contains("a batch holds only")));
         assert!(!airgap::describe(&refused).steps.unwrap().steps[0].allowed);
     }

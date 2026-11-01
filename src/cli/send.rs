@@ -59,6 +59,11 @@ pub struct SendArgs {
     /// Send it even though a dry run on the node says it would fail.
     #[arg(long)]
     pub anyway: bool,
+    /// The chain this may be signed for, by its genesis id: refuses to sign for any other a node
+    /// names. Without it, a signature is for the chain --node says it is on, so a wrong node or one
+    /// that lies gets a signature for its chain.
+    #[arg(long, value_name = "ID")]
+    pub genesis: Option<String>,
     /// Sign it in its EIP-712 typed form for this chain, as MetaMask and hardware wallets sign it,
     /// rather than chainv4's own. A secp256k1 key alone signs typed data.
     #[arg(long)]
@@ -546,21 +551,33 @@ pub(super) fn evm_to(text: &str) -> Result<Address, String> {
 /// Signs a transaction with the signer's next nonce, submits it, and unless told not to, waits
 /// until enough blocks hold it and prints what it did. A transaction that ran but failed is an
 /// error, so scripts can tell.
-/// A transaction signed as EIP-712 typed data for the chain the node's status names.
-#[cfg(feature = "secp256k1")]
-fn typed(status: &Value, tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
+/// The chain GET /status names, by its genesis id: what every signature here is for. A signature
+/// holds on that chain alone, so the node asked is what chooses it, unless --genesis says which.
+pub(super) fn genesis_of(status: &Value) -> CliResult<Hash> {
     let hash: HashType = status["hash"].as_str().and_then(|name| name.parse().ok()).ok_or("the node sent no hash")?;
-    let genesis = status["genesis"]
-        .as_str()
-        .and_then(from_hex)
-        .and_then(|bytes| Hash::from_bytes(hash, &bytes))
-        .ok_or("the node sent no genesis id that reads")?;
 
-    Ok(SignedTx::sign_eip712(tx, nonce, fee, keypair, &genesis).ok_or("--eip712 needs a secp256k1 key: typed data is Ethereum's")?)
+    Ok(status["genesis"].as_str().and_then(from_hex).and_then(|bytes| Hash::from_bytes(hash, &bytes)).ok_or("the node sent no genesis id that reads")?)
+}
+
+/// The chain to sign for: the one the node names, unless --genesis says another, which is refused
+/// before anything is signed.
+pub(super) fn chain_to_sign_for(status: &Value, wanted: Option<&str>) -> CliResult<Hash> {
+    let genesis = genesis_of(status)?;
+
+    match wanted {
+        Some(wanted) if !wanted.trim().eq_ignore_ascii_case(&genesis.to_string()) => Err(format!("the node is on chain {genesis}, not {}: nothing was signed", wanted.trim()).into()),
+        _ => Ok(genesis),
+    }
+}
+
+/// A transaction signed as EIP-712 typed data for this chain.
+#[cfg(feature = "secp256k1")]
+fn typed(genesis: &Hash, tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
+    Ok(SignedTx::sign_eip712(tx, nonce, fee, keypair, genesis).ok_or("--eip712 needs a secp256k1 key: typed data is Ethereum's")?)
 }
 
 #[cfg(not(feature = "secp256k1"))]
-fn typed(_: &Value, _: Tx, _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
+fn typed(_: &Hash, _: Tx, _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
     Err("--eip712 needs a secp256k1 key, and this build has no secp256k1".into())
 }
 
@@ -581,6 +598,7 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let account = ok(agent.get(format!("{node}/accounts/{sender}")).call())?;
     let nonce = account["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let status = ok(agent.get(format!("{node}/status")).call())?;
+    let genesis = chain_to_sign_for(&status, args.genesis.as_deref())?;
     let reads = matches!(args.tx, TxArgs::EvmCall { read: true, .. });
     let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. });
@@ -594,7 +612,7 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         max_price: args.max_price,
         tip: args.tip,
     };
-    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &keypair);
+    let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &keypair, &genesis);
     let (fee, failure, estimate) = offer(&agent, node, &probe, chosen)?;
 
     if reads {
@@ -612,8 +630,8 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     }
 
     let signed = match args.eip712 {
-        true => typed(&status, tx, nonce, fee, &keypair)?,
-        false => SignedTx::sign(tx, nonce, fee, &keypair),
+        true => typed(&genesis, tx, nonce, fee, &keypair)?,
+        false => SignedTx::sign(tx, nonce, fee, &keypair, &genesis),
     };
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
     let submitted = ok(agent

@@ -1,6 +1,7 @@
 //! Signing and sending transactions from the explorer. The key stays in this window: transactions
 //! are built and signed here with chainv4's own code, and only the signed bytes go to the node.
-//! The node works out the fee offer, as `chainv4 send` does, for a probe signed with none.
+//! The node works out the fee offer, as `chainv4 send` does, for a probe signed with none. A
+//! signature holds on one chain alone, so nothing is signed until the light client says which.
 
 use {
     super::{Ctx, View},
@@ -17,7 +18,7 @@ use {
     chainv4::structs::amount::Amount,
     chainv4::structs::bundle::{Bundle, bundle},
     chainv4::structs::code::Code,
-    chainv4::structs::hash::HashType,
+    chainv4::structs::hash::{Hash, HashType},
     chainv4::structs::hex::{from_hex, to_hex},
     chainv4::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     chainv4::structs::u256::{i256, u256},
@@ -25,6 +26,9 @@ use {
     serde_json::{Value, json},
     std::sync::{Arc, Mutex},
 };
+
+/// What Send says while the chain to sign for is not known.
+const NO_CHAIN: &str = "This cannot be signed yet: a signature holds on one chain alone, and the light client has not said which chain this node is on. It starts once the node answers.";
 
 /// The argument types a call can be given.
 const KINDS: [&str; 13] = ["address", "amount", "u256", "u128", "u64", "i64", "i128", "i256", "number", "bool", "string", "bytes", "nil"];
@@ -142,7 +146,7 @@ impl SendState {
     }
 
     /// Takes an answer meant for sending, moving on to the next step.
-    pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, api: &mut crate::api::Api) {
+    pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>, api: &mut crate::api::Api, genesis: Option<Hash>) {
         let Some(key) = &self.key else {
             return;
         };
@@ -165,7 +169,12 @@ impl SendState {
             (Step::Nonce { tx }, Ask::Account(address), Ok(value)) if *address == sender => {
                 match serde_json::from_value::<Account>(value.clone()) {
                     Ok(account) => {
-                        let probe = SignedTx::sign(tx.clone(), account.nonce, FeeOffer::NONE, key);
+                        let Some(genesis) = genesis else {
+                            self.step = Step::Failed(NO_CHAIN.to_string());
+
+                            return;
+                        };
+                        let probe = SignedTx::sign(tx.clone(), account.nonce, FeeOffer::NONE, key, &genesis);
                         let mut body = json!({ "tx": encode(&probe) });
 
                         if let Ok(gas_limit) = self.gas_limit.trim().parse::<u64>() {
@@ -193,7 +202,7 @@ impl SendState {
             (Step::Nonce { .. }, Ask::Account(address), Err(failure)) if *address == sender => Step::Failed(failure.message.clone()),
             (Step::Offer { tx, nonce, ask: asked }, ask, result) if asked == *ask => match result {
                 Ok(value) => match offer(value) {
-                    Ok((fee, None)) => submit(api, key, tx, nonce, fee),
+                    Ok((fee, None)) => submit(api, key, tx, nonce, fee, genesis),
                     Ok((fee, Some(warning))) => Step::Confirm { tx, nonce, fee, warning },
                     Err(err) => Step::Failed(err),
                 },
@@ -300,7 +309,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         ui.add_space(8.0);
         let busy = matches!(state.step, Step::Nonce { .. } | Step::Proving { .. } | Step::Offer { .. } | Step::Submit { .. });
 
-        if widgets::primary(ui, &palette, "Sign and send", !busy).clicked() {
+        let genesis = ctx.light.genesis();
+
+        if genesis.is_none() {
+            ui.colored_label(palette.warn, NO_CHAIN);
+        }
+
+        if widgets::primary(ui, &palette, "Sign and send", !busy && genesis.is_some()).clicked() {
             state.bundle = match (state.kind, &state.wasm) {
                 (Kind::Deploy, None) => lua_bundle(state).ok(),
                 _ => None,
@@ -408,7 +423,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, key: &Keypair) {
         if widgets::primary(ui, &palette, "Send", true).clicked()
             && let Step::Review { tx, nonce, fee, .. } = std::mem::replace(&mut state.step, Step::Idle)
         {
-            state.step = submit(ctx.api, key, tx, nonce, fee);
+            state.step = submit(ctx.api, key, tx, nonce, fee, ctx.light.genesis());
         }
 
         if widgets::quiet(ui, &palette, "Cancel").clicked() {
@@ -417,9 +432,12 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, key: &Keypair) {
     });
 }
 
-/// Signs a transaction with its fee and submits it.
-fn submit(api: &mut crate::api::Api, key: &Keypair, tx: Tx, nonce: u64, fee: FeeOffer) -> Step {
-    let signed = SignedTx::sign(tx, nonce, fee, key);
+/// Signs a transaction with its fee for this chain and submits it, unless no chain is known.
+fn submit(api: &mut crate::api::Api, key: &Keypair, tx: Tx, nonce: u64, fee: FeeOffer, genesis: Option<Hash>) -> Step {
+    let Some(genesis) = genesis else {
+        return Step::Failed(NO_CHAIN.to_string());
+    };
+    let signed = SignedTx::sign(tx, nonce, fee, key, &genesis);
     let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
     api.ask(ask.clone());
 
@@ -439,7 +457,7 @@ fn confirm(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, key: &Keypair) {
         if widgets::primary(ui, &palette, "Send anyway", true).clicked()
             && let Step::Confirm { tx, nonce, fee, .. } = std::mem::replace(&mut state.step, Step::Idle)
         {
-            state.step = submit(ctx.api, key, tx, nonce, fee);
+            state.step = submit(ctx.api, key, tx, nonce, fee, ctx.light.genesis());
         }
 
         if widgets::quiet(ui, &palette, "Cancel").clicked() {
@@ -936,6 +954,48 @@ mod tests {
     }
 
     #[test]
+    fn with_no_chain_known_nothing_is_signed_and_it_says_so() {
+        let key = Keypair::from_seed([4; 32]);
+
+        for size in SCREENS {
+            let mut state = SendState { key: Some(key.clone()), ..SendState::default() };
+            let (width, said, _) = drawn_in(&Store::default(), &mut Reading::default(), &mut Light::default(), size, false, |ui, ctx| show(ui, ctx, &mut state));
+
+            assert!(width <= size.0, "{width} wide, on {size:?}");
+            assert!(said.contains("cannot be signed yet"), "{said}");
+        }
+
+        // What was on its way when the chain went unknown goes no further.
+        let mut api = crate::api::Api::new("http://127.0.0.1:1", Err("no client in a test".to_string()), egui::Context::default());
+        let tx = Tx::Burn { from: key.public().address(), amount: chainv4::structs::amount::Amount::U128(1) };
+        let step = submit(&mut api, &key, tx.clone(), 0, FeeOffer::NONE, None);
+
+        assert!(matches!(step, Step::Failed(why) if why == NO_CHAIN));
+
+        let mut state = SendState { key: Some(key.clone()), step: Step::Nonce { tx }, ..SendState::default() };
+        let answer = serde_json::json!({ "address": key.public().address().to_string(), "balance": "0", "nonce": 3 });
+        state.answered(&Ask::Account(key.public().address().to_string()), &Ok(answer), &mut api, None);
+
+        assert!(matches!(&state.step, Step::Failed(why) if why == NO_CHAIN));
+    }
+
+    #[test]
+    fn what_it_signs_is_for_the_chain_the_light_client_follows() {
+        let key = Keypair::from_seed([4; 32]);
+        let genesis = Hash::zero(HashType::default_chain());
+        let mut api = crate::api::Api::new("http://127.0.0.1:1", Err("no client in a test".to_string()), egui::Context::default());
+        let tx = Tx::Burn { from: key.public().address(), amount: chainv4::structs::amount::Amount::U128(1) };
+        let Step::Submit { ask: Ask::Submit(body) } = submit(&mut api, &key, tx, 0, FeeOffer::NONE, Some(genesis)) else {
+            panic!("it signs and submits");
+        };
+        let body: Value = serde_json::from_str(&body).unwrap();
+        let sent: SignedTx = wincode::deserialize(&from_hex(body["tx"].as_str().unwrap()).unwrap()).unwrap();
+
+        assert_eq!(sent.verify_on(&genesis), Ok(()));
+        assert!(sent.verify_on(&Hash::from_bytes(HashType::default_chain(), &[8; 32]).unwrap()).is_err());
+    }
+
+    #[test]
     fn with_the_setting_on_a_deploy_is_not_offered_as_it_needs_a_dry_run() {
         let key = Keypair::from_seed([4; 32]);
         let mut state = SendState { key: Some(key), ..SendState::default() };
@@ -999,7 +1059,9 @@ mod tests {
         state.step = Step::Nonce {
             tx: build(&state, &key, 18).unwrap(),
         };
-        api.ask(Ask::Account(key.public().address().to_string()));
+        // What the panel has from the light client, this has from the node it is sending to.
+        api.ask(Ask::Status);
+        let mut genesis = None;
         let started = std::time::Instant::now();
 
         while !matches!(state.step, Step::Landed { .. }) {
@@ -1015,7 +1077,15 @@ mod tests {
 
             for reply in api.replies() {
                 if let crate::api::Reply::Answer { ask, result } = reply {
-                    state.answered(&ask, &result, &mut api);
+                    if ask == Ask::Status {
+                        let said = result.as_ref().ok().and_then(|status| from_hex(status["genesis"].as_str()?));
+                        genesis = said.and_then(|bytes| Hash::from_bytes(HashType::default_chain(), &bytes));
+                        api.ask(Ask::Account(key.public().address().to_string()));
+
+                        continue;
+                    }
+
+                    state.answered(&ask, &result, &mut api, genesis);
                 }
             }
 
@@ -1053,7 +1123,7 @@ mod tests {
         let mut api = crate::api::Api::new("http://127.0.0.1:0", Ok(chainv4_ui::net::Client::direct()), egui::Context::default());
         state.bundle = lua_bundle(&state).ok();
         state.step = Step::Waiting { id: "0x01".to_string() };
-        state.answered(&Ask::Tx("0x01".to_string()), &Ok(json!({ "status": "failed", "error": "compile error: syntax error: 3: oops" })), &mut api);
+        state.answered(&Ask::Tx("0x01".to_string()), &Ok(json!({ "status": "failed", "error": "compile error: syntax error: 3: oops" })), &mut api, None);
 
         assert!(matches!(&state.step, Step::Landed { failed: Some(why), .. } if why == "compile error: syntax error: lib/balances.lua:1: oops"));
 

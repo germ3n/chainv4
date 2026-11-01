@@ -32,13 +32,13 @@ fn deploy(source: &str) -> Tx {
 }
 
 fn batch(chain: &Chain, steps: Vec<Tx>) -> SignedTx {
-    SignedTx::sign(Tx::Batch { steps }, nonce(chain, &authority()), FeeOffer::NONE, &authority())
+    SignedTx::sign(Tx::Batch { steps }, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis())
 }
 
 /// Deploys the counter, and returns where it landed.
 fn counter(chain: &mut Chain) -> Address {
     let at = contract_address(&me(), nonce(chain, &authority()), chain.hash());
-    let deployed = SignedTx::sign(deploy(COUNTER), nonce(chain, &authority()), FeeOffer::NONE, &authority());
+    let deployed = SignedTx::sign(deploy(COUNTER), nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis());
 
     assert_eq!(advance(chain, vec![deployed])[0].result, Ok(Effect::Deployed(at)));
 
@@ -93,12 +93,13 @@ fn the_second_of_three_failing_undoes_all_three_and_says_which_it_was() {
     let db = Arc::new(MemoryDb::default());
     let paid = Genesis::dev_authority(authority().public());
     let mut chain = Chain::open(db, &paid).unwrap();
+    let genesis_id = chain.genesis();
     let fees = paid.fees.clone().unwrap().build();
     let offer = FeeOffer { gas_limit: 3_000_000, max_price: u256::new(1_000_000_000), tip: u256::ZERO };
     // Alice sends, so what she pays stays apart from what the producer earns.
     let alice = Keypair::from_seed([21; 32]);
     let me = alice.public().address();
-    let sign = |tx: Tx, nonce: u64, keypair: &Keypair| SignedTx::sign(tx, nonce, offer, keypair);
+    let sign = |tx: Tx, nonce: u64, keypair: &Keypair| SignedTx::sign(tx, nonce, offer, keypair, &genesis_id);
     let coin = u256::from(10u64).pow(19);
     let funded = sign(Tx::Transfer { from: self::me(), to: me, amount: Amount::U256(coin) }, nonce(&chain, &authority()), &authority());
     assert!(advance(&mut chain, vec![funded])[0].result.is_ok());
@@ -185,9 +186,26 @@ fn a_batch_may_hold_only_what_a_user_does_and_is_refused_before_it_runs() {
 
         let signed = batch(&chain, vec![pay(me(), 1, 1), step]);
 
-        assert_eq!(signed.verify(), Err(VerifyError::BatchStep));
+        assert_eq!(signed.verify_on(&chain.genesis()), Err(VerifyError::BatchStep));
         refused(&mut chain, signed, "a batch holds only");
     }
+}
+
+#[test]
+fn a_batch_signed_for_another_chain_is_refused_whatever_its_steps() {
+    let mut chain = open(&Arc::new(MemoryDb::default()));
+    let elsewhere = Chain::open(Arc::new(MemoryDb::default()), &Genesis { name: Some("another chain".to_string()), ..genesis() }).unwrap();
+    let foreign = batch(&elsewhere, vec![pay(me(), 1, 1), pay(me(), 2, 2)]);
+
+    assert_eq!(foreign.verify_on(&elsewhere.genesis()), Ok(()));
+    assert_eq!(foreign.verify_on(&chain.genesis()), Err(VerifyError::InvalidSignature));
+    refused(&mut chain, foreign.clone(), "signature does not match");
+
+    // The same steps, signed for this chain.
+    let ours = batch(&chain, vec![pay(me(), 1, 1), pay(me(), 2, 2)]);
+
+    assert_eq!(ours.tx, foreign.tx);
+    assert!(advance(&mut chain, vec![ours])[0].result.is_ok());
 }
 
 #[test]
@@ -195,12 +213,12 @@ fn a_batch_holds_one_to_thirty_two_steps() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
     let empty = batch(&chain, Vec::new());
 
-    assert_eq!(empty.verify(), Err(VerifyError::BatchSize));
+    assert_eq!(empty.verify_on(&chain.genesis()), Err(VerifyError::BatchSize));
     refused(&mut chain, empty, "1 to 32 steps");
 
     let too_many = batch(&chain, vec![pay(me(), 1, 1); MAX_BATCH_STEPS + 1]);
 
-    assert_eq!(too_many.verify(), Err(VerifyError::BatchSize));
+    assert_eq!(too_many.verify_on(&chain.genesis()), Err(VerifyError::BatchSize));
     refused(&mut chain, too_many, "1 to 32 steps");
 
     let most = batch(&chain, vec![pay(me(), 1, 1); MAX_BATCH_STEPS]);
@@ -217,12 +235,13 @@ fn a_batch_holds_one_to_thirty_two_steps() {
 #[test]
 fn every_step_must_take_from_the_batchs_sender_or_the_whole_of_it_is_invalid() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let victim = to(9);
 
     for theft in [Tx::Transfer { from: victim, to: me(), amount: Amount::U128(1) }, Tx::Burn { from: victim, amount: Amount::U128(1) }] {
         let signed = batch(&chain, vec![pay(me(), 1, 1), theft]);
 
-        assert_eq!(signed.verify(), Err(VerifyError::NotSender));
+        assert_eq!(signed.verify_on(&chain.genesis()), Err(VerifyError::NotSender));
         refused(&mut chain, signed, "only the sender's own funds");
     }
 
@@ -231,7 +250,7 @@ fn every_step_must_take_from_the_batchs_sender_or_the_whole_of_it_is_invalid() {
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &genesis).unwrap();
     let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).unwrap());
-    let probe = SignedTx::sign(Tx::Batch { steps: vec![Tx::Transfer { from: victim, to: me(), amount: Amount::U128(1) }] }, 0, FeeOffer::NONE, &authority());
+    let probe = SignedTx::sign(Tx::Batch { steps: vec![Tx::Transfer { from: victim, to: me(), amount: Amount::U128(1) }] }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let ran = dry_run(db, &genesis.rules(), &vm, &probe, 0, u256::ZERO).unwrap();
 
     assert!(ran.failure.is_some_and(|why| why.contains("only the sender's own funds")));
@@ -243,12 +262,12 @@ fn steps_invalid_in_themselves_make_the_batch_invalid() {
     let nothing = Tx::Transfer { from: me(), to: to(1), amount: Amount::U128(0) };
     let signed = batch(&chain, vec![pay(me(), 1, 1), nothing]);
 
-    assert_eq!(signed.verify(), Err(VerifyError::ZeroAmount));
+    assert_eq!(signed.verify_on(&chain.genesis()), Err(VerifyError::ZeroAmount));
     refused(&mut chain, signed, "greater than zero");
 
     let name = Tx::Name { name: "NOT A NAME".to_string(), action: crate::registry::names::NameAction::Register { years: 1 } };
 
-    assert_eq!(batch(&chain, vec![name]).verify(), Err(VerifyError::BadName));
+    assert_eq!(batch(&chain, vec![name]).verify_on(&chain.genesis()), Err(VerifyError::BadName));
 }
 
 #[test]
@@ -270,26 +289,27 @@ return M
     let mut limits = genesis.tx_limits;
     limits.fuel = 10_000_000;
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &Genesis { tx_limits: limits, ..genesis.clone() }).unwrap();
+    let genesis_id = chain.genesis();
     let spinner_at = contract_address(&me(), 0, chain.hash());
-    let deployed = SignedTx::sign(deploy(SPINNER), 0, FeeOffer::NONE, &authority());
+    let deployed = SignedTx::sign(deploy(SPINNER), 0, FeeOffer::NONE, &authority(), &genesis_id);
     assert!(advance(&mut chain, vec![deployed])[0].result.is_ok());
     let spin = |n: f64| call(spinner_at, "spin", vec![TxCallArgumentType::Number(n)]);
 
     // What one turn costs, by how far one spin goes.
-    let alone = SignedTx::sign(spin(10_000.0), 1, FeeOffer::NONE, &authority());
+    let alone = SignedTx::sign(spin(10_000.0), 1, FeeOffer::NONE, &authority(), &genesis_id);
     let used = advance(&mut chain, vec![alone]).remove(0).fuel_used;
     assert!(used > 1_000);
 
     // Each of these goes through alone; their limit is for all of them together.
     let turns = (10_000_000.0 / used as f64 * 10_000.0 * 0.55).floor();
-    let half = SignedTx::sign(spin(turns), 2, FeeOffer::NONE, &authority());
+    let half = SignedTx::sign(spin(turns), 2, FeeOffer::NONE, &authority(), &genesis_id);
     let receipt = advance(&mut chain, vec![half]).remove(0);
     assert!(receipt.result.is_ok(), "{:?}", receipt.result);
     assert!(receipt.fuel_used < 10_000_000);
     assert!(receipt.fuel_used * 2 > 10_000_000, "two of them pass the limit: {}", receipt.fuel_used);
 
     let before = balance(&chain, &to(1));
-    let both = SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 1, 1), spin(turns), spin(turns)] }, 3, FeeOffer::NONE, &authority());
+    let both = SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 1, 1), spin(turns), spin(turns)] }, 3, FeeOffer::NONE, &authority(), &genesis_id);
     let failed = advance(&mut chain, vec![both]).remove(0);
 
     let Err(Failure::Step { step: 2, failure }) = &failed.result else {
@@ -302,7 +322,7 @@ return M
 
     // However many steps come after the fuel ran out, a contract step finds none: 32 cheap spins
     // never come to more than the limit either.
-    let many = SignedTx::sign(Tx::Batch { steps: vec![spin((turns / 8.0).floor()); MAX_BATCH_STEPS] }, 4, FeeOffer::NONE, &authority());
+    let many = SignedTx::sign(Tx::Batch { steps: vec![spin((turns / 8.0).floor()); MAX_BATCH_STEPS] }, 4, FeeOffer::NONE, &authority(), &genesis_id);
     let failed = advance(&mut chain, vec![many]).remove(0);
 
     assert!(failed.result.is_err());
@@ -324,17 +344,18 @@ return M
     let mut limits = genesis.tx_limits;
     limits.memory = 4 * 1024 * 1024;
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &Genesis { tx_limits: limits, ..genesis.clone() }).unwrap();
+    let genesis_id = chain.genesis();
     let at = contract_address(&me(), 0, chain.hash());
-    let deployed = SignedTx::sign(deploy(HOARDER), 0, FeeOffer::NONE, &authority());
+    let deployed = SignedTx::sign(deploy(HOARDER), 0, FeeOffer::NONE, &authority(), &genesis_id);
     assert!(advance(&mut chain, vec![deployed])[0].result.is_ok());
     let hoard = |n: f64| call(at, "hoard", vec![TxCallArgumentType::Number(n)]);
 
     // A fraction of the limit, many times over, is no more than the limit at any one moment.
-    let small = SignedTx::sign(Tx::Batch { steps: vec![hoard(1024.0 * 1024.0); 3] }, 1, FeeOffer::NONE, &authority());
+    let small = SignedTx::sign(Tx::Batch { steps: vec![hoard(1024.0 * 1024.0); 3] }, 1, FeeOffer::NONE, &authority(), &genesis_id);
     let receipt = advance(&mut chain, vec![small]).remove(0);
     assert!(receipt.result.is_ok(), "{:?}", receipt.result);
 
-    let big = SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 1, 1), hoard(1024.0 * 1024.0), hoard(64.0 * 1024.0 * 1024.0)] }, 2, FeeOffer::NONE, &authority());
+    let big = SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 1, 1), hoard(1024.0 * 1024.0), hoard(64.0 * 1024.0 * 1024.0)] }, 2, FeeOffer::NONE, &authority(), &genesis_id);
     let failed = advance(&mut chain, vec![big]).remove(0);
 
     assert!(matches!(&failed.result, Err(Failure::Step { step: 2, .. })), "{:?}", failed.result);
@@ -355,16 +376,17 @@ end
 return M
 "#;
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let at = contract_address(&me(), 0, chain.hash());
-    assert!(advance(&mut chain, vec![SignedTx::sign(deploy(EMITTER), 0, FeeOffer::NONE, &authority())])[0].result.is_ok());
+    assert!(advance(&mut chain, vec![SignedTx::sign(deploy(EMITTER), 0, FeeOffer::NONE, &authority(), &genesis_id)])[0].result.is_ok());
     let emit = |n: f64| call(at, "emit", vec![TxCallArgumentType::Number(n)]);
-    let fits = SignedTx::sign(Tx::Batch { steps: vec![emit(100.0), emit(156.0)] }, 1, FeeOffer::NONE, &authority());
+    let fits = SignedTx::sign(Tx::Batch { steps: vec![emit(100.0), emit(156.0)] }, 1, FeeOffer::NONE, &authority(), &genesis_id);
     let receipt = advance(&mut chain, vec![fits]).remove(0);
 
     assert!(matches!(&receipt.result, Ok(Effect::Batch(steps)) if steps[0].events == 100 && steps[1].events == 156), "{:?}", receipt.result);
     assert_eq!(receipt.events.len(), 256, "in order, each step's after those before it");
 
-    let over = SignedTx::sign(Tx::Batch { steps: vec![emit(200.0), emit(200.0)] }, 2, FeeOffer::NONE, &authority());
+    let over = SignedTx::sign(Tx::Batch { steps: vec![emit(200.0), emit(200.0)] }, 2, FeeOffer::NONE, &authority(), &genesis_id);
     let failed = advance(&mut chain, vec![over]).remove(0);
 
     assert!(matches!(&failed.result, Err(Failure::Step { step: 1, .. })), "{:?}", failed.result);
@@ -384,15 +406,16 @@ end
 return M
 "#;
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let at = contract_address(&me(), 0, chain.hash());
-    assert!(advance(&mut chain, vec![SignedTx::sign(deploy(SPLIT), 0, FeeOffer::NONE, &authority())])[0].result.is_ok());
+    assert!(advance(&mut chain, vec![SignedTx::sign(deploy(SPLIT), 0, FeeOffer::NONE, &authority(), &genesis_id)])[0].result.is_ok());
     let paying = |to_seed: u8, label: &str| Tx::ContractCall {
         to: at,
         func: Hash::Xxh3_64(selector("pay")),
         amount: Amount::U128(1),
         data: vec![TxCallArgumentType::Address(to(to_seed)), TxCallArgumentType::String(label.to_string())],
     };
-    let signed = SignedTx::sign(Tx::Batch { steps: vec![paying(1, "first"), pay(me(), 3, 1), paying(2, "second")] }, 1, FeeOffer::NONE, &authority());
+    let signed = SignedTx::sign(Tx::Batch { steps: vec![paying(1, "first"), pay(me(), 3, 1), paying(2, "second")] }, 1, FeeOffer::NONE, &authority(), &genesis_id);
     let receipt = advance(&mut chain, vec![signed]).remove(0);
 
     let Ok(Effect::Batch(outcomes)) = &receipt.result else {
@@ -410,6 +433,7 @@ return M
 #[test]
 fn two_deploys_in_one_batch_land_apart_where_anyone_can_work_out() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let at = nonce(&chain, &authority());
     let hash = chain.hash();
     let first = contract_address(&me(), at, hash);
@@ -446,7 +470,7 @@ fn two_deploys_in_one_batch_land_apart_where_anyone_can_work_out() {
 
     // The next transaction's own deploy lands apart from all of them: no nonce reaches the numbers
     // later deploys in a batch use.
-    let next = SignedTx::sign(deploy(COUNTER), at + 1, FeeOffer::NONE, &authority());
+    let next = SignedTx::sign(deploy(COUNTER), at + 1, FeeOffer::NONE, &authority(), &genesis_id);
     let next_at = contract_address(&me(), at + 1, hash);
 
     assert!(![first, second, third].contains(&next_at));
@@ -491,12 +515,14 @@ end
 return M
 "#;
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let at = contract_address(&me(), 0, chain.hash());
     let signed = SignedTx::sign(
         Tx::Batch { steps: vec![deploy(OWNED), Tx::Upgrade { contract: at, code: Code::Lua(NEWER.to_string()) }, call(at, "version", Vec::new())] },
         0,
         FeeOffer::NONE,
         &authority(),
+        &genesis_id,
     );
     let receipt = advance(&mut chain, vec![signed]).remove(0);
     let Ok(Effect::Batch(outcomes)) = &receipt.result else {
@@ -511,9 +537,10 @@ return M
 fn a_multisig_sends_a_batch_on_one_bundle_of_its_members_signatures() {
     let members = [Keypair::from_seed([31; 32]), Keypair::from_seed([32; 32]), Keypair::from_seed([33; 32])];
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let create = Tx::CreateMultisig { members: members.iter().map(|key| MultisigMember { key: key.public(), bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
     let at = nonce(&chain, &authority());
-    assert!(advance(&mut chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &authority())])[0].result.is_ok());
+    assert!(advance(&mut chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &authority(), &genesis_id)])[0].result.is_ok());
     let account = multisig_address(&me(), at, chain.hash());
     let funded = transfer(&chain, &authority(), &account, 1_000);
     advance(&mut chain, vec![funded]);
@@ -522,7 +549,7 @@ fn a_multisig_sends_a_batch_on_one_bundle_of_its_members_signatures() {
     let body = MultisigBody { account, tx: steps.clone(), nonce: 0, fee: FeeOffer::NONE };
     let genesis_id = chain.genesis();
     let signing = |keys: &[&Keypair]| keys.iter().map(|key| MemberSignature::sign(&body, key, &genesis_id)).collect::<Vec<_>>();
-    let wrapped = |signatures| SignedTx::sign(Tx::Multisig { account, tx: Box::new(steps.clone()), signatures }, 0, FeeOffer::NONE, &members[0]);
+    let wrapped = |signatures| SignedTx::sign(Tx::Multisig { account, tx: Box::new(steps.clone()), signatures }, 0, FeeOffer::NONE, &members[0], &genesis_id);
 
     assert_eq!(wrapped(signing(&[&members[0], &members[1]])).sender(), account);
 
@@ -560,12 +587,13 @@ fn a_multisigs_batch_takes_from_the_multisig_alone_and_never_the_other_way_round
 fn a_chain_replays_its_batches_to_the_same_state() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let mut blocks = Vec::new();
     let contract = contract_address(&me(), 0, chain.hash());
     let txs = [
         vec![batch(&chain, vec![deploy(COUNTER), call(contract, "increment", vec![TxCallArgumentType::I64(1)]), deploy(COUNTER)])],
-        vec![SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 1, 5), call(contract, "nope", Vec::new())] }, 1, FeeOffer::NONE, &authority())],
-        vec![SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 2, 7), call(contract, "increment", vec![TxCallArgumentType::I64(1)])] }, 2, FeeOffer::NONE, &authority())],
+        vec![SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 1, 5), call(contract, "nope", Vec::new())] }, 1, FeeOffer::NONE, &authority(), &genesis_id)],
+        vec![SignedTx::sign(Tx::Batch { steps: vec![pay(me(), 2, 7), call(contract, "increment", vec![TxCallArgumentType::I64(1)])] }, 2, FeeOffer::NONE, &authority(), &genesis_id)],
     ];
 
     for tx in txs {
@@ -593,6 +621,8 @@ fn a_chain_replays_its_batches_to_the_same_state() {
 
 #[test]
 fn everyone_a_batchs_steps_touch_is_listed_in_the_address_index() {
+    // Whom a batch touches is read from it alone, and no chain here checks its signature.
+    let genesis_id = genesis().block().id();
     let (contract, deployed) = (Address::Contract([3; 32]), Address::Contract([4; 32]));
     let signed = SignedTx::sign(
         Tx::Batch {
@@ -608,6 +638,7 @@ fn everyone_a_batchs_steps_touch_is_listed_in_the_address_index() {
         0,
         FeeOffer::NONE,
         &authority(),
+        &genesis_id,
     );
     let done = TxStatus::Batch(vec![StepOutcome { effect: StepEffect::Deployed(deployed), events: 0, payments: 0 }]);
     let paid = crate::structs::receipt::Payment { from: contract, to: to(8), amount: u256::ONE };
@@ -632,7 +663,7 @@ fn the_mempool_refuses_what_no_block_could_hold_and_weighs_what_it_takes_whole()
     let fees = paid.fees.clone().unwrap().build();
     let genesis_id = chain.genesis();
     let offer = FeeOffer { gas_limit: 1_000_000, max_price: u256::new(1_000_000_000_000), tip: u256::ZERO };
-    let signed = |steps: Vec<Tx>, offer: FeeOffer| SignedTx::sign(Tx::Batch { steps }, 0, offer, &authority());
+    let signed = |steps: Vec<Tx>, offer: FeeOffer| SignedTx::sign(Tx::Batch { steps }, 0, offer, &authority(), &genesis_id);
     let add = |tx: SignedTx| Mempool::new(10).add(tx, &genesis_id, &chain.state(), Some(&fees));
 
     assert_eq!(add(signed(Vec::new(), offer)), Err(MempoolError::Invalid(VerifyError::BatchSize)));
@@ -641,7 +672,7 @@ fn the_mempool_refuses_what_no_block_could_hold_and_weighs_what_it_takes_whole()
 
     // Enough gas for one step's cost is not enough for ten's.
     let steps = vec![pay(me(), 1, 1); 10];
-    let one = fees.schedule().intrinsic(&SignedTx::sign(pay(me(), 1, 1), 0, offer, &authority()));
+    let one = fees.schedule().intrinsic(&SignedTx::sign(pay(me(), 1, 1), 0, offer, &authority(), &genesis_id));
     let short = FeeOffer { gas_limit: one, ..offer };
 
     assert_eq!(add(signed(steps.clone(), short)), Err(MempoolError::BadGasLimit));

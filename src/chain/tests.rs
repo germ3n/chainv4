@@ -98,7 +98,64 @@ fn transfer(chain: &Chain, from: &Keypair, to: &Address, amount: u128) -> Signed
         amount: Amount::U128(amount),
     };
 
-    SignedTx::sign(tx, nonce(chain, from), FeeOffer::NONE, from)
+    SignedTx::sign(tx, nonce(chain, from), FeeOffer::NONE, from, &chain.genesis())
+}
+
+/// Another chain of the same keys, whose accounts start just as this one's do: all that tells them
+/// apart is its genesis.
+fn another_chain() -> Chain {
+    Chain::open(Arc::new(MemoryDb::default()), &Genesis { name: Some("another chain".to_string()), ..genesis() }).unwrap()
+}
+
+#[test]
+fn a_transaction_signed_for_one_chain_runs_there_and_never_on_another_of_the_same_keys() {
+    use crate::crypto::verifiable::VerifyError;
+
+    let mut here = open(&Arc::new(MemoryDb::default()));
+    let mut there = another_chain();
+    let bob = Address::Ed25519([9; 32]);
+
+    assert_ne!(here.genesis(), there.genesis());
+    assert_eq!(nonce(&here, &authority()), nonce(&there, &authority()), "the same nonce on both, as a chain started over has");
+
+    let sent = transfer(&here, &authority(), &bob, 5);
+
+    assert_eq!(sent.verify_on(&here.genesis()), Ok(()));
+    assert_eq!(sent.verify_on(&there.genesis()), Err(VerifyError::InvalidSignature));
+
+    // A producer that leaves it out of nothing: the block holding it is refused, and nothing moves.
+    let (block, now) = forced_block(&there, vec![sent.clone()]);
+
+    match there.import(&block, now) {
+        Err(ImportError::Invalid(BlockError::Tx { error, .. })) => assert!(error.to_string().contains("signature does not match"), "{error}"),
+        other => panic!("expected the block refused, got {other:?}"),
+    }
+
+    assert_eq!(balance(&there, &bob), u256::ZERO);
+    assert_eq!(nonce(&there, &authority()), 0);
+
+    // An honest producer's build leaves it out, and its own chain runs it.
+    let (built, _) = next_block(&there, vec![sent.clone()]);
+
+    assert!(built.txs.is_empty());
+    assert!(advance(&mut here, vec![sent])[0].result.is_ok());
+    assert_eq!(balance(&here, &bob), u256::new(5));
+}
+
+#[test]
+fn the_same_keys_sending_the_same_thing_on_another_chain_make_another_id_with_the_same_bytes_but_the_signature() {
+    let (here, there) = (open(&Arc::new(MemoryDb::default())), another_chain());
+    let bob = Address::Ed25519([9; 32]);
+    let (one, other) = (transfer(&here, &authority(), &bob, 5), transfer(&there, &authority(), &bob, 5));
+
+    assert_eq!((&one.tx, one.nonce, one.fee, one.signer), (&other.tx, other.nonce, other.fee, other.signer));
+    assert_ne!(one.signature, other.signature);
+    assert_ne!(one.id(here.hash()), other.id(here.hash()));
+
+    let (one, other) = (wincode::serialize(&one).unwrap(), wincode::serialize(&other).unwrap());
+
+    assert_eq!(one.len(), other.len());
+    assert_eq!(one[..one.len() - 64], other[..other.len() - 64]);
 }
 
 #[test]
@@ -123,10 +180,11 @@ fn a_dry_run_keeps_nothing_and_runs_at_the_next_nonce() {
     let db = Arc::new(MemoryDb::default());
     let genesis = genesis();
     let chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let vm = Arc::new(Vm::new(&genesis.engines, genesis.hash).unwrap());
     let deployer = authority().public().address();
     // Signed at a nonce far from the sender's: a probe's own nonce does not matter.
-    let probe = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 99, FeeOffer::NONE, &authority());
+    let probe = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 99, FeeOffer::NONE, &authority(), &genesis_id);
     let ran = dry_run(db.clone(), &genesis.rules(), &vm, &probe, 0, u256::ZERO).unwrap();
     let state = chain.state();
 
@@ -136,7 +194,7 @@ fn a_dry_run_keeps_nothing_and_runs_at_the_next_nonce() {
     assert!(crate::registry::Contracts::new(&Arc::new(chain.state())).get(&contract_address(&deployer, 0, genesis.hash)).unwrap().is_none());
 
     let call = Tx::ContractCall { to: Address::Contract([9; 32]), func: Hash::Xxh3_64(selector("nope")), amount: Amount::U128(0), data: Vec::new() };
-    let failing = dry_run(db, &genesis.rules(), &vm, &SignedTx::sign(call, 0, FeeOffer::NONE, &authority()), 0, u256::ZERO).unwrap();
+    let failing = dry_run(db, &genesis.rules(), &vm, &SignedTx::sign(call, 0, FeeOffer::NONE, &authority(), &genesis_id), 0, u256::ZERO).unwrap();
 
     assert!(failing.failure.is_some_and(|why| why.contains("no contract")), "it says why it would fail");
 }
@@ -161,6 +219,7 @@ fn blocks_past_max_block_bytes_are_refused_and_never_built() {
     let authority = DevAuthority::dev_keypair();
     let genesis = Genesis { max_block_bytes: Some(crate::chain::MIN_BLOCK_BYTES), ..genesis() };
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     // Calls carrying 300 KiB each: four pass the limit.
     let big = |nonce: u64| {
         let tx = Tx::ContractCall {
@@ -170,7 +229,7 @@ fn blocks_past_max_block_bytes_are_refused_and_never_built() {
             data: vec![TxCallArgumentType::Bytes(vec![7; 300 * 1024])],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority, &genesis_id)
     };
     let txs: Vec<SignedTx> = (0..4).map(big).collect();
     let total: u64 = txs.iter().map(crate::chain::tx_bytes).sum();
@@ -241,7 +300,8 @@ fn token_functions_named_twice_or_blank_are_refused() {
 #[test]
 fn a_deployed_token_is_registered_and_leaves_with_its_block() {
     let token_code = Code::Lua(include_str!("../../contracts/lua/token.lua").to_string());
-    let deploy = SignedTx::sign(Tx::Deploy { code: token_code }, 0, FeeOffer::NONE, &authority());
+    let genesis_id = pow_genesis().block().id();
+    let deploy = SignedTx::sign(Tx::Deploy { code: token_code }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let token = contract_address(&authority().public().address(), 0, HashType::default_chain());
     let miner = Address::Ed25519([9; 32]);
     let registered = |chain: &Chain| crate::registry::Tokens::new(&chain.state()).get(&token).unwrap();
@@ -265,6 +325,8 @@ fn a_deployed_token_is_registered_and_leaves_with_its_block() {
     let unlisted = Genesis { token_functions: Vec::new(), ..pow_genesis() };
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &unlisted).unwrap();
     let genesis_block = chain.block_at(0).unwrap().unwrap();
+    // Another genesis is another chain, so the deploy is signed for it anew.
+    let deploy = SignedTx::sign(deploy.tx, 0, FeeOffer::NONE, &authority(), &chain.genesis());
     let deployed = mine_on(&chain, &genesis_block, vec![deploy], miner);
     extended(chain.import(&deployed, LATER));
 
@@ -287,6 +349,7 @@ function M.name() return storage.get("name") or "First" end"#,
         r#"function M.rename(name) storage.set("name", name) tokens.refresh() end
 return M"#
     );
+    let genesis_id = pow_genesis().block().id();
     let token = contract_address(&authority().public().address(), 0, HashType::default_chain());
     let rename = |name: &str, nonce: u64| {
         let tx = Tx::ContractCall {
@@ -296,13 +359,13 @@ return M"#
             data: vec![TxCallArgumentType::String(name.to_string())],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)
     };
     let named = |chain: &Chain| crate::registry::Tokens::new(&chain.state()).get(&token).unwrap().and_then(|token| token.name);
     let miner = Address::Ed25519([9; 32]);
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &pow_genesis()).unwrap();
     let genesis_block = chain.block_at(0).unwrap().unwrap();
-    let deployed = mine_on(&chain, &genesis_block, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(source) }, 0, FeeOffer::NONE, &authority())], miner);
+    let deployed = mine_on(&chain, &genesis_block, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(source) }, 0, FeeOffer::NONE, &authority(), &genesis_id)], miner);
     extended(chain.import(&deployed, LATER));
 
     assert_eq!(named(&chain).as_deref(), Some("First"));
@@ -400,7 +463,7 @@ fn transfers_run_and_failures_still_use_the_nonce() {
 #[test]
 fn an_ethereum_key_receives_and_sends_as_any_other() {
     use crate::crypto::keypair::KeyType;
-    use crate::crypto::verifiable::{Verifiable, VerifyError};
+    use crate::crypto::verifiable::VerifyError;
 
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
@@ -415,7 +478,7 @@ fn an_ethereum_key_receives_and_sends_as_any_other() {
 
     let back = transfer(&chain, &eth, &me, 400);
 
-    assert_eq!(back.verify(), Ok(()));
+    assert_eq!(back.verify_on(&chain.genesis()), Ok(()));
     assert_eq!(advance(&mut chain, vec![back])[0].result, Ok(Effect::Done));
     assert_eq!((balance(&chain, &address), nonce(&chain, &eth)), (u256::new(600), 1));
 
@@ -423,13 +486,14 @@ fn an_ethereum_key_receives_and_sends_as_any_other() {
     let mut forged = transfer(&chain, &stranger(), &me, 1);
     forged.signer = eth.public();
 
-    assert_eq!(forged.verify(), Err(VerifyError::InvalidSignature));
+    assert_eq!(forged.verify_on(&chain.genesis()), Err(VerifyError::InvalidSignature));
 }
 
 #[test]
 fn only_the_authority_mints() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let bob = stranger();
     let mint = |keypair: &Keypair, chain: &Chain| {
         let tx = Tx::Mint {
@@ -437,7 +501,7 @@ fn only_the_authority_mints() {
             amount: Amount::U128(5),
         };
 
-        SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair)
+        SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair, &genesis_id)
     };
     let tx = mint(&bob, &chain);
     let receipts = advance(&mut chain, vec![tx]);
@@ -457,6 +521,7 @@ fn only_the_authority_mints() {
 fn contracts_deploy_and_run_through_transactions() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let deployer = authority();
     let deploy = SignedTx::sign(
         Tx::Deploy {
@@ -465,6 +530,7 @@ fn contracts_deploy_and_run_through_transactions() {
         nonce(&chain, &deployer),
         FeeOffer::NONE,
         &deployer,
+        &genesis_id,
     );
     let receipts = advance(&mut chain, vec![deploy]);
     let counter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
@@ -482,6 +548,7 @@ fn contracts_deploy_and_run_through_transactions() {
             nonce(&chain, &deployer),
             FeeOffer::NONE,
             &deployer,
+            &genesis_id,
         );
         let receipts = advance(&mut chain, vec![call]);
 
@@ -527,10 +594,11 @@ fn blocks_must_follow_the_rules() {
 fn a_block_with_an_invalid_transaction_changes_nothing() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let bob = stranger().public().address();
     let good = transfer(&chain, &authority(), &bob, 10);
     let mut replayed = transfer(&chain, &authority(), &bob, 20);
-    replayed = SignedTx::sign(replayed.tx, 0, FeeOffer::NONE, &authority());
+    replayed = SignedTx::sign(replayed.tx, 0, FeeOffer::NONE, &authority(), &genesis_id);
 
     // Building leaves the replay out.
     assert_eq!(next_block(&chain, vec![good.clone(), replayed.clone()]).0.txs, std::slice::from_ref(&good));
@@ -557,8 +625,9 @@ fn deploys_for_engines_genesis_leaves_out_fail() {
         ..genesis()
     };
     let mut chain = Chain::open(db, &lua_only).unwrap();
+    let genesis_id = chain.genesis();
     let module = vec![0, b'a', b's', b'm', 1, 0, 0, 0];
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Wasm(module) }, 0, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Wasm(module) }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let (block, now) = next_block(&chain, vec![deploy]);
     let receipts = extended(chain.import(&block, now));
 
@@ -594,8 +663,9 @@ return M
 "#;
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let deployer = authority();
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 0, FeeOffer::NONE, &deployer);
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 0, FeeOffer::NONE, &deployer, &genesis_id);
     advance(&mut chain, vec![deploy]);
     let splitter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
     let (first, second) = (stranger().public().address(), stranger().public().address());
@@ -609,6 +679,7 @@ return M
         1,
         FeeOffer::NONE,
         &deployer,
+        &genesis_id,
     );
     let receipts = advance(&mut chain, vec![call]);
 
@@ -624,13 +695,13 @@ return M
     assert_eq!(crate::structs::receipt::CommittedReceipt::of(&receipts[0]).payments, receipts[0].payments);
 
     // Through another contract: the value it sent with its call first, then what the callee paid.
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 2, FeeOffer::NONE, &deployer);
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(SPLITTER.to_string()) }, 2, FeeOffer::NONE, &deployer, &genesis_id);
     advance(&mut chain, vec![deploy]);
     let relay = contract_address(&deployer.public().address(), 2, HashType::default_chain());
     let call = |function: &str, data: Vec<TxCallArgumentType>, nonce: u64| {
         let tx = Tx::ContractCall { to: relay, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(10), data };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &deployer)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &deployer, &genesis_id)
     };
     let (a, b) = (TxCallArgumentType::Address(first), TxCallArgumentType::Address(second));
     let receipts = advance(&mut chain, vec![
@@ -711,25 +782,26 @@ fn mine_after(chain: &Chain, parent: &Block, gap_ms: u64, txs: Vec<SignedTx>, mi
     block
 }
 
-fn send(to: &Address, amount: u128, nonce: u64) -> SignedTx {
+fn send(genesis: &Hash, to: &Address, amount: u128, nonce: u64) -> SignedTx {
     let tx = Tx::Transfer {
         from: authority().public().address(),
         to: *to,
         amount: Amount::U128(amount),
     };
 
-    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), genesis)
 }
 
 #[test]
 fn the_heavier_branch_wins_and_state_follows_it() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let genesis_id = chain.genesis();
     let genesis = chain.block_at(0).unwrap().unwrap();
     let (bob, carol) = (stranger().public().address(), stranger().public().address());
     let (miner_a, miner_b) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
-    let to_bob = send(&bob, 10, 0);
-    let to_carol = send(&carol, 20, 0);
+    let to_bob = send(&genesis_id, &bob, 10, 0);
+    let to_carol = send(&genesis_id, &carol, 20, 0);
     let a1 = mine_on(&chain, &genesis, vec![to_bob.clone()], miner_a);
     let b1 = mine_on(&chain, &genesis, vec![to_carol.clone()], miner_b);
 
@@ -794,11 +866,12 @@ fn side_branches_can_be_found_in_the_database() {
 fn a_heavier_branch_that_fails_to_run_is_dropped() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let genesis_id = chain.genesis();
     let genesis = chain.block_at(0).unwrap().unwrap();
     let bob = stranger().public().address();
-    let a1 = mine_on(&chain, &genesis, vec![send(&bob, 10, 0)], Address::Ed25519([1; 32]));
+    let a1 = mine_on(&chain, &genesis, vec![send(&genesis_id, &bob, 10, 0)], Address::Ed25519([1; 32]));
     // Nonce 7 is not the sender's next, which only running the block finds out.
-    let b1 = mine_on(&chain, &genesis, vec![send(&bob, 99, 7)], Address::Ed25519([2; 32]));
+    let b1 = mine_on(&chain, &genesis, vec![send(&genesis_id, &bob, 99, 7)], Address::Ed25519([2; 32]));
     let b2 = mine_on(&chain, &b1, Vec::new(), Address::Ed25519([2; 32]));
     let b3 = mine_on(&chain, &b2, Vec::new(), Address::Ed25519([2; 32]));
 
@@ -817,10 +890,11 @@ fn a_heavier_branch_that_fails_to_run_is_dropped() {
 fn bad_blocks_are_remembered_across_restarts() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis_id = chain.genesis();
     let genesis = chain.block_at(0).unwrap().unwrap();
     let bob = stranger().public().address();
     let a1 = mine_on(&chain, &genesis, Vec::new(), Address::Ed25519([1; 32]));
-    let b1 = mine_on(&chain, &genesis, vec![send(&bob, 99, 7)], Address::Ed25519([2; 32]));
+    let b1 = mine_on(&chain, &genesis, vec![send(&genesis_id, &bob, 99, 7)], Address::Ed25519([2; 32]));
     let b2 = mine_on(&chain, &b1, Vec::new(), Address::Ed25519([2; 32]));
 
     extended(chain.import(&a1, LATER));
@@ -996,6 +1070,7 @@ fn a_pool_block_sends_its_miners_share_to_the_escrow_and_each_claims_what_it_ear
     let genesis = Genesis { fees: Some(crate::chain::fees::FeeConfig::dev()), ..pow_genesis() };
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let hash = chain.hash();
     // Real keys' addresses, as a claim checks the miner's is one.
     let (pool, alice, bob) = (Address::Ed25519([7; 32]), Keypair::from_seed([8; 32]).public().address(), Keypair::from_seed([9; 32]).public().address());
@@ -1011,7 +1086,7 @@ fn a_pool_block_sends_its_miners_share_to_the_escrow_and_each_claims_what_it_ear
     };
 
     // The pool's first block: 90% to the escrow, nothing credited yet.
-    let tx = SignedTx::sign(Tx::Transfer { from: authority().public().address(), to: Address::Ed25519([1; 32]), amount: Amount::U128(5) }, 0, fee(&chain), &authority());
+    let tx = SignedTx::sign(Tx::Transfer { from: authority().public().address(), to: Address::Ed25519([1; 32]), amount: Amount::U128(5) }, 0, fee(&chain), &authority(), &genesis_id);
     let first = PoolCommitment { parts: 900_000_000, root: Hash::zero(hash), count: 0 };
     let (block, _) = next(&mut chain, vec![tx], Some(first));
     assert_eq!(block.header.pool_root, Block::pool_root(hash, Some(&first)));
@@ -1032,7 +1107,7 @@ fn a_pool_block_sends_its_miners_share_to_the_escrow_and_each_claims_what_it_ear
     let claim = |nonce: u64, chain: &Chain| {
         let tx = Tx::Claim { height: committed.header.height, to: alice, earned: earned[0].1, index: 0, path: crate::crypto::merkle::audit_path(hash, &leaves, 0) };
 
-        SignedTx::sign(tx, nonce, fee(chain), &authority())
+        SignedTx::sign(tx, nonce, fee(chain), &authority(), &genesis_id)
     };
     let tx = claim(1, &chain);
     let (_, receipts) = next(&mut chain, vec![tx], None);
@@ -1048,7 +1123,7 @@ fn a_pool_block_sends_its_miners_share_to_the_escrow_and_each_claims_what_it_ear
 
     // Bob's own claim names a leaf that is not his place.
     let wrong = Tx::Claim { height: committed.header.height, to: bob, earned: earned[1].1, index: 0, path: crate::crypto::merkle::audit_path(hash, &leaves, 0) };
-    let tx = SignedTx::sign(wrong, 3, fee(&chain), &authority());
+    let tx = SignedTx::sign(wrong, 3, fee(&chain), &authority(), &genesis_id);
     let (_, receipts) = next(&mut chain, vec![tx], None);
     assert!(matches!(&receipts[0].result, Err(Failure::Claim(why)) if why.contains("path")));
     let _ = PAYOUT_PARTS;
@@ -1126,8 +1201,9 @@ return M
 "#;
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let deployer = authority();
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &deployer);
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &deployer, &genesis_id);
     advance(&mut chain, vec![deploy]);
     let emitter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
     let call = |function: &str, nonce: u64, data: Vec<TxCallArgumentType>| {
@@ -1138,7 +1214,7 @@ return M
             data,
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &deployer)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &deployer, &genesis_id)
     };
     let ping = call("ping", 1, vec![TxCallArgumentType::Number(2.0)]);
     let failing = call("ping_then_fail", 2, Vec::new());
@@ -1185,8 +1261,9 @@ return M
 "#;
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let owner = authority();
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(V1.to_string()) }, 0, FeeOffer::NONE, &owner);
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(V1.to_string()) }, 0, FeeOffer::NONE, &owner, &genesis_id);
     let receipts = advance(&mut chain, vec![deploy]);
     let contract = contract_address(&owner.public().address(), 0, HashType::default_chain());
 
@@ -1200,7 +1277,7 @@ return M
             code: Code::Lua(code.to_string()),
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, signer)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, signer, &genesis_id)
     };
     let version = |chain: &mut Chain, nonce: u64| {
         let tx = Tx::ContractCall {
@@ -1210,7 +1287,7 @@ return M
             data: Vec::new(),
         };
 
-        advance(chain, vec![SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())])[0].result.clone()
+        advance(chain, vec![SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)])[0].result.clone()
     };
     let receipts = advance(&mut chain, vec![upgrade(BROKEN, 1, &owner), upgrade(V2, 0, &stranger())]);
 
@@ -1244,9 +1321,10 @@ fn every_secure_hash_can_run_a_chain() {
 
     for &algorithm in &secure {
         let mut chain = Chain::open(Arc::new(MemoryDb::default()), &hashed_with(algorithm)).unwrap();
+        let genesis_id = chain.genesis();
         let genesis = chain.block_at(0).unwrap().unwrap();
         let bob = stranger().public().address();
-        let tx = send(&bob, 10, 0);
+        let tx = send(&genesis_id, &bob, 10, 0);
         let block = mine_on(&chain, &genesis, vec![tx.clone()], Address::Ed25519([1; 32]));
 
         assert_eq!(chain.genesis().algorithm(), algorithm, "{}", algorithm.name());
@@ -1302,6 +1380,7 @@ fn xxh3_is_never_a_chain_or_work_hash() {
 fn a_deploy_that_never_finishes_loading_pays_for_all_its_fuel() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let deployer = authority();
     let deploy = SignedTx::sign(
         Tx::Deploy {
@@ -1310,6 +1389,7 @@ fn a_deploy_that_never_finishes_loading_pays_for_all_its_fuel() {
         nonce(&chain, &deployer),
         FeeOffer::NONE,
         &deployer,
+        &genesis_id,
     );
     let receipts = advance(&mut chain, vec![deploy]);
 
@@ -1333,11 +1413,12 @@ return M
 fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_block() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis_id = chain.genesis();
     let genesis_block = chain.block_at(0).unwrap().unwrap();
     let (alice, bob) = (stranger().public().address(), stranger().public().address());
     let miner = Address::Ed25519([9; 32]);
     let emitter = contract_address(&authority().public().address(), 0, HashType::default_chain());
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let ping = |to: Address, n: i64, nonce: u64| {
         let tx = Tx::ContractCall {
             to: emitter,
@@ -1346,7 +1427,7 @@ fn indexed_events_are_found_by_contract_name_and_address_and_leave_with_their_bl
             data: vec![TxCallArgumentType::Address(to), TxCallArgumentType::I64(n)],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)
     };
 
     // Events before the index is turned on are not in it.
@@ -1487,6 +1568,7 @@ fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
     let alice = stranger().public().address();
     let miner = Address::Ed25519([9; 32]);
     let emitter = contract_address(&authority().public().address(), 0, HashType::default_chain());
+    let genesis_id = pow_genesis().block().id();
     let ping = |n: i64, nonce: u64| {
         let tx = Tx::ContractCall {
             to: emitter,
@@ -1495,7 +1577,7 @@ fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
             data: vec![TxCallArgumentType::Address(alice), TxCallArgumentType::I64(n)],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)
     };
     let entries = |db: &MemoryDb| {
         let mut all = Vec::new();
@@ -1521,7 +1603,7 @@ fn the_event_index_catches_up_on_older_blocks_and_keeps_its_window() {
     live.keep_index(IndexKind::Events, None).unwrap();
     assert_eq!(ahead.keep_index(IndexKind::Events, Some(KeepFrom::Height(3))).unwrap().from, 3, "it waits for height 3");
 
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let mut main = vec![mine_on(&late, &genesis_block, vec![deploy, ping(1, 1)], miner)];
 
     for nonce in 2..=6 {
@@ -1628,7 +1710,9 @@ fn a_transaction_touches_its_sender_its_parties_and_the_addresses_it_names() {
     let me = sender.public().address();
     let (alice, bob) = (stranger().public().address(), stranger().public().address());
     let (contract, deployed) = (Address::Contract([7; 32]), Address::Contract([8; 32]));
-    let signed = |tx: Tx| SignedTx::sign(tx, 0, FeeOffer::NONE, &sender);
+    // Whom a transaction touches is read from it alone, and no chain here checks its signature.
+    let genesis_id = genesis().block().id();
+    let signed = |tx: Tx| SignedTx::sign(tx, 0, FeeOffer::NONE, &sender, &genesis_id);
     let set = |addresses: &[Address]| addresses.iter().copied().collect::<std::collections::BTreeSet<_>>();
     let code = || Code::Lua(EMITTER.to_string());
     let call = Tx::ContractCall {
@@ -1664,7 +1748,8 @@ fn the_address_index_lists_what_touched_each_address_newest_first_and_follows_re
     let (alice, bob) = (stranger().public().address(), stranger().public().address());
     let miner = Address::Ed25519([9; 32]);
     let emitter = contract_address(&me, 0, hash);
-    let pay = |to: Address, nonce: u64| SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(5) }, nonce, FeeOffer::NONE, &authority());
+    let genesis_id = pow_genesis().block().id();
+    let pay = |to: Address, nonce: u64| SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(5) }, nonce, FeeOffer::NONE, &authority(), &genesis_id);
     let ping = |to: Address, nonce: u64| {
         let tx = Tx::ContractCall {
             to: emitter,
@@ -1673,9 +1758,9 @@ fn the_address_index_lists_what_touched_each_address_newest_first_and_follows_re
             data: vec![TxCallArgumentType::Address(to), TxCallArgumentType::I64(1)],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)
     };
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(EMITTER.to_string()) }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let listed = |chain: &Chain, address: &Address| {
         stored_address_txs(&*chain.db, address, None, 100)
             .unwrap()
@@ -1789,13 +1874,14 @@ fn roots_hold(chain: &Chain) {
 fn headers_commit_to_the_state_and_what_their_transactions_did() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let bob = stranger().public().address();
 
     roots_hold(&chain);
     assert_ne!(chain.tip().state_root, Hash::zero(chain.hash()), "genesis holds the allocations");
     assert_eq!(chain.tip().receipts_root, Hash::zero(chain.hash()));
 
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     let counter = contract_address(&authority().public().address(), 0, chain.hash());
     let increment = |nonce: u64| {
         let tx = Tx::ContractCall {
@@ -1805,9 +1891,9 @@ fn headers_commit_to_the_state_and_what_their_transactions_did() {
             data: vec![TxCallArgumentType::I64(5)],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)
     };
-    advance(&mut chain, vec![deploy, send(&bob, 10, 1)]);
+    advance(&mut chain, vec![deploy, send(&genesis_id, &bob, 10, 1)]);
     roots_hold(&chain);
     advance(&mut chain, vec![increment(2), increment(3)]);
     roots_hold(&chain);
@@ -1825,7 +1911,7 @@ fn headers_commit_to_the_state_and_what_their_transactions_did() {
 
     // A header that claims another root is refused, and nothing it ran is kept.
     let refused = |chain: &mut Chain, tamper: &dyn Fn(&mut BlockHeader)| {
-        let (mut block, now) = next_block(chain, vec![send(&bob, 1, 4)]);
+        let (mut block, now) = next_block(chain, vec![send(&genesis_id, &bob, 1, 4)]);
         tamper(&mut block.header);
         block.seal = producer().seal(&block.header).unwrap();
 
@@ -1848,15 +1934,16 @@ fn headers_commit_to_the_state_and_what_their_transactions_did() {
 fn reorgs_take_the_state_tree_along() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &pow_genesis()).unwrap();
+    let genesis_id = chain.genesis();
     let genesis = chain.block_at(0).unwrap().unwrap();
     let bob = stranger().public().address();
-    let a1 = mine_on(&chain, &genesis, vec![send(&bob, 10, 0)], Address::Ed25519([1; 32]));
+    let a1 = mine_on(&chain, &genesis, vec![send(&genesis_id, &bob, 10, 0)], Address::Ed25519([1; 32]));
     extended(chain.import(&a1, LATER));
     roots_hold(&chain);
 
     // A heavier branch, sending more to someone else, takes over, and then the first comes back.
     let carol = stranger().public().address();
-    let b1 = mine_on(&chain, &genesis, vec![send(&bob, 30, 0), send(&carol, 1, 1)], Address::Ed25519([2; 32]));
+    let b1 = mine_on(&chain, &genesis, vec![send(&genesis_id, &bob, 30, 0), send(&genesis_id, &carol, 1, 1)], Address::Ed25519([2; 32]));
     assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
     let b2 = mine_on(&chain, &b1, Vec::new(), Address::Ed25519([2; 32]));
     assert!(matches!(chain.import(&b2, LATER), Ok(Imported::Reorganized { .. })));
@@ -1946,6 +2033,7 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
     genesis.allocations.extend(keys.iter().map(|key| Allocation { address: key.public().address(), amount: u256::new(10u128.pow(21)) }));
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let base = chain.next_base_price();
     // An Ed25519 transfer's gas exactly; other schemes' cost less.
     let gas_limit = 3_620;
@@ -1956,7 +2044,7 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
             let to = keys[(index + 1) % keys.len()].public().address();
             let fee = FeeOffer { gas_limit, max_price: base * u256::new(100), tip: u256::ZERO };
 
-            SignedTx::sign(Tx::Transfer { from: key.public().address(), to, amount: Amount::U128(1) }, 0, fee, key)
+            SignedTx::sign(Tx::Transfer { from: key.public().address(), to, amount: Amount::U128(1) }, 0, fee, key, &genesis_id)
         })
         .collect();
     let now = chain.tip().timestamp + SLOT;
@@ -2011,6 +2099,7 @@ fn state_at(db: &Arc<MemoryDb>, chain: &Chain, height: u64) -> Option<Arc<State>
 fn state_reads_and_proves_at_every_kept_height() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let to = stranger().public().address();
 
     // Each block pays 10 more; the third deploys a contract, the fifth calls it.
@@ -2019,7 +2108,7 @@ fn state_reads_and_proves_at_every_kept_height() {
 
         if amount == 3 {
             let deploy = Tx::Deploy { code: Code::Lua(COUNTER.to_string()) };
-            txs.push(SignedTx::sign(deploy, nonce(&chain, &authority()) + 1, FeeOffer::NONE, &authority()));
+            txs.push(SignedTx::sign(deploy, nonce(&chain, &authority()) + 1, FeeOffer::NONE, &authority(), &genesis_id));
         }
 
         advance(&mut chain, txs);
@@ -2176,8 +2265,9 @@ fn the_directory_admin_sets_the_directory_hands_the_role_on_and_renounces_it() {
     let (alice, bob) = (stranger(), stranger());
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &Genesis { directory_admin: Some(alice.public().address()), ..genesis() }).unwrap();
+    let genesis_id = chain.genesis();
     let directory = |byte: u8| Directory { swap: Some(Address::Contract([byte; 32])), ..Directory::default() };
-    let signed = |tx: Tx, nonce: u64, key: &Keypair| SignedTx::sign(tx, nonce, FeeOffer::NONE, key);
+    let signed = |tx: Tx, nonce: u64, key: &Keypair| SignedTx::sign(tx, nonce, FeeOffer::NONE, key, &genesis_id);
     let admin = |chain: &Chain| directory_admin(&chain.state()).unwrap();
     let decided = |chain: &Chain| crate::registry::changes::Changes::new(&chain.state()).directory().unwrap();
 
@@ -2222,8 +2312,9 @@ fn a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_
     let someone = stranger();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &genesis()).unwrap();
-    let set = SignedTx::sign(Tx::SetDirectory { directory: crate::registry::directory::Directory::default() }, 0, FeeOffer::NONE, &authority());
-    let hand = SignedTx::sign(Tx::HandDirectory { to: Some(someone.public().address()) }, 1, FeeOffer::NONE, &authority());
+    let genesis_id = chain.genesis();
+    let set = SignedTx::sign(Tx::SetDirectory { directory: crate::registry::directory::Directory::default() }, 0, FeeOffer::NONE, &authority(), &genesis_id);
+    let hand = SignedTx::sign(Tx::HandDirectory { to: Some(someone.public().address()) }, 1, FeeOffer::NONE, &authority(), &genesis_id);
     let receipts = advance(&mut chain, vec![set, hand]);
 
     assert_eq!(receipts[0].result, Err(Failure::Registry(RegistryError::NotDirectoryAdmin)));

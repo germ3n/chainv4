@@ -143,7 +143,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
 
     let Some(genesis) = ctx.chain.genesis else {
         theme::card(ui, &palette, |ui| {
-            ui.label(RichText::new("Waiting for the light client to start.").color(palette.muted));
+            ui.label(RichText::new("Waiting for the light client to start: a multisig's signatures hold on one chain alone, and it has not said which.").color(palette.muted));
         });
 
         return;
@@ -487,7 +487,7 @@ fn price(ctx: &mut Ctx, state: &mut MultisigState, account: Address, tx: Tx, val
     let nonce = value["nonce"].as_u64().unwrap_or(0);
     let threshold = value["threshold"].as_u64().unwrap_or(1) as usize;
     let body = MultisigBody { account, tx, nonce, fee: FeeOffer::NONE };
-    let ask = Ask::Offer(json!({ "tx": to_hex(&wincode::serialize(&sized(&body, threshold)).expect("a probe always encodes")) }).to_string());
+    let ask = Ask::Offer(json!({ "tx": to_hex(&wincode::serialize(&sized(&body, threshold, &genesis)).expect("a probe always encodes")) }).to_string());
     ctx.node.ask(ask.clone());
     state.pricing = Some((ask, body, genesis));
     state.trouble = None;
@@ -495,12 +495,12 @@ fn price(ctx: &mut Ctx, state: &mut MultisigState, account: Address, tx: Tx, val
 
 /// A probe of the multisig's transaction, carrying as many signatures as its quorum will, so it
 /// costs what the real one will: the node prices it unsigned.
-fn sized(body: &MultisigBody, threshold: usize) -> chainv4::structs::tx::SignedTx {
+fn sized(body: &MultisigBody, threshold: usize, genesis: &chainv4::structs::hash::Hash) -> chainv4::structs::tx::SignedTx {
     let key = Keypair::from_seed([1; 32]);
-    let signature = MemberSignature::sign(body, &key, &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
+    let signature = MemberSignature::sign(body, &key, genesis);
     let tx = Tx::Multisig { account: body.account, tx: Box::new(body.tx.clone()), signatures: vec![signature; threshold.max(1)] };
 
-    chainv4::structs::tx::SignedTx::sign(tx, body.nonce, FeeOffer::NONE, &key)
+    chainv4::structs::tx::SignedTx::sign(tx, body.nonce, FeeOffer::NONE, &key, genesis)
 }
 
 /// The bundle on its way round: what it does, who signed, and signing, approving or submitting it;
@@ -802,7 +802,7 @@ mod tests {
         let account = Address::Multisig([4; 32]);
         let tx = Tx::Batch { steps: vec![Tx::Burn { from: account, amount: chainv4::structs::amount::Amount::U128(5) }] };
         let body = MultisigBody { account, tx, nonce: 7, fee: FeeOffer::NONE };
-        let probe = sized(&body, 2);
+        let probe = sized(&body, 2, &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
 
         assert_eq!((probe.sender(), probe.nonce), (account, 7));
         assert_eq!(probe.batch_problem(), None, "a batch the chain takes from it");
@@ -859,7 +859,7 @@ mod tests {
         let account = Address::Multisig([4; 32]);
         let tx = Tx::Transfer { from: account, to: Address::Ed25519([9; 32]), amount: chainv4::structs::amount::Amount::U128(5) };
         let body = MultisigBody { account, tx, nonce: 7, fee: FeeOffer::NONE };
-        let probe = sized(&body, 3);
+        let probe = sized(&body, 3, &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
 
         assert_eq!((probe.sender(), probe.nonce), (account, 7));
         assert!(matches!(&probe.tx, Tx::Multisig { signatures, .. } if signatures.len() == 3));

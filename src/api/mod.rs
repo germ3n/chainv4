@@ -50,8 +50,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 #[cfg(feature = "governance")]
 use crate::chain::stored_decisions;
 
-#[cfg(feature = "faucet")]
 mod proxies;
+#[cfg(feature = "faucet")]
 mod faucet;
 mod filters;
 mod json;

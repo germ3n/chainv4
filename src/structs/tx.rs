@@ -875,10 +875,10 @@ impl Hashable for TxCallArgumentType {
 const SIGNING_DOMAIN: &[u8] = b"chainv4 transaction";
 
 #[document(
-    summary = "A transaction as it travels and lands in blocks: the transaction, the signer's next nonce, the signer's public key and their signature over all three. The sender is the signer's address.",
+    summary = "A transaction as it travels and lands in blocks: the transaction, the signer's next nonce, the signer's public key and their signature over all three and the chain's genesis id, so it holds on one chain alone. The sender is the signer's address.",
     category = "Transactions",
-    see_also = "Tx, Keypair::sign",
-    example = "let signed = SignedTx::sign(tx, accounts.get(&keypair.public().address())?.nonce, FeeOffer::NONE, &keypair);",
+    see_also = "Tx, Keypair::sign, SignedTx::verify_on",
+    example = "let signed = SignedTx::sign(tx, accounts.get(&keypair.public().address())?.nonce, FeeOffer::NONE, &keypair, &chain.genesis());",
 )]
 #[derive(Clone, Debug, PartialEq, SchemaWrite, SchemaRead)]
 pub struct SignedTx {
@@ -890,7 +890,7 @@ pub struct SignedTx {
     pub fee: FeeOffer,
     #[document(summary = "Who signed it. Their address is the sender.")]
     pub signer: PublicKey,
-    #[document(summary = "The signer's signature over the transaction, nonce, fee offer and signer.")]
+    #[document(summary = "The signer's signature over the chain's genesis id, the transaction, nonce, fee offer and signer.")]
     pub signature: Signature,
 }
 
@@ -939,11 +939,12 @@ impl SignedTx {
             nonce = "The sender's current nonce.",
             fee = "What the sender offers to pay; FeeOffer::NONE on a chain without fees.",
             keypair = "The sender's keys.",
+            genesis = "The chain's genesis id, so the signature holds on this chain only.",
         },
     )]
-    pub fn sign(tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair) -> SignedTx {
+    pub fn sign(tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair, genesis: &Hash) -> SignedTx {
         let signer = keypair.public();
-        let signature = keypair.sign(&signing_bytes(&tx, nonce, &fee, &signer));
+        let signature = keypair.sign(&signing_bytes(&tx, nonce, &fee, &signer, genesis));
 
         SignedTx {
             tx,
@@ -967,7 +968,7 @@ impl SignedTx {
 
     #[document(
         parent = "SignedTx",
-        summary = "The transaction's id: its whole encoding, signature included, hashed with the chain's hash.",
+        summary = "The transaction's id: its whole encoding, signature included, hashed with the chain's hash. A signature names its chain, so the same keys sending the same thing on another chain make another id.",
         params = { hash = "The chain's hash, from genesis." },
     )]
     pub fn id(&self, hash: crate::structs::hash::HashType) -> Hash {
@@ -985,8 +986,9 @@ impl SignedTx {
     }
 }
 
-fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey) -> Vec<u8> {
+fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey, genesis: &Hash) -> Vec<u8> {
     let mut bytes = SIGNING_DOMAIN.to_vec();
+    bytes.extend_from_slice(&genesis.hashable_bytes_with_tag());
     bytes.extend_from_slice(&tx.hashable_bytes_with_tag());
     bytes.extend_from_slice(&nonce.to_le_bytes());
     bytes.extend_from_slice(&fee.hashable_bytes_with_tag());
@@ -995,34 +997,12 @@ fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey) -> Vec
     bytes
 }
 
-impl Verifiable for SignedTx {
-    #[document(
-        parent = "SignedTx",
-        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Whether the nonce is the next one depends on chain state, so the executor checks that.",
-        see_also = "Tx::verify, VerifyError::NotSender",
-    )]
-    fn verify(&self) -> Result<(), VerifyError> {
-        // An Ethereum-signed transaction holds only with its chain, as verify_on checks it.
-        if matches!(self.tx, Tx::Ethereum { .. }) {
-            return Err(VerifyError::BadEthereum);
-        }
-
-        self.tx.verify()?;
-        self.signer.verify()?;
-        self.signer.verify_signature(
-            &signing_bytes(&self.tx, self.nonce, &self.fee, &self.signer),
-            &self.signature,
-        )?;
-
-        self.check_sender()
-    }
-}
-
 impl SignedTx {
     #[document(
         parent = "SignedTx",
-        summary = "Checks it as verify does, on a chain: chainv4's own signatures as verify checks them, and an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), so one signed for another chain does not hold here; nothing that holds a batch holds under EIP-712, which would show its signer an opaque hash. Every node's check of a transaction is this one.",
-        params = { genesis = "The chain's genesis id, which an EIP-712 signature is bound to." },
+        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Every signature names its chain, so one signed for another chain does not hold here: chainv4's own over the genesis id and the transaction, an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), and an Ethereum one by its chain id. Nothing that holds a batch holds under EIP-712, which would show its signer an opaque hash. Whether the nonce is the next one depends on chain state, so the executor checks that. Every node's check of a transaction is this one, and there is no check of a signature without a chain.",
+        params = { genesis = "The chain's genesis id, which the signature is bound to." },
+        see_also = "Tx::verify, VerifyError::NotSender",
     )]
     pub fn verify_on(&self, genesis: &crate::structs::hash::Hash) -> Result<(), VerifyError> {
         #[cfg(feature = "secp256k1")]
@@ -1060,9 +1040,16 @@ impl SignedTx {
             return self.check_sender();
         }
 
-        let _ = genesis;
+        // An Ethereum-signed transaction holds only as the first check above takes it.
+        if matches!(self.tx, Tx::Ethereum { .. }) {
+            return Err(VerifyError::BadEthereum);
+        }
 
-        self.verify()
+        self.tx.verify()?;
+        self.signer.verify()?;
+        self.signer.verify_signature(&signing_bytes(&self.tx, self.nonce, &self.fee, &self.signer, genesis), &self.signature)?;
+
+        self.check_sender()
     }
 
     #[document(

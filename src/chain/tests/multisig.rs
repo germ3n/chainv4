@@ -22,7 +22,7 @@ fn two_of_three(chain: &mut Chain) -> Address {
     let creator = authority();
     let at = nonce(chain, &creator);
     let create = Tx::CreateMultisig { members: members().iter().map(member).collect(), threshold: 2, testnet: false };
-    let receipts = advance(chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &creator)]);
+    let receipts = advance(chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &creator, &chain.genesis())]);
     let account = multisig_address(&creator.public().address(), at, chain.hash());
 
     assert_eq!(receipts[0].result, Ok(Effect::Deployed(account)));
@@ -42,7 +42,7 @@ fn pay(chain: &Chain, account: &Address, to: &Address, amount: u128, signers: &[
     let signatures = signers.iter().map(|keypair| MemberSignature::sign(&body, keypair, &chain.genesis())).collect();
     let carrier = signers.first().copied().cloned().unwrap_or_else(stranger);
 
-    SignedTx::sign(Tx::Multisig { account: *account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, &carrier)
+    SignedTx::sign(Tx::Multisig { account: *account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, &carrier, &chain.genesis())
 }
 
 fn refused(chain: &mut Chain, tx: SignedTx, why: &str) {
@@ -55,8 +55,44 @@ fn refused(chain: &mut Chain, tx: SignedTx, why: &str) {
 }
 
 #[test]
+fn a_bundle_for_another_chain_is_refused_with_its_carrier_or_its_members_signing_for_that_chain() {
+    let mut chain = open(&Arc::new(MemoryDb::default()));
+    let elsewhere = Chain::open(Arc::new(MemoryDb::default()), &Genesis { name: Some("another chain".to_string()), ..genesis() }).unwrap().genesis();
+    let account = two_of_three(&mut chain);
+    let [alice, bob, _] = members();
+    let to = Address::Ed25519([9; 32]);
+    let body = MultisigBody { account, tx: Tx::Transfer { from: account, to, amount: Amount::U128(10) }, nonce: 0, fee: FeeOffer::NONE };
+    let bundled = |genesis: Hash| {
+        let mut bundle = crate::registry::multisig::MultisigBundle { genesis, body: body.clone(), signatures: Vec::new() };
+        bundle.sign(&alice);
+        bundle.sign(&bob);
+
+        bundle
+    };
+
+    // All of it for the other chain: the carrier's envelope is what fails first.
+    refused(&mut chain, bundled(elsewhere).envelope(&alice), "signature does not match");
+
+    // The members' for this chain, carried under a signature for the other: as refused.
+    let here = bundled(chain.genesis());
+    let carried = SignedTx::sign(here.envelope(&alice).tx, 0, FeeOffer::NONE, &alice, &elsewhere);
+    refused(&mut chain, carried, "signature does not match");
+
+    // A carrier for this chain carrying the members' for the other: their signatures do not hold.
+    let theirs = bundled(elsewhere);
+    let carried = SignedTx::sign(theirs.envelope(&alice).tx, 0, FeeOffer::NONE, &alice, &chain.genesis());
+    refused(&mut chain, carried, "does not check out");
+
+    // And all of it for this one runs.
+    let carrier = stranger();
+    assert_eq!(advance(&mut chain, vec![here.envelope(&carrier)])[0].result, Ok(Effect::Done));
+    assert_eq!(balance(&chain, &to), u256::new(10));
+}
+
+#[test]
 fn a_multisig_pays_on_its_members_signatures_and_never_on_too_few() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let account = two_of_three(&mut chain);
     let [alice, bob, carol] = members();
     let to = Address::Ed25519([9; 32]);
@@ -70,7 +106,7 @@ fn a_multisig_pays_on_its_members_signatures_and_never_on_too_few() {
     let body = MultisigBody { account, tx: tx.clone(), nonce: 0, fee: FeeOffer::NONE };
     let elsewhere = Hash::zero(chain.hash());
     let signatures = [&alice, &bob].iter().map(|keypair| MemberSignature::sign(&body, keypair, &elsewhere)).collect();
-    refused(&mut chain, SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, 0, FeeOffer::NONE, &alice), "does not check out");
+    refused(&mut chain, SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, 0, FeeOffer::NONE, &alice, &genesis_id), "does not check out");
 
     // None of those took its nonce; two of three pay, carried by anyone, the multisig the sender.
     assert_eq!(multisig_nonce(&chain, &account), 0);
@@ -86,7 +122,7 @@ fn a_multisig_pays_on_its_members_signatures_and_never_on_too_few() {
     let theft = Tx::Transfer { from: authority().public().address(), to, amount: Amount::U128(1) };
     let body = MultisigBody { account, tx: theft.clone(), nonce: 1, fee: FeeOffer::NONE };
     let signatures = [&alice, &bob].iter().map(|keypair| MemberSignature::sign(&body, keypair, &chain.genesis())).collect();
-    let signed = SignedTx::sign(Tx::Multisig { account, tx: Box::new(theft), signatures }, 1, FeeOffer::NONE, &alice);
+    let signed = SignedTx::sign(Tx::Multisig { account, tx: Box::new(theft), signatures }, 1, FeeOffer::NONE, &alice, &genesis_id);
 
     assert_eq!(signed.verify_on(&chain.genesis()), Err(crate::crypto::verifiable::VerifyError::NotSender));
 }
@@ -94,6 +130,7 @@ fn a_multisig_pays_on_its_members_signatures_and_never_on_too_few() {
 #[test]
 fn approvals_on_chain_count_with_signatures_until_the_nonce_moves() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let account = two_of_three(&mut chain);
     let [alice, bob, carol] = members();
     let to = Address::Ed25519([9; 32]);
@@ -101,7 +138,7 @@ fn approvals_on_chain_count_with_signatures_until_the_nonce_moves() {
     let approve = |chain: &Chain, keypair: &Keypair, tx: &Tx, nonce: u64| {
         let approval = Tx::ApproveMultisig { account, nonce, fee: FeeOffer::NONE, tx: Box::new(tx.clone()) };
 
-        SignedTx::sign(approval, self::nonce(chain, keypair), FeeOffer::NONE, keypair)
+        SignedTx::sign(approval, self::nonce(chain, keypair), FeeOffer::NONE, keypair, &genesis_id)
     };
 
     // Not a member, or not the next nonce: refused as it runs.
@@ -133,7 +170,7 @@ fn approvals_on_chain_count_with_signatures_until_the_nonce_moves() {
     let sent = approve(&chain, &carol, &next, 1);
     advance(&mut chain, vec![sent]);
     let id = MultisigBody { account, tx: next.clone(), nonce: 1, fee: FeeOffer::NONE }.id(&chain.genesis());
-    let withdraw = SignedTx::sign(Tx::WithdrawMultisig { account, proposal: id }, nonce(&chain, &carol), FeeOffer::NONE, &carol);
+    let withdraw = SignedTx::sign(Tx::WithdrawMultisig { account, proposal: id }, nonce(&chain, &carol), FeeOffer::NONE, &carol, &genesis_id);
     advance(&mut chain, vec![withdraw]);
 
     let sent = pay(&chain, &account, &to, 5, &[]);
@@ -150,13 +187,14 @@ fn approvals_on_chain_count_with_signatures_until_the_nonce_moves() {
 #[test]
 fn a_multisig_changes_its_members_by_its_own_quorum_and_keeps_its_address() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let account = two_of_three(&mut chain);
     let [alice, bob, carol] = members();
     let dave = Keypair::from_seed([34; 32]);
     let change = Tx::ChangeMultisig { members: vec![member(&carol), member(&dave)], threshold: 2, testnet: false };
 
     // A key's account cannot send it; nor can the multisig hand itself a policy no multisig has.
-    let sent = SignedTx::sign(change.clone(), nonce(&chain, &alice), FeeOffer::NONE, &alice);
+    let sent = SignedTx::sign(change.clone(), nonce(&chain, &alice), FeeOffer::NONE, &alice, &genesis_id);
     let direct = advance(&mut chain, vec![sent]);
 
     assert!(matches!(&direct[0].result, Err(failure) if failure.to_string().contains("only a multisig")));
@@ -164,7 +202,7 @@ fn a_multisig_changes_its_members_by_its_own_quorum_and_keeps_its_address() {
         let body = MultisigBody { account, tx: tx.clone(), nonce: multisig_nonce(chain, &account), fee: FeeOffer::NONE };
         let signatures = signers.iter().map(|keypair| MemberSignature::sign(&body, keypair, &chain.genesis())).collect();
 
-        SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, signers[0])
+        SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, signers[0], &genesis_id)
     };
     let sent = sign(&chain, Tx::ChangeMultisig { members: vec![member(&dave)], threshold: 2, testnet: false }, &[&alice, &bob]);
     let bad = advance(&mut chain, vec![sent]);
@@ -217,15 +255,16 @@ fn multisig_policies_are_checked() {
 fn a_multisig_pays_its_own_fee() {
     let genesis = Genesis::dev_authority(authority().public());
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let creator = authority();
     let price = chain.next_base_price().saturating_mul(u256::new(2));
     let fee = FeeOffer { gas_limit: 200_000, max_price: price, tip: u256::ZERO };
     let at = nonce(&chain, &creator);
     let create = Tx::CreateMultisig { members: members().iter().map(member).collect(), threshold: 2, testnet: false };
-    advance(&mut chain, vec![SignedTx::sign(create, at, fee, &creator)]);
+    advance(&mut chain, vec![SignedTx::sign(create, at, fee, &creator, &genesis_id)]);
     let account = multisig_address(&creator.public().address(), at, chain.hash());
     let funding = Tx::Transfer { from: creator.public().address(), to: account, amount: Amount::U128(10u128.pow(18)) };
-    let sent = SignedTx::sign(funding, nonce(&chain, &creator), fee, &creator);
+    let sent = SignedTx::sign(funding, nonce(&chain, &creator), fee, &creator, &genesis_id);
     advance(&mut chain, vec![sent]);
 
     let [alice, bob, _] = members();
@@ -234,7 +273,7 @@ fn a_multisig_pays_its_own_fee() {
     let body = MultisigBody { account, tx: tx.clone(), nonce: 0, fee };
     let signatures = [&alice, &bob].iter().map(|keypair| MemberSignature::sign(&body, keypair, &chain.genesis())).collect();
     let before = balance(&chain, &account);
-    let receipts = advance(&mut chain, vec![SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, 0, fee, &alice)]);
+    let receipts = advance(&mut chain, vec![SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, 0, fee, &alice, &genesis_id)]);
 
     assert_eq!(receipts[0].result, Ok(Effect::Done));
     assert!(receipts[0].fee > u256::ZERO);
@@ -247,6 +286,7 @@ fn a_multisig_pays_its_own_fee() {
 #[test]
 fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
     let account = two_of_three(&mut chain);
     let [alice, bob, carol] = members();
     let named = |keypair: &Keypair, evm: u8| MultisigMember { evm: Some([evm; 20]), ..member(keypair) };
@@ -254,7 +294,7 @@ fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
         let body = MultisigBody { account, tx: tx.clone(), nonce: multisig_nonce(chain, &account), fee: FeeOffer::NONE };
         let signatures = [&alice, &bob].iter().map(|keypair| MemberSignature::sign(&body, keypair, &chain.genesis())).collect();
 
-        SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, &alice)
+        SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, body.nonce, FeeOffer::NONE, &alice, &genesis_id)
     };
 
     assert_eq!(Multisigs::new(&chain.state()).evm_start(&account).unwrap(), None, "made naming no EVM addresses");

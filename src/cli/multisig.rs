@@ -4,7 +4,7 @@
 //! submits it once enough back it, the multisig paying its fee.
 
 use {
-    super::send::{SendArgs, TlsArgs, Wanted, agent, offer, ok, report, transaction, wait},
+    super::send::{SendArgs, TlsArgs, Wanted, agent, chain_to_sign_for, genesis_of, offer, ok, report, transaction, wait},
     crate::chain::fees::OfferChoice,
     super::{CliResult, signer},
     crate::crypto::keypair::Keypair,
@@ -13,7 +13,7 @@ use {
     crate::structs::hash::{Hash, HashType},
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::tx::{FeeOffer, SignedTx, Tx},
-    serde_json::{Value, json},
+    serde_json::json,
     std::path::{Path, PathBuf},
     std::time::Duration,
     ureq::Agent,
@@ -220,7 +220,7 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
     let node = args.node.trim_end_matches('/');
     let agent = agent(&args.tls)?;
     let status = ok(agent.get(format!("{node}/status")).call())?;
-    let genesis = genesis(&status)?;
+    let genesis = chain_to_sign_for(&status, args.genesis.as_deref())?;
     let multisig = ok(agent.get(format!("{node}/multisig/{account}")).call())?;
     let nonce = multisig["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let threshold = multisig["threshold"].as_u64().ok_or("the node sent no threshold")? as usize;
@@ -309,13 +309,14 @@ fn submit(agent: &Agent, node: &str, bundle: &MultisigBundle, carrier: &Keypair,
 pub(super) fn send_own(agent: &Agent, node: &str, keypair: &Keypair, tx: Tx, timeout: Duration) -> CliResult<()> {
     let sender = keypair.public().address();
     let nonce = ok(agent.get(format!("{node}/accounts/{sender}")).call())?["nonce"].as_u64().ok_or("the node sent no nonce")?;
-    let (fee, failure, _) = offer(agent, node, &SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, keypair), Default::default())?;
+    let genesis = genesis_of(&ok(agent.get(format!("{node}/status")).call())?)?;
+    let (fee, failure, _) = offer(agent, node, &SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, keypair, &genesis), Default::default())?;
 
     if let Some(error) = failure {
         return Err(format!("a dry run says this would fail: {error}").into());
     }
 
-    post_and_wait(agent, node, &SignedTx::sign(tx, nonce, fee, keypair), timeout)
+    post_and_wait(agent, node, &SignedTx::sign(tx, nonce, fee, keypair, &genesis), timeout)
 }
 
 fn post_and_wait(agent: &Agent, node: &str, signed: &SignedTx, timeout: Duration) -> CliResult<()> {
@@ -360,13 +361,6 @@ fn list_steps(tx: &Tx) {
     for (place, step) in steps.iter().enumerate() {
         println!("  step {}: {}", place + 1, crate::structs::json::tx(step));
     }
-}
-
-/// The genesis id GET /status names, which members sign over.
-fn genesis(status: &Value) -> CliResult<Hash> {
-    let hash: HashType = status["hash"].as_str().and_then(|name| name.parse().ok()).ok_or("the node sent no hash")?;
-
-    Ok(status["genesis"].as_str().and_then(from_hex).and_then(|bytes| Hash::from_bytes(hash, &bytes)).ok_or("the node sent no genesis id that reads")?)
 }
 
 /// A proposal's id as show prints it, read with the chain's hash.
@@ -537,7 +531,7 @@ fn scan(agent: &Agent, esplora: &str, wallet: &crate::crypto::bitcoin::psbt::Mul
     use crate::crypto::bitcoin::psbt::{MultisigCoin, Utxo};
 
     let base = esplora.trim_end_matches('/');
-    let get = |path: String| -> CliResult<Value> {
+    let get = |path: String| -> CliResult<serde_json::Value> {
         let mut answer = agent.get(format!("{base}{path}")).call().map_err(|err| format!("Esplora {path}: {err}"))?;
 
         Ok(serde_json::from_str(&answer.body_mut().read_to_string()?).map_err(|_| format!("Esplora {path}: not JSON"))?)

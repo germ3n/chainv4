@@ -12,7 +12,7 @@ use {
 const COIN: Address = Address::Contract([0; 32]);
 
 fn deploy(chain: &mut Chain, code: Code) -> Address {
-    let receipt = advance(chain, vec![SignedTx::sign(Tx::Deploy { code }, nonce(chain, &authority()), FeeOffer::NONE, &authority())]).remove(0);
+    let receipt = advance(chain, vec![SignedTx::sign(Tx::Deploy { code }, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis())]).remove(0);
 
     match receipt.result {
         Ok(Effect::Deployed(address)) => address,
@@ -24,7 +24,7 @@ fn deploy(chain: &mut Chain, code: Code) -> Address {
 fn call(chain: &mut Chain, to: Address, function: &str, coin: u128, data: Vec<TxCallArgumentType>) -> Receipt {
     let tx = Tx::ContractCall { to, func: Hash::Xxh3_64(crate::vm::selector(function)), amount: Amount::U128(coin), data };
 
-    advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority())]).remove(0)
+    advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis())]).remove(0)
 }
 
 fn returned(receipt: &Receipt) -> Vec<TxCallArgumentType> {
@@ -41,7 +41,7 @@ fn refused(receipt: &Receipt, why: &str) {
 fn evm_call(chain: &mut Chain, to: Address, signature: &str, args: &[AbiValue], types: &[AbiType]) -> Vec<u8> {
     let input = [keccak(signature.as_bytes())[..4].to_vec(), encode_values(types, args).unwrap()].concat();
     let tx = Tx::EvmCall { to, value: Amount::U128(0), input };
-    let receipt = advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority())]).remove(0);
+    let receipt = advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis())]).remove(0);
 
     match receipt.result {
         Ok(Effect::Returned(values)) => match values.as_slice() {
@@ -156,7 +156,7 @@ fn evm_send(chain: &mut Chain, to: Address, value: u128, signature: &str, types:
         _ => [keccak(signature.as_bytes())[..4].to_vec(), encode_values(types, args).unwrap()].concat(),
     };
     let tx = Tx::EvmCall { to, value: Amount::U128(value), input };
-    let receipt = advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority())]).remove(0);
+    let receipt = advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis())]).remove(0);
 
     match receipt.result {
         Ok(Effect::Returned(values)) => match values.as_slice() {

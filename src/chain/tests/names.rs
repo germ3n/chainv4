@@ -8,7 +8,7 @@ use {
 };
 
 fn name_tx(chain: &Chain, from: &Keypair, name: &str, action: NameAction) -> SignedTx {
-    SignedTx::sign(Tx::Name { name: name.to_string(), action }, nonce(chain, from), FeeOffer::NONE, from)
+    SignedTx::sign(Tx::Name { name: name.to_string(), action }, nonce(chain, from), FeeOffer::NONE, from, &chain.genesis())
 }
 
 fn grace() -> u64 {
@@ -30,6 +30,7 @@ fn funded_stranger(chain: &mut Chain) -> Keypair {
 fn names_register_resolve_and_burn_their_price() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let alice = funded_stranger(&mut chain);
     let before = balance(&chain, &alice.public().address());
     let register = name_tx(&chain, &alice, "alice", NameAction::Register { years: 2 });
@@ -57,7 +58,7 @@ fn names_register_resolve_and_burn_their_price() {
     assert_eq!(nonce(&chain, &carol), 1);
 
     // A primary name, then a subname for someone else.
-    let primary = SignedTx::sign(Tx::PrimaryName { name: Some("alice".into()) }, nonce(&chain, &alice), FeeOffer::NONE, &alice);
+    let primary = SignedTx::sign(Tx::PrimaryName { name: Some("alice".into()) }, nonce(&chain, &alice), FeeOffer::NONE, &alice, &genesis_id);
     let subname = name_tx(&chain, &bob, "bob", NameAction::Subname { label: "pay".into(), owner: carol.public().address() });
     let receipts = advance(&mut chain, vec![primary, subname]);
     let state = chain.state();
@@ -107,9 +108,10 @@ fn under_fees_a_name_pays_its_gas_and_burns_its_price() {
     let db = Arc::new(MemoryDb::default());
     let paid = Genesis::dev_authority(authority().public());
     let mut chain = Chain::open(db, &paid).unwrap();
+    let genesis_id = chain.genesis();
     let fees = paid.fees.clone().unwrap().build();
     let offer = FeeOffer { gas_limit: 100_000, max_price: u256::new(1_000_000_000), tip: u256::ZERO };
-    let register = SignedTx::sign(Tx::Name { name: "alice".into(), action: NameAction::Register { years: 1 } }, 0, offer, &authority());
+    let register = SignedTx::sign(Tx::Name { name: "alice".into(), action: NameAction::Register { years: 1 } }, 0, offer, &authority(), &genesis_id);
     let intrinsic = fees.schedule().intrinsic(&register);
     let before = balance(&chain, &authority().public().address());
     let receipt = advance(&mut chain, vec![register]).remove(0);
@@ -168,14 +170,15 @@ return M
 "#;
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let alice = funded_stranger(&mut chain);
     let bob = stranger();
     let payer = crate::registry::contracts::contract_address(&authority().public().address(), nonce(&chain, &authority()), chain.hash());
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, nonce(&chain, &authority()), FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, nonce(&chain, &authority()), FeeOffer::NONE, &authority(), &genesis_id);
     let register = name_tx(&chain, &alice, "alice", NameAction::Register { years: 1 });
     advance(&mut chain, vec![deploy, register]);
     let subname = name_tx(&chain, &alice, "alice", NameAction::Subname { label: "pay".into(), owner: bob.public().address() });
-    let primary = SignedTx::sign(Tx::PrimaryName { name: Some("alice".into()) }, nonce(&chain, &alice) + 1, FeeOffer::NONE, &alice);
+    let primary = SignedTx::sign(Tx::PrimaryName { name: Some("alice".into()) }, nonce(&chain, &alice) + 1, FeeOffer::NONE, &alice, &genesis_id);
     advance(&mut chain, vec![subname, primary]);
 
     let call = |chain: &Chain, function: &str, amount: u128, args: Vec<TxCallArgumentType>, offset: u64| {
@@ -184,6 +187,7 @@ return M
             nonce(chain, &authority()) + offset,
             FeeOffer::NONE,
             &authority(),
+            &genesis_id,
         )
     };
     let calls = vec![
@@ -201,14 +205,16 @@ return M
     // A chain without names has a names library still, so every node runs a script alike; it fails.
     let nameless = Genesis { names: None, ..genesis() };
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &nameless).unwrap();
+    let genesis_id = chain.genesis();
     let payer_there = crate::registry::contracts::contract_address(&authority().public().address(), 0, chain.hash());
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, 0, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, 0, FeeOffer::NONE, &authority(), &genesis_id);
     advance(&mut chain, vec![deploy]);
     let lookup = SignedTx::sign(
         Tx::ContractCall { to: payer_there, func: crate::crypto::hasher::Hasher::digest(HashType::Xxh3_64, b"pay"), amount: Amount::U128(0), data: vec![TxCallArgumentType::String("alice.dev".into())] },
         1,
         FeeOffer::NONE,
         &authority(),
+        &genesis_id,
     );
 
     assert!(matches!(&advance(&mut chain, vec![lookup])[0].result, Err(failure) if failure.to_string().contains("this chain has no names")));

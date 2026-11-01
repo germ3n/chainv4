@@ -429,6 +429,7 @@ mod send {
                 confirmations: 1,
                 gas_limit: None,
                 anyway: false,
+                genesis: None,
                 eip712: false,
                 max_price: None,
                 tip: None,
@@ -443,6 +444,67 @@ mod send {
 
             self.thread.join().unwrap().0
         }
+    }
+
+    #[test]
+    fn the_api_refuses_a_transaction_signed_for_another_chain_and_takes_it_signed_for_this_one() {
+        use crate::structs::tx::{FeeOffer, SignedTx, Tx};
+
+        let running = Running::start(false);
+        let key = DevAuthority::dev_keypair();
+        let burn = Tx::Burn { from: key.public().address(), amount: crate::structs::amount::Amount::U128(1) };
+        let elsewhere = crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::default_chain(), b"another chain");
+        // An offer that pays, so what is refused is refused for its signature and nothing else.
+        let fee = FeeOffer { gas_limit: 1_000_000, max_price: u256::new(1_000_000_000_000), tip: u256::ZERO };
+        let post = |signed: &SignedTx| {
+            let mut answer = ureq::post(format!("http://{}/txs", running.api))
+                .header("content-type", "application/json")
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send(serde_json::json!({ "tx": crate::structs::hex::to_hex(&wincode::serialize(signed).unwrap()) }).to_string())
+                .unwrap();
+
+            (answer.status().as_u16(), answer.body_mut().read_to_string().unwrap())
+        };
+        let batch = Tx::Batch { steps: vec![burn.clone(), burn.clone()] };
+
+        for foreign in [burn, batch.clone()] {
+            let (status, said) = post(&SignedTx::sign(foreign, 0, fee, &key, &elsewhere));
+
+            assert_eq!(status, 400, "{said}");
+            assert!(said.contains("signature does not match"), "{said}");
+        }
+
+        let (status, said) = post(&SignedTx::sign(batch, 0, fee, &key, &running.genesis));
+
+        assert_eq!(status, 202, "{said}");
+
+        let node = running.stop();
+
+        assert_eq!(node.mempool().len(), 1, "only what was signed for this chain waits");
+    }
+
+    #[test]
+    fn send_signs_for_the_chain_its_node_names_and_refuses_before_signing_one_it_was_not_told_to() {
+        let running = Running::start(true);
+        let burn = || TxArgs::Burn { amount: u256::new(1) };
+        let other = crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::default_chain(), b"another chain").to_string();
+        let refused = send(SendArgs { genesis: Some(other.clone()), ..running.args(burn()) }).unwrap_err().to_string();
+
+        assert!(refused.contains(&running.genesis.to_string()) && refused.contains(&other) && refused.contains("nothing was signed"), "{refused}");
+
+        // Told the chain the node is on, in whichever case and with whatever spaces around it.
+        let named = format!(" {} ", running.genesis.to_string().to_uppercase().replacen("0X", "0x", 1));
+        send(SendArgs { genesis: Some(named), ..running.args(burn()) }).unwrap();
+
+        // Told none, the node names it, and what it took runs there.
+        send(running.args(burn())).unwrap();
+
+        let node = running.stop();
+        let sender = DevAuthority::dev_keypair().public().address();
+
+        assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&sender).unwrap().nonce, 2);
     }
 
     #[test]
@@ -983,7 +1045,7 @@ mod send {
         let wrong = send(running.args(call("bump(uint256)", &["three"], false)));
 
         // What --read prints, from the node's dry run of count().
-        let probe = SignedTx::sign(Tx::EvmCall { to: counter, value: Amount::U128(0), input: super::super::evm::call("count()", &[]).unwrap() }, 3, FeeOffer::NONE, &deployer);
+        let probe = SignedTx::sign(Tx::EvmCall { to: counter, value: Amount::U128(0), input: super::super::evm::call("count()", &[]).unwrap() }, 3, FeeOffer::NONE, &deployer, &running.genesis);
         let answer: serde_json::Value = serde_json::from_str(
             &ureq::post(format!("http://{}/offer", running.api))
                 .header("content-type", "application/json")

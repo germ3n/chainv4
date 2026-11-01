@@ -43,7 +43,7 @@ fn transfer() -> SignedTx {
         amount: Amount::U128(1_500_000_000_000_000_000),
     };
 
-    SignedTx::sign(tx, 4, FeeOffer::NONE, &keypair)
+    SignedTx::sign(tx, 4, FeeOffer::NONE, &keypair, &genesis())
 }
 
 fn bundle() -> MultisigBundle {
@@ -111,7 +111,13 @@ fn a_raw_signed_transaction_decodes_with_its_kind_and_whether_it_checks() {
 
     let mut forged = signed.clone();
     forged.nonce = 5;
-    assert!(decode::signature_checks(&forged, None).is_err(), "a signature over another nonce");
+    assert!(decode::signature_checks(&forged, Some(&genesis())).is_err(), "a signature over another nonce");
+
+    // It names its chain: not this one's on another, and on none known, nothing can be said.
+    let elsewhere = Hash::from_bytes(HASH, &[8; 32]).unwrap();
+
+    assert!(decode::signature_checks(&signed, Some(&elsewhere)).is_err());
+    assert!(decode::signature_checks(&signed, None).unwrap_err().contains("not known yet"));
 
     assert!(decode::decode(&format!("{raw}00")).unwrap_err().contains("more bytes after it"));
     assert!(decode::decode("0x0102").unwrap_err().starts_with("not a signed transaction"));

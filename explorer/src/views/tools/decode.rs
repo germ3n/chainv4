@@ -10,7 +10,6 @@ use {
     chainv4::abi::Abi,
     chainv4::abi::known::{KnownAbi, read_call, read_log},
     chainv4::abi::multisig::EvmBundle,
-    chainv4::crypto::verifiable::Verifiable,
     chainv4::registry::multisig::MultisigBundle,
     chainv4::structs::address::Address,
     chainv4::structs::hash::{Hash, HashType},
@@ -120,14 +119,13 @@ pub fn kind(tx: &Tx) -> String {
     snake
 }
 
-/// Whether a signed transaction's signature checks: on this chain, knowing its genesis, as nodes
-/// check it, or by itself when the chain is not known yet.
+/// Whether a signed transaction's signature checks on this chain, as nodes check it. A signature
+/// names its chain, so with none known yet it cannot be said to.
 pub fn signature_checks(signed: &SignedTx, genesis: Option<&Hash>) -> Result<(), String> {
     match genesis {
-        Some(genesis) => signed.verify_on(genesis),
-        None => signed.verify(),
+        Some(genesis) => signed.verify_on(genesis).map_err(|why| why.to_string()),
+        None => Err("the chain is not known yet, and a signature holds on one chain alone".to_string()),
     }
-    .map_err(|why| why.to_string())
 }
 
 /// A multisig bundle's signatures: each member's key, the account it controls, and whether its
@@ -327,13 +325,15 @@ fn read_row(ui: &mut Ui, ctx: &Ctx, read: &Result<Read, String>) {
 fn signed_tx(ui: &mut Ui, ctx: &mut Ctx, signed: &SignedTx) {
     let look = ctx.look;
     let id = signed.id(chain_hash(ctx)).to_string();
-    let checks = signature_checks(signed, genesis(ctx).as_ref());
+    let chain = genesis(ctx);
+    let checks = signature_checks(signed, chain.as_ref());
 
     ui.horizontal_wrapped(|ui| {
         ui.label(widgets::strong(format!("Transaction · {}", kind(&signed.tx)), 15.0).color(look.palette.ink));
 
         match &checks {
             Ok(()) => widgets::pill(ui, "signature checks", look.palette.good),
+            Err(_) if chain.is_none() => widgets::pill(ui, "chain not known yet", look.palette.muted),
             Err(_) => widgets::pill(ui, "signature does not check", look.palette.bad),
         };
     });

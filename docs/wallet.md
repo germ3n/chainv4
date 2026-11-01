@@ -598,6 +598,10 @@ holding its nonce, so the next transaction takes that nonce again.
 
 ### A batch
 
+A signature holds on one chain alone, so Send signs nothing until the light client has said which
+chain the node is on. Until then it says so: it never goes by a guess, or by the genesis pinned at the
+node, which is what the node said last time.
+
 The Batch page, in the sidebar and under More on a phone, builds a [batch](chain.md#batches): several
 steps under one signature and one fee, all of which go through or none do, such as an approval and the
 swap that spends it, or several people paid at once. Add any step a batch may hold, move each up or
@@ -931,11 +935,16 @@ wallet with a password, as any other.
 1. The watch-only wallet builds the transaction on Send as usual, and the node prices it from a probe whose
    signature signs nothing: the node checks none for a price.
 2. **Sign on the signer** shows the request as a QR code: the transaction, its nonce and fee
-   offer, the key to sign with, and how the node names the coin and the token.
-3. On the signer, **Sign** reads it and lays out what it signs: the amount in the asset's units
-   and as the raw units signed, from, to, the token's contract, the most the fee comes to, the
-   nonce, and everything the transaction holds. It refuses a key none of its accounts holds, and a
-   transaction the chain would refuse. **Sign** shows the signed transaction as a code.
+   offer, the key to sign with, how the node names the coin and the token, and the chain it is for,
+   by its genesis id, which the light client follows. A wallet that does not know the chain yet
+   says so and signs nothing.
+3. On the signer, **Sign** reads it and lays out what it signs: the chain, by the id **Your chain**
+   takes and the genesis id, the amount in the asset's units and as the raw units signed, from, to,
+   the token's contract, the most the fee comes to, the nonce, and everything the transaction holds.
+   The signer follows no chain, so the chain is the sender's word, and a hostile sender may name
+   another of the same keys: with **Your chain** set under Settings, it refuses any other. It
+   refuses a key none of its accounts holds, and a transaction the chain would refuse. **Sign**
+   shows the signed transaction as a code.
 4. The watch-only wallet reads it back, and sends it only if it is the very transaction it asked for, signed
    by that key, and the signature holds.
 

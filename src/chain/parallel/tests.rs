@@ -72,8 +72,13 @@ fn context() -> BlockContext {
         timestamp: 1,
         producer: producer().public().address(),
         base_price: FeeConfig::dev().build().pricing().genesis_price(),
-        genesis: crate::structs::hash::Hash::zero(crate::structs::hash::HashType::default_chain()),
+        genesis: chain(),
     }
+}
+
+/// The chain the blocks here run on, by the genesis id their context names.
+fn chain() -> crate::structs::hash::Hash {
+    crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::default_chain(), b"the chain these blocks run on")
 }
 
 /// What running the block's transactions strictly one by one gives, the way blocks always ran:
@@ -140,7 +145,7 @@ fn tangled() -> Vec<SignedTx> {
         data: Vec::new(),
     };
     let fresh = |seed: u8| key(seed).public().address();
-    let sign = |tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair| SignedTx::sign(tx, nonce, fee, keypair);
+    let sign = |tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair| SignedTx::sign(tx, nonce, fee, keypair, &chain());
 
     vec![
         // Nothing in common with anything.
@@ -226,7 +231,7 @@ fn tangled_batches() -> Vec<SignedTx> {
     let call = |function: &str| Tx::ContractCall { to: counter, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(0), data: Vec::new() };
     let deploy = || Tx::Deploy { code: Code::Lua(COUNTER.to_string()) };
     let fresh = |seed: u8| key(seed).public().address();
-    let batch = |steps: Vec<Tx>, nonce: u64, keypair: &Keypair| SignedTx::sign(Tx::Batch { steps }, nonce, fee, keypair);
+    let batch = |steps: Vec<Tx>, nonce: u64, keypair: &Keypair| SignedTx::sign(Tx::Batch { steps }, nonce, fee, keypair, &chain());
     // More than a sender holds until the batch before it in the block pays it.
     let plenty = 2 * 10u128.pow(18);
 
@@ -236,7 +241,7 @@ fn tangled_batches() -> Vec<SignedTx> {
         batch(vec![pay(1, key(2).public().address(), 10u128.pow(18) / 2), pay(1, fresh(102), 1)], 0, &key(1)),
         batch(vec![pay(2, fresh(103), 10u128.pow(18) + 1), call("increment")], 0, &key(2)),
         // Nothing in common with any of them.
-        SignedTx::sign(pay(3, fresh(104), 1), 0, fee, &key(3)),
+        SignedTx::sign(pay(3, fresh(104), 1), 0, fee, &key(3), &chain()),
         // Fails at its second step, and its first does not stand.
         batch(vec![call("increment"), pay(8, fresh(105), plenty)], 0, &key(8)),
         batch(vec![call("increment"), deploy(), deploy()], 0, &key(9)),
@@ -356,12 +361,12 @@ fn a_contract_reaching_what_nobody_named_makes_only_the_reader_run_again() {
         amount: Amount::U128(1_000),
     };
     let txs = vec![
-        SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, 0, fee, &key(6)),
+        SignedTx::sign(Tx::Deploy { code: Code::Lua(PAYER.to_string()) }, 0, fee, &key(6), &chain()),
         // Waits for the deploy, which it names, then pays key 5, which it does not.
-        SignedTx::sign(pay, 0, fee, &key(7)),
+        SignedTx::sign(pay, 0, fee, &key(7), &chain()),
         // Names nothing the others do, so runs at once, on key 5's balance from before the payment.
         // The payment goes in first and changes that balance, so this runs again on the new one.
-        SignedTx::sign(spend, 0, fee, &key(5)),
+        SignedTx::sign(spend, 0, fee, &key(5), &chain()),
     ];
     let db = funded();
     let reference = Arc::new(State::new(db.clone()));
@@ -418,13 +423,13 @@ fn a_scan_another_transaction_wrote_into_runs_again() {
     };
     let call = |to: Address, function: &str, data: Vec<TxCallArgumentType>| Tx::ContractCall { to, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(0), data };
     let txs = vec![
-        SignedTx::sign(Tx::Deploy { code: Code::Lua(MEMBERS.to_string()) }, 0, fee, &key(6)),
-        SignedTx::sign(Tx::Deploy { code: Code::Lua(MEMBERS.to_string()) }, 1, fee, &key(6)),
+        SignedTx::sign(Tx::Deploy { code: Code::Lua(MEMBERS.to_string()) }, 0, fee, &key(6), &chain()),
+        SignedTx::sign(Tx::Deploy { code: Code::Lua(MEMBERS.to_string()) }, 1, fee, &key(6), &chain()),
         // Names the relay, and joins the club through it: a key the club never had.
-        SignedTx::sign(call(relay, "relay", vec![TxCallArgumentType::Address(club)]), 0, fee, &key(7)),
+        SignedTx::sign(call(relay, "relay", vec![TxCallArgumentType::Address(club)]), 0, fee, &key(7), &chain()),
         // Names the club, so runs beside the relay, counting no members. It read no key the join
         // wrote, as none was there, but its scan covered it, so it runs again and counts one.
-        SignedTx::sign(call(club, "count", Vec::new()), 0, fee, &key(8)),
+        SignedTx::sign(call(club, "count", Vec::new()), 0, fee, &key(8), &chain()),
     ];
     let db = funded();
     let reference = Arc::new(State::new(db.clone()));

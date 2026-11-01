@@ -916,7 +916,7 @@ fn finish_changing_both(ctx: &mut Ctx, state: &mut SettingsState) {
 }
 
 /// An offline signer's word for which chain is its: MetaMask's requests for it are named so, and
-/// any other's are warned of.
+/// any other's are warned of; this wallet's own for any other are refused.
 fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
     let id = egui::Id::unique("your chain typed");
@@ -925,7 +925,7 @@ fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
     ui.add_space(10.0);
     theme::caps(ui, &palette, "Your chain");
     ui.label(
-        RichText::new("Its Ethereum chain id, as GET /status shows chain_id: MetaMask's requests for it read as your chain, and any other's are warned of. Empty for none.")
+        RichText::new("Its Ethereum chain id, as GET /status shows chain_id: requests for it read as your chain. A sender's for any other are refused, and MetaMask's warned of. Empty for none.")
             .small()
             .color(palette.muted),
     );

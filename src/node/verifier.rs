@@ -122,6 +122,11 @@ mod tests {
         std::time::Duration,
     };
 
+    /// The chain the gate here is on.
+    fn chain() -> Hash {
+        crate::crypto::hasher::Hasher::digest(HashType::default_chain(), b"the chain the gate is on")
+    }
+
     fn transfer(nonce: u64) -> SignedTx {
         let authority = DevAuthority::dev_keypair();
         let tx = Tx::Transfer {
@@ -130,7 +135,7 @@ mod tests {
             amount: Amount::U128(1),
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority, &chain())
     }
 
     #[test]
@@ -140,11 +145,23 @@ mod tests {
         forged.nonce = 7;
         let peer = PeerId::random();
         let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }, NetEvent::PeerDown(peer), NetEvent::Tx { from: peer, tx: forged, gossip: None }];
-        let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()), |_| true);
+        let checked = check(batch, &Workers::new(), &chain(), |_| true);
 
         assert!(matches!(&checked[0], Arrival::Event { event, checked: Some(Ok(())) } if matches!(**event, NetEvent::Tx { .. })));
         assert!(matches!(&checked[1], Arrival::Event { event, checked: None } if matches!(**event, NetEvent::PeerDown(_))));
         assert!(matches!(&checked[2], Arrival::Event { event, checked: Some(Err(_)) } if matches!(**event, NetEvent::Tx { .. })));
+    }
+
+    #[test]
+    fn a_verdict_is_on_the_chain_it_was_asked_of() {
+        let peer = PeerId::random();
+        let elsewhere = crate::crypto::hasher::Hasher::digest(HashType::default_chain(), b"another chain");
+        let batch = || vec![NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }];
+        let here = check(batch(), &Workers::new(), &chain(), |_| true);
+        let there = check(batch(), &Workers::new(), &elsewhere, |_| true);
+
+        assert!(matches!(&here[0], Arrival::Event { checked: Some(Ok(())), .. }));
+        assert!(matches!(&there[0], Arrival::Event { checked: Some(Err(VerifyError::InvalidSignature)), .. }));
     }
 
     #[test]
@@ -154,7 +171,7 @@ mod tests {
         // so the gate turns the second away on its cheap checks without spending a verify.
         let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }, NetEvent::Tx { from: peer, tx: transfer(1), gossip: None }];
         let worth_first = std::sync::atomic::AtomicBool::new(true);
-        let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()), |_| worth_first.swap(false, std::sync::atomic::Ordering::SeqCst));
+        let checked = check(batch, &Workers::new(), &chain(), |_| worth_first.swap(false, std::sync::atomic::Ordering::SeqCst));
 
         assert!(matches!(&checked[0], Arrival::Event { checked: Some(Ok(())), .. }), "the affordable one is verified");
         assert!(matches!(&checked[1], Arrival::Event { checked: None, .. }), "the unaffordable one is left for the gate to refuse");
@@ -169,7 +186,7 @@ mod tests {
             Arc::new(MemoryDb::default()),
             None,
             HashType::default_chain(),
-            Hash::zero(HashType::default_chain()),
+            chain(),
             commands,
             Arc::new(Backlog::new(BacklogLimits::default())),
         ));

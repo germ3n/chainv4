@@ -1,7 +1,8 @@
 //! An offline signer's page: a request read off the sender's screen, all it asks laid out to check,
 //! and once signed, the signed transaction as a code for the sender to read back. Nothing here
-//! talks to a node: the request says the nonce and fee, and the sender proves the rest. With
-//! biometrics on, signing waits for one more check.
+//! talks to a node: the request says the nonce, the fee and the chain, shown among the rest and held
+//! against the one set in Settings, and the sender proves the rest. With biometrics on, signing waits
+//! for one more check.
 //!
 //! MetaMask's requests read here too, once it paired with the signer as its QR hardware wallet:
 //! a transaction, typed data or a message, for any chain, the chain named large, and the signature
@@ -118,6 +119,36 @@ fn note(ctx: &mut Ctx, kind: &str, what: &str, signer: &str) {
     }
 }
 
+/// Which chain a signature here counts on, among the facts to check, as a hostile sender may name
+/// another: its id, the one Settings takes, then the genesis id that comes from. Never one of the
+/// names of Ethereum's chains MetaMask's requests go by: an id here is the first bytes of a genesis
+/// id, which a sender could choose so as to read as one.
+fn chain_row(ui: &mut Ui, palette: &theme::Palette, genesis: &chainv4::structs::hash::Hash, yours: Option<u64>) {
+    let chain = chainv4::crypto::ethereum::chain_id(genesis);
+    let name = if yours == Some(chain) { "your chain" } else { "another chain than yours" };
+
+    super::row(ui, palette, "For the chain", |ui| {
+        ui.vertical(|ui| {
+            if yours.is_some() {
+                ui.label(RichText::new(name).strong());
+            }
+
+            ui.label(RichText::new(format!("chain id {chain}")).strong());
+            super::address(ui, palette, &genesis.to_string());
+
+            // Nothing to hold it against: what was said above is the sender's word alone.
+            if yours.is_none() {
+                ui.label(RichText::new("The sender says so. Set your chain's id in Settings, and this signer refuses any other.").small().color(palette.warn));
+            }
+        });
+    });
+}
+
+/// What a history line says of what was signed, with the chain it counts on.
+fn on_chain(what: &str, chain: u64) -> String {
+    format!("{what} on chain {chain}").trim().to_string()
+}
+
 /// How a native transaction reads in the history: its kind, and what it does.
 fn native_line(described: &airgap::Described) -> (String, String) {
     // A batch's steps are too many for a line, and the page that signed it laid each out.
@@ -226,6 +257,7 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     signer: chainv4::crypto::keypair::PublicKey::Ed25519([0; 32]),
                     coin: airgap::Shown { symbol: String::new(), decimals: 0 },
                     token: None,
+                    genesis: bundle.genesis,
                 });
                 let trouble = refused.or(trouble);
                 state.step = Step::Multisig { bundle, key, trouble };
@@ -242,6 +274,9 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         return;
     };
     let described = airgap::describe(request);
+    let yours = ctx.settings.signer_chain;
+    // Held against the chain Settings names as it stands now, not as it stood when this was read.
+    let wrong = airgap::wrong_chain(&request.genesis, yours);
     let mut next = None;
 
     // What the check before signing came to: passed, it signs; the fingers or faces enrolled
@@ -274,6 +309,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             super::steps::heading(ui, ctx, steps);
         }
 
+        chain_row(ui, &palette, &request.genesis, yours);
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &described.from));
         super::row(ui, &palette, "Fee, at most", |ui| {
             ui.label(&described.fee).on_hover_text(&described.gas);
@@ -308,14 +344,14 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             ui.add(egui::Label::new(theme::mono(&described.everything).color(palette.soft)).wrap());
         });
 
-        if let Some(trouble) = trouble.as_ref() {
+        if let Some(why) = wrong.as_ref().or(trouble.as_ref()) {
             ui.add_space(6.0);
-            ui.colored_label(palette.bad, trouble.as_str());
+            ui.colored_label(palette.bad, why.as_str());
         }
 
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && state.confirming.is_none()).clicked();
+            let tapped = theme::primary(ui, &palette, "Sign", wrong.is_none() && trouble.is_none() && state.confirming.is_none()).clicked();
             let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
 
             if tapped && !confirmed && let Some((enrolled, _)) = biometric {
@@ -326,12 +362,12 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     .iter()
                     .find_map(|holder| holder.keys.iter().find(|key| key.public() == request.signer))
                     .ok_or_else(|| "the key is gone from this wallet".to_string())
-                    .and_then(|key| airgap::sign(request, key));
+                    .and_then(|key| airgap::sign(request, key, yours));
 
                 match signed {
                     Ok(signed) => {
                         let (kind, what) = native_line(&described);
-                        note(ctx, &kind, &what, &described.from);
+                        note(ctx, &kind, &on_chain(&what, described.chain), &described.from);
                         next = Some(Step::Signed { message: Box::new(Message::Signed(signed)) });
                     }
                     Err(why) => *trouble = Some(why),
@@ -374,6 +410,8 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
     }
 
+    let yours = ctx.settings.signer_chain;
+    let wrong = airgap::wrong_chain(&bundle.genesis, yours);
     let request = airgap::Request {
         tx: bundle.body.tx.clone(),
         nonce: bundle.body.nonce,
@@ -381,6 +419,7 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         signer: key.unwrap_or(chainv4::crypto::keypair::PublicKey::Ed25519([0; 32])),
         coin: airgap::Shown { symbol: "units".to_string(), decimals: 0 },
         token: None,
+        genesis: bundle.genesis,
     };
     let described = airgap::describe(&request);
     // A non-batch inner transaction is laid out in the step frame too, so a member sees its value,
@@ -401,7 +440,7 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         super::row(ui, &palette, "Nonce", |ui| {
             ui.label(bundle.body.nonce.to_string());
         });
-        super::row(ui, &palette, "For the chain", |ui| super::address(ui, &palette, &bundle.genesis.to_string()));
+        chain_row(ui, &palette, &bundle.genesis, yours);
         super::row(ui, &palette, "Signed by", |ui| {
             ui.label(format!("{} member{} so far", bundle.signatures.len(), if bundle.signatures.len() == 1 { "" } else { "s" }));
         });
@@ -435,13 +474,13 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             ui.add(egui::Label::new(theme::mono(&described.everything).color(palette.soft)).wrap());
         });
 
-        if let Some(trouble) = trouble.as_ref() {
-            ui.colored_label(palette.bad, trouble.as_str());
+        if let Some(why) = wrong.as_ref().or(trouble.as_ref()) {
+            ui.colored_label(palette.bad, why.as_str());
         }
 
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui| {
-            let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && key.is_some() && state.confirming.is_none()).clicked();
+            let tapped = theme::primary(ui, &palette, "Sign", wrong.is_none() && trouble.is_none() && key.is_some() && state.confirming.is_none()).clicked();
             let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
 
             if tapped && !confirmed && let Some((enrolled, _)) = biometric {
@@ -453,7 +492,7 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                         signed.sign(keypair);
                         let (kind, what) = native_line(&described);
                         let member = keypair.public().address().to_string();
-                        note(ctx, &format!("Multisig {} · {kind}", format::short(&bundle.body.account.to_string())), &what, &member);
+                        note(ctx, &format!("Multisig {} · {kind}", format::short(&bundle.body.account.to_string())), &on_chain(&what, described.chain), &member);
                         next = Some(Step::Signed { message: Box::new(Message::Multisig(Box::new(signed))) });
                     }
                     None => *trouble = Some("the key is gone from this wallet".to_string()),
@@ -830,6 +869,7 @@ mod signed_history {
             nonce: 3,
             everything: "the words of a message".to_string(),
             steps: None,
+            chain: 7,
         };
         let (kind, what) = native_line(&described);
 
@@ -896,7 +936,7 @@ mod batch_tests {
                 let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
                 Step::Review {
-                    request: Box::new(Request { tx: Tx::Batch { steps: vec![pay; 3] }, nonce: 4, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None }),
+                    request: Box::new(Request { tx: Tx::Batch { steps: vec![pay; 3] }, nonce: 4, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis: Hash::zero(HashType::default_chain()) }),
                     trouble: None,
                 }
             });
@@ -936,7 +976,7 @@ mod batch_tests {
             let tx = Tx::EvmCall { to: Address::Evm([0xab; 20]), value: Amount::U128(2_000_000_000_000_000_000), input: vec![0x12, 0x34, 0x56, 0x78, 0x9a] };
             let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
-            Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None }), trouble: None }
+            Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis: Hash::zero(HashType::default_chain()) }), trouble: None }
         });
         let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
 
@@ -962,6 +1002,96 @@ mod batch_tests {
         assert!(shown.iter().any(|(text, _)| text.contains("bytes")), "the inner call's data shows");
     }
 
+    /// What the review of a request for this chain says, on a signer told this is its own, and
+    /// where it stands once tapped on Sign, with what its history noted.
+    fn tapped_sign(genesis: Hash, yours: Option<u64>) -> (String, SignState, Vec<crate::vault::SignedLine>) {
+        let mut book = drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let from = holders[0].addresses()[0];
+        let signer = holders[0].public(&from).unwrap();
+        let tx = Tx::Transfer { from, to: Address::Ed25519([9; 32]), amount: Amount::U128(1) };
+        let request = Request { tx, nonce: 0, fee: fee(), signer, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis };
+        let mut state = SignState { step: Step::Review { request: Box::new(request), trouble: None }, ..SignState::default() };
+        let mut world = drawn::World::default();
+        world.settings.signer_chain = yours;
+        let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), |ui, ctx| review(ui, ctx, &mut state));
+        drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), "Sign", |ui, ctx| review(ui, ctx, &mut state));
+
+        (said, state, book.signed)
+    }
+
+    #[test]
+    fn the_offline_signer_shows_the_chain_and_will_not_sign_for_another_it_was_told_is_not_its_own() {
+        let genesis = Hash::zero(HashType::default_chain());
+        let chain = chainv4::crypto::ethereum::chain_id(&genesis);
+
+        // Told nothing, it shows the chain as the sender's word, and signs.
+        let (said, state, noted) = tapped_sign(genesis, None);
+
+        assert!(said.contains(&format!("chain id {chain}")) && said.contains("The sender says so"), "{said}");
+        assert!(matches!(state.step, Step::Signed { .. }), "{said}");
+        assert!(noted[0].what.ends_with(&format!("on chain {chain}")), "its history says which: {noted:?}");
+
+        // Told this one, it names it so, and signs.
+        let (said, state, _) = tapped_sign(genesis, Some(chain));
+
+        assert!(said.contains("your chain") && !said.contains("The sender says so"), "{said}");
+        assert!(matches!(state.step, Step::Signed { .. }), "{said}");
+
+        // Told another, the tap does nothing, and it says why.
+        let (said, state, noted) = tapped_sign(genesis, Some(chain + 1));
+
+        assert!(said.contains(&format!("not yours, {}", chain + 1)) && said.contains("another chain than yours"), "{said}");
+        assert!(matches!(state.step, Step::Review { .. }), "{said}");
+        assert!(noted.is_empty(), "nothing signed, nothing noted");
+    }
+
+    #[test]
+    fn a_chain_id_a_sender_chose_to_read_as_ethereums_is_not_named_so() {
+        // Its first bytes are the sender's to choose: this one's chain id is 1.
+        let genesis = Hash::zero(HashType::default_chain());
+
+        assert_eq!(chainv4::crypto::ethereum::chain_id(&genesis), 1);
+
+        let (said, ..) = tapped_sign(genesis, None);
+
+        assert!(said.contains("chain id 1") && !said.contains("Ethereum"), "{said}");
+    }
+
+    #[test]
+    fn the_chain_of_a_request_shows_above_its_sign_button_on_every_screen() {
+        for (width, _) in drawn::SCREENS {
+            let shown = drawn_sign(width, |from| {
+                let tx = Tx::Transfer { from: from[0], to: Address::Ed25519([9; 32]), amount: Amount::U128(1) };
+                let signer = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
+
+                Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis: Hash::zero(HashType::default_chain()) }), trouble: None }
+            });
+            let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
+
+            assert!(top(&shown, "chain id") < sign);
+        }
+    }
+
+    #[test]
+    fn a_multisig_bundle_for_a_chain_this_signer_was_told_is_not_its_own_is_refused() {
+        let account = Address::Multisig([6; 32]);
+        let genesis = Hash::zero(HashType::default_chain());
+        let tx = Tx::Burn { from: account, amount: Amount::U128(1) };
+        let bundle = MultisigBundle { genesis, body: MultisigBody { account, tx, nonce: 1, fee: fee() }, signatures: Vec::new() };
+        let mut book = drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let key = holders[0].keys.first().map(|key| key.public());
+        let mut state = SignState { step: Step::Multisig { bundle: Box::new(bundle), key, trouble: None }, ..SignState::default() };
+        let mut world = drawn::World::default();
+        world.settings.signer_chain = Some(chainv4::crypto::ethereum::chain_id(&genesis) + 1);
+        let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), |ui, ctx| multisig_review(ui, ctx, &mut state));
+        drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), "Sign", |ui, ctx| multisig_review(ui, ctx, &mut state));
+
+        assert!(said.contains("not yours"), "{said}");
+        assert!(matches!(state.step, Step::Multisig { .. }), "{said}");
+    }
+
     #[test]
     fn a_request_the_chain_would_refuse_says_so_and_a_signature_is_not_offered() {
         let shown = drawn_sign(360.0, |_| {
@@ -972,6 +1102,7 @@ mod batch_tests {
                 signer: chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public(),
                 coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 },
                 token: None,
+                genesis: Hash::zero(HashType::default_chain()),
             };
             let trouble = airgap::refused(&refused);
 

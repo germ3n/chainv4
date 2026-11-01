@@ -73,7 +73,7 @@ hash for one thing can never pass for another.
 
 | Domain | What follows |
 | --- | --- |
-| `chainv4 transaction` | The transaction, nonce, fee offer and signer. |
+| `chainv4 transaction` | The genesis id, the transaction, nonce, fee offer and signer, so a signature holds on one chain alone. |
 | EIP-155's chain id | An Ethereum transaction, signed as Ethereum signs it: bound to this chain by the chain id, the genesis id's first 6 bytes. |
 | EIP-712's `chainv4` | A transaction's typed form, nonce and fee offer, under the genesis id as salt: see [Typed data (EIP-712)](#typed-data-eip-712). |
 | `chainv4 block` | A header's id, signed by the authority. |
@@ -90,7 +90,8 @@ or Trezor through it, can sign for chainv4 with the keys it holds.
 
 **The domain:** `name` chainv4, `version` 1, and `salt` the genesis id, so a signature holds on
 one chain alone. Nodes check it with `SignedTx::verify_on(genesis)`, at the gate, on the verifier
-and in every block they run; plain `verify` refuses one, knowing no chain.
+and in every block they run. Every signature on a transaction is checked this way, as each names
+its chain: there is no check of one without a chain.
 
 **The message,** one typed form per transaction:
 

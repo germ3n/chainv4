@@ -245,9 +245,11 @@ pub fn kind_words(kind: ChangeKind) -> String {
 }
 
 impl Checked {
-    /// Whether it may be taken as what became of a transaction on this chain. A transaction's id says
-    /// nothing of its chain: the same keys sending the same thing on a new chain make the same id, which
-    /// is proven there afresh. One kept before its chain was said goes with any, until a node mentions it.
+    /// Whether it may be taken as what became of a transaction on this chain. A transaction signed
+    /// now has an id of its chain's alone, as its signature names the chain, but rows on a device may
+    /// be from before that, when the same keys sending the same thing on a new chain made the same id,
+    /// which was proven there afresh. One kept before its chain was said goes with any, until a node
+    /// mentions it.
     pub fn on(&self, genesis: Option<&str>) -> bool {
         self.genesis.is_empty() || Some(self.genesis.as_str()) == genesis
     }
@@ -596,7 +598,8 @@ mod tests {
     };
 
     fn landed(tx: Tx, outcome: CommittedOutcome, events: Vec<Event>) -> Proven<Landed> {
-        let signed = SignedTx::sign(tx, 4, FeeOffer::NONE, &Keypair::development());
+        // What a row says comes from its receipt and transaction: no chain here checks a signature.
+        let signed = SignedTx::sign(tx, 4, FeeOffer::NONE, &Keypair::development(), &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
 
         Proven {
             value: Landed {
@@ -666,7 +669,7 @@ mod tests {
         ];
 
         for (change, said) in changes {
-            let signed = SignedTx::sign(Tx::ApproveChange { version: 3, change: change.clone() }, 4, FeeOffer::NONE, &Keypair::development());
+            let signed = SignedTx::sign(Tx::ApproveChange { version: 3, change: change.clone() }, 4, FeeOffer::NONE, &Keypair::development(), &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
             let back: SignedTx = wincode::deserialize(&wincode::serialize(&signed).expect("encodes")).expect("decodes in a light build");
 
             assert_eq!(back, signed);
@@ -964,7 +967,7 @@ mod batch_tests {
 
     fn checked(tx: Tx, outcome: CommittedOutcome) -> Checked {
         let key = Keypair::from_seed([7; 32]);
-        let signed = SignedTx::sign(tx, 0, FeeOffer::NONE, &key);
+        let signed = SignedTx::sign(tx, 0, FeeOffer::NONE, &key, &chainv4::structs::hash::Hash::zero(HashType::default_chain()));
         let id = signed.id(HashType::default_chain());
         let receipt = CommittedReceipt::new(id, 0, 0, u256::ZERO, outcome, Vec::new(), Vec::new());
 

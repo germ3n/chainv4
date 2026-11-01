@@ -153,6 +153,12 @@ impl Light {
         self.client.as_ref().filter(|_| self.trouble.is_none())
     }
 
+    /// The chain to sign for, by its genesis id: the one the client follows without trouble, which
+    /// held against the genesis pinned at this node. None until it does, and nothing can be signed.
+    pub fn genesis(&self) -> Option<Hash> {
+        self.client().map(LightClient::genesis)
+    }
+
     /// The block to ask a proof at: the newest the client followed, which it holds the header of;
     /// None while it follows nothing.
     pub fn tip_block(&self) -> Option<String> {

@@ -400,7 +400,8 @@ past the transaction is refused.
 
 **What it does:** the node's mempool admits it and gossips it. The API answers 202 with its
 `id`, or 503 when the node's [backlog](node.md#the-gossip-backlog) has no room: try again
-shortly.
+shortly. One signed for another chain is refused with 400: a signature names its chain by the
+genesis id `GET /status` says.
 
 `chainv4 send` is a client of this route.
 

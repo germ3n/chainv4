@@ -128,21 +128,22 @@ fn a_contract_s_create_in_a_later_step_goes_on_from_its_nonce_in_the_step_before
 fn several_evm_calls_share_one_gas_allowance_and_a_later_one_gets_only_what_is_left() {
     let paid = Genesis::dev_authority(authority().public());
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &paid).unwrap();
+    let genesis_id = chain.genesis();
     let fees = paid.fees.clone().unwrap().build();
     let high = FeeOffer { gas_limit: 3_000_000, max_price: u256::new(1_000_000_000), tip: u256::ZERO };
     let at = nonce(&chain, &authority());
-    let deployed = SignedTx::sign(Tx::Deploy { code: Code::Evm(counter_init(1)) }, at, high, &authority());
+    let deployed = SignedTx::sign(Tx::Deploy { code: Code::Evm(counter_init(1)) }, at, high, &authority(), &genesis_id);
     let counter = evm::create_address(&of_authority(), at);
     assert!(advance(&mut chain, vec![deployed])[0].result.is_ok());
     let bump = || evm_step(counter, calldata("bump(uint256)", &[word(1)]));
     // Its storage is written already, so every bump from here costs the same.
-    let alone = SignedTx::sign(bump(), at + 1, high, &authority());
+    let alone = SignedTx::sign(bump(), at + 1, high, &authority(), &genesis_id);
     let used = fees.schedule().for_fuel(advance(&mut chain, vec![alone]).remove(0).fuel_used);
     assert!(used > 21_000, "{used}");
 
     let two = || Tx::Batch { steps: vec![bump(), bump()] };
-    let intrinsic = fees.schedule().intrinsic(&SignedTx::sign(two(), at + 2, high, &authority()));
-    let limited = |limit: u64, nonce: u64| SignedTx::sign(two(), nonce, FeeOffer { gas_limit: limit, ..high }, &authority());
+    let intrinsic = fees.schedule().intrinsic(&SignedTx::sign(two(), at + 2, high, &authority(), &genesis_id));
+    let limited = |limit: u64, nonce: u64| SignedTx::sign(two(), nonce, FeeOffer { gas_limit: limit, ..high }, &authority(), &genesis_id);
 
     // Room for one and a half: the first goes, the second finds only what it left, and all goes.
     let short = limited(intrinsic + used + used / 2, at + 2);
@@ -208,20 +209,21 @@ fn a_step_too_expensive_only_at_the_end_undoes_all_those_before_it_and_pays_the_
     let db = Arc::new(MemoryDb::default());
     let paid = Genesis::dev_authority(authority().public());
     let mut chain = Chain::open(db, &paid).unwrap();
+    let genesis_id = chain.genesis();
     let fees = paid.fees.clone().unwrap().build();
     let high = FeeOffer { gas_limit: 3_000_000, max_price: u256::new(1_000_000_000), tip: u256::ZERO };
     let init = counter_init(0);
-    let deployed = SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, 0, high, &authority());
+    let deployed = SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, 0, high, &authority(), &genesis_id);
     let counter = evm::create_address(&of_authority(), 0);
     assert!(advance(&mut chain, vec![deployed])[0].result.is_ok());
     let bump = || evm_step(counter, calldata("bump(uint256)", &[word(1)]));
     let at = nonce(&chain, &authority());
     let looking = |limit| FeeOffer { gas_limit: limit, ..high };
-    let probe = SignedTx::sign(Tx::Batch { steps: vec![bump(), bump()] }, at, looking(1_000_000), &authority());
+    let probe = SignedTx::sign(Tx::Batch { steps: vec![bump(), bump()] }, at, looking(1_000_000), &authority(), &genesis_id);
     let intrinsic = fees.schedule().intrinsic(&probe);
     // Enough for the first bump, with its storage to write, and not for the second.
     let limit = intrinsic + 60_000;
-    let signed = SignedTx::sign(Tx::Batch { steps: vec![bump(), bump()] }, at, looking(limit), &authority());
+    let signed = SignedTx::sign(Tx::Batch { steps: vec![bump(), bump()] }, at, looking(limit), &authority(), &genesis_id);
     let (block, now) = next_block(&chain, vec![signed]);
     let receipt = extended(chain.import(&block, now)).remove(0);
 

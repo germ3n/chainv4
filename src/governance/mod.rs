@@ -477,7 +477,9 @@ mod tests {
         for leak in [None, Some(Leak { after_epochs: 4, permille: 10 })] {
             for change in [Change::Finality(config(leak)), Change::SwitchFinality { epoch: 40, config: config(leak) }] {
                 let tx = Tx::ApproveChange { version: 3, change };
-                let signed = SignedTx::sign(tx, 7, FeeOffer::NONE, &crate::crypto::keypair::Keypair::development());
+                // How it reads back is all this asks, so no chain checks its signature.
+                let chain = crate::structs::hash::Hash::zero(crate::structs::hash::HashType::default_chain());
+                let signed = SignedTx::sign(tx, 7, FeeOffer::NONE, &crate::crypto::keypair::Keypair::development(), &chain);
                 let read: SignedTx = wincode::deserialize(&wincode::serialize(&signed).unwrap()).unwrap();
 
                 assert_eq!(read, signed);

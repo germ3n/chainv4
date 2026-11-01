@@ -90,6 +90,7 @@ impl Node {
         let waiting = self.gate.mempool().iter().filter(|tx| tx.sender() == from).map(|tx| tx.nonce + 1).max();
         let mut nonce = account.nonce.max(waiting.unwrap_or(0));
         let base = self.chain.next_base_price();
+        let genesis = self.chain.genesis();
         let mut pushed = 0;
 
         for (index, (to, earned)) in tree.leaves.iter().enumerate() {
@@ -105,11 +106,11 @@ impl Node {
 
             let path = tree.proof(hash, to).map(|(_, _, path)| path).ok_or("a leaf the tree does not hold")?;
             let tx = Tx::Claim { height, to: *to, earned: *earned, index: index as u64, path };
-            let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &push.key);
+            let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, &push.key, &genesis);
             // A claim runs no contract, so it needs its intrinsic gas alone: no fuel cap to add.
             let offer = self.chain.fees().map_or(FeeOffer::NONE, |fees| fees.offer(base, 0, &probe, Default::default()));
 
-            match self.submit(SignedTx::sign(tx, nonce, offer, &push.key)) {
+            match self.submit(SignedTx::sign(tx, nonce, offer, &push.key, &genesis)) {
                 Ok(()) => {
                     log::info!("[pool] claimed {} for {to}", earned.saturating_sub(claimed));
                     nonce += 1;

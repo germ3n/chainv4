@@ -128,7 +128,7 @@ fn a_signature_holds_on_its_chain_alone() {
 #[test]
 fn a_transaction_signed_as_typed_data_holds_on_its_chain_and_nowhere_else() {
     use crate::crypto::keypair::Signature;
-    use crate::crypto::verifiable::{Verifiable, VerifyError};
+    use crate::crypto::verifiable::VerifyError;
     use crate::structs::tx::SignedTx;
 
     let key = Keypair::generate(KeyType::Secp256k1).unwrap();
@@ -144,7 +144,6 @@ fn a_transaction_signed_as_typed_data_holds_on_its_chain_and_nowhere_else() {
 
     assert_eq!(signed.verify_on(&ours), Ok(()));
     assert_eq!(signed.verify_on(&theirs), Err(VerifyError::InvalidSignature), "bound to its chain");
-    assert_eq!(signed.verify(), Err(VerifyError::InvalidSignature), "and never checked without one");
 
     let mut changed = signed.clone();
     changed.nonce = 1;
@@ -157,9 +156,10 @@ fn a_transaction_signed_as_typed_data_holds_on_its_chain_and_nowhere_else() {
 
     assert_eq!(native.verify_on(&ours), Err(VerifyError::InvalidSignature));
 
-    let own = SignedTx::sign(transfer.clone(), 0, fee, &key);
+    let own = SignedTx::sign(transfer.clone(), 0, fee, &key, &ours);
 
     assert_eq!(own.verify_on(&ours), Ok(()), "chainv4's own signatures check as ever");
+    assert_eq!(own.verify_on(&theirs), Err(VerifyError::InvalidSignature), "and are bound to their chain alike");
 
     // Only Ethereum's keys sign typed data, and a transfer from another's address is refused.
     #[cfg(feature = "ed25519")]
@@ -205,5 +205,5 @@ fn a_batch_never_holds_under_a_typed_signature_which_would_show_an_opaque_hash()
     assert_eq!(forged(Tx::ApproveMultisig { account, nonce: 0, fee: FeeOffer::NONE, tx: Box::new(its) }).verify_on(&genesis), Err(VerifyError::BatchNotTyped));
 
     // Under chainv4's own signature, the same key sends it.
-    assert_eq!(SignedTx::sign(batch, 0, FeeOffer::NONE, &key).verify_on(&genesis), Ok(()));
+    assert_eq!(SignedTx::sign(batch, 0, FeeOffer::NONE, &key, &genesis).verify_on(&genesis), Ok(()));
 }

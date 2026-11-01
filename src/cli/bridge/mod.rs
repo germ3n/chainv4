@@ -266,6 +266,7 @@ impl Bridge {
             finalized: false,
             gas_limit: None,
             anyway: false,
+            genesis: None,
             eip712: false,
             max_price: None,
             tip: None,

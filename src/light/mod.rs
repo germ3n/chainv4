@@ -1339,6 +1339,11 @@ impl LightClient {
         self.sealed(height)
     }
 
+    #[document(parent = "LightClient", summary = "The genesis id of the chain it follows, which it trusts and checks every header from: what a transaction signed for this chain names.")]
+    pub fn genesis(&self) -> Hash {
+        self.genesis
+    }
+
     #[document(
         parent = "LightClient",
         summary = "The total work of the header it followed at a height, counted from the first one it followed: from genesis, or from the first header of a checkpoint start, whose own work counts as nothing. None for a height it did not follow.",

@@ -189,16 +189,26 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         false => "The wallet signs it from what it proved; the node only prices it and passes it on.",
     });
 
-    if let Step::Review { draft, fee, warning } = &state.step {
-        let (draft, fee, warning) = (draft.clone(), *fee, warning.clone());
-        review(ui, ctx, state, draft, fee, warning);
+    if let Step::Sent { id } = &state.step {
+        let id = id.clone();
+        sent(ui, ctx, state, &id);
 
         return;
     }
 
-    if let Step::Sent { id } = &state.step {
-        let id = id.clone();
-        sent(ui, ctx, state, &id);
+    // A signature holds on one chain alone, so with none known nothing here can be signed: the chain
+    // comes from the light client, never from a guess or a genesis pinned but not yet checked.
+    let Some(genesis) = ctx.chain.genesis else {
+        theme::card(ui, &palette, |ui| {
+            ui.colored_label(palette.warn, NO_CHAIN);
+        });
+
+        return;
+    };
+
+    if let Step::Review { draft, fee, warning } = &state.step {
+        let (draft, fee, warning) = (draft.clone(), *fee, warning.clone());
+        review(ui, ctx, state, draft, fee, warning, genesis);
 
         return;
     }
@@ -599,14 +609,18 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
     finish(ctx, state, from, signer, tx, coin, token, shown, what, account.value.nonce)
 }
 
+/// What Send says while the chain to sign for is not known.
+const NO_CHAIN: &str = "The wallet cannot sign yet: a signature holds on one chain alone, and the light client has not said which chain this node is on. It starts once the node answers.";
+
 /// The draft of a transaction, and the body of POST /offer for its probe, at the next nonce.
 #[allow(clippy::too_many_arguments)]
 fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx, coin: u256, token: Option<Shown>, to: String, what: String, proven_nonce: u64) -> Result<(Draft, String), String> {
     let holder = ctx.holder().ok_or("there is no account to send from")?;
+    let genesis = ctx.chain.genesis.ok_or(NO_CHAIN)?;
     let address = from.to_string();
     let nonce = next_nonce(proven_nonce, &ctx.settings.sent, &address, ctx.now);
     let probe = match holder.key(&from) {
-        Some(key) => SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key),
+        Some(key) => SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key, &genesis),
         None => airgap::probe(tx.clone(), nonce, signer),
     };
     let mut body = json!({ "tx": encode(&probe) });
@@ -631,7 +645,8 @@ fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx
 }
 
 /// What the transaction costs at most, and the button that signs and sends it.
-fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: FeeOffer, warning: Option<String>) {
+#[allow(clippy::too_many_arguments)]
+fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: FeeOffer, warning: Option<String>, genesis: Hash) {
     let palette = *ctx.palette;
     // What Read from checked blocks suggested may be changed here, and the offer is what was typed.
     let fee = if ctx.settings.read_blocks { typed_offer(state, fee).unwrap_or(fee) } else { fee };
@@ -738,32 +753,29 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             };
 
             if theme::primary(ui, &palette, send, !short && !metamask_refuses && state.confirming.is_none()).clicked() || confirmed {
-                match key {
-                    None if by_metamask => match ctx.chain.genesis {
-                        Some(genesis) => {
-                            let signed = Signed::default();
-                            let (inbox, wake) = (signed.clone(), ctx.wake.clone());
-                            let typed = crate::metamask::typed_data(&draft.tx, draft.nonce, &fee, &genesis);
-                            crate::metamask::sign(ethereum(&draft.from), typed, move |answer| {
-                                *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
-                                wake.request_repaint();
-                            });
-                            state.step = Step::MetaMask { draft: draft.clone(), fee, genesis, signed };
-                        }
-                        None => state.step = Step::Failed("The light client has not started: the chain to sign for is not known yet.".to_string()),
-                    },
+                match (key, genesis) {
+                    (None, genesis) if by_metamask => {
+                        let signed = Signed::default();
+                        let (inbox, wake) = (signed.clone(), ctx.wake.clone());
+                        let typed = crate::metamask::typed_data(&draft.tx, draft.nonce, &fee, &genesis);
+                        crate::metamask::sign(ethereum(&draft.from), typed, move |answer| {
+                            *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                            wake.request_repaint();
+                        });
+                        state.step = Step::MetaMask { draft: draft.clone(), fee, genesis, signed };
+                    }
                     // With biometrics on, a check first; signing once it passes.
-                    Some(_) if !confirmed && let Some((enrolled, _)) = biometrics::enrolled(ctx.wake, ctx.settings) => {
+                    (Some(_), _) if !confirmed && let Some((enrolled, _)) = biometrics::enrolled(ctx.wake, ctx.settings) => {
                         state.confirm_trouble = None;
                         state.confirming = Some(Check::start(ctx.wake, &enrolled, &format!("Send {}", draft.what)));
                     }
-                    Some(key) => {
-                        let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key);
+                    (Some(key), genesis) => {
+                        let signed = SignedTx::sign(draft.tx.clone(), draft.nonce, fee, key, &genesis);
                         let ask = Ask::Submit(json!({ "tx": encode(&signed) }).to_string());
                         ctx.node.ask(ask.clone());
                         state.step = Step::Sending { draft: draft.clone(), ask };
                     }
-                    None => {
+                    (None, genesis) => {
                         let request = Request {
                             tx: draft.tx.clone(),
                             nonce: draft.nonce,
@@ -774,6 +786,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                                 decimals: ctx.coin.decimals,
                             },
                             token: draft.token.clone(),
+                            genesis,
                         };
                         state.step = Step::Offline {
                             draft: draft.clone(),
@@ -1033,7 +1046,7 @@ mod tests {
         let draft = Draft { from, signer, to: "its steps".to_string(), tx, nonce: 2, token: None, what: "A batch of 2 steps".to_string(), coin: u256::ZERO };
         let fee = FeeOffer { gas_limit: 50_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO };
         let mut state = SendState { step: Step::Review { draft, fee, warning: None }, ..SendState::default() };
-        let (drawn, _, shown) = crate::views::drawn::page_shown(book, &mut holders, (width, 20_000.0), |ui, ctx| show(ui, ctx, &mut state));
+        let (drawn, _, shown) = crate::views::drawn::following_shown(book, &mut holders, (width, 20_000.0), |ui, ctx| show(ui, ctx, &mut state));
 
         assert!(drawn <= width + 1.0, "{drawn} on {width}");
 
@@ -1060,6 +1073,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_wallet_with_no_chain_known_says_so_and_offers_nothing_to_sign_even_with_one_pinned() {
+        use crate::views::drawn::{SCREENS, World, said_in, two_phrases};
+
+        let mut book = two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let from = holders[0].addresses()[0];
+        let signer = holders[0].public(&from).unwrap();
+        let tx = Tx::Transfer { from, to: from, amount: Amount::U128(1) };
+        let draft = Draft { from, signer, to: "to someone".to_string(), tx, nonce: 2, token: None, what: "1 DEV".to_string(), coin: u256::ONE };
+        let fee = FeeOffer { gas_limit: 26_250, max_price: u256::new(2_000), tip: u256::ZERO };
+
+        for size in SCREENS {
+            for step in [Step::Edit, Step::Review { draft: draft.clone(), fee, warning: None }] {
+                // A genesis pinned at the node is what it said last time, and says nothing of now.
+                let mut world = World::default();
+                world.settings.pinned.insert(world.settings.node.clone(), Hash::zero(HashType::default_chain()).to_string());
+                let mut state = SendState { step, ..SendState::default() };
+                let said = said_in(&mut world, &mut book, &mut holders, size, |ui, ctx| show(ui, ctx, &mut state));
+
+                assert!(said.contains("cannot sign yet"), "{said}");
+                assert!(!said.contains("Sign and send") && !said.contains("Review"), "{said}");
+            }
+        }
+
+        // Nor is a draft made, whatever asks for one.
+        let mut world = World::default();
+        let (mut asked, state) = (None, SendState::default());
+        crate::views::drawn::page_in(&mut world, &mut book, &mut holders, SCREENS[0], |_, ctx| {
+            asked = Some(finish(ctx, &state, from, signer, Tx::Transfer { from, to: from, amount: Amount::U128(1) }, u256::ONE, None, String::new(), String::new(), 0).map(|_| ()));
+        });
+
+        assert_eq!(asked, Some(Err(NO_CHAIN.to_string())));
+    }
+
+    #[test]
+    fn a_probe_and_what_goes_to_the_signer_are_for_the_chain_the_light_client_follows() {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let from = holders[0].addresses()[0];
+        let signer = holders[0].public(&from).unwrap();
+        let state = SendState::default();
+        let chain = Hash::zero(HashType::default_chain());
+        let mut drafted = None;
+
+        crate::views::drawn::following_shown(&mut book, &mut holders, crate::views::drawn::SCREENS[0], |_, ctx| {
+            drafted = Some(finish(ctx, &state, from, signer, Tx::Transfer { from, to: from, amount: Amount::U128(1) }, u256::ONE, None, String::new(), String::new(), 0));
+        });
+
+        let (_, body) = drafted.unwrap().unwrap();
+        let body: Value = serde_json::from_str(&body).unwrap();
+        let probe: SignedTx = wincode::deserialize(&chainv4::structs::hex::from_hex(body["tx"].as_str().unwrap()).unwrap()).unwrap();
+
+        assert_eq!(probe.verify_on(&chain), Ok(()));
+    }
+
     /// The review of a plain transfer, in a world with this setting, and what it said.
     fn reviewing_a_transfer(reading: bool, size: (f32, f32)) -> (f32, String) {
         use crate::views::drawn::{World, page_in, said_in, two_phrases};
@@ -1079,8 +1148,8 @@ mod tests {
         };
         let state = || SendState { fee_typed: reading.then(|| ("26250".to_string(), "2000".to_string(), fee, true)), ..SendState::default() };
         let (mut one, mut other) = (state(), state());
-        let (width, _) = page_in(&mut world(), &mut book, &mut holders, size, |ui, ctx| review(ui, ctx, &mut one, draft.clone(), fee, None));
-        let said = said_in(&mut world(), &mut book, &mut holders, size, |ui, ctx| review(ui, ctx, &mut other, draft.clone(), fee, None));
+        let (width, _) = page_in(&mut world(), &mut book, &mut holders, size, |ui, ctx| review(ui, ctx, &mut one, draft.clone(), fee, None, Hash::zero(HashType::default_chain())));
+        let said = said_in(&mut world(), &mut book, &mut holders, size, |ui, ctx| review(ui, ctx, &mut other, draft.clone(), fee, None, Hash::zero(HashType::default_chain())));
 
         (width, said)
     }

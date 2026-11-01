@@ -291,9 +291,10 @@ fn every_kind_of_change_reads_in_words() {
     assert_eq!((label("name_prices"), label("reward"), label("consensus")), ("Name prices".to_string(), "Block reward".to_string(), "Consensus".to_string()));
 }
 
-/// A council member's key, and what it signs.
+/// A council member's key, and what it signs. What a page shows comes from its receipt and
+/// transaction, so no chain here checks the signature.
 fn signed(tx: Tx) -> SignedTx {
-    SignedTx::sign(tx, 0, FeeOffer::NONE, &Keypair::development())
+    SignedTx::sign(tx, 0, FeeOffer::NONE, &Keypair::development(), &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()))
 }
 
 /// What the light client proves of a decision: its receipt, with this outcome, and its transaction,

@@ -359,7 +359,7 @@ hour. An older node answers 404, and the explorer shows nothing.
 | Tools | Decode, Convert, Hash & verify, and Proof, in tabs. See [Tools](#tools). |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Governance | Who approves changes and what one needs, the changes being approved with their approvals, every setting in force and the change that set it, and every decision, each proven by the light client. See [Governance](#governance). |
-| Send | Signs and sends transfers, contract calls, deploys and burns. |
+| Send | Signs and sends transfers, contract calls, deploys and burns, for the chain the light client follows: until it says which, it says so and signs nothing. |
 | Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, dark or light, and the genesis the light client pinned there, which it can forget. |
 | More | On a phone, the pages the tabs have no room for. |
 
@@ -378,7 +378,8 @@ Proof's fetch work offline.
 **Decode** reads what is pasted:
 - **A raw signed transaction,** `0x…` as the chain encodes it, or the wallet's code for one,
   `ur:chainv4-signed/…`: its kind, id, with a link to its page, sender, nonce, offer, signer and
-  signature, and whether the signature checks on this chain; an EVM call's calldata read by the
+  signature, and whether the signature checks on this chain, or that the chain is not known yet, as a
+  signature names its chain; an EVM call's calldata read by the
   ABIs; then every field as the tx page shows it, from the node's own JSON for it, written here.
 - **A swap's code,** `ur:chainv4-swap/…`: the hash, offer or answer, and each leg's chain, what it
   locks, where, who pays, who claims and when it ends.

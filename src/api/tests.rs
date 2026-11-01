@@ -49,6 +49,7 @@ fn serve() -> Fixture {
     let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
     let transfer = Tx::Transfer {
         from: authority.public().address(),
@@ -61,7 +62,7 @@ fn serve() -> Fixture {
 
     for (nonce, tx) in [transfer, deploy].into_iter().enumerate() {
         let now = chain.tip().timestamp + SLOT;
-        let signed = SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority);
+        let signed = SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority, &genesis_id);
         let mut block = chain.build(vec![signed], Vec::new(), producer.address(&[]), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
         chain.import(&block, now).unwrap();
@@ -384,7 +385,7 @@ fn signed(nonce: u64) -> SignedTx {
         amount: Amount::U128(1),
     };
 
-    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority, &free().block().id())
 }
 
 fn post_tx(address: SocketAddr, bytes: &[u8]) -> (u16, Value) {
@@ -485,6 +486,7 @@ fn fees_show_in_status_blocks_and_receipts() {
     let db = Arc::new(MemoryDb::default());
     let genesis = Genesis::dev_authority(authority.public());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let base = chain.next_base_price();
     let fee = FeeOffer {
         gas_limit: 100_000,
@@ -497,7 +499,7 @@ fn fees_show_in_status_blocks_and_receipts() {
         amount: Amount::U128(10),
     };
     let now = chain.tip().timestamp + SLOT;
-    let mut block = chain.build(vec![SignedTx::sign(transfer, 0, fee, &authority)], Vec::new(), producer.address(&[]), now).unwrap();
+    let mut block = chain.build(vec![SignedTx::sign(transfer, 0, fee, &authority, &genesis_id)], Vec::new(), producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
     chain.import(&block, now).unwrap();
     let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
@@ -592,6 +594,8 @@ fn authority_chains_list_their_signers_and_changes() {
         ..crate::chain::AuthorityConfig::dev(signers[0])
     };
     let proposal = vec![signers[0], signers[1]];
+    let finality = crate::chain::FinalityConfig::Authority(config);
+    let genesis_id = Genesis { finality: Some(finality.clone()), ..free() }.block().id();
     let approve = SignedTx::sign(
         Tx::ApproveSigners {
             version: 0,
@@ -602,6 +606,7 @@ fn authority_chains_list_their_signers_and_changes() {
         0,
         FeeOffer::NONE,
         &keys[0],
+        &genesis_id,
     );
     // Another signer approves something else, then takes it back.
     let other = SignedTx::sign(
@@ -614,9 +619,10 @@ fn authority_chains_list_their_signers_and_changes() {
         0,
         FeeOffer::NONE,
         &keys[1],
+        &genesis_id,
     );
-    let withdraw = SignedTx::sign(Tx::WithdrawApproval { version: 0 }, 1, FeeOffer::NONE, &keys[1]);
-    let (address, _) = serve_with(crate::chain::FinalityConfig::Authority(config), 3, |height| match height {
+    let withdraw = SignedTx::sign(Tx::WithdrawApproval { version: 0 }, 1, FeeOffer::NONE, &keys[1], &genesis_id);
+    let (address, _) = serve_with(finality, 3, |height| match height {
         1 => vec![approve.clone(), other.clone()],
         2 => vec![withdraw.clone()],
         _ => Vec::new(),
@@ -681,7 +687,7 @@ fn governance_lists_the_decision_and_the_ballot() {
         ..free()
     };
     let staked = ConsensusConfig::Staked { slot_ms: SLOT, schedule: Schedule::Priority };
-    let approve = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev);
+    let approve = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
     let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
@@ -741,9 +747,9 @@ fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
         ..free()
     };
     let bootnodes = vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()];
-    let renamed = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Name("second".to_string()) }, 0, FeeOffer::NONE, &dev);
+    let renamed = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Name("second".to_string()) }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
     // Each kind its own version: the bootnodes' first decision, after the name's.
-    let booted = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev);
+    let booted = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev, &genesis.block().id());
     let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
@@ -806,15 +812,17 @@ fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
 #[test]
 fn depth_chains_finalize_by_depth() {
     let authority = DevAuthority::dev_keypair();
+    let finality = crate::chain::FinalityConfig::Depth(crate::chain::DepthConfig { depth: 3 });
+    let genesis_id = Genesis { finality: Some(finality.clone()), ..free() }.block().id();
     let burn = |nonce: u64| {
         let tx = Tx::Burn {
             from: authority.public().address(),
             amount: Amount::U128(1),
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority, &genesis_id)
     };
-    let (address, _) = serve_with(crate::chain::FinalityConfig::Depth(crate::chain::DepthConfig { depth: 3 }), 6, |height| {
+    let (address, _) = serve_with(finality, 6, |height| {
         match height {
             1 => vec![burn(0)],
             5 => vec![burn(1)],
@@ -879,6 +887,7 @@ mod ffg {
         let db = Arc::new(MemoryDb::default());
         let genesis = free();
         let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+        let genesis_id = chain.genesis();
         let newcomer = Keypair::generate(authority.public().key_type()).unwrap();
         let bond = SignedTx::sign(
             Tx::Bond {
@@ -888,6 +897,7 @@ mod ffg {
             0,
             FeeOffer::NONE,
             &authority,
+            &genesis_id,
         );
         let transfer = SignedTx::sign(
             Tx::Transfer {
@@ -898,6 +908,7 @@ mod ffg {
             1,
             FeeOffer::NONE,
             &authority,
+            &genesis_id,
         );
 
         for height in 1..=18 {
@@ -1153,6 +1164,7 @@ fn receipts_show_where_a_call_went() {
         2,
         FeeOffer::NONE,
         &DevAuthority::dev_keypair(),
+        &fixture.chain.genesis(),
     );
     produce(&mut fixture.chain, vec![call.clone()]);
     let receipt = ok(fixture.address, &format!("/txs/{}", call.id(HashType::default_chain())));
@@ -1209,6 +1221,7 @@ fn offers_cover_what_a_transaction_costs_now() {
     let db = Arc::new(MemoryDb::default());
     let genesis = Genesis::dev_authority(authority.public());
     let chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let probe = SignedTx::sign(
         Tx::Deploy {
@@ -1217,6 +1230,7 @@ fn offers_cover_what_a_transaction_costs_now() {
         0,
         FeeOffer::NONE,
         &authority,
+        &genesis_id,
     );
     let body = |probe: &SignedTx, extra: Value| {
         let mut body = json!({ "tx": to_hex(&wincode::serialize(probe).unwrap()) });
@@ -1254,6 +1268,7 @@ fn offers_cover_what_a_transaction_costs_now() {
         0,
         FeeOffer::NONE,
         &authority,
+        &genesis_id,
     );
     let (_, _, plain) = request(address, "POST", "/offer", &body(&transfer, json!({})));
 
@@ -1266,6 +1281,7 @@ fn offers_cover_what_a_transaction_costs_now() {
         0,
         FeeOffer::NONE,
         &authority,
+        &genesis_id,
     );
     let (status, _, failing) = request(address, "POST", "/offer", &body(&missing, json!({})));
 
@@ -1291,13 +1307,13 @@ fn evm_deploys_and_calls_are_dry_run_at_offer_and_read_as_json() {
     let address = start(db.clone(), None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), crate::structs::u256::u256::new(5).to_be_bytes().to_vec()].concat();
     let offer = |tx: Tx| {
-        let probe = SignedTx::sign(tx, 0, FeeOffer::NONE, &authority);
+        let probe = SignedTx::sign(tx, 0, FeeOffer::NONE, &authority, &genesis.block().id());
 
         request(address, "POST", "/offer", &json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) }).to_string()).2
     };
     let deploy = offer(Tx::Deploy { code: Code::Evm(init) });
     let fees = genesis.fees.as_ref().unwrap().build();
-    let tx = SignedTx::sign(Tx::EvmCall { to: Address::Evm([7; 20]), value: Amount::U128(3), input: vec![0xb2, 0x0e] }, 0, FeeOffer::NONE, &authority);
+    let tx = SignedTx::sign(Tx::EvmCall { to: Address::Evm([7; 20]), value: Amount::U128(3), input: vec![0xb2, 0x0e] }, 0, FeeOffer::NONE, &authority, &genesis.block().id());
 
     assert_eq!(deploy["estimate"]["status"], "ok", "{deploy}");
     assert_eq!(deploy["estimate"]["deployed"], crate::vm::evm::create_address(&authority.public().address(), 0).to_string());
@@ -1356,9 +1372,10 @@ fn every_name_lists_in_name_order_a_page_at_a_time() {
     let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let txs: Vec<Tx> = ["carol", "alice", "bob"].into_iter().map(|name| Tx::Name { name: name.into(), action: NameAction::Register { years: 1 } }).collect();
     let now = chain.tip().timestamp + SLOT;
-    let signed: Vec<SignedTx> = txs.into_iter().enumerate().map(|(nonce, tx)| SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority)).collect();
+    let signed: Vec<SignedTx> = txs.into_iter().enumerate().map(|(nonce, tx)| SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority, &genesis_id)).collect();
     let mut block = chain.build(signed, Vec::new(), producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
     chain.import(&block, now).unwrap();
@@ -1390,6 +1407,7 @@ fn names_are_looked_up_by_name_and_accounts_show_their_primary_one() {
     let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let txs = [
         Tx::Name { name: "alice".into(), action: NameAction::Register { years: 1 } },
         Tx::Name { name: "alice".into(), action: NameAction::Text { key: "url".into(), value: Some("https://alice.example".into()) } },
@@ -1397,7 +1415,7 @@ fn names_are_looked_up_by_name_and_accounts_show_their_primary_one() {
         Tx::PrimaryName { name: Some("alice".into()) },
     ];
     let now = chain.tip().timestamp + SLOT;
-    let signed: Vec<SignedTx> = txs.into_iter().enumerate().map(|(nonce, tx)| SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority)).collect();
+    let signed: Vec<SignedTx> = txs.into_iter().enumerate().map(|(nonce, tx)| SignedTx::sign(tx, nonce as u64, FeeOffer::NONE, &authority, &genesis_id)).collect();
     let mut block = chain.build(signed, Vec::new(), producer.address(&[]), now).unwrap();
     block.seal = producer.seal(&block.header).unwrap();
     chain.import(&block, now).unwrap();
@@ -1475,6 +1493,7 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
     let db = Arc::new(MemoryDb::default());
     let genesis = Genesis::dev_authority(authority.public());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let secret = [0x46; 32];
     let sender = Keypair::from_private(PrivateKey::Secp256k1(secret)).public().address();
     let Address::Secp256k1(from) = sender else { unreachable!() };
@@ -1509,6 +1528,7 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
         0,
         FeeOffer { gas_limit: 100_000, max_price: u256::from(10_000_000_000u64), tip: u256::ZERO },
         &authority,
+        &genesis_id,
     );
     let blocks = [vec![fund], vec![SignedTx::from_ethereum(deploy.clone()).unwrap()], vec![SignedTx::from_ethereum(bump.clone()).unwrap()]];
 
@@ -1967,6 +1987,7 @@ fn read_only_calls_run_on_a_copy_that_is_thrown_away() {
         2,
         FeeOffer::NONE,
         &authority,
+        &fixture.chain.genesis(),
     );
     produce(&mut fixture.chain, vec![deploy]);
     let bumper = contract_address(&authority.public().address(), 2, HashType::default_chain());
@@ -2045,10 +2066,11 @@ fn tokens_are_listed_from_the_registry() {
     let authority = DevAuthority::dev_keypair();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let deployed = |nonce: u64| contract_address(&authority.public().address(), nonce, HashType::default_chain());
     let (token, greeter) = (deployed(0), deployed(1));
-    let deploy = |code: &str, nonce: u64| SignedTx::sign(Tx::Deploy { code: Code::Lua(code.to_string()) }, nonce, FeeOffer::NONE, &authority);
+    let deploy = |code: &str, nonce: u64| SignedTx::sign(Tx::Deploy { code: Code::Lua(code.to_string()) }, nonce, FeeOffer::NONE, &authority, &genesis_id);
     produce(&mut chain, vec![deploy(include_str!("../../contracts/lua/token.lua"), 0), deploy(GREETER, 1)]);
 
     assert_eq!(
@@ -2119,10 +2141,11 @@ fn collections_are_listed_from_the_registry() {
     let authority = DevAuthority::dev_keypair();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let deployed = |nonce: u64| contract_address(&authority.public().address(), nonce, HashType::default_chain());
     let (nft, multi, greeter) = (deployed(0), deployed(1), deployed(2));
-    let deploy = |code: &str, nonce: u64| SignedTx::sign(Tx::Deploy { code: Code::Lua(code.to_string()) }, nonce, FeeOffer::NONE, &authority);
+    let deploy = |code: &str, nonce: u64| SignedTx::sign(Tx::Deploy { code: Code::Lua(code.to_string()) }, nonce, FeeOffer::NONE, &authority, &genesis_id);
     produce(
         &mut chain,
         vec![
@@ -2157,6 +2180,7 @@ fn events_are_listed_from_the_index() {
     let authority = DevAuthority::dev_keypair();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let greeter = contract_address(&authority.public().address(), 0, HashType::default_chain());
 
@@ -2172,9 +2196,9 @@ fn events_are_listed_from_the_index() {
             data: vec![TxCallArgumentType::Address(bob)],
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority, &genesis_id)
     };
-    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(GREETER.to_string()) }, 0, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(GREETER.to_string()) }, 0, FeeOffer::NONE, &authority, &genesis_id)]);
     produce(&mut chain, vec![greet(1)]);
     let last = produce(&mut chain, vec![greet(2)]);
     let listing = ok(address, &format!("/events?contract={greeter}"));
@@ -2223,18 +2247,19 @@ fn evm_logs_are_listed_by_their_topic_and_by_the_addresses_in_them() {
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let word = |value: u64| crate::structs::u256::u256::from(value).to_be_bytes().to_vec();
     let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), word(5)].concat();
     let counter = crate::vm::evm::create_address(&me, 0);
 
     chain.keep_index(IndexKind::Events, None).unwrap();
-    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, 0, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, 0, FeeOffer::NONE, &authority, &genesis_id)]);
 
     let bump = |nonce: u64, by: u64| {
         let input = [crate::crypto::secp256k1::keccak(b"bump(uint256)")[..4].to_vec(), word(by)].concat();
 
-        SignedTx::sign(Tx::EvmCall { to: counter, value: Amount::U128(0), input }, nonce, FeeOffer::NONE, &authority)
+        SignedTx::sign(Tx::EvmCall { to: counter, value: Amount::U128(0), input }, nonce, FeeOffer::NONE, &authority, &genesis_id)
     };
     produce(&mut chain, vec![bump(1, 2)]);
     produce(&mut chain, vec![bump(2, 3)]);
@@ -2290,9 +2315,10 @@ fn an_address_s_transactions_are_listed_from_the_index() {
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
-    let pay = |nonce: u64| SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(7) }, nonce, FeeOffer::NONE, &authority);
+    let pay = |nonce: u64| SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(7) }, nonce, FeeOffer::NONE, &authority, &genesis_id);
 
     assert_eq!(get(address, &format!("/accounts/{bob}/txs")).0, 404, "no index yet");
 
@@ -2338,6 +2364,7 @@ fn a_listing_is_filtered_by_kind_direction_counterparty_token_and_when_and_pages
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let bob_key = Keypair::generate(authority.public().key_type()).unwrap();
     let (bob, carol) = (bob_key.public().address(), Keypair::generate(authority.public().key_type()).unwrap().public().address());
@@ -2345,11 +2372,11 @@ fn a_listing_is_filtered_by_kind_direction_counterparty_token_and_when_and_pages
 
     chain.keep_index(IndexKind::Addresses, None).unwrap();
     // Height 1: a transfer to bob; 2: one back; 3: a deploy; 4: a call; 5: a transfer to carol.
-    produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(7) }, 0, FeeOffer::NONE, &authority)]);
-    produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: bob, to: me, amount: Amount::U128(3) }, 0, FeeOffer::NONE, &bob_key)]);
-    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 1, FeeOffer::NONE, &authority)]);
-    produce(&mut chain, vec![SignedTx::sign(Tx::ContractCall { to: contract, func: Hash::Xxh3_64(crate::vm::selector("increment")), amount: Amount::U128(0), data: vec![TxCallArgumentType::I64(1)] }, 2, FeeOffer::NONE, &authority)]);
-    let last = produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: me, to: carol, amount: Amount::U128(5) }, 3, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(7) }, 0, FeeOffer::NONE, &authority, &genesis_id)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: bob, to: me, amount: Amount::U128(3) }, 0, FeeOffer::NONE, &bob_key, &genesis_id)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 1, FeeOffer::NONE, &authority, &genesis_id)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::ContractCall { to: contract, func: Hash::Xxh3_64(crate::vm::selector("increment")), amount: Amount::U128(0), data: vec![TxCallArgumentType::I64(1)] }, 2, FeeOffer::NONE, &authority, &genesis_id)]);
+    let last = produce(&mut chain, vec![SignedTx::sign(Tx::Transfer { from: me, to: carol, amount: Amount::U128(5) }, 3, FeeOffer::NONE, &authority, &genesis_id)]);
     let time = |height: u64| chain.tip().timestamp - (5 - height) * SLOT;
 
     assert_eq!(last.header.timestamp, time(5));
@@ -2420,16 +2447,17 @@ fn a_listing_looks_through_no_more_than_its_bound_and_says_where_to_go_on_from()
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let bob = Keypair::generate(authority.public().key_type()).unwrap().public().address();
 
     chain.keep_index(IndexKind::Addresses, None).unwrap();
     // The deploy first, oldest, under more transfers than one request looks through.
-    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 0, FeeOffer::NONE, &authority)]);
+    produce(&mut chain, vec![SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, 0, FeeOffer::NONE, &authority, &genesis_id)]);
     let mut nonce = 1;
 
     while (nonce as usize) <= filters::MAX_TXS_SCANNED + 10 {
-        let txs: Vec<SignedTx> = (nonce..nonce + 256).map(|nonce| SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)).collect();
+        let txs: Vec<SignedTx> = (nonce..nonce + 256).map(|nonce| SignedTx::sign(Tx::Transfer { from: me, to: bob, amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority, &genesis_id)).collect();
         nonce += txs.len() as u64;
         produce(&mut chain, txs);
     }
@@ -2678,6 +2706,7 @@ fn a_light_client_proves_who_sent_what_one_transaction_at_a_time() {
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let hash = HashType::default_chain();
     let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
@@ -2686,7 +2715,7 @@ fn a_light_client_proves_who_sent_what_one_transaction_at_a_time() {
         .map(|nonce| {
             let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
 
-            SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(u128::from(nonce) + 1) }, nonce, FeeOffer::NONE, &authority)
+            SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(u128::from(nonce) + 1) }, nonce, FeeOffer::NONE, &authority, &genesis_id)
         })
         .collect();
     let block = produce(&mut chain, pays.clone());
@@ -2936,14 +2965,15 @@ fn batches() -> Batches {
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let hash = HashType::default_chain();
     let contract = contract_address(&me, 0, hash);
     let bob = Keypair::from_seed([40; 32]).public().address();
     let carol = Keypair::from_seed([41; 32]).public().address();
     let call = Tx::ContractCall { to: contract, func: Hash::Xxh3_64(crate::vm::selector("increment")), amount: Amount::U128(0), data: vec![TxCallArgumentType::I64(1)] };
     let pay = |to: Address, amount: u128| Tx::Transfer { from: me, to, amount: Amount::U128(amount) };
-    let good = SignedTx::sign(Tx::Batch { steps: vec![Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, call.clone(), pay(bob, 7)] }, 0, FeeOffer::NONE, &authority);
-    let bad = SignedTx::sign(Tx::Batch { steps: vec![pay(carol, 1), Tx::Transfer { from: me, to: carol, amount: Amount::U256(u256::MAX) }] }, 1, FeeOffer::NONE, &authority);
+    let good = SignedTx::sign(Tx::Batch { steps: vec![Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, call.clone(), pay(bob, 7)] }, 0, FeeOffer::NONE, &authority, &genesis_id);
+    let bad = SignedTx::sign(Tx::Batch { steps: vec![pay(carol, 1), Tx::Transfer { from: me, to: carol, amount: Amount::U256(u256::MAX) }] }, 1, FeeOffer::NONE, &authority, &genesis_id);
 
     chain.keep_index(IndexKind::Addresses, None).unwrap();
     produce(&mut chain, vec![good.clone()]);
@@ -3057,7 +3087,7 @@ fn a_dry_run_and_an_offer_price_a_batch_whole_and_say_what_would_fail() {
     let bob = Keypair::from_seed([40; 32]).public().address();
     let pay = |amount: u128| Tx::Transfer { from: me, to: bob, amount: Amount::U128(amount) };
     let body = |tx: Tx| {
-        let probe = SignedTx::sign(tx, 0, FeeOffer::NONE, &authority);
+        let probe = SignedTx::sign(tx, 0, FeeOffer::NONE, &authority, &genesis.block().id());
 
         (json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) }).to_string(), probe)
     };
@@ -3091,15 +3121,16 @@ fn ethereum_tools_see_a_batch_s_logs_in_order_and_never_as_one_call() {
     let me = authority.public().address();
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
     let word = |value: u64| crate::structs::u256::u256::from(value).to_be_bytes().to_vec();
     let selector = |signature: &str| crate::crypto::secp256k1::keccak(signature.as_bytes())[..4].to_vec();
     let init = [from_hex(include_str!("../../contracts/evm/Counter.bin").trim()).unwrap(), word(5)].concat();
     let counter = create_address(&me, 0);
     let Address::Evm(counter_bytes) = counter else { unreachable!() };
     let bump = |by: u64| Tx::EvmCall { to: counter, value: Amount::U128(0), input: [selector("bump(uint256)"), word(by)].concat() };
-    let batch = SignedTx::sign(Tx::Batch { steps: vec![Tx::Deploy { code: Code::Evm(init) }, bump(1), bump(2)] }, 0, FeeOffer::NONE, &authority);
-    let failed = SignedTx::sign(Tx::Batch { steps: vec![bump(4), Tx::Transfer { from: me, to: counter, amount: Amount::U256(u256::MAX) }] }, 1, FeeOffer::NONE, &authority);
-    let single = SignedTx::sign(bump(8), 2, FeeOffer::NONE, &authority);
+    let batch = SignedTx::sign(Tx::Batch { steps: vec![Tx::Deploy { code: Code::Evm(init) }, bump(1), bump(2)] }, 0, FeeOffer::NONE, &authority, &genesis_id);
+    let failed = SignedTx::sign(Tx::Batch { steps: vec![bump(4), Tx::Transfer { from: me, to: counter, amount: Amount::U256(u256::MAX) }] }, 1, FeeOffer::NONE, &authority, &genesis_id);
+    let single = SignedTx::sign(bump(8), 2, FeeOffer::NONE, &authority, &genesis_id);
     let hash = HashType::default_chain();
     produce(&mut chain, vec![batch.clone()]);
     produce(&mut chain, vec![failed.clone(), single.clone()]);

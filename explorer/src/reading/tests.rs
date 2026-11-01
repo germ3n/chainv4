@@ -189,8 +189,13 @@ fn opened(fixture: &Fixture) -> Reading {
     on_shelf(&Arc::new(MemoryShelf::default()), fixture)
 }
 
+/// What transactions here are signed for: reading a block checks its roots, and no signature.
+fn chain() -> Hash {
+    Hash::zero(HASH)
+}
+
 fn transfer(from: u8, to: Address, amount: u64, nonce: u64) -> (SignedTx, CommittedReceipt) {
-    let signed = SignedTx::sign(Tx::Transfer { from: key(from).public().address(), to, amount: Amount::U128(u128::from(amount)) }, nonce, FeeOffer::NONE, &key(from));
+    let signed = SignedTx::sign(Tx::Transfer { from: key(from).public().address(), to, amount: Amount::U128(u128::from(amount)) }, nonce, FeeOffer::NONE, &key(from), &chain());
     let receipt = CommittedReceipt::new(signed.id(HASH), 0, 21_000, u256::from(21_000u64 * 9), CommittedOutcome::Done, Vec::new(), Vec::new());
 
     (signed, receipt)
@@ -198,7 +203,7 @@ fn transfer(from: u8, to: Address, amount: u64, nonce: u64) -> (SignedTx, Commit
 
 fn call_with_events(from: u8, nonce: u64, events: Vec<Event>, outcome: CommittedOutcome) -> (SignedTx, CommittedReceipt) {
     let tx = Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: vec![TxCallArgumentType::Address(bob())] };
-    let signed = SignedTx::sign(tx, nonce, FeeOffer::NONE, &key(from));
+    let signed = SignedTx::sign(tx, nonce, FeeOffer::NONE, &key(from), &chain());
     let receipt = CommittedReceipt::new(signed.id(HASH), 5, 90_000, u256::from(90_000u64 * 9), outcome, events, Vec::new());
 
     (signed, receipt)

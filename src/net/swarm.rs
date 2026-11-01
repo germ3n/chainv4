@@ -993,6 +993,14 @@ mod tests {
         libp2p::Multiaddr,
     };
 
+    /// A transaction to send round. The network carries it as it is, and no chain is here to check
+    /// its signature: a node does that once it arrives.
+    fn burn(authority: &crate::crypto::keypair::Keypair, nonce: u64) -> SignedTx {
+        let chain = crate::structs::hash::Hash::zero(HashType::default_chain());
+
+        SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, authority, &chain)
+    }
+
     fn config(network: &str, backlog: BacklogLimits, peers: Vec<Multiaddr>) -> NetConfig {
         NetConfig {
             listen: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
@@ -1073,7 +1081,7 @@ mod tests {
 
         'heard: loop {
             assert!(Instant::now() < deadline, "nothing the restarted peer published arrived");
-            after.send(NetCommand::PublishTx(SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)));
+            after.send(NetCommand::PublishTx(burn(&authority, nonce)));
             nonce += 1;
             let until = Instant::now() + Duration::from_secs(2);
 
@@ -1135,7 +1143,7 @@ mod tests {
 
         'heard: loop {
             assert!(Instant::now() < deadline, "nothing the restarted peer published arrived");
-            after.send(NetCommand::PublishTx(SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)));
+            after.send(NetCommand::PublishTx(burn(&authority, nonce)));
             nonce += 1;
             let until = Instant::now() + Duration::from_secs(2);
 
@@ -1409,8 +1417,7 @@ mod tests {
         // Gossip reaches the victim once it has told the flooder what it subscribes to.
         while victim.backlog.disconnected() == 0 {
             assert!(Instant::now() < deadline, "never disconnected; dropped {}", victim.backlog.dropped());
-            let tx = SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority);
-            flooder.send(NetCommand::PublishTx(tx));
+            flooder.send(NetCommand::PublishTx(burn(&authority, nonce)));
             nonce += 1;
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -1519,7 +1526,7 @@ mod tests {
         let count = TX_BATCH + 44;
 
         for nonce in 0..count as u64 {
-            sender.send(NetCommand::PublishTx(SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority)));
+            sender.send(NetCommand::PublishTx(burn(&authority, nonce)));
         }
 
         let mut nonces = std::collections::BTreeSet::new();

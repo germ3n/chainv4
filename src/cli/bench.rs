@@ -145,6 +145,8 @@ pub fn chain(blocks: u32, senders: u32, db: Option<PathBuf>) -> CliResult<Vec<Bl
     let mut producer = AuthorityProducer::new(authority, SLOT);
     let mut results = Vec::new();
 
+    let chain = producer_chain.genesis();
+
     for nonce in 0..u64::from(blocks) {
         let base = producer_chain.next_base_price();
         let gas_limit = 4_000;
@@ -156,7 +158,7 @@ pub fn chain(blocks: u32, senders: u32, db: Option<PathBuf>) -> CliResult<Vec<Bl
                 let to = keys[(index + 1) % keys.len()].public().address();
                 let fee = FeeOffer { gas_limit, max_price: base * u256::new(100), tip: u256::ZERO };
 
-                SignedTx::sign(Tx::Transfer { from: key.public().address(), to, amount: Amount::U128(1) }, nonce, fee, key)
+                SignedTx::sign(Tx::Transfer { from: key.public().address(), to, amount: Amount::U128(1) }, nonce, fee, key, &chain)
             })
             .collect();
         let sign = ms(started);
@@ -223,6 +225,7 @@ pub fn load(nodes: &[String], tls: &TlsArgs, key: Option<&std::path::Path>, send
     let nodes: Vec<String> = nodes.iter().map(|node| node.trim_end_matches('/').to_string()).collect();
     let funder = super::signer(key)?;
     let status = ok(agent.get(format!("{}/status", nodes[0])).call())?;
+    let genesis = super::send::genesis_of(&status)?;
     let base: u256 = status["fees"]["base_price"].as_str().and_then(|text| u256::from_str_radix(text, 10).ok()).unwrap_or(u256::ZERO);
     let fee = FeeOffer { gas_limit: 4_000, max_price: (base * u256::new(4)).max(u256::ONE), tip: u256::ZERO };
     let keys: Vec<Keypair> = (0..senders).map(|_| Keypair::generate(KeyType::ALL[0])).collect::<Result<_, _>>()?;
@@ -233,7 +236,7 @@ pub fn load(nodes: &[String], tls: &TlsArgs, key: Option<&std::path::Path>, send
     let each = u256::new(10u128.pow(18));
 
     for key in &keys {
-        let tx = SignedTx::sign(Tx::Transfer { from: funder.public().address(), to: key.public().address(), amount: Amount::U256(each) }, nonce, fee, &funder);
+        let tx = SignedTx::sign(Tx::Transfer { from: funder.public().address(), to: key.public().address(), amount: Amount::U256(each) }, nonce, fee, &funder, &genesis);
         submit(&agent, &nodes[0], &tx).map_err(|why| format!("funding refused: {why}"))?;
         nonce += 1;
     }
@@ -260,7 +263,7 @@ pub fn load(nodes: &[String], tls: &TlsArgs, key: Option<&std::path::Path>, send
 
         for index in 0..total {
             let (sender, to) = (index % keys.len(), (index + 1) % keys.len());
-            txs.push(SignedTx::sign(Tx::Transfer { from: keys[sender].public().address(), to: keys[to].public().address(), amount: Amount::U128(1) }, nonces[sender], fee, &keys[sender]));
+            txs.push(SignedTx::sign(Tx::Transfer { from: keys[sender].public().address(), to: keys[to].public().address(), amount: Amount::U128(1) }, nonces[sender], fee, &keys[sender], &genesis));
             nonces[sender] += 1;
         }
 

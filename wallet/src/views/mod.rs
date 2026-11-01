@@ -572,7 +572,7 @@ pub fn code(ui: &mut Ui, palette: &Palette, message: &crate::airgap::Message) {
     let bytes = message.bytes();
     let side = ui.available_width().clamp(200.0, 420.0);
 
-    match bytes.len() <= crate::airgap::FRAGMENT {
+    match bytes.len() <= crate::airgap::ONE_CODE {
         true => {
             ui.vertical_centered(|ui| receive::qr(ui, &text, side));
         }
@@ -673,10 +673,11 @@ pub(crate) mod drawn {
         book
     }
 
-    /// What a drawn page works on besides its book: the settings it sees, the vault open, and why it
-    /// asked to lock.
+    /// What a drawn page works on besides its book: the chain it follows, the settings it sees, the
+    /// vault open, and why it asked to lock.
     #[derive(Default)]
     pub struct World {
+        pub chain: Chain,
         pub settings: Settings,
         pub vault: Option<Vault>,
         pub lock: Option<String>,
@@ -717,6 +718,20 @@ pub(crate) mod drawn {
     /// Draws a page as page does, and says too each text the last frame drew and where.
     pub fn page_shown(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool, Vec<(String, egui::Rect)>) {
         frames(&mut bare(holders), book, holders, size, 2, |_, _| Vec::new(), draw)
+    }
+
+    /// As `page_shown`, on a world following a chain, as a page that signs needs.
+    pub fn following_shown(book: &mut Book, holders: &mut Vec<Holder>, size: (f32, f32), draw: impl FnMut(&mut Ui, &mut Ctx)) -> (f32, bool, Vec<(String, egui::Rect)>) {
+        frames(&mut following(holders), book, holders, size, 2, |_, _| Vec::new(), draw)
+    }
+
+    /// A world of one wallet, as `bare`, whose light client has started on a chain, so its pages know
+    /// what they would sign for.
+    pub fn following(holders: &[Holder]) -> World {
+        let mut world = bare(holders);
+        world.chain.genesis = Some(chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
+
+        world
     }
 
     /// As `page`: what it said, in the order it drew it.
@@ -849,7 +864,7 @@ pub(crate) mod drawn {
         let egui = egui::Context::default();
         crate::theme::install_fonts(&egui);
         let palette = crate::theme::DARK;
-        let (chain, coin) = (Chain::default(), Coin { symbol: "DEV".to_string(), decimals: 18 });
+        let coin = Coin { symbol: "DEV".to_string(), decimals: 18 };
         let mut node = Node::new("http://127.0.0.1:1", Err("no client in a test".to_string()), egui.clone());
         let (mut page, mut connect, mut changed) = (Page::Accounts, None, false);
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
@@ -859,7 +874,7 @@ pub(crate) mod drawn {
             let mut ctx = Ctx {
                 palette: &palette,
                 reader: &reader,
-                chain: &chain,
+                chain: &world.chain,
                 node: &mut node,
                 holders: &mut *holders,
                 current: 0,

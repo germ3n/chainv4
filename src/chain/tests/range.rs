@@ -42,10 +42,10 @@ fn check(chain: &Chain, item: RangeItem) -> Result<crate::light::CheckedItem, Ra
     check_range_item(chain.hash(), &header_at(chain, item.sealed.header.height), item)
 }
 
-fn call(contract: Address, function: &str, data: Vec<TxCallArgumentType>, nonce: u64) -> SignedTx {
+fn call(genesis: &Hash, contract: Address, function: &str, data: Vec<TxCallArgumentType>, nonce: u64) -> SignedTx {
     let tx = Tx::ContractCall { to: contract, func: Hash::Xxh3_64(selector(function)), amount: Amount::U128(0), data };
 
-    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+    SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), genesis)
 }
 
 fn text(value: &str) -> TxCallArgumentType {
@@ -57,18 +57,19 @@ fn text(value: &str) -> TxCallArgumentType {
 fn busy_chain() -> (Arc<MemoryDb>, Chain, Address) {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let me = authority().public().address();
     let (bob, carol) = (Keypair::from_seed([1; 32]).public().address(), Keypair::from_seed([2; 32]).public().address());
 
     // Block 1, two transfers; 2, a deploy; 3, a value kept; 4, nothing; 5, the value dropped.
-    let pays = vec![transfer(&chain, &authority(), &bob, 5), SignedTx::sign(Tx::Transfer { from: me, to: carol, amount: Amount::U128(7) }, 1, FeeOffer::NONE, &authority())];
+    let pays = vec![transfer(&chain, &authority(), &bob, 5), SignedTx::sign(Tx::Transfer { from: me, to: carol, amount: Amount::U128(7) }, 1, FeeOffer::NONE, &authority(), &genesis_id)];
     advance(&mut chain, pays);
     let contract = contract_address(&me, 2, chain.hash());
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(KEEPER.to_string()) }, 2, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(KEEPER.to_string()) }, 2, FeeOffer::NONE, &authority(), &genesis_id);
     assert_eq!(advance(&mut chain, vec![deploy])[0].result, Ok(Effect::Deployed(contract)));
-    assert!(advance(&mut chain, vec![call(contract, "keep", vec![text("kept"), text("value")], 3)])[0].result.is_ok());
+    assert!(advance(&mut chain, vec![call(&genesis_id, contract, "keep", vec![text("kept"), text("value")], 3)])[0].result.is_ok());
     advance(&mut chain, Vec::new());
-    assert!(advance(&mut chain, vec![call(contract, "drop", vec![text("kept")], 4)])[0].result.is_ok());
+    assert!(advance(&mut chain, vec![call(&genesis_id, contract, "drop", vec![text("kept")], 4)])[0].result.is_ok());
 
     (db, chain, contract)
 }
@@ -688,6 +689,7 @@ fn what_a_block_costs_with_its_proofs() {
     let database = Arc::new(RocksDb::open(&dir).unwrap().unsynced());
     let db: Arc<dyn Database> = database.clone();
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let genesis_id = chain.genesis();
     let hash = chain.hash();
     println!("state of {accounts} accounts");
 
@@ -741,7 +743,7 @@ fn what_a_block_costs_with_its_proofs() {
                 .public()
                 .address();
 
-                SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(1) }, nonce + n, FeeOffer::NONE, &authority())
+                SignedTx::sign(Tx::Transfer { from: me, to, amount: Amount::U128(1) }, nonce + n, FeeOffer::NONE, &authority(), &genesis_id)
             })
             .collect();
         nonce += size;
@@ -750,13 +752,13 @@ fn what_a_block_costs_with_its_proofs() {
     }
 
     let contract = contract_address(&me, nonce, hash);
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(KEEPER.to_string()) }, nonce, FeeOffer::NONE, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(KEEPER.to_string()) }, nonce, FeeOffer::NONE, &authority(), &genesis_id);
     assert_eq!(advance(&mut chain, vec![deploy])[0].result, Ok(Effect::Deployed(contract)));
     report("a deploy", &chain, chain.tip().height);
     nonce += 1;
 
     for size in [100u64, 1_000] {
-        let txs: Vec<SignedTx> = (0..size).map(|n| call(contract, "keep", vec![text(&format!("key-{}", nonce + n)), text("a value of a few dozen bytes kept by a contract")], nonce + n)).collect();
+        let txs: Vec<SignedTx> = (0..size).map(|n| call(&genesis_id, contract, "keep", vec![text(&format!("key-{}", nonce + n)), text("a value of a few dozen bytes kept by a contract")], nonce + n)).collect();
         nonce += size;
         assert!(advance(&mut chain, txs).iter().all(|receipt| receipt.result.is_ok()));
         report(&format!("{size} contract calls, each writing a key"), &chain, chain.tip().height);

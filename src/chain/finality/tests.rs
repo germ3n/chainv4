@@ -242,7 +242,7 @@ mod voting {
 
     /// Sends a transaction from the dev key, which holds the funds, in the next block.
     pub(super) fn send(chain: &mut Chain, tx: Tx) -> Vec<Receipt> {
-        let signed = SignedTx::sign(tx, nonce(chain, &dev()), FeeOffer::NONE, &dev());
+        let signed = SignedTx::sign(tx, nonce(chain, &dev()), FeeOffer::NONE, &dev(), &chain.genesis());
 
         advance(chain, vec![signed], Vec::new()).unwrap()
     }
@@ -672,6 +672,7 @@ mod voting {
                 ..genesis_with(Some(finality))
             };
             let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+            let genesis_id = chain.genesis();
             let pool = |chain: &Chain| balance(chain, &REWARD_POOL);
             let supply = |chain: &Chain| {
                 let voters: u256 = voters().iter().map(|keypair| balance(chain, &keypair.public().address())).fold(u256::ZERO, |sum, next| sum + next);
@@ -691,7 +692,7 @@ mod voting {
                 to: key(99).public().address(),
                 amount: Amount::U128(1),
             };
-            let signed = SignedTx::sign(tx, nonce(&chain, &dev()), fee, &dev());
+            let signed = SignedTx::sign(tx, nonce(&chain, &dev()), fee, &dev(), &genesis_id);
             let receipts = advance(&mut chain, vec![signed], Vec::new()).unwrap();
             let fed = pool(&chain);
 
@@ -973,6 +974,7 @@ mod voting {
         use crate::structs::amount::Amount;
 
         let mut chain = open(&ffg());
+        let genesis_id = chain.genesis();
         grow_to(&mut chain, 2 * INTERVAL + 1);
         let carol = &voters()[2];
         let honest = signed(&chain, carol, start(&chain), checkpoint(&chain, 2));
@@ -998,6 +1000,7 @@ mod voting {
                 nonce,
                 FeeOffer::NONE,
                 &reporter,
+                &genesis_id,
             )
         };
         let receipts = advance(&mut chain, vec![slash(honest, double, 0), slash(honest, double, 1)], Vec::new()).unwrap();
@@ -1166,6 +1169,7 @@ mod voting {
     #[test]
     fn signers_produce_in_turn_and_step_in_for_one_that_misses() {
         let mut chain = rotating();
+        let genesis_id = chain.genesis();
         let [alice, bob, carol] = voters();
 
         // Ten blocks in turn, each weighing 2.
@@ -1210,7 +1214,7 @@ mod voting {
                 change_threshold: 2,
             };
 
-            SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair)
+            SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair, &genesis_id)
         };
         let txs = vec![approve(&chain, &alice), approve(&chain, &bob)];
         let tip = chain.tip().clone();
@@ -1373,6 +1377,7 @@ mod voting {
 
         for schedule in [Schedule::Draw, Schedule::Priority] {
             let (mut chain, rules) = staked(schedule);
+            let genesis_id = chain.genesis();
 
             // Ten blocks in turn, each weighing 2, from the three genesis validators alone.
             for _ in 0..10 {
@@ -1413,7 +1418,7 @@ mod voting {
                 voter: newcomer.public(),
                 amount: Amount::U128(500),
             };
-            let signed = SignedTx::sign(bond, nonce(&chain, &dev()), FeeOffer::NONE, &dev());
+            let signed = SignedTx::sign(bond, nonce(&chain, &dev()), FeeOffer::NONE, &dev(), &genesis_id);
             produce_in_turn(&mut chain, rules, vec![signed]);
             let record = Validators::new(&chain.state()).get(&newcomer.public()).unwrap().unwrap();
             let joins = record.active_from;
@@ -1520,7 +1525,7 @@ mod voting {
     /// Sends a transaction from a key in the next authority block, and returns its receipt.
     #[cfg(all(feature = "finality-ffg", any(feature = "governance-electorate", feature = "governance-council")))]
     fn send_as(chain: &mut Chain, keypair: &Keypair, tx: Tx) -> Receipt {
-        let signed = SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair);
+        let signed = SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair, &chain.genesis());
 
         advance(chain, vec![signed], Vec::new()).unwrap().remove(0)
     }
@@ -1652,7 +1657,7 @@ mod voting {
     /// Sends a transaction in the next block produced by stake.
     #[cfg(all(feature = "finality-ffg", feature = "governance-electorate"))]
     fn send_as_staked(chain: &mut Chain, rules: crate::consensus::Staked, keypair: &Keypair, tx: Tx) -> Receipt {
-        let signed = SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair);
+        let signed = SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair, &chain.genesis());
         let height = chain.tip().height + 1;
         let producers = chain.producers_for(height).unwrap();
         let producer = validator_key(&rules.producer_at(&producers, height, 0).unwrap().voter);
@@ -2270,6 +2275,7 @@ mod voting {
         use crate::structs::tx::Tx;
 
         let mut chain = open(&authority());
+        let genesis_id = chain.genesis();
         let [alice, bob, carol] = voters();
         let dave = key(14);
         let approve = |keypair: &Keypair, chain: &Chain| {
@@ -2280,7 +2286,7 @@ mod voting {
                 change_threshold: 2,
             };
 
-            SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair)
+            SignedTx::sign(tx, nonce(chain, keypair), FeeOffer::NONE, keypair, &genesis_id)
         };
 
         // Carol out, Dave in: one approval is not enough, and an outsider's does not count.
@@ -2329,6 +2335,7 @@ mod voting {
 
         // Approvals count only in the epoch they are made in.
         let mut chain = open(&FinalityConfig::Authority(AuthorityConfig { approval_epochs: 1, ..signers() }));
+        let genesis_id = chain.genesis();
         let [alice, bob, _] = voters();
         let approve = Tx::ApproveSigners {
             version: 0,
@@ -2338,7 +2345,7 @@ mod voting {
         };
         let withdraw = Tx::WithdrawApproval { version: 0 };
         let send = |chain: &mut Chain, keypair: &Keypair, tx: &Tx| {
-            let signed = SignedTx::sign(tx.clone(), nonce(chain, keypair), FeeOffer::NONE, keypair);
+            let signed = SignedTx::sign(tx.clone(), nonce(chain, keypair), FeeOffer::NONE, keypair, &genesis_id);
 
             advance(chain, vec![signed], Vec::new()).unwrap().remove(0).result
         };
@@ -3067,6 +3074,7 @@ fn staking_needs_staking() {
     use crate::structs::tx::Tx;
 
     let mut chain = open_with(None);
+    let genesis_id = chain.genesis();
     let bond = SignedTx::sign(
         Tx::Bond {
             voter: key(60).public(),
@@ -3075,6 +3083,7 @@ fn staking_needs_staking() {
         0,
         FeeOffer::NONE,
         &dev(),
+        &genesis_id,
     );
     let receipts = advance(&mut chain, vec![bond], Vec::new()).unwrap();
     let vote = Vote {
@@ -3099,6 +3108,7 @@ fn staking_needs_staking() {
         1,
         FeeOffer::NONE,
         &dev(),
+        &genesis_id,
     );
 
     assert_eq!(receipts[0].result, Err(Failure::NoStaking));

@@ -507,7 +507,7 @@ impl MultisigBundle {
     pub fn envelope(&self, carrier: &crate::crypto::keypair::Keypair) -> crate::structs::tx::SignedTx {
         let tx = Tx::Multisig { account: self.body.account, tx: Box::new(self.body.tx.clone()), signatures: self.signatures.clone() };
 
-        crate::structs::tx::SignedTx::sign(tx, self.body.nonce, self.body.fee, carrier)
+        crate::structs::tx::SignedTx::sign(tx, self.body.nonce, self.body.fee, carrier, &self.genesis)
     }
 
     #[document(parent = "MultisigBundle", summary = "Its text: chainv4-multisig: and its encoding in hex, to save or paste.")]

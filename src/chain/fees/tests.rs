@@ -110,7 +110,7 @@ fn signed(chain: &Chain, keypair: &Keypair, txs: Vec<Tx>, fee: FeeOffer) -> Vec<
 
     txs.into_iter()
         .enumerate()
-        .map(|(index, tx)| SignedTx::sign(tx, first + index as u64, fee, keypair))
+        .map(|(index, tx)| SignedTx::sign(tx, first + index as u64, fee, keypair, &chain.genesis()))
         .collect()
 }
 
@@ -528,6 +528,7 @@ fn fee_settings_that_cannot_work_are_refused() {
 #[test]
 fn a_batch_pays_for_every_step_as_much_as_they_would_alone_for_the_work_and_the_bytes() {
     let chain = open(FeeConfig::dev());
+    let genesis_id = chain.genesis();
     let schedule = chain.fees().unwrap().schedule();
     let alice_key = alice();
     let me = alice_key.public().address();
@@ -536,7 +537,7 @@ fn a_batch_pays_for_every_step_as_much_as_they_would_alone_for_the_work_and_the_
         Tx::Transfer { to, amount, .. } => Tx::Transfer { from: me, to, amount },
         other => other,
     };
-    let sign = |tx: Tx| SignedTx::sign(tx, 0, FeeOffer::NONE, &alice_key);
+    let sign = |tx: Tx| SignedTx::sign(tx, 0, FeeOffer::NONE, &alice_key, &genesis_id);
     let weights = Weighted::dev();
     let one = schedule.intrinsic(&sign(pay.clone()));
     let batched = sign(Tx::Batch { steps: vec![pay.clone(); 4] });
@@ -572,15 +573,16 @@ fn a_batch_pays_for_every_step_as_much_as_they_would_alone_for_the_work_and_the_
 #[test]
 fn a_batch_counts_whole_against_the_block_gas_and_byte_limits() {
     let mut chain = open(FeeConfig::dev());
+    let genesis_id = chain.genesis();
     let alice_key = alice();
     let limit = chain.fees().unwrap().block_gas_limit();
     let steps = vec![transfer_from(&alice_key, &dev(), 1); 2];
-    let over = SignedTx::sign(Tx::Batch { steps: steps.clone() }, nonce(&chain, &alice_key), offer(&chain, limit + 1), &alice_key);
+    let over = SignedTx::sign(Tx::Batch { steps: steps.clone() }, nonce(&chain, &alice_key), offer(&chain, limit + 1), &alice_key, &genesis_id);
 
     assert!(forced(&mut chain, vec![over], |_| {}).is_err(), "more gas than a block holds");
 
-    let bytes = crate::chain::tx_bytes(&SignedTx::sign(Tx::Batch { steps: steps.clone() }, 0, FeeOffer::NONE, &alice_key));
-    let one = crate::chain::tx_bytes(&SignedTx::sign(transfer_from(&alice_key, &dev(), 1), 0, FeeOffer::NONE, &alice_key));
+    let bytes = crate::chain::tx_bytes(&SignedTx::sign(Tx::Batch { steps: steps.clone() }, 0, FeeOffer::NONE, &alice_key, &genesis_id));
+    let one = crate::chain::tx_bytes(&SignedTx::sign(transfer_from(&alice_key, &dev(), 1), 0, FeeOffer::NONE, &alice_key, &genesis_id));
     let step = wincode::serialized_size(&transfer_from(&alice_key, &dev(), 1)).unwrap();
 
     assert_eq!(bytes, one + step + 9, "both steps' bytes, its tag and its length");
@@ -628,6 +630,7 @@ return M
 fn a_step_left_with_no_fuel_at_all_runs_nothing() {
     let alice = alice();
     let mut chain = open(FeeConfig::dev());
+    let genesis_id = chain.genesis();
     let contract = contract_address(&alice.public().address(), 0, HashType::default_chain());
     let deploy = Tx::Deploy { code: Code::Lua(SPINNER.to_string()) };
     let txs = signed(&chain, &alice, vec![deploy], offer(&chain, 1_000_000));
@@ -638,9 +641,9 @@ fn a_step_left_with_no_fuel_at_all_runs_nothing() {
 
     for steps in [vec![spin.clone()], vec![spin, evm.clone()], vec![evm]] {
         let next = nonce(&chain, &alice);
-        let sized = SignedTx::sign(Tx::Batch { steps: steps.clone() }, next, offer(&chain, 1_000_000), &alice);
+        let sized = SignedTx::sign(Tx::Batch { steps: steps.clone() }, next, offer(&chain, 1_000_000), &alice, &genesis_id);
         let exact = chain.fees().unwrap().schedule().intrinsic(&sized);
-        let signed = SignedTx::sign(Tx::Batch { steps }, next, offer(&chain, exact), &alice);
+        let signed = SignedTx::sign(Tx::Batch { steps }, next, offer(&chain, exact), &alice, &genesis_id);
         let (_, receipts) = advance(&mut chain, vec![signed]);
 
         assert!(matches!(&receipts[0].result, Err(Failure::Step { step: 0, .. })), "with its gas limit all spoken for: {:?}", receipts[0].result);

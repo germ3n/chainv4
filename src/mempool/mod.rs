@@ -451,7 +451,7 @@ mod tests {
             amount: Amount::U128(1),
         };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, keypair)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, keypair, &genesis())
     }
 
     /// Every transaction worth the same, as on a chain without fees.
@@ -473,7 +473,24 @@ mod tests {
         };
         let fee = FeeOffer { gas_limit, ..FeeOffer::NONE };
 
-        SignedTx::sign(tx, nonce, fee, keypair)
+        SignedTx::sign(tx, nonce, fee, keypair, &genesis())
+    }
+
+    #[test]
+    fn a_transaction_signed_for_another_chain_does_not_wait_here_and_one_for_this_chain_does() {
+        let keypair = keypair();
+        let state = state();
+        let mut mempool = Mempool::new(10);
+        let tx = Tx::Burn { from: keypair.public().address(), amount: Amount::U128(1) };
+        let elsewhere = crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::default_chain(), b"another chain");
+        let foreign = SignedTx::sign(tx.clone(), 0, FeeOffer::NONE, &keypair, &elsewhere);
+
+        assert_eq!(mempool.add(foreign, &genesis(), &state, None), Err(MempoolError::Invalid(VerifyError::InvalidSignature)));
+        assert_eq!(mempool.len(), 0);
+
+        mempool.add(SignedTx::sign(tx, 0, FeeOffer::NONE, &keypair, &genesis()), &genesis(), &state, None).unwrap();
+
+        assert_eq!(mempool.len(), 1);
     }
 
     #[test]
@@ -562,7 +579,7 @@ mod tests {
         // A poor sender's transaction, whose signature does not hold either: affordable catches it
         // first, so the result is CannotPay, not Invalid, which proves the verify was never reached.
         let poor = Keypair::generate(keypair().public().key_type()).unwrap();
-        let tx = SignedTx::sign(Tx::Burn { from: poor.public().address(), amount: Amount::U128(1) }, 0, FeeOffer { gas_limit: 100_000, max_price: fees.pricing().floor(), tip: u256::ZERO }, &poor);
+        let tx = SignedTx::sign(Tx::Burn { from: poor.public().address(), amount: Amount::U128(1) }, 0, FeeOffer { gas_limit: 100_000, max_price: fees.pricing().floor(), tip: u256::ZERO }, &poor, &genesis);
 
         assert_eq!(Mempool::affordable(&tx, &state, Some(&fees)), Err(MempoolError::CannotPay));
         assert_eq!(Mempool::check(&tx, Err(VerifyError::InvalidSignature), &genesis, &state, Some(&fees)), Err(MempoolError::CannotPay), "cheap first");
@@ -638,7 +655,7 @@ mod tests {
                 amount: Amount::U128(1),
             };
 
-            SignedTx::sign(tx, nonce, fee, keypair)
+            SignedTx::sign(tx, nonce, fee, keypair, &genesis())
         };
         let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &genesis(), &state, Some(&fees));
 
@@ -682,7 +699,7 @@ mod tests {
             };
             let fee = FeeOffer { gas_limit: 100_000, max_price, tip: u256::ZERO };
 
-            SignedTx::sign(tx, nonce, fee, keypair)
+            SignedTx::sign(tx, nonce, fee, keypair, &genesis())
         };
         let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &genesis(), &state, Some(&fees)).unwrap();
         add(&mut mempool, burn(&rich, 0, floor * u256::from(4u64)));

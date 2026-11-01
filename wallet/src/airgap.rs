@@ -4,8 +4,10 @@
 //! Between them go three messages, each a QR code one device shows and the other photographs, or
 //! the same text copied or in a file:
 //! - **Pairing:** an account's public keys, from the signer, for the sender to watch.
-//! - **A request:** the transaction, its nonce and fee offer, the key to sign with, and how the
-//!   sender's node names the coin and the token, for the signer to show what it signs.
+//! - **A request:** the transaction, its nonce and fee offer, the key to sign with, how the sender's
+//!   node names the coin and the token, for the signer to show what it signs, and the chain it is
+//!   for, by its genesis id: the signer follows no chain of its own, and a signature holds on the
+//!   one named alone, so it shows that too, and holds it against the chain it was told is its own.
 //! - **The signed transaction,** back to the sender, which checks it is the one it asked for.
 //!
 //! Each is a Uniform Resource, as MetaMask's and Keystone's codes are: `ur:chainv4-pairing`,
@@ -22,7 +24,7 @@ use {
     chainv4::crypto::hasher::Hasher,
     chainv4::crypto::keypair::{Keypair, PublicKey, Signature},
     chainv4::crypto::verifiable::Verifiable,
-    chainv4::structs::hash::HashType,
+    chainv4::structs::hash::{Hash, HashType},
     chainv4::registry::names::NameAction,
     chainv4::structs::tx::{FeeOffer, SignedTx, Tx, TxCallArgumentType},
     chainv4::structs::u256::u256,
@@ -37,9 +39,13 @@ pub const SIGNED_TYPE: &str = "chainv4-signed";
 /// passes as text, read by the signer to add its member's signature, and shown back.
 pub const MULTISIG_TYPE: &str = "chainv4-multisig";
 
-/// The most bytes of a message one code holds: as dense as a code a phone reads off a screen
-/// reliably, about 620 characters, as many as a token transfer's request takes. Longer ones
-/// animate, a part this long at a time.
+/// The most bytes of a message one code holds, about 700 characters: as many as a token transfer's
+/// request takes, the chain it names included. A code that stays still may be denser than one of
+/// those that pass by, each of which a phone has a moment to read.
+pub const ONE_CODE: usize = 340;
+
+/// The most bytes of a message each of a longer one's parts holds, as they animate: as dense as a
+/// code a phone reads off a screen reliably as it goes by, about 620 characters.
 pub const FRAGMENT: usize = 300;
 
 /// The widths a photo is read at, the first that finds a code winning: a phone's camera takes
@@ -83,6 +89,11 @@ pub struct Request {
     pub coin: Shown,
     /// The token a token transfer sends, as the registry lists it.
     pub token: Option<Shown>,
+    /// The chain it is for, by its genesis id: the sender's word, which a hostile sender may set to
+    /// another chain's, so the signer shows it. Last, so a request from before there was one stops
+    /// short of it, and one read by a signer from before has bytes left over: refused either way,
+    /// with nothing read out of place.
+    pub genesis: Hash,
 }
 
 /// One of the three messages, a request MetaMask shows for its QR hardware wallet to sign, or a
@@ -286,15 +297,28 @@ fn code_in(bytes: &[u8]) -> Result<String, String> {
     })
 }
 
-/// What the signer holds a request against before it signs: the key it names is one of its, and
-/// the transaction is one the chain could take from that key.
-pub fn sign(request: &Request, key: &Keypair) -> Result<SignedTx, String> {
+/// Why a signer told which chain is its own will not sign for this one, if it will not: the same id
+/// Settings takes, and MetaMask's requests name, from the genesis id. Told none, it only shows it.
+pub fn wrong_chain(genesis: &Hash, yours: Option<u64>) -> Option<String> {
+    let chain = chainv4::crypto::ethereum::chain_id(genesis);
+
+    yours.filter(|yours| *yours != chain).map(|yours| format!("This is for chain {chain}, not yours, {yours}: a signature here counts on chain {chain} alone, so this signer will not make one."))
+}
+
+/// What the signer holds a request against before it signs: the chain it names is the one this
+/// signer was told is its own, if it was told one; the key it names is one of its; and the
+/// transaction is one the chain could take from that key.
+pub fn sign(request: &Request, key: &Keypair, yours: Option<u64>) -> Result<SignedTx, String> {
+    if let Some(why) = wrong_chain(&request.genesis, yours) {
+        return Err(why);
+    }
+
     if key.public() != request.signer {
         return Err("that key is not the one the request names".to_string());
     }
 
-    let signed = SignedTx::sign(request.tx.clone(), request.nonce, request.fee, key);
-    signed.verify().map_err(|err| format!("the chain would refuse this transaction: {err}"))?;
+    let signed = SignedTx::sign(request.tx.clone(), request.nonce, request.fee, key, &request.genesis);
+    signed.verify_on(&request.genesis).map_err(|err| format!("the chain would refuse this transaction: {err}"))?;
 
     Ok(signed)
 }
@@ -307,7 +331,7 @@ pub fn check(request: &Request, signed: &SignedTx) -> Result<(), String> {
         return Err("that is not the transaction this wallet asked to sign".to_string());
     }
 
-    signed.verify().map_err(|err| format!("its signature does not hold: {err}"))
+    signed.verify_on(&request.genesis).map_err(|err| format!("its signature does not hold: {err}"))
 }
 
 /// What the node prices a transaction from: the transaction as the signer would sign it, with a
@@ -348,6 +372,8 @@ pub struct Described {
     pub everything: String,
     /// Each step, for a batch, or a member's approval of one.
     pub steps: Option<crate::steps::Steps>,
+    /// The chain a signature counts on: its id, as Settings and MetaMask's requests name it.
+    pub chain: u64,
 }
 
 /// Lays a request out for the signer to read.
@@ -355,7 +381,9 @@ pub fn describe(request: &Request) -> Described {
     // The coin's and a token's symbols are the node's and the site's word, so they are cut short
     // and escaped before they reach a headline, as the step frame does with everything it shows.
     let coin = &Shown { symbol: crate::steps::plain(&request.coin.symbol), decimals: request.coin.decimals };
-    let most = u256::from(request.fee.gas_limit) * request.fee.max_price;
+    // Saturating, as these are the sender's word: a sum past what fits must not panic the signer,
+    // nor, in a build that wraps, show a small fee for a large one.
+    let most = u256::from(request.fee.gas_limit).saturating_mul(request.fee.max_price);
     let shown = |raw: u256, asset: &Shown| (format::amount(&raw.to_string(), asset.decimals, &asset.symbol), raw.to_string());
     let (kind, what, to, token) = match &request.tx {
         Tx::Transfer { to, amount, .. } => (format!("Send {}", coin.symbol), Some(shown(amount.to_u256(), coin)), Some(to.to_string()), None),
@@ -398,6 +426,7 @@ pub fn describe(request: &Request) -> Described {
         nonce: request.nonce,
         everything: format!("{:#?}", request.tx),
         steps: request.tx.batch_steps().map(|steps| crate::steps::of(steps, &request.coin, &|_| None, None)),
+        chain: chainv4::crypto::ethereum::chain_id(&request.genesis),
     }
 }
 

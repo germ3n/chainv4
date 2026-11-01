@@ -39,10 +39,13 @@ A `SignedTx` is:
 - the sender's nonce;
 - a fee offer;
 - the signer's public key;
-- a signature over the first three and the key.
+- a signature over the chain's genesis id, the first three and the key.
 
 The sender is the signer's address. A transaction's id is its whole encoding, signature
-included, hashed with the chain hash.
+included, hashed with the chain hash. The genesis id is signed, not sent: a transaction signed for
+one chain fails its signature on any other, so it cannot be sent again on a new chain of the same
+keys, and its id is that chain's alone. `SignedTx::verify_on(genesis)` is the only check of a
+signature, and takes the chain.
 
 | Transaction | Does |
 | --- | --- |

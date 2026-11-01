@@ -174,6 +174,7 @@ async fn send(api: &Api, faucet: &Arc<Faucet>, node: crate::node::NodeHandle, to
     let key = &faucet.config.key;
     let from = key.public().address();
     let tx = Tx::Transfer { from, to, amount: crate::cli::amount(faucet.config.amount) };
+    let genesis = at_height(&*api.db, 0)?.id();
     let header = tip(&*api.db)?.header;
     let base = api.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit()));
 
@@ -184,7 +185,7 @@ async fn send(api: &Api, faucet: &Arc<Faucet>, node: crate::node::NodeHandle, to
             let next = faucet.next_nonce.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             account.nonce.max(*next)
         };
-        let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key);
+        let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key, &genesis);
         let offer = api.fees.as_ref().map_or(FeeOffer::NONE, |fees| fees.offer(base, api.tx_fuel, &probe, Default::default()));
         let most = faucet.config.amount.saturating_add(u256::from(offer.gas_limit).saturating_mul(offer.max_price));
 
@@ -192,7 +193,7 @@ async fn send(api: &Api, faucet: &Arc<Faucet>, node: crate::node::NodeHandle, to
             return Err(ApiError::Unavailable(format!("the faucet is dry: it holds {} of the {most} a drip takes", account.balance)));
         }
 
-        let signed = SignedTx::sign(tx.clone(), nonce, offer, key);
+        let signed = SignedTx::sign(tx.clone(), nonce, offer, key, &genesis);
 
         match node.submit(signed).await {
             Ok(id) => {

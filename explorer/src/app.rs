@@ -279,7 +279,7 @@ impl Explorer {
                         continue;
                     }
 
-                    self.send.answered(&ask, &result, &mut self.api);
+                    self.send.answered(&ask, &result, &mut self.api, self.light.genesis());
 
                     match result {
                         Ok(value) => {

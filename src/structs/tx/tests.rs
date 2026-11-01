@@ -24,6 +24,11 @@ fn key() -> Keypair {
     Keypair::from_seed([7; 32])
 }
 
+/// The chain they are signed for.
+fn chain() -> Hash {
+    Hash::zero(crate::structs::hash::HashType::default_chain())
+}
+
 fn fee() -> FeeOffer {
     FeeOffer { gas_limit: 21000, max_price: u256::new(2), tip: u256::ONE }
 }
@@ -78,6 +83,20 @@ fn old() -> Vec<(Tx, &'static str, &'static str)> {
     ]
 }
 
+/// A transaction signed as it was before a signature named its chain: what the ids old() pins were
+/// made from, and what an older build's rows still hold.
+#[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
+fn signed_for_no_chain(tx: Tx) -> SignedTx {
+    let (nonce, fee, signer) = (3u64, fee(), key().public());
+    let bytes = [b"chainv4 transaction".as_slice(), &tx.hashable_bytes_with_tag(), &nonce.to_le_bytes(), &fee.hashable_bytes_with_tag(), &signer.hashable_bytes_with_tag()].concat();
+    let signature = key().sign(&bytes);
+
+    SignedTx { tx, nonce, fee, signer, signature }
+}
+
+// A signature now names its chain, which changes what it signs and so every transaction's id. No
+// byte of how a transaction is encoded moved, and this is what shows it: the bytes pinned stand as
+// they were, and so does each id, from a signature made as it was then.
 #[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
 #[test]
 fn every_old_transaction_keeps_its_exact_bytes_and_id() {
@@ -85,9 +104,43 @@ fn every_old_transaction_keeps_its_exact_bytes_and_id() {
         assert_eq!(to_hex(&wincode::serialize(&tx).unwrap()), bytes, "{tx:?}");
         assert_eq!(wincode::deserialize::<Tx>(&from_hex(bytes).unwrap()).unwrap(), tx);
 
-        let signed = SignedTx::sign(tx, 3, fee(), &key());
+        let signed = signed_for_no_chain(tx);
 
         assert_eq!(signed.id(HashType::default_chain()).to_string(), id, "{signed:?}");
+    }
+}
+
+// The same transactions signed as they are now, for the chain chain() names: what changing the
+// bytes a signature covers would change shows here, as a new genesis is the only way to do that.
+#[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
+#[test]
+fn every_transaction_signed_for_a_chain_differs_from_the_old_one_in_its_signature_alone() {
+    let ids = [
+        "0x101c6210787596850b8919291b20ae698e5654558cab2bc814c6cfd3772f7828",
+        "0x82ba4509071dc632b5b2c66518be0c4a2d6c332dc3e161fb24d85018ed906ba1",
+        "0x1115111ba10d2329ee83707a05ce9cfe7feba2f74b548407c234ff749b3687db",
+        "0x08adda65df652d19b1bec02c3b12e213520e6fa72bf8008c808853f538d6868a",
+        "0x18a25d38b38d3e5d05cc3a333024288d6f03060213dd964dce395d2c3fb36014",
+        "0x8a3dd07ddfa52022ab152bf1f04327975c36577131ee1c218a2ccc3eace19686",
+        "0x1255e363cd49ce7a0cac3efe48e8805e17380377ad15b7fb15890b801c321428",
+        "0x4c183f277f6d9abc38695366d319689543e52df563b76097beee274adfa0ecfb",
+        "0x1aa75b0de476c79494207c11e86b794cebd34415be3e85389b1fbb3ff34de53b",
+        "0xceb92caf22a8f091ae94f9ff5921612f71f89d1ea920736c41aacb0d5ef02719",
+    ];
+
+    assert_eq!(old().len(), ids.len());
+
+    for ((tx, _, old_id), id) in old().into_iter().zip(ids) {
+        let then = wincode::serialize(&signed_for_no_chain(tx.clone())).unwrap();
+        let signed = SignedTx::sign(tx, 3, fee(), &key(), &chain());
+        let now = wincode::serialize(&signed).unwrap();
+
+        assert_eq!(signed.id(HashType::default_chain()).to_string(), id, "{signed:?}");
+        assert_ne!(old_id, id);
+        assert_eq!(now.len(), then.len());
+        assert_eq!(now[..now.len() - 64], then[..then.len() - 64], "the tag, the transaction, nonce, fee offer and signer stand");
+        assert_ne!(now[now.len() - 64..], then[then.len() - 64..]);
+        assert_eq!(signed.verify_on(&chain()), Ok(()));
     }
 }
 
@@ -144,11 +197,11 @@ fn a_batch_reads_back_as_it_was_written_under_the_next_free_tag() {
     assert_eq!(wincode::deserialize::<Tx>(&bytes).unwrap(), tx);
     assert_eq!(wincode::serialized_size(&tx).unwrap(), bytes.len() as u64);
 
-    let signed = SignedTx::sign(tx.clone(), 1, fee(), &key());
+    let signed = SignedTx::sign(tx.clone(), 1, fee(), &key(), &chain());
     let round: SignedTx = wincode::deserialize(&wincode::serialize(&signed).unwrap()).unwrap();
 
     assert_eq!(round, signed);
-    assert_eq!(round.verify(), Ok(()));
+    assert_eq!(round.verify_on(&chain()), Ok(()));
 
     let carried = Tx::Multisig { account: ACCOUNT, tx: Box::new(batch(vec![Tx::Burn { from: ACCOUNT, amount: Amount::U128(1) }])), signatures: Vec::new() };
 

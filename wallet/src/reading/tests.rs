@@ -191,8 +191,13 @@ fn account_entry(address: &Address, balance: u64, nonce: u64) -> (Column, Vec<u8
     (Column::Accounts, address_key(address), Some(wincode::serialize(&account).unwrap()))
 }
 
+/// What transactions here are signed for: reading a block checks its roots, and no signature.
+fn chain() -> Hash {
+    Hash::zero(HASH)
+}
+
 fn pay(from: u8, to: Address, amount: u64, nonce: u64) -> (SignedTx, CommittedReceipt) {
-    let signed = SignedTx::sign(Tx::Transfer { from: key(from).public().address(), to, amount: Amount::U128(u128::from(amount)) }, nonce, FeeOffer::NONE, &key(from));
+    let signed = SignedTx::sign(Tx::Transfer { from: key(from).public().address(), to, amount: Amount::U128(u128::from(amount)) }, nonce, FeeOffer::NONE, &key(from), &chain());
     let receipt = CommittedReceipt::new(signed.id(HASH), 0, 21_000, u256::from(21_000u64 * 7), CommittedOutcome::Done, Vec::new(), Vec::new());
 
     (signed, receipt)
@@ -867,7 +872,7 @@ fn a_token_first_seen_going_up_takes_its_balance_from_the_block_and_one_proof_of
     read_all(&mut reading, &fixture, &[alice()], Some(2));
     let start_proofs = reading.standing().unwrap().proofs;
 
-    let signed = SignedTx::sign(Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: vec![TxCallArgumentType::Address(alice()), TxCallArgumentType::U256(u256::from(5u64))] }, 0, FeeOffer::NONE, &key(2));
+    let signed = SignedTx::sign(Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: vec![TxCallArgumentType::Address(alice()), TxCallArgumentType::U256(u256::from(5u64))] }, 0, FeeOffer::NONE, &key(2), &chain());
     let event = Event { contract: token(), name: "Transfer".to_string(), data: vec![TxCallArgumentType::Address(bob()), TxCallArgumentType::Address(alice()), TxCallArgumentType::U256(u256::from(5u64))] };
     let receipt = CommittedReceipt::new(signed.id(HASH), 0, 90_000, u256::ZERO, CommittedOutcome::Done, vec![event], Vec::new());
     fixture.push(Making { txs: vec![signed.clone()], receipts: vec![receipt.clone()], writes: vec![(Column::Namespaces, balance_key.clone(), Some(b"5".to_vec()))], ..Making::default() });
@@ -902,7 +907,7 @@ fn a_token_first_seen_among_many_blocks_of_one_answer_takes_no_proof_of_its_bala
     fixture.empty_to(1);
     let (_, mut reading) = shelf();
     read_all(&mut reading, &fixture, &[alice()], Some(1));
-    let signed = SignedTx::sign(Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: Vec::new() }, 0, FeeOffer::NONE, &key(2));
+    let signed = SignedTx::sign(Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: Vec::new() }, 0, FeeOffer::NONE, &key(2), &chain());
     let event = Event { contract: token(), name: "Transfer".to_string(), data: vec![TxCallArgumentType::Address(bob()), TxCallArgumentType::Address(alice()), TxCallArgumentType::U256(u256::from(5u64))] };
     let receipt = CommittedReceipt::new(signed.id(HASH), 0, 90_000, u256::ZERO, CommittedOutcome::Done, vec![event], Vec::new());
     fixture.push(Making { txs: vec![signed], receipts: vec![receipt], writes: vec![(Column::Namespaces, balance_key.clone(), Some(b"5".to_vec()))], ..Making::default() });
@@ -931,7 +936,7 @@ fn a_token_first_seen_going_down_takes_a_proof_as_what_it_read_there_is_old() {
     tracked.push((Column::Namespaces, balance_key.clone()));
     let mut fixture = Fixture::new(&[], tracked);
     fixture.empty_to(2);
-    let signed = SignedTx::sign(Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: Vec::new() }, 0, FeeOffer::NONE, &key(2));
+    let signed = SignedTx::sign(Tx::ContractCall { to: token(), func: Hash::zero(HashType::Xxh3_64), amount: Amount::U128(0), data: Vec::new() }, 0, FeeOffer::NONE, &key(2), &chain());
     let event = Event { contract: token(), name: "Transfer".to_string(), data: vec![TxCallArgumentType::Address(bob()), TxCallArgumentType::Address(alice()), TxCallArgumentType::U256(u256::from(5u64))] };
     let receipt = CommittedReceipt::new(signed.id(HASH), 0, 90_000, u256::ZERO, CommittedOutcome::Done, vec![event], Vec::new());
     fixture.push(Making { txs: vec![signed], receipts: vec![receipt], writes: vec![(Column::Namespaces, balance_key.clone(), Some(b"5".to_vec()))], ..Making::default() });
@@ -1075,7 +1080,7 @@ fn an_index_beside_a_wallets_files_is_never_taken_for_one_and_a_damaged_one_touc
 fn every_kind_of_touching_a_wallet_counts_and_nothing_else_does() {
     let ours = Ours::of(&[alice()]);
     let receipt = |events, payments| CommittedReceipt::new(Hash::zero(HASH), 0, 0, u256::ZERO, CommittedOutcome::Done, events, payments);
-    let signed = |tx, seed| SignedTx::sign(tx, 0, FeeOffer::NONE, &key(seed));
+    let signed = |tx, seed| SignedTx::sign(tx, 0, FeeOffer::NONE, &key(seed), &chain());
     let carol = key(3).public().address();
     let plain = Tx::Transfer { from: bob(), to: carol, amount: Amount::U128(1) };
 

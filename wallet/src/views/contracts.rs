@@ -451,6 +451,8 @@ fn evm_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &
                 (Ok(input), Ok(sent)) if read => {
                     let tx = Tx::EvmCall { to: address, value: amount(*sent), input: input.clone() };
                     let Some(body) = probe(ctx, from, tx) else {
+                        state.results.insert(key.clone(), Err("This cannot be tried yet: the light client has not said which chain this node is on.".to_string()));
+
                         return;
                     };
                     let ask = Ask::Read(body);
@@ -481,11 +483,13 @@ fn evm_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &
 }
 
 /// The body of POST /offer for a probe of a transaction from an address: signed by its key, or,
-/// for a watch-only one, signed by nothing, which a dry run never checks.
+/// for a watch-only one, signed by nothing, which a dry run never checks. None until the chain to
+/// sign for is known.
 fn probe(ctx: &Ctx, from: &Address, tx: Tx) -> Option<String> {
     let holder = ctx.holder()?;
+    let genesis = ctx.chain.genesis?;
     let probe = match holder.key(from) {
-        Some(key) => SignedTx::sign(tx, 0, FeeOffer::NONE, key),
+        Some(key) => SignedTx::sign(tx, 0, FeeOffer::NONE, key, &genesis),
         None => airgap::probe(tx, 0, holder.public(from)?),
     };
 

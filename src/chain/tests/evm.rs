@@ -34,7 +34,7 @@ fn calldata(signature: &str, args: &[Vec<u8>]) -> Vec<u8> {
 }
 
 fn sign(chain: &Chain, from: &Keypair, tx: Tx) -> SignedTx {
-    SignedTx::sign(tx, nonce(chain, from), FeeOffer::NONE, from)
+    SignedTx::sign(tx, nonce(chain, from), FeeOffer::NONE, from, &chain.genesis())
 }
 
 fn call(chain: &Chain, from: &Keypair, to: Address, value: u128, input: Vec<u8>) -> SignedTx {
@@ -56,8 +56,8 @@ fn deploy(chain: &mut Chain, start: u128) -> Address {
 }
 
 /// A transaction signed again one nonce later, for the second one a sender puts in a block.
-fn next_nonce(signed: SignedTx, from: &Keypair) -> SignedTx {
-    SignedTx::sign(signed.tx, signed.nonce + 1, FeeOffer::NONE, from)
+fn next_nonce(genesis: &Hash, signed: SignedTx, from: &Keypair) -> SignedTx {
+    SignedTx::sign(signed.tx, signed.nonce + 1, FeeOffer::NONE, from, genesis)
 }
 
 /// What a call returned, as bytes.
@@ -266,7 +266,7 @@ fn indexing_logs_topics_touches_neither_blocks_nor_state() {
     let deploy = sign(&indexed, &authority(), Tx::Deploy { code: Code::Evm(init) });
     let mut blocks = vec![deploy];
 
-    blocks.push(next_nonce(call(&indexed, &authority(), counter, 0, calldata("bump(uint256)", &[word(3)])), &authority()));
+    blocks.push(next_nonce(&indexed.genesis(), call(&indexed, &authority(), counter, 0, calldata("bump(uint256)", &[word(3)])), &authority()));
 
     for tx in blocks {
         let (block, now) = next_block(&indexed, vec![tx]);
@@ -335,6 +335,7 @@ fn an_evm_contract_deploys_counts_emits_and_reverts_with_its_reason() {
 fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let me = authority().public().address();
     let ethereum = Keypair::generate(KeyType::Secp256k1).unwrap().public().address();
     let counter = deploy(&mut chain, 0);
@@ -351,7 +352,7 @@ fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
     // Paid out to the Ed25519 sender's alias, it reaches the sender; to a secp256k1 account, that.
     let pay_me = call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&me), word(400)]));
     let pay_them = call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&ethereum), word(100)]));
-    let pay_them = next_nonce(pay_them, &authority());
+    let pay_them = next_nonce(&genesis_id, pay_them, &authority());
     let paid = advance(&mut chain, vec![pay_me, pay_them]);
 
     assert!(paid.iter().all(|receipt| receipt.result.is_ok()), "{paid:?}");
@@ -386,6 +387,7 @@ fn the_coin_moves_into_evm_contracts_and_back_out_to_any_account() {
 fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let counter = deploy(&mut chain, 0);
     let deposit = call(&chain, &authority(), counter, 1_000, calldata("deposit()", &[]));
     let bob = Keypair::generate(KeyType::Ed25519).unwrap();
@@ -396,6 +398,7 @@ fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
             nonce,
             FeeOffer::NONE,
             &authority(),
+            &genesis_id,
         )
     };
     let first = nonce(&chain, &authority()) + 1;
@@ -407,6 +410,7 @@ fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
         nonce(&chain, &bob),
         FeeOffer::NONE,
         &bob,
+        &genesis_id,
     );
     advance(&mut chain, vec![plain]);
 
@@ -419,7 +423,7 @@ fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
     let carol_before = balance(&chain, &carol.public().address());
     let pay_bob = call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&bob.public().address()), word(300)]));
     let pay_carol =
-        next_nonce(call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&carol.public().address()), word(200)])), &authority());
+        next_nonce(&genesis_id, call(&chain, &authority(), counter, 0, calldata("pay(address,uint256)", &[address_word(&carol.public().address()), word(200)])), &authority());
     let paid = advance(&mut chain, vec![pay_bob, pay_carol]);
 
     assert!(paid.iter().all(|receipt| receipt.result.is_ok()), "{paid:?}");
@@ -433,6 +437,7 @@ fn any_transaction_writes_its_senders_alias_down_so_the_evm_can_pay_it() {
 fn a_bitcoin_account_sends_and_the_evm_pays_it_under_its_alias() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let counter = deploy(&mut chain, 0);
     let deposit = call(&chain, &authority(), counter, 1_000, calldata("deposit()", &[]));
     let dave = Keypair::generate(KeyType::Bitcoin).unwrap();
@@ -445,6 +450,7 @@ fn a_bitcoin_account_sends_and_the_evm_pays_it_under_its_alias() {
         nonce(&chain, &authority()) + 1,
         FeeOffer::NONE,
         &authority(),
+        &genesis_id,
     );
     advance(&mut chain, vec![deposit, fund]);
 
@@ -455,9 +461,10 @@ fn a_bitcoin_account_sends_and_the_evm_pays_it_under_its_alias() {
         nonce(&chain, &dave),
         FeeOffer::NONE,
         &dave,
+        &genesis_id,
     );
 
-    assert!(crate::crypto::verifiable::Verifiable::verify(&back).is_ok());
+    assert!(back.verify_on(&genesis_id).is_ok());
     assert!(advance(&mut chain, vec![back])[0].result.is_ok());
     assert_eq!(nonce(&chain, &dave), 1);
     assert_eq!(evm::account_of(&chain.state(), evm::evm_alias(&address)).unwrap(), address);
@@ -557,6 +564,7 @@ fn a_chain_without_the_evm_refuses_evm_transactions() {
 fn evm_transactions_in_one_block_run_side_by_side_as_they_would_one_by_one() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let counter = deploy(&mut chain, 0);
     let others: Vec<Keypair> = (0..4).map(|_| stranger()).collect();
     let first = nonce(&chain, &authority());
@@ -566,7 +574,7 @@ fn evm_transactions_in_one_block_run_side_by_side_as_they_would_one_by_one() {
         .map(|(other, nonce)| {
             let tx = Tx::Transfer { from: authority().public().address(), to: other.public().address(), amount: Amount::U128(1_000) };
 
-            SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority())
+            SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority(), &genesis_id)
         })
         .collect();
     advance(&mut chain, funding);
@@ -576,7 +584,7 @@ fn evm_transactions_in_one_block_run_side_by_side_as_they_would_one_by_one() {
 
     for other in &others {
         txs.push(call(&chain, other, counter, 0, calldata("bump(uint256)", &[word(2)])));
-        txs.push(next_nonce(call(&chain, other, counter, 10, calldata("deposit()", &[])), other));
+        txs.push(next_nonce(&genesis_id, call(&chain, other, counter, 10, calldata("deposit()", &[])), other));
     }
 
     let receipts = advance(&mut chain, txs);
@@ -591,12 +599,13 @@ fn under_fees_evm_gas_is_the_chains_gas_one_for_one() {
     let db = Arc::new(MemoryDb::default());
     let paid = Genesis::dev_authority(authority().public());
     let mut chain = Chain::open(db, &paid).unwrap();
+    let genesis_id = chain.genesis();
     let fees = paid.fees.clone().unwrap().build();
     let offer = FeeOffer { gas_limit: 300_000, max_price: u256::new(1_000_000_000), tip: u256::ZERO };
     let init = [crate::structs::hex::from_hex(COUNTER_BIN.trim()).unwrap(), word(0)].concat();
     // Storing code costs gas by the byte, as on Ethereum.
     let deploy_offer = FeeOffer { gas_limit: 3_000_000, ..offer };
-    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, nonce(&chain, &authority()), deploy_offer, &authority());
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Evm(init) }, nonce(&chain, &authority()), deploy_offer, &authority(), &genesis_id);
     let counter = evm::create_address(&authority().public().address(), deploy.nonce);
     let deployed = advance(&mut chain, vec![deploy]).remove(0);
 
@@ -607,6 +616,7 @@ fn under_fees_evm_gas_is_the_chains_gas_one_for_one() {
         nonce(&chain, &authority()),
         offer,
         &authority(),
+        &genesis_id,
     );
     let intrinsic = fees.schedule().intrinsic(&bump);
     let receipt = advance(&mut chain, vec![bump]).remove(0);
@@ -647,6 +657,7 @@ fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
 
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db, &genesis()).unwrap();
+    let genesis_id = chain.genesis();
     // Alice holds an Ed25519 key, and has never sent an EVM transaction: a name resolves to her
     // alias all the same.
     let alice = Keypair::generate(KeyType::Ed25519).unwrap();
@@ -655,10 +666,11 @@ fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
         nonce(&chain, &authority()),
         FeeOffer::NONE,
         &authority(),
+        &genesis_id,
     );
     advance(&mut chain, vec![fund]);
     let register = sign(&chain, &alice, Tx::Name { name: "alice".into(), action: NameAction::Register { years: 1 } });
-    let primary = next_nonce(sign(&chain, &alice, Tx::PrimaryName { name: Some("alice".into()) }), &alice);
+    let primary = next_nonce(&genesis_id, sign(&chain, &alice, Tx::PrimaryName { name: Some("alice".into()) }), &alice);
     let payer = evm::create_address(&authority().public().address(), nonce(&chain, &authority()));
     let deploy = sign(&chain, &authority(), Tx::Deploy { code: Code::Evm(crate::structs::hex::from_hex(NAME_PAYER_BIN.trim()).unwrap()) });
     let receipts = advance(&mut chain, vec![register, primary, deploy]);
@@ -667,7 +679,7 @@ fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
 
     let before = balance(&chain, &alice.public().address());
     let pay = call(&chain, &authority(), payer, 1_000, calldata("pay(string)", &[string_arg("Alice.dev")]));
-    let lookup = next_nonce(call(&chain, &authority(), payer, 0, calldata("lookup(string)", &[string_arg("alice")])), &authority());
+    let lookup = next_nonce(&genesis_id, call(&chain, &authority(), payer, 0, calldata("lookup(string)", &[string_arg("alice")])), &authority());
     let receipts = advance(&mut chain, vec![pay, lookup]);
 
     assert_eq!(receipts[0].result.as_ref().map(|_| ()), Ok(()), "{:?}", receipts[0].result);
@@ -676,7 +688,7 @@ fn evm_contracts_resolve_and_pay_names_through_the_precompile() {
 
     // The other way: her alias goes by her primary name. Nobody's resolves to nothing.
     let whois = call(&chain, &authority(), payer, 0, calldata("whois(address)", &[address_word(&alice.public().address())]));
-    let nobody = next_nonce(call(&chain, &authority(), payer, 5, calldata("pay(string)", &[string_arg("nobody.dev")])), &authority());
+    let nobody = next_nonce(&genesis_id, call(&chain, &authority(), payer, 5, calldata("pay(string)", &[string_arg("nobody.dev")])), &authority());
     let receipts = advance(&mut chain, vec![whois, nobody]);
 
     assert_eq!(returned_string(&receipts[0]), "alice.dev");
@@ -702,6 +714,7 @@ fn ethereum_account(chain: &mut Chain, secret: [u8; 32]) -> Address {
         nonce(chain, &authority()),
         FeeOffer::NONE,
         &authority(),
+        &chain.genesis(),
     );
     advance(chain, vec![fund]);
 
@@ -776,6 +789,7 @@ fn ethereum_signatures_hold_on_their_own_chain_alone_and_say_what_they_carry() {
 
     let db = Arc::new(MemoryDb::default());
     let chain = Chain::open(db, &genesis()).unwrap();
+    let genesis_id = chain.genesis();
     let secret = [0x46; 32];
     let good = ethereum(&chain, &secret, EthereumKind::DynamicFee, 0, Some([1; 20]), 0, Vec::new());
 
@@ -799,7 +813,7 @@ fn ethereum_signatures_hold_on_their_own_chain_alone_and_say_what_they_carry() {
     }
 
     // And an Ethereum transaction under a signature of chainv4's own never holds.
-    let disguised = SignedTx::sign(good.tx.clone(), 0, FeeOffer::NONE, &authority());
+    let disguised = SignedTx::sign(good.tx.clone(), 0, FeeOffer::NONE, &authority(), &genesis_id);
 
     assert_eq!(disguised.verify_on(&chain.genesis()), Err(VerifyError::BadEthereum));
 }
@@ -897,6 +911,7 @@ fn lua_call(chain: &Chain, to: Address, function: &str, data: Vec<TxCallArgument
 fn evm_contracts_call_native_ones_and_send_them_coin() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let (bridge, counter, _) = bridged(&mut chain);
     let add = call(&chain, &authority(), bridge, 300, calldata("add(bytes32,uint64)", &[contract_word(&counter), word(5)]));
     let receipt = advance(&mut chain, vec![add]).remove(0);
@@ -918,7 +933,7 @@ fn evm_contracts_call_native_ones_and_send_them_coin() {
 
     // A native view reads in a static call; a native function that writes is refused there.
     let peek = call(&chain, &authority(), bridge, 0, calldata("peek(bytes32,string)", &[contract_word(&counter), word(64), word(5), [b"total".to_vec(), vec![0; 27]].concat()]));
-    let touch = next_nonce(call(&chain, &authority(), bridge, 0, calldata("peek(bytes32,string)", &[contract_word(&counter), word(64), word(5), [b"touch".to_vec(), vec![0; 27]].concat()])), &authority());
+    let touch = next_nonce(&genesis_id, call(&chain, &authority(), bridge, 0, calldata("peek(bytes32,string)", &[contract_word(&counter), word(64), word(5), [b"touch".to_vec(), vec![0; 27]].concat()])), &authority());
     let receipts = advance(&mut chain, vec![peek, touch]);
 
     assert_eq!(returned(&receipts[0]), word(5));
@@ -1019,6 +1034,7 @@ return M
 fn the_evm_calls_back_into_itself_through_a_native_contract() {
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let (bridge, _, _) = bridged(&mut chain);
     let echo = deploy_lua(&mut chain, ECHO);
     let set = lua_call(&chain, echo, "set_bridge", vec![TxCallArgumentType::Address(bridge)]);
@@ -1034,7 +1050,7 @@ fn the_evm_calls_back_into_itself_through_a_native_contract() {
 
     // Reverted after, the inner EVM call's bump goes too.
     let revert = call(&chain, &authority(), bridge, 0, calldata("addThenRevert(bytes32,uint64)", &[contract_word(&echo), word(5)]));
-    let tried = next_nonce(call(&chain, &authority(), bridge, 0, calldata("tryAdd(bytes32,uint64)", &[contract_word(&echo), word(5)])), &authority());
+    let tried = next_nonce(&genesis_id, call(&chain, &authority(), bridge, 0, calldata("tryAdd(bytes32,uint64)", &[contract_word(&echo), word(5)])), &authority());
     let receipts = advance(&mut chain, vec![revert, tried]);
 
     assert!(receipts[0].result.is_err());
@@ -1106,13 +1122,14 @@ fn lua_speaks_solidity_s_abi() {
 
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let user = deploy_lua(&mut chain, ABI_USER);
     let alice = Keypair::generate(KeyType::Ed25519).unwrap().public().address();
     let calls = vec![
         lua_call(&chain, user, "transfer", vec![TxCallArgumentType::Address(alice), TxCallArgumentType::U256(u256::new(5))]),
-        next_nonce(lua_call(&chain, user, "round_trip", Vec::new()), &authority()),
-        next_nonce(next_nonce(lua_call(&chain, user, "too_big", Vec::new()), &authority()), &authority()),
-        next_nonce(next_nonce(next_nonce(lua_call(&chain, user, "shared", Vec::new()), &authority()), &authority()), &authority()),
+        next_nonce(&genesis_id, lua_call(&chain, user, "round_trip", Vec::new()), &authority()),
+        next_nonce(&genesis_id, next_nonce(&genesis_id, lua_call(&chain, user, "too_big", Vec::new()), &authority()), &authority()),
+        next_nonce(&genesis_id, next_nonce(&genesis_id, next_nonce(&genesis_id, lua_call(&chain, user, "shared", Vec::new()), &authority()), &authority()), &authority()),
     ];
     let receipts = advance(&mut chain, calls);
     let expected = [
@@ -1624,6 +1641,7 @@ fn a_contract_made_where_coin_waited_takes_it_over_and_none_is_made_or_lost() {
 
     let db = Arc::new(MemoryDb::default());
     let mut chain = open(&db);
+    let genesis_id = chain.genesis();
     let proxy = Address::Evm([0x4e, 0x59, 0xb4, 0x48, 0x47, 0xb3, 0x79, 0x57, 0x85, 0x88, 0x92, 0x0c, 0xa7, 0x8f, 0xbf, 0x26, 0xc0, 0xb4, 0x95, 0x6c]);
     let (multisig, start) = (Address::Multisig([4; 32]), EvmStart { owners: vec![evm_owner(&[1; 32])], threshold: 1 });
     let bytes = multisig_contract(&multisig, &start);
@@ -1634,7 +1652,7 @@ fn a_contract_made_where_coin_waited_takes_it_over_and_none_is_made_or_lost() {
     // there is code; sent here to the contract's address, under it.
     let through_evm = call(&chain, &authority(), Address::Secp256k1(bytes), 300, Vec::new());
     advance(&mut chain, vec![through_evm]);
-    let here = SignedTx::sign(Tx::Transfer { from: me, to: Address::Evm(bytes), amount: Amount::U128(200) }, nonce(&chain, &authority()), FeeOffer::NONE, &authority());
+    let here = SignedTx::sign(Tx::Transfer { from: me, to: Address::Evm(bytes), amount: Amount::U128(200) }, nonce(&chain, &authority()), FeeOffer::NONE, &authority(), &genesis_id);
     advance(&mut chain, vec![here]);
 
     let deploy = call(&chain, &authority(), proxy, 0, multisig_deployment(&multisig, &start));

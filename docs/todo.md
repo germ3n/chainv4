@@ -820,11 +820,12 @@ offline; these would make that hold up as a treasury.
 - [ ] **Bitcoin withdrawal fees come from the pool.** A release's fee is taken from what the gateway holds, not from what
   was burned (`contracts/lua/btc_gateway.lua`, where `propose` reckons the fee), so wBTC slowly stops being backed.
 - [ ] **Release manifests have no expiry, and only the node orders them by `issued`.**
-- [ ] **A chain's own signature on a transaction is not bound to its chain.** `signing_bytes` covers the transaction,
-  nonce, fee offer and signer, while votes, EIP-155 and EIP-712 name the genesis. So a transaction signed on one
-  chain is valid on another where its account has that nonce: with the keys reused, as across the devnet's
-  genesises, anyone can send it again there. Binding it changes what every signer signs, so it needs every node
-  and app at once, and a new genesis.
+- [x] **A chain's own signature on a transaction is bound to its chain.** `signing_bytes` covered the transaction,
+  nonce, fee offer and signer, while votes, EIP-155 and EIP-712 named the genesis. So a transaction signed on one
+  chain was valid on another where its account had that nonce: with the keys reused, as across the devnet's
+  genesises, anyone could send it again there. It covers the genesis id now, `SignedTx::verify_on` is the only check
+  of a signature, the offline signer's request names its chain, and the apps sign nothing with none known. It
+  needs every node and app at once, and a new genesis.
 - [x] **After a new chain, Activity showed the old one's transactions.** A row kept from the old chain stood in for
   a transaction with the same id on the new one, and being final was never proven again. With no chain followed,
   it listed every chain's. Each is kept with its genesis and goes by it now, the pinned one with none followed.

@@ -105,14 +105,14 @@ fn producing_on(genesis: &Genesis) -> (Node, FakeNet) {
 }
 
 /// The development key's transfers, from this nonce on.
-fn transfers(count: u64) -> impl Iterator<Item = SignedTx> {
+fn transfers(genesis: Hash, count: u64) -> impl Iterator<Item = SignedTx> {
     let authority = DevAuthority::dev_keypair();
     let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
 
     (0..count).map(move |nonce| {
         let tx = Tx::Transfer { from: authority.public().address(), to, amount: Amount::U128(1) };
 
-        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority)
+        SignedTx::sign(tx, nonce, FeeOffer::NONE, &authority, &genesis)
     })
 }
 
@@ -123,7 +123,7 @@ fn blocks_fill_to_the_chains_limits_not_a_fixed_count() {
 
     // Bounded by max_block_bytes alone, a block holds all 1,500.
     let (mut producer, mut net) = producing_on(&bounded);
-    transfers(1_500).for_each(|tx| producer.submit(tx).unwrap());
+    transfers(producer.chain().genesis(), 1_500).for_each(|tx| producer.submit(tx).unwrap());
     producer.step(SLOT).unwrap();
 
     assert_eq!(published_block(&mut net).txs.len(), 1_500);
@@ -132,7 +132,7 @@ fn blocks_fill_to_the_chains_limits_not_a_fixed_count() {
     // The node's own cap holds its blocks to it.
     let (producer, mut net) = producing_on(&bounded);
     let mut producer = producer.max_block_txs(Some(100));
-    transfers(300).for_each(|tx| producer.submit(tx).unwrap());
+    transfers(producer.chain().genesis(), 300).for_each(|tx| producer.submit(tx).unwrap());
     producer.step(SLOT).unwrap();
 
     assert_eq!(published_block(&mut net).txs.len(), 100);
@@ -141,7 +141,7 @@ fn blocks_fill_to_the_chains_limits_not_a_fixed_count() {
     // A chain that bounds blocks by neither bytes nor gas takes 1,000 a block.
     let unbounded = Genesis { max_block_bytes: None, ..bounded };
     let (mut producer, mut net) = producing_on(&unbounded);
-    transfers(1_200).for_each(|tx| producer.submit(tx).unwrap());
+    transfers(producer.chain().genesis(), 1_200).for_each(|tx| producer.submit(tx).unwrap());
     producer.step(SLOT).unwrap();
 
     assert_eq!(published_block(&mut net).txs.len(), UNBOUNDED_CHAIN_TXS);
@@ -156,7 +156,7 @@ fn a_time_budget_seals_what_ran_by_then_and_the_rest_wait() {
     // rest stay for the next block, which gets the time it needs.
     let (producer, mut net) = producing_on(&genesis);
     let mut producer = producer.max_build_ms(Some(1));
-    transfers(1_500).for_each(|tx| producer.submit(tx).unwrap());
+    transfers(producer.chain().genesis(), 1_500).for_each(|tx| producer.submit(tx).unwrap());
     producer.step(SLOT).unwrap();
 
     let first = published_block(&mut net);
@@ -258,7 +258,7 @@ fn gossip_leaves_the_backlog_once_the_loop_handled_it() {
     let backlog = follower.backlog.clone();
 
     for nonce in 0..2 {
-        let tx = SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority);
+        let tx = SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority, &follower.chain().genesis());
 
         // As the network does: counted in, then handed on.
         assert_eq!(backlog.admit(crate::net::Origin::Peer(peer), std::time::Instant::now()), crate::net::Admission::Admitted);
@@ -344,6 +344,42 @@ fn a_transfer_signed_as_typed_data_goes_into_a_block_as_any_other() {
 }
 
 #[test]
+fn a_transaction_signed_for_another_chain_is_refused_by_gossip_and_by_submission_and_goes_no_further() {
+    let (mut node, mut net) = node(false);
+    let authority = DevAuthority::dev_keypair();
+    let burn = Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) };
+    let elsewhere = Hash::from_bytes(HashType::default_chain(), &[9; 32]).unwrap();
+    let foreign = SignedTx::sign(burn.clone(), 0, FeeOffer::NONE, &authority, &elsewhere);
+
+    // Sent to it directly, as POST /txs does.
+    assert!(node.submit(foreign.clone()).is_err());
+
+    // Through the verifier, from a peer, and as the API's handle on the node hands it over.
+    let peer = PeerId::random();
+    let (reply, mut verdict) = tokio::sync::oneshot::channel();
+    net.events.send(NetEvent::Tx { from: peer, tx: foreign.clone(), gossip: None }).unwrap();
+    net.events.send(NetEvent::Submitted { tx: foreign, reply }).unwrap();
+    node.step(1).unwrap();
+
+    assert!(matches!(verdict.try_recv(), Ok(Err(_))), "the API is told");
+    assert_eq!(node.mempool().len(), 0);
+    assert!(!sent(&mut net).iter().any(|command| matches!(command, NetCommand::PublishTx(_))), "nor is it passed on");
+
+    // The same transaction signed for this chain goes in, and on to the peers, by each way.
+    let ours = SignedTx::sign(burn.clone(), 0, FeeOffer::NONE, &authority, &node.chain().genesis());
+    node.submit(ours).unwrap();
+
+    assert_eq!(node.mempool().len(), 1);
+    assert!(sent(&mut net).iter().any(|command| matches!(command, NetCommand::PublishTx(_))));
+
+    let next = SignedTx::sign(burn, 1, FeeOffer::NONE, &authority, &node.chain().genesis());
+    net.events.send(NetEvent::Tx { from: peer, tx: next, gossip: None }).unwrap();
+    node.step(1).unwrap();
+
+    assert_eq!(node.mempool().len(), 2);
+}
+
+#[test]
 fn transactions_travel_to_the_producer_and_into_a_block() {
     let (mut producer, mut producer_net) = node(true);
     let (mut follower, mut follower_net) = node(false);
@@ -358,6 +394,7 @@ fn transactions_travel_to_the_producer_and_into_a_block() {
         0,
         FeeOffer::NONE,
         &authority,
+        &producer.chain().genesis(),
     );
     follower.submit(tx.clone()).unwrap();
     let gossiped = sent(&mut follower_net)
@@ -644,6 +681,7 @@ fn submitted_transactions_are_queued_gossiped_and_answered() {
         0,
         FeeOffer::NONE,
         &authority,
+        &node.chain().genesis(),
     );
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let pending = std::thread::spawn({
@@ -1282,6 +1320,7 @@ fn the_report_counts_what_peers_sent_and_shows_what_waits() {
         0,
         FeeOffer::NONE,
         &authority,
+        &node.chain().genesis(),
     );
     // Said twice, as when its interface comes back up: listed once.
     net.events.send(NetEvent::Listening("/ip4/127.0.0.1/udp/9/quic-v1".parse().unwrap())).unwrap();
@@ -1327,7 +1366,7 @@ fn a_new_node_syncs_from_a_snapshot_and_runs_only_the_blocks_after_it() {
                 to,
                 amount: Amount::U128(u128::from(slot)),
             };
-            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority)).unwrap();
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority, &producer.chain().genesis())).unwrap();
             paid.push((to, slot));
         }
 
@@ -1405,7 +1444,7 @@ fn a_node_starting_at_a_checkpoint_fetches_nothing_below_it_and_holds_it_final()
         if slot % 2 == 0 {
             let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
             let tx = Tx::Transfer { from: authority.public().address(), to, amount: Amount::U128(u128::from(slot)) };
-            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority)).unwrap();
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority, &producer.chain().genesis())).unwrap();
         }
 
         producer.step(SLOT * slot).unwrap();
@@ -1469,7 +1508,7 @@ fn snapshot_of_a_chain_with_producers_from_finality(genesis: Genesis, producer: 
         if slot % 2 == 0 {
             let to = Keypair::generate(dev.public().key_type()).unwrap().public().address();
             let tx = Tx::Transfer { from: dev.public().address(), to, amount: Amount::U128(u128::from(slot)) };
-            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &dev)).unwrap();
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &dev, &producer.chain().genesis())).unwrap();
             paid.push((to, slot));
         }
 
@@ -1619,7 +1658,7 @@ fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
 
     assert_eq!(node.chain().tip().difficulty, 0);
     assert_eq!(node.chain().tip_work(), u256::new(3), "authority blocks weigh 1");
-    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev)).unwrap();
+    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
 
     for slot in 4..=30 {
         node.step(SLOT * slot).unwrap();
@@ -1661,7 +1700,7 @@ fn a_snapshot_whose_pivot_grows_too_old_moves_it_up_and_fetches_only_what_change
             to,
             amount: Amount::U128(u128::from(slot)),
         };
-        producer.submit(SignedTx::sign(tx, slot - 1, FeeOffer::NONE, &authority)).unwrap();
+        producer.submit(SignedTx::sign(tx, slot - 1, FeeOffer::NONE, &authority, &producer.chain().genesis())).unwrap();
     };
 
     for slot in 1..=60 {
@@ -1807,9 +1846,9 @@ fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
     let behind = Upgrade { least: ours, from: 3 };
     node.step(SLOT).unwrap();
     // One this version already meets, which stops nothing, then one it does not.
-    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Upgrade(behind) }, 0, FeeOffer::NONE, &dev)).unwrap();
+    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Upgrade(behind) }, 0, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
     node.step(SLOT * 2).unwrap();
-    node.submit(SignedTx::sign(Tx::ApproveChange { version: 1, change: Change::Upgrade(upgrade) }, 1, FeeOffer::NONE, &dev)).unwrap();
+    node.submit(SignedTx::sign(Tx::ApproveChange { version: 1, change: Change::Upgrade(upgrade) }, 1, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
 
     for slot in 3..=4 {
         node.step(SLOT * slot).unwrap();

@@ -300,6 +300,7 @@ transaction that landed but failed exits non-zero.
 | `--max-price N` | see [Fees](#fees) | The most it pays per gas, in the smallest unit: by default twice the base price plus the tip, or the lowest bid. |
 | `--tip N` | `0` | Under a base fee, what it adds per gas for the producer. |
 | `--anyway` | | Send it even though a dry run on the node says it would fail. |
+| `--genesis ID` | | The chain this may be signed for, by its genesis id: refuses to sign for any other a node names. Without it, the node's word decides which chain it is signed for. |
 | `--eip712` | | Sign it as EIP-712 typed data for this chain, as MetaMask does, rather than in chainv4's own form. A secp256k1 key only. See [Typed data](docs/crypto.md#typed-data-eip-712). |
 
 ### transfer, mint, burn
