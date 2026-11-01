@@ -36,6 +36,10 @@ const MAX_LOG_TOPICS: usize = 1_000;
 const LOG_TOPIC_PLACES: usize = 4;
 /// The most fee history one eth_feeHistory gives.
 const MAX_FEE_HISTORY: u64 = 1_024;
+/// The most requests one POST /rpc batch may hold. Each is answered in order on the API's one
+/// thread, and one may run a contract under the whole fuel cap, so a body may not line up more of
+/// them than a client could send as separate requests against the per-address rate limit.
+const MAX_BATCH: usize = 100;
 
 /// A JSON-RPC error: its code, as Ethereum's nodes use them, its message, and any data.
 struct RpcError {
@@ -81,6 +85,7 @@ pub(super) async fn rpc(api: Arc<Api>, body: &[u8]) -> Value {
 
     match request {
         Value::Array(batch) if batch.is_empty() => reply(&Value::Null, Err(RpcError { code: -32600, message: "an empty batch".to_string(), data: None })),
+        Value::Array(batch) if batch.len() > MAX_BATCH => reply(&Value::Null, Err(RpcError { code: -32600, message: format!("a batch holds at most {MAX_BATCH} requests"), data: None })),
         Value::Array(batch) => {
             let mut replies = Vec::with_capacity(batch.len());
 
@@ -147,10 +152,14 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
             let account = account_of(&state, bytes)?;
             let mut nonce = Accounts::new(&state).get(&account)?.nonce;
 
-            // Those it sent that wait in the mempool take the nonces after.
+            // Those it sent that wait in the mempool take the nonces after: the pending count is one
+            // past the highest it has waiting, when that is higher than the state nonce.
             if pending && let Some(node) = &api.node {
-                let report = node.report(usize::MAX).await.map_err(|err| RpcError::server(err.to_string()))?;
-                nonce = report.txs.iter().filter(|tx| tx.sender() == account).map(|tx| tx.nonce + 1).fold(nonce, u64::max);
+                let answer = node.mempool(crate::node::MempoolQuery::HighestNonce(account)).await.map_err(|err| RpcError::server(err.to_string()))?;
+
+                if let crate::node::MempoolAnswer::HighestNonce(Some(highest)) = answer {
+                    nonce = nonce.max(highest.saturating_add(1));
+                }
             }
 
             Ok(quantity(u256::from(nonce)))
@@ -580,20 +589,19 @@ struct Found {
 /// A transaction still waiting in the node's mempool, by its hash: with no block, as Ethereum's
 /// nodes show a pending one. Null when none waits by that hash.
 async fn pending(api: &Api, hash: &Value) -> Answer {
-    let hash = bytes(hash, "a transaction hash")?;
+    let hash: [u8; 32] = bytes(hash, "a transaction hash")?.try_into().map_err(|_| RpcError::invalid("a transaction hash is 32 bytes"))?;
     let Some(node) = &api.node else {
         return Ok(Value::Null);
     };
-    let report = node.report(usize::MAX).await.map_err(|err| RpcError::server(err.to_string()))?;
+    let answer = node.mempool(crate::node::MempoolQuery::EthereumByHash(hash)).await.map_err(|err| RpcError::server(err.to_string()))?;
 
-    Ok(report
-        .txs
-        .iter()
-        .find_map(|signed| match &signed.tx {
-            Tx::Ethereum { raw } if tx_hash(raw).as_slice() == hash.as_slice() => Some(ethereum_json(signed, raw, None)),
-            _ => None,
-        })
-        .unwrap_or(Value::Null))
+    Ok(match answer {
+        crate::node::MempoolAnswer::Ethereum(Some(signed)) => match &signed.tx {
+            Tx::Ethereum { raw } => ethereum_json(&signed, raw, None),
+            _ => Value::Null,
+        },
+        _ => Value::Null,
+    })
 }
 
 /// The transaction a keccak hash names, once it landed on the main chain.

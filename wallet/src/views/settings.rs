@@ -8,7 +8,7 @@ mod opening;
 use {
     super::Ctx,
     crate::app::Role,
-    crate::biometrics::{self, Proof},
+    crate::biometrics::Proof,
     crate::format,
     crate::guard::{self, Factors, Guard, confirmed},
     crate::lock::{self, Typed},
@@ -837,14 +837,19 @@ fn change_password(ctx: &mut Ctx, state: &mut SettingsState) -> Result<String, S
     *ctx.changed = true;
     let none = state.new.is_empty();
 
-    if let Some(entry) = ctx.settings.wallets.get_mut(ctx.settings.wallet) {
+    // The key the old password stretched to opens nothing now. Retire its record rather than forget
+    // it at once, as the mode switch does: settings on disk still name it until the new seal is
+    // written, so a kill in between strands nothing, and retire_all forgets it once settings that no
+    // longer name it have been read back. Have settings written now, not at the next autosave, so
+    // the new seal reaches disk before anything relies on it. A hardware wallet does not come here.
+    let old = ctx.settings.wallets.get_mut(ctx.settings.wallet).and_then(|entry| {
         entry.unprotected = none;
-    }
 
-    // They kept the key the old password stretched to, which opens nothing now. A wallet that needs
-    // hardware does not come this way.
-    let had = ctx.settings.wallets.get(ctx.settings.wallet).is_some_and(|entry| entry.biometric.is_some());
-    biometrics::turn_off(ctx.wake, ctx.settings);
+        entry.biometric.take()
+    });
+    let had = old.is_some();
+    ctx.settings.retired.extend(old);
+    ctx.settings.persist_now = true;
     state.current.clear();
     state.new.clear();
     state.again.clear();
@@ -1353,6 +1358,33 @@ mod tests {
                     assert!(!changed, "{guard:?}");
                 }
             }
+        }
+
+        #[test]
+        fn changing_the_password_writes_at_once_and_retires_the_old_biometric_key() {
+            // An Either wallet: a password opens it, with biometrics kept as an alternative. Changing
+            // the password must write the new seal at once, not at the next autosave, and must not
+            // forget the old biometric key before that seal is on disk, or a kill in between would
+            // leave the file holding the old seal with no biometrics to open it either.
+            let book = drawn::two_phrases();
+            let vault = Vault::create("correct horse").unwrap();
+            let sealed = vault.seal(&book).unwrap();
+            let mut world = World { settings: Settings::with_wallets(vec![entry(sealed, Some("a-key-tag".to_string()))]), vault: Some(vault), ..World::default() };
+            let mut book = book;
+            let mut holders = crate::keys::open(&book).unwrap();
+            let mut state = SettingsState { current: Typed::new("correct horse".to_string()), new: Typed::new("a new password".to_string()), again: Typed::new("a new password".to_string()), ..SettingsState::default() };
+            let mut done = None;
+
+            drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_ui, ctx| {
+                if done.is_none() {
+                    done = Some(change_password(ctx, &mut state));
+                }
+            });
+
+            assert!(done.unwrap().unwrap().contains("Biometrics are off"), "it says the key was retired");
+            assert!(world.settings.persist_now, "the new seal is written at once");
+            assert_eq!(world.settings.wallets[0].biometric, None, "the wallet no longer names the old key");
+            assert_eq!(world.settings.retired, vec!["a-key-tag".to_string()], "retired, not forgotten, until the settings are on disk");
         }
     }
 }

@@ -190,11 +190,31 @@ impl Gate {
             return Err(MempoolError::Syncing);
         }
 
-        let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
+        let state = State::new(self.db.clone());
         let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        Mempool::check(&tx, checked, &self.genesis, &State::new(self.db.clone()), fees.as_deref())?;
+
+        // The cheap checks first: a transaction that cannot pay or whose nonce is used is turned
+        // away before any signature is verified. The verifier skips the verify for such a one too,
+        // so checked is None and the fallback here never runs for it.
+        Mempool::affordable(&tx, &state, fees.as_deref())?;
+
+        let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
+        Mempool::backed(&tx, checked, &self.genesis, &state)?;
 
         self.mempool().insert(tx)
+    }
+
+    /// Whether a transaction could be admitted on the tip's state as it stands, signatures aside:
+    /// what the verifier checks before spending a verify on it. A transaction being synced from a
+    /// snapshot is worth verifying, as its state is not yet whole to judge it by.
+    pub(super) fn affordable(&self, tx: &SignedTx) -> bool {
+        if self.syncing.load(Ordering::Relaxed) {
+            return true;
+        }
+
+        let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
+
+        Mempool::affordable(tx, &State::new(self.db.clone()), fees.as_deref()).is_ok()
     }
 
     fn publish(&self, event: impl FnOnce() -> NodeEvent) {

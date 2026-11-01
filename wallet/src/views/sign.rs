@@ -261,32 +261,20 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
     }
 
+    // A single transaction is laid out in the same frame a batch's step is, so its amount,
+    // recipient and data all show, not a one-line summary that a compromised sender could lean on.
+    let single = described.steps.is_none().then(|| airgap::laid(request));
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &described.kind);
         ui.add_space(4.0);
 
         // A batch's count and total say what the steps come to, before any of them.
-        match &described.steps {
-            Some(steps) => super::steps::heading(ui, ctx, steps),
-            None => {
-                if let Some((shown, raw)) = &described.what {
-                    theme::fitted(ui, shown, 34.0, 16.0, egui::FontFamily::Name(theme::SERIF.into()), palette.ink);
-                    ui.label(RichText::new(format!("{raw} units, signed as such")).small().color(palette.muted));
-                    ui.add_space(8.0);
-                }
-            }
+        if let Some(steps) = &described.steps {
+            super::steps::heading(ui, ctx, steps);
         }
 
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &described.from));
-
-        if let Some(to) = &described.to {
-            super::row(ui, &palette, "To", |ui| super::address(ui, &palette, to));
-        }
-
-        if let Some(token) = &described.token {
-            super::row(ui, &palette, "Token", |ui| super::address(ui, &palette, token));
-        }
-
         super::row(ui, &palette, "Fee, at most", |ui| {
             ui.label(&described.fee).on_hover_text(&described.gas);
         });
@@ -294,10 +282,20 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
             ui.label(described.nonce.to_string());
         });
 
-        // Every step, before the button that signs them.
-        if let Some(steps) = &described.steps {
-            ui.add_space(6.0);
-            super::steps::each(ui, ctx, steps);
+        // Then the transaction itself: every step of a batch, or the lone one in its own frame.
+        ui.add_space(6.0);
+
+        match (&described.steps, &single) {
+            (Some(steps), _) => super::steps::each(ui, ctx, steps),
+            // A kind the step frame lays out in full: the common ones, with amount, recipient and data.
+            (None, Some(single)) if single.steps[0].allowed => super::steps::single(ui, ctx, &single.steps[0]),
+            // A kind it has no better layout for, such as a validator's or governance's: its
+            // recipient if it names one, and the rest in "Everything it holds" below.
+            _ => {
+                if let Some(to) = &described.to {
+                    super::row(ui, &palette, "To", |ui| super::address(ui, &palette, to));
+                }
+            }
         }
 
         ui.add_space(6.0);
@@ -385,6 +383,9 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         token: None,
     };
     let described = airgap::describe(&request);
+    // A non-batch inner transaction is laid out in the step frame too, so a member sees its value,
+    // recipient and calldata, not a one-line summary of a transaction that spends the multisig.
+    let single = described.steps.is_none().then(|| airgap::laid(&request));
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &format!("A multisig's transaction: {}", described.kind));
@@ -394,28 +395,28 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         }
 
         super::row(ui, &palette, "Multisig", |ui| super::address(ui, &palette, &bundle.body.account.to_string()));
-
-        if let Some(to) = &described.to {
-            super::row(ui, &palette, "To", |ui| super::address(ui, &palette, to));
-        }
-
-        if let (Some((_, raw)), None) = (&described.what, &described.steps) {
-            super::row(ui, &palette, "Amount", |ui| {
-                ui.label(format!("{raw} units"));
-            });
-        }
-
+        super::row(ui, &palette, "Fee, at most", |ui| {
+            ui.label(&described.fee).on_hover_text(&described.gas);
+        });
         super::row(ui, &palette, "Nonce", |ui| {
             ui.label(bundle.body.nonce.to_string());
         });
+        super::row(ui, &palette, "For the chain", |ui| super::address(ui, &palette, &bundle.genesis.to_string()));
         super::row(ui, &palette, "Signed by", |ui| {
             ui.label(format!("{} member{} so far", bundle.signatures.len(), if bundle.signatures.len() == 1 { "" } else { "s" }));
         });
 
-        // Every step, as the multisig will run it, before a member's key goes on them.
-        if let Some(steps) = &described.steps {
-            ui.add_space(6.0);
-            super::steps::each(ui, ctx, steps);
+        // The transaction itself, as the multisig will run it, before a member's key goes on it.
+        ui.add_space(6.0);
+
+        match (&described.steps, &single) {
+            (Some(steps), _) => super::steps::each(ui, ctx, steps),
+            (None, Some(single)) if single.steps[0].allowed => super::steps::single(ui, ctx, &single.steps[0]),
+            _ => {
+                if let Some(to) = &described.to {
+                    super::row(ui, &palette, "To", |ui| super::address(ui, &palette, to));
+                }
+            }
         }
 
         let keys: Vec<chainv4::crypto::keypair::PublicKey> = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).map(|key| key.public()).filter(|key| !matches!(key, chainv4::crypto::keypair::PublicKey::Bitcoin(_))).collect();
@@ -592,7 +593,9 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     }
                 }
 
-                super::text_block(ui, &palette, &serde_json::to_string_pretty(&json["message"]).unwrap_or_default());
+                // Only the fields the type declares are signed; a site may add others to the
+                // message that are not part of the digest, so show just the signed ones.
+                super::text_block(ui, &palette, &serde_json::to_string_pretty(&data.signed_message()).unwrap_or_default());
             }
             Ok(Asked::Message(message)) => {
                 super::row(ui, &palette, "Signs", |ui| {
@@ -925,6 +928,38 @@ mod batch_tests {
             assert!(top(&shown, "Step 2 of 2") < sign);
             assert!(shown.iter().any(|(text, _)| text == "Sends 10 units in all"), "{shown:?}");
         }
+    }
+
+    #[test]
+    fn the_offline_signer_shows_a_lone_calls_value_recipient_and_data_not_a_one_line_summary() {
+        let shown = drawn_sign(360.0, |_| {
+            let tx = Tx::EvmCall { to: Address::Evm([0xab; 20]), value: Amount::U128(2_000_000_000_000_000_000), input: vec![0x12, 0x34, 0x56, 0x78, 0x9a] };
+            let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
+
+            Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None }), trouble: None }
+        });
+        let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
+
+        assert!(shown.iter().any(|(text, _)| text.contains("2 DEV")), "the value it signs shows, not just the kind: {shown:?}");
+        assert!(shown.iter().any(|(text, _)| text == "To"), "the recipient shows");
+        assert!(shown.iter().any(|(text, _)| text.contains("bytes")), "the calldata and its size show");
+        assert!(top(&shown, "2 DEV") < sign, "above the sign button, not folded into a collapsed section");
+    }
+
+    #[test]
+    fn the_offline_signer_shows_a_multisig_bundles_fee_and_chain_and_its_lone_calls_detail() {
+        let account = Address::Multisig([6; 32]);
+        let shown = drawn_sign(360.0, |_| {
+            let tx = Tx::EvmCall { to: Address::Evm([0xcd; 20]), value: Amount::U128(7), input: vec![0xde, 0xad, 0xbe, 0xef] };
+            let bundle = MultisigBundle { genesis: Hash::zero(HashType::default_chain()), body: MultisigBody { account, tx, nonce: 1, fee: fee() }, signatures: Vec::new() };
+
+            Step::Multisig { bundle: Box::new(bundle), key: Some(chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public()), trouble: None }
+        });
+
+        assert!(shown.iter().any(|(text, _)| text == "Fee, at most"), "the fee a member signs for shows: {shown:?}");
+        assert!(shown.iter().any(|(text, _)| text == "For the chain"), "the bundle's chain shows");
+        assert!(shown.iter().any(|(text, _)| text.contains("7 units")), "the inner call's value shows");
+        assert!(shown.iter().any(|(text, _)| text.contains("bytes")), "the inner call's data shows");
     }
 
     #[test]

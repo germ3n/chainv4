@@ -106,6 +106,18 @@ fn fake_node_holding(limits: BacklogLimits, waiting: Option<Vec<SignedTx>>) -> N
 
                     let _ = reply.send(report);
                 }
+                #[cfg(feature = "ethereum")]
+                NetEvent::MempoolAsk { query, reply } => {
+                    use crate::node::{MempoolAnswer, MempoolQuery};
+
+                    let txs = waiting.clone().unwrap_or_else(|| vec![signed(0), signed(1)]);
+                    let answer = match query {
+                        MempoolQuery::HighestNonce(account) => MempoolAnswer::HighestNonce(txs.iter().filter(|tx| tx.sender() == account).map(|tx| tx.nonce).max()),
+                        MempoolQuery::EthereumByHash(hash) => MempoolAnswer::Ethereum(txs.into_iter().find(|tx| matches!(&tx.tx, crate::structs::tx::Tx::Ethereum { raw } if crate::crypto::ethereum::tx_hash(raw) == hash)).map(Box::new)),
+                    };
+
+                    let _ = reply.send(answer);
+                }
                 _ => {}
             }
         }

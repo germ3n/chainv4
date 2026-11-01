@@ -238,8 +238,9 @@ nothing is written. The vault is sealed as one piece under one key, so damage to
 cost one account: it fails to open at all, and the file's copy is what helps then.
 
 **Changing the password:** the current one, then the new one twice, or nothing to have none. The
-accounts are sealed again under a new salt. Biometrics of the older kind kept the key the old
-password stretched to, so they turn off. A wallet that needs both a password and biometrics takes
+accounts are sealed again under a new salt, and the new seal is written at once. Biometrics of the
+older kind kept the key the old password stretched to, so they turn off: that key is retired, not
+forgotten, until settings without it are on disk, so a kill in between strands nothing. A wallet that needs both a password and biometrics takes
 the check as well and cannot have none: its key is made anew from the new password and the same
 hardware secret, under a new salt, and opened again before it replaces the old vault. A wallet with
 biometrics alone has no password to change.
@@ -309,7 +310,9 @@ it was given, seals the vault anew under a new salt, opens that with the new fac
 only then replaces it. A failure anywhere leaves the old vault and its record as they were. Settings
 are written at once, and the old key is forgotten only when settings saying so are read back as the
 app next starts, so being killed at any step leaves a vault and the key it needs. A key made and
-left behind by a kill is an orphan: nothing names it and it opens nothing.
+left behind by a kill is an orphan: nothing names it and it opens nothing. Changing the password of
+a wallet that keeps biometrics as an alternative follows the same order: the new seal is written at
+once, and the old biometric key is retired, not forgotten, until settings without it are on disk.
 
 **An older build** on a phone or a desktop now finds no wallets at all, as they moved out of the file
 it reads (see [What it remembers](#what-it-remembers)), and going back to this build finds them whole.
@@ -610,6 +613,12 @@ each read says what read it, and that a built-in ABI's is "A match, not proof". 
 cut short and has anything that could lay out or hide text written as an escape, and fills the fields
 of its own frame, so it cannot draw a step or a row of its own. Whatever contracts do past what the
 steps say, a note says, and names' prices too: only the chain knows those.
+
+A single transaction that is not a batch is laid out in the same frame: its kind, what it sends,
+where to, and a call's data with the raw selector and size and the read below them, so a lone
+contract or EVM call shows as much as a batch's step does, never a one-line summary that leaves its
+value or recipient out. A multisig member reading a bundle or a proposal sees its inner transaction
+the same way, with the fee the multisig pays and the chain the bundle is for.
 
 **MetaMask cannot sign a batch.** It would show one opaque hash for all the steps, so the wallet says
 so instead of asking, and the chain refuses one anyway: send it from an account this wallet or the
@@ -1251,9 +1260,14 @@ localStorage under one key, `chainv4-wallet`. Either way it holds:
 then renamed into place, so a kill or a lost battery leaves it as it was or as it became, and only
 what changed is written. Each has a copy, written just after and holding the same, for when the
 first will not read: never what it held before, or a password changed would still open the copy. A
-wallet neither of whose files reads is set aside as `….unreadable-…`, never written over, and the
-app says so across the top while every other wallet opens. So do settings that will not read, which
-cost no wallet. A failed save, such as on a full disk, says so too, and is tried again.
+wallet whose files hold bytes that do not parse is set aside as `….unreadable-…`, never written
+over, and the app says so across the top while every other wallet opens. A wallet whose files cannot
+be read at all right now, a lock or a permission rather than damage, is left exactly in place and
+read again next start, as its bytes may be good; the app says that too. So do settings that will not
+read, which cost no wallet. A failed save, such as on a full disk, says so too, and is tried again,
+and in the browser a save that storage would not take is reported rather than lost in this tab. A
+wallet removed takes its files with it, even ones a kill had left this run never wrote, so it cannot
+come back on a later start.
 
 **From older builds.** An older build kept everything in eframe's one file. The first start moves it
 all, and takes the wallets out of that file only once their own are written. An older build run

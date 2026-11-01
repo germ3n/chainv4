@@ -183,4 +183,18 @@ impl Node {
             backlog: (self.backlog.waiting(), self.backlog.limits()),
         }
     }
+
+    /// Answers one narrow mempool question under the mempool lock, without copying it out: the
+    /// range for a sender's highest nonce, one scan for an Ethereum transaction by its hash.
+    #[cfg(feature = "ethereum")]
+    pub(super) fn answer_mempool(&self, query: crate::node::MempoolQuery) -> crate::node::MempoolAnswer {
+        use crate::node::{MempoolAnswer, MempoolQuery};
+
+        let mempool = self.gate.mempool();
+
+        match query {
+            MempoolQuery::HighestNonce(account) => MempoolAnswer::HighestNonce(mempool.highest_nonce(&account)),
+            MempoolQuery::EthereumByHash(hash) => MempoolAnswer::Ethereum(mempool.ethereum_by_hash(&hash).map(Box::new)),
+        }
+    }
 }

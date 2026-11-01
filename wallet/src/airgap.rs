@@ -352,7 +352,9 @@ pub struct Described {
 
 /// Lays a request out for the signer to read.
 pub fn describe(request: &Request) -> Described {
-    let coin = &request.coin;
+    // The coin's and a token's symbols are the node's and the site's word, so they are cut short
+    // and escaped before they reach a headline, as the step frame does with everything it shows.
+    let coin = &Shown { symbol: crate::steps::plain(&request.coin.symbol), decimals: request.coin.decimals };
     let most = u256::from(request.fee.gas_limit) * request.fee.max_price;
     let shown = |raw: u256, asset: &Shown| (format::amount(&raw.to_string(), asset.decimals, &asset.symbol), raw.to_string());
     let (kind, what, to, token) = match &request.tx {
@@ -361,10 +363,10 @@ pub fn describe(request: &Request) -> Described {
             let [TxCallArgumentType::Address(recipient), TxCallArgumentType::U256(units)] = data.as_slice() else {
                 unreachable!("is_token_transfer looked")
             };
-            let asset = request.token.clone().unwrap_or(Shown {
-                symbol: "units of the token".to_string(),
-                decimals: 0,
-            });
+            let asset = request.token.clone().map_or_else(
+                || Shown { symbol: "units of the token".to_string(), decimals: 0 },
+                |asset| Shown { symbol: crate::steps::plain(&asset.symbol), decimals: asset.decimals },
+            );
 
             (format!("Send {}", asset.symbol), Some(shown(*units, &asset)), Some(recipient.to_string()), Some(contract.to_string()))
         }
@@ -378,7 +380,7 @@ pub fn describe(request: &Request) -> Described {
         Tx::HandDirectory { to: None } => ("Renounce the directory's admin role, for good".to_string(), None, None, None),
         // A token the sender could only name for one: in a batch, its whole units as signed.
         Tx::Batch { steps } => {
-            let laid = crate::steps::of(steps, coin, &|_| None, None);
+            let laid = crate::steps::of(steps, &request.coin, &|_| None, None);
 
             (format!("A batch of {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }), Some(laid.total), None, None)
         }
@@ -395,8 +397,19 @@ pub fn describe(request: &Request) -> Described {
         gas: format!("{} gas at up to {} per gas", request.fee.gas_limit, format::amount(&request.fee.max_price.to_string(), coin.decimals, &coin.symbol)),
         nonce: request.nonce,
         everything: format!("{:#?}", request.tx),
-        steps: request.tx.batch_steps().map(|steps| crate::steps::of(steps, coin, &|_| None, None)),
+        steps: request.tx.batch_steps().map(|steps| crate::steps::of(steps, &request.coin, &|_| None, None)),
     }
+}
+
+/// A single, non-batch transaction laid out as a batch's step is, from the request's own coin and
+/// token, which is all an offline signer has to name them by. So a lone contract or EVM call shows
+/// its amount, its recipient and its data with the raw selector and size, as a batch's step does,
+/// rather than a one-line summary that leaves them out. The caller lays a batch out with
+/// `steps::of` on its own steps instead.
+pub fn laid(request: &Request) -> crate::steps::Steps {
+    let token = request.token.clone();
+
+    crate::steps::of(std::slice::from_ref(&request.tx), &request.coin, &|_| token.clone(), None)
 }
 
 /// Why the chain would refuse a batch a request or a bundle holds, if it would: said as soon as it

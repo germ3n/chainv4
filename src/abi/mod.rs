@@ -22,6 +22,13 @@ use {
 /// How deep types and values may nest: past this, input is refused rather than recursed into.
 const MAX_DEPTH: usize = 16;
 
+/// The longest a fixed array may say it is, as `uint256[N]`. Far above any real ABI, and chosen so
+/// every node reads the same types whatever its pointer width: a length a 64-bit node could parse
+/// but a 32-bit one could not is refused on both. It bounds nothing a decode needs on its own, as
+/// an array still may not be longer than its bytes (decode_one), but it keeps type parsing from
+/// depending on the width of the machine.
+const MAX_FIXED_ARRAY: usize = u32::MAX as usize;
+
 fn keccak(bytes: &[u8]) -> [u8; 32] {
     Hasher::digest(HashType::Keccak256, bytes).to_bytes().try_into().expect("keccak256 is 32 bytes")
 }
@@ -101,11 +108,16 @@ impl AbiType {
         }
     }
 
-    /// What a static type takes in place: 32 bytes a word.
+    /// What a static type takes in place: 32 bytes a word. Saturating, as a contract chooses the
+    /// type: a fixed array long enough that its element count times a word overflows a pointer
+    /// gives usize::MAX here, so decoding stops at `data.get(at..)` rather than wrapping (which a
+    /// release node does silently and an overflow-checked one panics on) or differing by pointer
+    /// width. The length itself is capped at parse (parse_type), so this only saturates on a type
+    /// no caller writes.
     fn head_size(&self) -> usize {
         match self {
-            AbiType::FixedArray(inner, len) if !self.is_dynamic() => inner.head_size() * len,
-            AbiType::Tuple(types) if !self.is_dynamic() => types.iter().map(AbiType::head_size).sum(),
+            AbiType::FixedArray(inner, len) if !self.is_dynamic() => inner.head_size().saturating_mul(*len),
+            AbiType::Tuple(types) if !self.is_dynamic() => types.iter().map(AbiType::head_size).fold(0usize, usize::saturating_add),
             _ => 32,
         }
     }
@@ -140,7 +152,14 @@ fn parse_type(text: &str, depth: usize) -> Result<AbiType, String> {
 
         return match len {
             "" => Ok(AbiType::Array(inner)),
-            len => Ok(AbiType::FixedArray(inner, len.parse().map_err(|_| format!("{text}: {len} is no length"))?)),
+            len => {
+                let len: usize = len.parse().map_err(|_| format!("{text}: {len} is no length"))?;
+
+                match len <= MAX_FIXED_ARRAY {
+                    true => Ok(AbiType::FixedArray(inner, len)),
+                    false => Err(format!("{text}: a fixed array may hold at most {MAX_FIXED_ARRAY}")),
+                }
+            }
         };
     }
 

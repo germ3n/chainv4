@@ -100,6 +100,11 @@ const RANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 )]
 pub const DEFAULT_PER_IP: usize = 64;
 
+/// How many mining WebSocket relays one client may hold open at once. Each opens a connection into
+/// the mining port on this machine, which sees them all as loopback, so they are capped here by who
+/// asked rather than there. Past it, 503, as the port itself answers when full.
+const MINING_RELAYS_PER_IP: usize = 16;
+
 /// What every handler reads from.
 #[derive(Clone)]
 struct Api {
@@ -175,6 +180,12 @@ struct Api {
     /// What it shares of itself, and the token that shows everything.
     sharing: sharing::Sharing,
     report_token: Option<Arc<Vec<u8>>>,
+    /// Besides loopback, the addresses whose X-Forwarded-For the API believes: the reverse proxies
+    /// in front of it. Empty trusts loopback alone.
+    trusted_proxies: Arc<[IpAddr]>,
+    /// Mining WebSocket relays open now, by client, so one cannot open a flood of them into the
+    /// mining port, which sees them all as loopback.
+    mining_relays: Arc<InFlight>,
 }
 
 /// Requests in flight, by client, and how many each may have.
@@ -219,20 +230,20 @@ impl Drop for Counted {
     }
 }
 
-/// Who asks: the connection's IP, or behind a proxy on this machine or its private network, the
-/// last one X-Forwarded-For names, which the proxy added itself.
-fn asker(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    let local = match peer.ip() {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
-        IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
-    };
+/// Who asks: the connection's IP, or, when the connection is from a reverse proxy the node trusts,
+/// the last address X-Forwarded-For names, which that proxy added itself. Loopback is always
+/// trusted, as the proxy on the same host connects from it; any other private address is trusted
+/// only when --trusted-proxy named it, so that a second container or box on a shared private
+/// network cannot spoof a client's address and slip past the per-IP limits.
+fn asker(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> IpAddr {
+    let trusted = peer.ip().is_loopback() || trusted_proxies.contains(&peer.ip());
     let forwarded = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit(',').next())
         .and_then(|last| last.trim().parse().ok());
 
-    match (local, forwarded) {
+    match (trusted, forwarded) {
         (true, Some(ip)) => ip,
         _ => peer.ip(),
     }
@@ -245,7 +256,7 @@ async fn per_client(Live(api): Live<Api>, axum::extract::ConnectInfo(peer): axum
         return next.run(request).await;
     }
 
-    match InFlight::enter(&api.in_flight, asker(peer, request.headers())) {
+    match InFlight::enter(&api.in_flight, asker(peer, request.headers(), &api.trusted_proxies)) {
         Some(_counted) => next.run(request).await,
         None => (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": "too many requests at once from you: wait for some to answer" }))).into_response(),
     }
@@ -430,6 +441,8 @@ pub struct ApiOptions {
     pub sharing: sharing::Sharing,
     #[document(summary = "The token that shows everything to whoever bears it, --report-token; None for nobody off this machine to see it.")]
     pub report_token: Option<Vec<u8>>,
+    #[document(summary = "Besides loopback, the addresses of reverse proxies whose X-Forwarded-For the API believes, --trusted-proxy. Empty trusts loopback alone, so no other host on a shared private network can spoof a client's address past the per-IP limits.")]
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
 #[document(
@@ -534,6 +547,8 @@ pub fn start(
                     mining_onion: options.mining_onion.map(Arc::new),
                     sharing: options.sharing,
                     report_token: options.report_token.map(Arc::new),
+                    trusted_proxies: options.trusted_proxies.into(),
+                    mining_relays: Arc::new(InFlight { per_ip: MINING_RELAYS_PER_IP, counts: Default::default() }),
                 })
                 // Who connects, for the faucet's limits by IP.
                 .into_make_service_with_connect_info::<SocketAddr>())
@@ -1421,7 +1436,7 @@ async fn blocks_range(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<S
     let from = number(&query, "from")?.ok_or_else(|| ApiError::BadRequest("from is the height to start at".to_string()))?;
     let entry = u32::try_from(number(&query, "entry")?.unwrap_or(0)).map_err(|_| ApiError::BadRequest("entry is too big".to_string()))?;
     let count = number(&query, "count")?.unwrap_or(RangeLimits::SERVED.blocks);
-    let turn = match api.ranges.enter(asker(peer, &headers)).await {
+    let turn = match api.ranges.enter(asker(peer, &headers, &api.trusted_proxies)).await {
         Ok(turn) => turn,
         // As nginx's own 429 does, it says when to come back.
         Err(busy) => {

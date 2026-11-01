@@ -72,6 +72,17 @@ impl TypedData {
     }
 
     /// A struct type's fields: each its name and type.
+    /// The message with only the fields the primary type declares, which are the ones the signature
+    /// covers. A site may add others to the message that a signing screen would show but the digest
+    /// never includes; showing this keeps a screen from vouching for a field that is not signed.
+    /// Falls back to the whole message when the type cannot be read.
+    pub fn signed_message(&self) -> Value {
+        match self.fields(&self.primary) {
+            Ok(fields) => Value::Object(fields.into_iter().map(|(name, _)| (name.clone(), self.message.get(&name).cloned().unwrap_or(Value::Null))).collect()),
+            Err(_) => self.message.clone(),
+        }
+    }
+
     fn fields(&self, name: &str) -> Result<Vec<(String, String)>, String> {
         let fields = self.types.get(name).and_then(Value::as_array).ok_or_else(|| format!("no type {name}"))?;
 

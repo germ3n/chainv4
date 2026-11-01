@@ -660,6 +660,9 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
     let steps = super::steps::of_tx(ctx, &draft.tx, landing.as_ref());
     // A batch's own review: an approval of one still says whom it approves for.
     let whole_batch = matches!(draft.tx, Tx::Batch { .. });
+    // A single transaction is laid out in the same step frame, so its amount, recipient and
+    // calldata all show, not only the headline the page wrote.
+    let one = (!whole_batch).then(|| super::steps::of_one(ctx, &draft.tx, landing.as_ref()));
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Review");
@@ -672,29 +675,6 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         }
 
         super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &draft.from.to_string()));
-
-        if !whole_batch {
-            super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to));
-        }
-
-        // A contract's EVM call, by name, under who it goes to, as well as how much data it is.
-        if let Tx::EvmCall { to, input, .. } = &draft.tx
-            && !input.is_empty()
-        {
-            let contract = to.to_string();
-
-            super::row(ui, &palette, "Data", |ui| {
-                ui.label(theme::mono(format!("{} · {} bytes", to_hex(&input[..input.len().min(4)]), input.len())));
-            });
-
-            if let Some(read) = ctx.reader.call(super::decoded::kept(&ctx.settings.contracts, &contract), input) {
-                let token = ctx.chain.tokens.get(&contract).and_then(|token| Some((token.value.symbol.as_deref()?, token.value.decimals?)));
-
-                super::decoded::signing(ui, &palette, token, &read);
-            }
-
-            super::decoded::raw(ui, &palette, "contract's data", &to_hex(input));
-        }
 
         super::row(ui, &palette, "Fee, at most", |ui| {
             ui.label(ctx.amount(None, &most.to_string()))
@@ -722,14 +702,18 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
 
         if let Some(warning) = &warning {
             ui.add_space(6.0);
-            ui.colored_label(palette.bad, format!("A dry run on the node says this would fail: {warning}"));
+            ui.colored_label(palette.bad, format!("A dry run on the node says this would fail: {}", crate::steps::plain(warning)));
             ui.label(RichText::new("Sent anyway, it uses its nonce and pays its fee, unless things change before it lands.").small().color(palette.muted));
         }
 
-        // Every step, before the button that signs them.
-        if let Some(steps) = &steps {
-            ui.add_space(8.0);
-            super::steps::each(ui, ctx, steps);
+        // The transaction itself, before the button that signs it: every step of a batch, or the
+        // lone one in its own frame, with its amount, recipient and data.
+        ui.add_space(8.0);
+
+        match (&steps, &one) {
+            (Some(steps), _) => super::steps::each(ui, ctx, steps),
+            (None, Some(one)) if one.steps[0].allowed => super::steps::single(ui, ctx, &one.steps[0]),
+            _ => super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to)),
         }
 
         let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));

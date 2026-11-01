@@ -98,6 +98,21 @@ fn what_does_not_fit_or_read_is_refused() {
 }
 
 #[test]
+fn a_fixed_array_too_long_to_measure_is_refused_rather_than_overflowing() {
+    // A length whose element count times a word overflows a pointer once made the decoder's
+    // head_size wrap on a release node and panic on an overflow-checked one, and a 64-bit node
+    // read a type a 32-bit one could not. The length is capped at parse, on every build and width.
+    assert!(AbiType::parse("uint256[4294967296]").is_err(), "a dimension past the cap");
+    assert!(AbiType::parse("uint256[600000000000000000][0]").is_err(), "even wrapped in an empty outer array");
+    assert!(AbiType::parse("uint256[4294967295]").is_ok(), "the cap itself still parses");
+
+    // What does parse, however large, decodes to an error rather than overflowing: an empty outer
+    // array whose element type is enormous once measured for the head advance.
+    let parsed = AbiType::parse("uint256[1000000][0]").expect("both dimensions are under the cap");
+    assert_eq!(decode_values(&[parsed], &[0u8; 32]).unwrap(), vec![AbiValue::Array(vec![])]);
+}
+
+#[test]
 fn typed_values_read_from_what_a_person_types() {
     assert_eq!(parse_value(&ty("uint256"), "0x10").unwrap(), AbiValue::Uint(u256::from(16u64)));
     assert_eq!(parse_value(&ty("int16"), "-300").unwrap(), AbiValue::Int(i256::from(-300)));

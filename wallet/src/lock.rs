@@ -391,8 +391,8 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                 if let Some(pairing) = paired.as_ref()
                     && theme::primary(ui, palette, "Watch it", true).clicked()
                 {
-                    match password(making).and_then(|password| Vault::create(&password)) {
-                        Ok(vault) => opened = Some(keep_watched(settings, name(making, settings.wallets.len()), vault, pairing)),
+                    match password(making).and_then(|password| Vault::create(&password)).and_then(|vault| keep_watched(settings, name(making, settings.wallets.len()), vault, pairing)) {
+                        Ok(kept) => opened = Some(kept),
                         Err(why) => making.error = Some(why),
                     }
                 }
@@ -429,10 +429,12 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 if theme::primary(ui, palette, "Restore", true).clicked() {
-                    let restored = read_words(words).and_then(|phrase| Ok((phrase, Vault::create(&password(making)?)?)));
+                    let restored = read_words(words)
+                        .and_then(|phrase| Ok((phrase, Vault::create(&password(making)?)?)))
+                        .and_then(|(phrase, vault)| keep(settings, name(making, settings.wallets.len()), vault, &phrase, making.passphrase.to_string()));
 
                     match restored {
-                        Ok((phrase, vault)) => opened = Some(keep(settings, name(making, settings.wallets.len()), vault, &phrase, making.passphrase.to_string())),
+                        Ok(kept) => opened = Some(kept),
                         Err(why) => making.error = Some(why),
                     }
                 }
@@ -451,8 +453,14 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
 
     // The words asked back were right: the wallet is kept, and opens.
     if confirmed && let Lock::Words { made, .. } = std::mem::replace(lock, Lock::Open) {
-        opened = Some(keep(settings, made.name, made.vault, &made.phrase, made.passphrase.to_string()));
-        settings.just_made = true;
+        match keep(settings, made.name, made.vault, &made.phrase, made.passphrase.to_string()) {
+            Ok(kept) => {
+                opened = Some(kept);
+                settings.just_made = true;
+            }
+            // Only an OS entropy failure seals nothing; nothing was kept, so go back to choose.
+            Err(_) => *lock = Lock::Choose,
+        }
     }
 
     opened
@@ -618,7 +626,7 @@ fn right(phrase: &Phrase, asked: &[usize; 3], answers: &[Typed; 3]) -> bool {
 
 /// Seals a new wallet with its first account, the phrase's account 0, and keeps it, as the wallet
 /// in use.
-fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, passphrase: String) -> Opened {
+fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, passphrase: String) -> Result<Opened, String> {
     let book = Book {
         phrases: vec![Words::new(phrase.to_string(), passphrase)],
         accounts: vec![StoredAccount {
@@ -630,28 +638,12 @@ fn keep(settings: &mut Settings, name: String, vault: Vault, phrase: &Phrase, pa
         ..Book::default()
     };
 
-    match vault.seal(&book) {
-        Ok(sealed) => {
-            settings.wallets.push(WalletEntry {
-                id: String::new(),
-                name,
-                vault: sealed,
-                current: String::new(),
-                biometric: None,
-                unprotected: vault.bare(),
-                born: None,
-            });
-            settings.wallet = settings.wallets.len() - 1;
-        }
-        Err(why) => log::warn!("could not seal the new wallet: {why}"),
-    }
-
-    Opened { vault, book }
+    keep_sealed(settings, name, vault, book)
 }
 
 /// Seals a new watch-only wallet with the signer's account it read, and keeps it, as the wallet in
 /// use.
-fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &Pairing) -> Opened {
+fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &Pairing) -> Result<Opened, String> {
     let book = Book {
         phrases: Vec::new(),
         accounts: vec![StoredAccount {
@@ -663,23 +655,28 @@ fn keep_watched(settings: &mut Settings, name: String, vault: Vault, pairing: &P
         ..Book::default()
     };
 
-    match vault.seal(&book) {
-        Ok(sealed) => {
-            settings.wallets.push(WalletEntry {
-                id: String::new(),
-                name,
-                vault: sealed,
-                current: String::new(),
-                biometric: None,
-                unprotected: vault.bare(),
-                born: None,
-            });
-            settings.wallet = settings.wallets.len() - 1;
-        }
-        Err(why) => log::warn!("could not seal the new wallet: {why}"),
-    }
+    keep_sealed(settings, name, vault, book)
+}
 
-    Opened { vault, book }
+/// Seals a new wallet's book and adds it to the list as the one in use. A seal that fails (only an
+/// OS entropy failure can do it) adds nothing and leaves the wallet in use where it was, so the
+/// next save cannot write the new book over another wallet's entry; the caller stays where it is
+/// and says why rather than opening a wallet that was never kept.
+fn keep_sealed(settings: &mut Settings, name: String, vault: Vault, book: Book) -> Result<Opened, String> {
+    let sealed = vault.seal(&book).map_err(|why| format!("could not seal the new wallet: {why}"))?;
+
+    settings.wallets.push(WalletEntry {
+        id: String::new(),
+        name,
+        vault: sealed,
+        current: String::new(),
+        biometric: None,
+        unprotected: vault.bare(),
+        born: None,
+    });
+    settings.wallet = settings.wallets.len() - 1;
+
+    Ok(Opened { vault, book })
 }
 
 /// A phrase's words, numbered, down columns: two on a narrow screen, three otherwise.
@@ -771,7 +768,7 @@ mod tests {
     fn a_kept_wallet_starts_with_the_phrases_first_account() {
         let mut settings = Settings::default();
         let phrase = Phrase::generate(12).unwrap();
-        let opened = keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
+        let opened = keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new()).unwrap();
 
         assert_eq!((settings.wallets.len(), settings.wallet, settings.wallets[0].name.as_str()), (1, 0, "Mine"));
         assert_eq!(opened.book.accounts[0].source, Source::Phrase { account: 0, extra: Vec::new(), from: None });
@@ -795,7 +792,7 @@ mod tests {
     fn a_wallet_without_a_password_opens_with_none_and_says_so() {
         let mut settings = Settings::default();
         let phrase = Phrase::generate(12).unwrap();
-        let opened = keep(&mut settings, "Open".to_string(), Vault::create("").unwrap(), &phrase, String::new());
+        let opened = keep(&mut settings, "Open".to_string(), Vault::create("").unwrap(), &phrase, String::new()).unwrap();
 
         assert!(settings.wallets[0].unprotected);
         assert_eq!(Vault::open(&settings.wallets[0].vault, "").unwrap().1, opened.book);
@@ -808,14 +805,14 @@ mod tests {
         let mut settings = Settings::default();
         settings.role = Some(Role::Online);
         let phrase = Phrase::generate(12).unwrap();
-        keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
+        keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new()).unwrap();
         let signer = crate::keys::derive(&phrase.seed(""), 0);
         let pairing = Pairing {
             name: "Cold".to_string(),
             keys: signer.iter().map(|key| key.public()).collect(),
             origin: None,
         };
-        let watched = keep_watched(&mut settings, "Cold storage".to_string(), Vault::create("battery staple").unwrap(), &pairing);
+        let watched = keep_watched(&mut settings, "Cold storage".to_string(), Vault::create("battery staple").unwrap(), &pairing).unwrap();
 
         assert_eq!(settings.wallets.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), ["Mine", "Cold storage"]);
         assert_eq!(settings.wallet, 1, "the one just paired is in use");
@@ -983,14 +980,14 @@ mod tests {
     fn a_wallet_with_a_password_or_none_has_nothing_new_on_its_lock_screen() {
         let phrase = Phrase::generate(12).unwrap();
         let mut settings = Settings::with_wallets(Vec::new());
-        keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new());
+        keep(&mut settings, "Mine".to_string(), Vault::create("correct horse").unwrap(), &phrase, String::new()).unwrap();
         let mut lock = Lock::locked();
         let (said, _, _) = drawn_lock(PHONE, None, &mut settings, &mut lock);
 
         assert!(!said.contains("It will not open") && !said.contains("Remove"), "{said}");
 
         let mut settings = Settings::with_wallets(Vec::new());
-        keep(&mut settings, "Open".to_string(), Vault::create("").unwrap(), &phrase, String::new());
+        keep(&mut settings, "Open".to_string(), Vault::create("").unwrap(), &phrase, String::new()).unwrap();
         let (said, _, _) = drawn_lock(PHONE, None, &mut settings, &mut Lock::locked());
 
         assert!(said.contains("no password") && said.contains("need biometrics"), "the warning stays, and points on: {said}");
@@ -1003,7 +1000,7 @@ mod tests {
         let vault = Vault::create("correct horse").unwrap();
         let enrolled = fake::keep(&vault.key());
         let mut settings = Settings::with_wallets(Vec::new());
-        keep(&mut settings, "Mine".to_string(), vault, &phrase, String::new());
+        keep(&mut settings, "Mine".to_string(), vault, &phrase, String::new()).unwrap();
         settings.wallets[0].biometric = Some(enrolled.0);
 
         let (said, _, opened) = drawn_lock(PHONE, None, &mut settings, &mut Lock::locked());

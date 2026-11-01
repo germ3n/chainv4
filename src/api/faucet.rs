@@ -126,7 +126,7 @@ pub(super) async fn give(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInf
         return Err(ApiError::BadRequest(format!("not enough work: the hash must start with {} zero bits", faucet.config.work_bits)));
     }
 
-    let ip = asker(peer, &headers);
+    let ip = asker(peer, &headers, &api.trusted_proxies);
     let keys = [format!("to:{to}"), format!("ip:{ip}")];
     reserve(&faucet, &keys, now)?;
 
@@ -235,15 +235,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn behind_a_local_proxy_the_asker_is_the_last_ip_it_added() {
+    fn only_a_loopback_or_named_proxy_may_say_who_asks() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "6.6.6.6, 203.0.113.9".parse().unwrap());
+        let loopback: SocketAddr = "127.0.0.1:40000".parse().unwrap();
         let proxy: SocketAddr = "172.18.0.3:40000".parse().unwrap();
+        let other: SocketAddr = "172.18.0.4:40000".parse().unwrap();
         let outside: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        let added = "203.0.113.9".parse::<std::net::IpAddr>().unwrap();
+        let trusted = [proxy.ip()];
 
-        assert_eq!(asker(proxy, &headers), "203.0.113.9".parse::<std::net::IpAddr>().unwrap(), "the one the proxy added, not the one the caller wrote");
-        assert_eq!(asker(outside, &headers), outside.ip(), "a caller from outside cannot name another IP");
-        assert_eq!(asker(proxy, &HeaderMap::new()), proxy.ip());
+        // Loopback is always believed, as the proxy on the same host connects from it.
+        assert_eq!(asker(loopback, &headers, &[]), added, "the one the proxy added, not the one the caller wrote");
+        // A private address is believed only when --trusted-proxy named it.
+        assert_eq!(asker(proxy, &headers, &trusted), added, "a named proxy is believed");
+        assert_eq!(asker(other, &headers, &trusted), other.ip(), "another box on the private network is not, so it cannot spoof");
+        assert_eq!(asker(proxy, &headers, &[]), proxy.ip(), "with none named, even a private peer is not believed");
+        assert_eq!(asker(outside, &headers, &trusted), outside.ip(), "a caller from outside cannot name another IP");
+        assert_eq!(asker(loopback, &HeaderMap::new(), &[]), loopback.ip());
         assert_eq!((span(86_340_000), span(300_000), span(400)), ("23h 59m".to_string(), "5m".to_string(), "1s".to_string()));
     }
 }

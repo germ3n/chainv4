@@ -32,6 +32,37 @@ const error = (code, message) => ({ code, message });
 const UNAUTHORIZED = error(4100, "Connect the site to the chainv4 wallet first.");
 const REJECTED = error(4001, "User rejected the request.");
 
+// The most requests one site may have waiting for the wallet at once, so a page in a loop cannot
+// pile them up without end or keep the approval window from ever closing.
+const MOST_PENDING_PER_ORIGIN = 4;
+// After the person closes the approval window by hand, a short spell in which a fresh request does
+// not reopen it, so a page cannot force it straight back the instant it is dismissed.
+const REOPEN_COOLDOWN_MS = 2000;
+let reopenAfter = 0;
+
+// Whether a node is on this machine or a private network, where a page could not reach it itself.
+// Its reads are not relayed for a site that has not connected, so the extension is no way around
+// the browser's private-network protection, which would otherwise let any page probe a local node.
+function localNode(node) {
+    try {
+        const host = new URL(node).hostname.replace(/^\[|\]$/g, "");
+
+        return (
+            host === "localhost" ||
+            host === "127.0.0.1" ||
+            host === "::1" ||
+            /^10\./.test(host) ||
+            /^192\.168\./.test(host) ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+            /^169\.254\./.test(host) ||
+            /^fe80:/i.test(host) ||
+            /^f[cd][0-9a-f]{2}:/i.test(host)
+        );
+    } catch {
+        return false;
+    }
+}
+
 // What the wallet last said: its node, chain id, Ethereum accounts and whether it is unlocked.
 async function walletState() {
     const { wallet } = await api.storage.local.get("wallet");
@@ -110,10 +141,20 @@ async function chainId() {
 
 // Hands a request to the wallet: every page of it open now, and a window of it when none is
 // unlocked. The first to answer settles it.
-function approve(origin, method, params) {
+function approve(origin, method, params, port) {
     return new Promise((resolve, reject) => {
+        const waitingForOrigin = [...waiting.values()].filter((request) => request.origin === origin).length;
+
+        if (waitingForOrigin >= MOST_PENDING_PER_ORIGIN) {
+            reject(error(4001, "Too many requests from this site are already waiting; answer or dismiss them first."));
+
+            return;
+        }
+
         const id = nextId++;
-        waiting.set(id, { id, origin, method, params, resolve, reject });
+        // The port is kept so that, if the page goes before the wallet answers, its request is
+        // dropped rather than surfacing later out of the context the person was in.
+        waiting.set(id, { id, origin, method, params, resolve, reject, port });
         deliver();
     });
 }
@@ -127,7 +168,7 @@ async function deliver() {
 
     const unlocked = [...wallets.values()].some((wallet) => wallet.unlocked);
 
-    if (requests.length > 0 && !unlocked && approvalWindow === null) {
+    if (requests.length > 0 && !unlocked && approvalWindow === null && Date.now() >= reopenAfter) {
         approvalWindow = -1;
 
         try {
@@ -146,6 +187,9 @@ api.windows?.onRemoved.addListener((closed) => {
     }
 
     approvalWindow = null;
+    // Dismissed by hand: hold off reopening for a moment, so a page in a loop cannot force the
+    // window straight back the instant it is closed.
+    reopenAfter = Date.now() + REOPEN_COOLDOWN_MS;
 
     // Closed with nothing else of the wallet open: what it held is rejected.
     if (![...wallets.values()].some((wallet) => wallet.unlocked)) {
@@ -212,7 +256,7 @@ function signer(method, params) {
     }
 }
 
-async function answer(origin, method, params) {
+async function answer(origin, method, params, port) {
     if (REFUSED.has(method)) {
         throw error(4200, `${method} is not supported: it signs what cannot be read. Use personal_sign or eth_signTypedData_v4.`);
     }
@@ -254,7 +298,7 @@ async function answer(origin, method, params) {
     if (method === "eth_requestAccounts" || method === "wallet_requestPermissions") {
         const given = await accountsOf(origin);
 
-        return given.length > 0 && method === "eth_requestAccounts" ? given : approve(origin, method, params);
+        return given.length > 0 && method === "eth_requestAccounts" ? given : approve(origin, method, params, port);
     }
 
     if (APPROVED.has(method)) {
@@ -264,10 +308,19 @@ async function answer(origin, method, params) {
             throw UNAUTHORIZED;
         }
 
-        return approve(origin, method, params);
+        return approve(origin, method, params, port);
     }
 
     if (/^(eth|net|web3)_/.test(method)) {
+        // A read goes to the node. For a site that has not connected, it is relayed only when the
+        // node is one the page could reach itself: never a loopback or private-network node, so the
+        // extension cannot be used to probe the person's own node past the browser's protection.
+        const connected = Boolean((await sites())[origin]);
+
+        if (!connected && localNode((await walletState()).node)) {
+            throw error(4100, "Connect the site to the chainv4 wallet first to use its node: the node is on a private network a page cannot reach on its own.");
+        }
+
         return rpc(method, params);
     }
 
@@ -278,11 +331,40 @@ api.runtime.onConnect.addListener((port) => {
     if (port.name === "chainv4-provider") {
         // The page's origin, as the browser knows it.
         const origin = port.sender?.origin ?? new URL(port.sender?.url ?? "about:blank").origin;
+
+        // Only a real web origin gets a provider. An opaque one (a sandboxed page, which the
+        // browser reports as "null") would otherwise share one grant with every other such page, so
+        // a site a person connected could be impersonated by any attacker page that made itself
+        // opaque. Such a page simply has no wallet.
+        if (!origin.startsWith("http://") && !origin.startsWith("https://")) {
+            port.disconnect();
+
+            return;
+        }
+
         pages.set(port, { origin });
-        port.onDisconnect.addListener(() => pages.delete(port));
+        port.onDisconnect.addListener(() => {
+            pages.delete(port);
+
+            // What this page left waiting cannot be answered to it, and must not surface later out
+            // of context: reject and drop it when the page goes, and refresh the wallet's view.
+            let dropped = false;
+
+            for (const [id, request] of [...waiting]) {
+                if (request.port === port) {
+                    request.reject(REJECTED);
+                    waiting.delete(id);
+                    dropped = true;
+                }
+            }
+
+            if (dropped) {
+                deliver();
+            }
+        });
         port.onMessage.addListener(async ({ id, method, params }) => {
             try {
-                port.postMessage({ id, result: await answer(origin, method, params) });
+                port.postMessage({ id, result: await answer(origin, method, params, port) });
             } catch (failed) {
                 port.postMessage({ id, error: failed?.code ? failed : error(-32603, String(failed?.message ?? failed)) });
             }

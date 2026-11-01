@@ -73,6 +73,18 @@ fn data_that_does_not_fit_its_types_is_refused() {
     assert!(TypedData::parse(&looping).unwrap().digest().is_err());
 }
 
+#[test]
+fn a_decoy_field_a_site_adds_to_the_message_is_not_shown_and_does_not_change_the_digest() {
+    let types = json!({ "EIP712Domain": [], "Order": [{ "name": "amount", "type": "uint256" }] });
+    let honest = TypedData::parse(&json!({ "types": types, "primaryType": "Order", "domain": {}, "message": { "amount": "5" } })).unwrap();
+    let decoyed = TypedData::parse(&json!({ "types": types, "primaryType": "Order", "domain": {}, "message": { "amount": "5", "recipient": "0x00" } })).unwrap();
+
+    // The extra field is no part of what the type declares, so the digest is the same with or
+    // without it, and a signing screen shows only the field that is signed.
+    assert_eq!(honest.digest().unwrap(), decoyed.digest().unwrap(), "the decoy does not change the digest");
+    assert_eq!(decoyed.signed_message(), json!({ "amount": "5" }), "and it is not shown");
+}
+
 fn nest(depth: usize) -> Value {
     match depth {
         0 => Value::Null,

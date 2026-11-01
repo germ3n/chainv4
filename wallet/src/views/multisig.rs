@@ -382,9 +382,19 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
             ui.separator();
             ui.label(RichText::new(describe(ctx, &tx)).color(palette.ink));
 
-            // What it is members approve, whole, before anyone can.
-            if let Some(steps) = super::steps::of_tx(ctx, &tx, None) {
-                ui.push_id(("proposal steps", approvals.len(), nonce), |ui| super::steps::listed(ui, ctx, &steps));
+            // What it is members approve, whole, before anyone can: a batch's steps, or a lone
+            // call laid out in the same frame, so its value, recipient and calldata all show.
+            match super::steps::of_tx(ctx, &tx, None) {
+                Some(steps) => {
+                    ui.push_id(("proposal steps", approvals.len(), nonce), |ui| super::steps::listed(ui, ctx, &steps));
+                }
+                None => {
+                    let one = super::steps::of_one(ctx, &tx, None);
+
+                    if one.steps[0].allowed {
+                        ui.push_id(("proposal step", approvals.len(), nonce), |ui| super::steps::single(ui, ctx, &one.steps[0]));
+                    }
+                }
             }
 
             ui.add(egui::Label::new(RichText::new(progress(approvals.len() as u64, threshold, approved, mine.is_some())).small().color(palette.soft)).wrap());
@@ -542,8 +552,10 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
         theme::caps(ui, &palette, "Waiting for its members");
         ui.label(RichText::new(describe(ctx, &held.body.tx)).color(palette.ink).size(16.0));
 
-        // The count and total first, then the rest of the bundle, then every step to sign.
+        // The count and total first, then the rest of the bundle, then every step to sign. A lone
+        // transaction is laid out in the same frame, so its value, recipient and calldata all show.
         let steps = super::steps::of_tx(ctx, &held.body.tx, None);
+        let one = steps.is_none().then(|| super::steps::of_one(ctx, &held.body.tx, None));
 
         if let Some(steps) = &steps {
             super::steps::heading(ui, ctx, steps);
@@ -561,9 +573,16 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
             ui.label(if keys.is_empty() { "nobody yet".to_string() } else { keys.join(", ") });
         });
 
-        if let Some(steps) = &steps {
-            ui.add_space(6.0);
-            super::steps::each(ui, ctx, steps);
+        match (&steps, &one) {
+            (Some(steps), _) => {
+                ui.add_space(6.0);
+                super::steps::each(ui, ctx, steps);
+            }
+            (None, Some(one)) if one.steps[0].allowed => {
+                ui.add_space(6.0);
+                super::steps::single(ui, ctx, &one.steps[0]);
+            }
+            _ => {}
         }
 
         let approvals = approvals_of(state, &held);

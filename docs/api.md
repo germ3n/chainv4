@@ -849,8 +849,17 @@ the explorer.
 - **Requests are answered side by side,** on a thread a core (`--http-threads` for another
   count), dry runs and contract calls on the blocking pool, so a slow one holds up no other.
 - **Each client may have 64 requests in flight at once** (`--http-per-ip`); more get 429. A client
-  is its IP, or behind a proxy on the node's own machine or network, such as Docker's nginx, the
-  last address `X-Forwarded-For` names. `GET /stream` is not counted.
+  is its IP, or, when the connection comes from a reverse proxy the node trusts, the last address
+  `X-Forwarded-For` names. Loopback is always trusted, which covers a proxy on the same host such as
+  Docker's nginx; any other address is trusted only when `--trusted-proxy` named it, so a second
+  container or box on a shared private network cannot spoof a client's address past the limit. `GET
+  /stream` is not counted.
+- **A JSON-RPC batch at `POST /rpc` holds at most 100 requests.** Each is answered in order on the
+  one thread, and one may run a contract under the whole fuel cap, so a larger batch is refused with
+  code -32600 rather than letting one body line up far more work than the rate limit allows.
+- **Mining WebSocket relays are capped per client,** 16 open at once from one address. Each opens a
+  connection into the mining port, which sees them all as loopback, so they are counted here by who
+  asked; past the cap, 503.
 - **`/node`, `/mempool` and `/stream` ask the node.** The rest read the database; these go to
   the node loop, which answers between blocks.
 - **Reads are not snapshot-consistent.** A request that reads several keys can see two tips.

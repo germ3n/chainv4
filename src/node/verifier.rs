@@ -51,7 +51,7 @@ pub(super) fn spawn(events: mpsc::Receiver<NetEvent>, workers: Arc<Workers>, gat
 
             let mut tally = Tally::default();
 
-            for arrival in check(batch, &workers, &gate.genesis()) {
+            for arrival in check(batch, &workers, &gate.genesis(), |tx| gate.affordable(tx)) {
                 match gate.take(arrival) {
                     Ok(taken) => tally.add(taken),
                     Err(arrival) => {
@@ -72,15 +72,25 @@ pub(super) fn spawn(events: mpsc::Receiver<NetEvent>, workers: Arc<Workers>, gat
 }
 
 /// Checks a batch's transactions side by side on the workers, on the chain of this genesis,
-/// keeping the batch's order.
-pub(super) fn check(batch: Vec<NetEvent>, workers: &Workers, genesis: &Hash) -> Vec<Arrival> {
-    let txs: Vec<&SignedTx> = batch.iter().filter_map(carried).collect();
-    let mut found = workers.map(&txs, |tx| tx.verify_on(genesis)).into_iter();
+/// keeping the batch's order. Only a transaction `affordable` says the gate could still admit is
+/// verified: one that cannot pay or whose nonce is used is left with no signature result, so the
+/// gate turns it away on the cheap checks without the crypto, and a flood of unpayable
+/// transactions from a fresh key costs no verifies.
+pub(super) fn check(batch: Vec<NetEvent>, workers: &Workers, genesis: &Hash, affordable: impl Fn(&SignedTx) -> bool) -> Vec<Arrival> {
+    let worth: Vec<bool> = batch.iter().filter_map(carried).map(&affordable).collect();
+    let to_verify: Vec<&SignedTx> = batch.iter().filter_map(carried).zip(&worth).filter_map(|(tx, &ok)| ok.then_some(tx)).collect();
+    let mut verified = workers.map(&to_verify, |tx| tx.verify_on(genesis)).into_iter();
+    let mut worth = worth.into_iter();
 
     batch
         .into_iter()
         .map(|event| {
-            let checked = carried(&event).and_then(|_| found.next());
+            // In batch order: each carried transaction takes its own worth, and its verify result
+            // when it was worth verifying.
+            let checked = match carried(&event) {
+                Some(_) => worth.next().and_then(|ok| ok.then(|| verified.next()).flatten()),
+                None => None,
+            };
 
             Arrival::Event { event: Box::new(event), checked }
         })
@@ -130,11 +140,24 @@ mod tests {
         forged.nonce = 7;
         let peer = PeerId::random();
         let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }, NetEvent::PeerDown(peer), NetEvent::Tx { from: peer, tx: forged, gossip: None }];
-        let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()));
+        let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()), |_| true);
 
         assert!(matches!(&checked[0], Arrival::Event { event, checked: Some(Ok(())) } if matches!(**event, NetEvent::Tx { .. })));
         assert!(matches!(&checked[1], Arrival::Event { event, checked: None } if matches!(**event, NetEvent::PeerDown(_))));
         assert!(matches!(&checked[2], Arrival::Event { event, checked: Some(Err(_)) } if matches!(**event, NetEvent::Tx { .. })));
+    }
+
+    #[test]
+    fn a_transaction_the_gate_could_not_admit_is_not_verified() {
+        let peer = PeerId::random();
+        // The first is worth verifying, the second is not: only the first gets a signature result,
+        // so the gate turns the second away on its cheap checks without spending a verify.
+        let batch = vec![NetEvent::Tx { from: peer, tx: transfer(0), gossip: None }, NetEvent::Tx { from: peer, tx: transfer(1), gossip: None }];
+        let worth_first = std::sync::atomic::AtomicBool::new(true);
+        let checked = check(batch, &Workers::new(), &Hash::zero(HashType::default_chain()), |_| worth_first.swap(false, std::sync::atomic::Ordering::SeqCst));
+
+        assert!(matches!(&checked[0], Arrival::Event { checked: Some(Ok(())), .. }), "the affordable one is verified");
+        assert!(matches!(&checked[1], Arrival::Event { checked: None, .. }), "the unaffordable one is left for the gate to refuse");
     }
 
     #[test]

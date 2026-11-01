@@ -586,10 +586,20 @@ impl Net {
                 let gossip = Some(Gossip(message_id.clone()));
 
                 if message.topic == self.blocks.hash() {
+                    // A block counts against its sender's share of the backlog, as a vote does, so a
+                    // peer streaming blocks whose parent this node lacks cannot make it decode and
+                    // queue them without bound. The node releases the slot once it has judged it.
+                    if !self.admit(from, events) {
+                        self.judge(from, gossip, Verdict::Ignore, events);
+
+                        return true;
+                    }
+
                     match wincode::deserialize::<Block>(&message.data) {
                         Ok(block) => NetEvent::Block { from, block, gossip },
                         Err(err) => {
                             log::debug!("[net] undecodable block from {from}: {err}");
+                            self.backlog.release(Origin::Peer(from));
                             self.judge(from, Some(Gossip(message_id)), Verdict::Reject(Fault::Garbage), events);
 
                             return true;

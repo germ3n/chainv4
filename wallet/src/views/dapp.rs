@@ -290,7 +290,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             }
 
             ui.add_space(6.0);
-            super::text_block(ui, &palette, &serde_json::to_string_pretty(&json["message"]).unwrap_or_default());
+            // Only the fields the type declares are signed; show just those, never decoy fields a
+            // site slips into the message that the digest leaves out.
+            super::text_block(ui, &palette, &serde_json::to_string_pretty(&data.signed_message()).unwrap_or_default());
         }
     });
 

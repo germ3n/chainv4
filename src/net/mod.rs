@@ -87,6 +87,12 @@ pub enum NetEvent {
         txs: usize,
         reply: oneshot::Sender<crate::node::NodeReport>,
     },
+    #[cfg(feature = "ethereum")]
+    #[document(summary = "A client asked the node one narrow question about its mempool, by sender or by an Ethereum transaction's hash, so a cheap lookup does not clone the whole mempool. The node answers on reply.")]
+    MempoolAsk {
+        query: crate::node::MempoolQuery,
+        reply: oneshot::Sender<crate::node::MempoolAnswer>,
+    },
 }
 
 #[document(

@@ -69,15 +69,23 @@ pub(super) async fn about(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectIn
 }
 
 /// GET /mining/ws: the mining port over a WebSocket, each message a line of its protocol.
-pub(super) async fn socket(Shared(api): Shared<Api>, upgrade: WebSocketUpgrade) -> Result<Response, ApiError> {
+pub(super) async fn socket(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Result<Response, ApiError> {
     let (_, listening) = port(&api).await?;
     let to = local(listening);
 
-    Ok(upgrade.max_message_size(MOST_LINE as usize).on_upgrade(move |socket| relay(socket, to)).into_response())
+    // The relay outlives this request, so the per-request gate does not cover it: count it here,
+    // by who asked, and let the count go when the relay ends.
+    let who = super::asker(peer, &headers, &api.trusted_proxies);
+    let Some(counted) = super::InFlight::enter(&api.mining_relays, who) else {
+        return Err(ApiError::Unavailable("too many mining relays open from you at once; close one and try again".to_string()));
+    };
+
+    Ok(upgrade.max_message_size(MOST_LINE as usize).on_upgrade(move |socket| relay(socket, to, counted)).into_response())
 }
 
-/// Passes lines between the WebSocket and the mining port until either closes.
-async fn relay(socket: WebSocket, to: SocketAddr) {
+/// Passes lines between the WebSocket and the mining port until either closes. Holds the relay's
+/// count until it returns, which drops it.
+async fn relay(socket: WebSocket, to: SocketAddr, _counted: super::Counted) {
     let stream = match tokio::net::TcpStream::connect(to).await {
         Ok(stream) => stream,
         Err(err) => return log::warn!("[http] the mining port {to} did not take the WebSocket's relay: {err}"),

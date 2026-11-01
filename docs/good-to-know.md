@@ -132,11 +132,17 @@ other pages explain each part in full; this one is the short list to keep in min
 - **Tokens keep balances where light clients can prove them.** The token standard puts each
   holder's balance in the `balances` namespace under the holder's address text. A token that
   keeps them elsewhere still works, but no wallet can prove what it holds.
-- **Floods are turned away at the door.** Gossiped transactions and votes, and submissions, count
-  against a backlog: 10,000 in all and 1,000 from any one peer by default
+- **Floods are turned away at the door.** Gossiped blocks, transactions and votes, and submissions,
+  count against a backlog: 10,000 in all and 1,000 from any one peer by default
   (`--max-gossip-backlog`, `--max-gossip-per-peer`). Past it they are dropped, `POST /txs`
   answers 503, and a peer over its share 10 times in a minute is disconnected. It can come back
-  at once: there are no bans yet (see [Node](node.md#the-gossip-backlog)).
+  at once: there are no bans yet (see [Node](node.md#the-gossip-backlog)). A block counts for its
+  sender's share too, so a peer streaming blocks whose parent the node lacks cannot make it decode
+  and queue them without bound; the slot is let go once the node has judged the block.
+- **A cheap request is not verified before it is priced.** A submitted or gossiped transaction has
+  its nonce and, on a fee chain, its balance checked against the tip before its signature is
+  verified, and a multisig's members' signatures only after that: a flood from a fresh, unfunded
+  key costs no signature checks, and the same member's signature sent many times over costs one.
 - **A node only streams when asked.** `--stream` turns on `GET /stream`. Without it, clients
   such as the explorer and the wallet poll.
 - **The apps' stream only says when to ask.** A wallet and the explorer's light client take from it
@@ -149,6 +155,10 @@ other pages explain each part in full; this one is the short list to keep in min
   little, as fuel pays only for the input and dynamic values may share their bytes: 328 KB of offsets at
   one long value came to 537 MB, outside any VM's memory limit. It is a rule every node must apply alike,
   so it goes out to all nodes at once.
+  - **A fixed array's length is capped where a type is parsed,** at `u32::MAX`, so measuring a static
+    type's size cannot overflow a pointer, which once wrapped on a release node and panicked on an
+    overflow-checked one, and so every node reads the same types whatever its pointer width. Far above
+    any real ABI; a longer one is refused, not decoded.
 - **Read-only calls hold up the API.** `POST /call` runs a contract under the chain's fuel cap on
   the API's one thread, and every other request waits for it. Behind nginx, an address gets 5 a second; see
   [Docker](docker.md#what-is-exposed).

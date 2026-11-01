@@ -16,7 +16,7 @@ use {
     r#macro::document,
     serde_json::{Value, json},
     std::collections::{BTreeMap, VecDeque},
-    std::net::{SocketAddr, TcpListener, TcpStream},
+    std::net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     std::sync::atomic::{AtomicBool, Ordering},
     std::sync::{Arc, Condvar, Mutex, MutexGuard},
     std::thread::JoinHandle,
@@ -31,6 +31,10 @@ pub const SPAN: u64 = 1 << 48;
 const RANGES: u64 = 1 << 15;
 /// The most connections, workers and handshakes together, the port takes at once.
 const MOST_CONNECTIONS: usize = 256;
+/// The most of those any one address but loopback may hold: a rig runs several workers from one
+/// place, but no host fills the port by itself. Loopback is exempt, as the node's own WebSocket
+/// relay comes from it; browsers mining through the relay are capped per address at the HTTP layer.
+const MOST_PER_IP: usize = 32;
 /// How long a connection has to finish its handshake.
 const HANDSHAKE: Duration = Duration::from_secs(10);
 pub use super::protocol::{PING, QUIET};
@@ -572,7 +576,7 @@ impl Drop for Pool {
 
 /// Takes connections until the pool stops, a thread for each, and waits for them all to end.
 fn accept(listener: &TcpListener, state: &Arc<State>) {
-    let mut connections: Vec<JoinHandle<()>> = Vec::new();
+    let mut connections: Vec<(IpAddr, JoinHandle<()>)> = Vec::new();
     let mut next: u64 = 0;
     #[cfg(feature = "pool")]
     let mut saved = std::time::Instant::now();
@@ -590,10 +594,21 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
 
         match listener.accept() {
             Ok((stream, peer)) => {
-                connections.retain(|connection| !connection.is_finished());
+                connections.retain(|(_, connection)| !connection.is_finished());
 
                 if connections.len() >= MOST_CONNECTIONS {
                     log::warn!("[mining] {peer}: {MOST_CONNECTIONS} connections already; turned away");
+
+                    continue;
+                }
+
+                // No one address but loopback may take more than its share, so an idle flood from
+                // one host cannot fill the port and lock every real worker out. The relay on this
+                // machine comes from loopback, and its own per-IP cap stands at the HTTP layer.
+                let ip = peer.ip();
+
+                if !ip.is_loopback() && connections.iter().filter(|(had, _)| *had == ip).count() >= MOST_PER_IP {
+                    log::warn!("[mining] {peer}: {MOST_PER_IP} connections from this address already; turned away");
 
                     continue;
                 }
@@ -615,7 +630,7 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
                 });
 
                 match thread {
-                    Ok(thread) => connections.push(thread),
+                    Ok(thread) => connections.push((ip, thread)),
                     Err(err) => log::error!("[mining] a worker's thread did not start: {err}"),
                 }
             }
@@ -627,7 +642,7 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
         }
     }
 
-    for connection in connections {
+    for (_, connection) in connections {
         let _ = connection.join();
     }
 }

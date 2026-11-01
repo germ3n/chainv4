@@ -370,6 +370,50 @@ impl NodeHandle {
 
         report.await.map_err(|_| SubmitError::Stopped)
     }
+
+    #[cfg(feature = "ethereum")]
+    #[document(
+        parent = "NodeHandle",
+        summary = "Asks the node one narrow question about its mempool, answered without copying the mempool out: the highest nonce a sender has waiting, or an Ethereum-signed transaction by its hash.",
+        returns = "The answer, or Stopped when the node is not running.",
+    )]
+    pub async fn mempool(&self, query: MempoolQuery) -> Result<MempoolAnswer, SubmitError> {
+        let (reply, answer) = oneshot::channel();
+
+        self.inbox
+            .send(NetEvent::MempoolAsk { query, reply })
+            .map_err(|_| SubmitError::Stopped)?;
+
+        answer.await.map_err(|_| SubmitError::Stopped)
+    }
+}
+
+#[cfg(feature = "ethereum")]
+#[document(
+    summary = "A narrow question a client asks about the node's mempool, answered without cloning it: see NetEvent::MempoolAsk.",
+    category = "Node",
+    see_also = "MempoolAnswer, NodeHandle::mempool",
+)]
+#[derive(Debug)]
+pub enum MempoolQuery {
+    #[document(summary = "The highest nonce this sender has waiting, for a pending nonce count.")]
+    HighestNonce(crate::structs::address::Address),
+    #[document(summary = "An Ethereum-signed transaction by the keccak256 of its raw bytes.")]
+    EthereumByHash([u8; 32]),
+}
+
+#[cfg(feature = "ethereum")]
+#[document(
+    summary = "The answer to a MempoolQuery.",
+    category = "Node",
+    see_also = "MempoolQuery",
+)]
+#[derive(Debug)]
+pub enum MempoolAnswer {
+    #[document(summary = "The highest nonce waiting from the sender, or None when it has none waiting.")]
+    HighestNonce(Option<u64>),
+    #[document(summary = "The Ethereum transaction found, or None when none waits by that hash.")]
+    Ethereum(Option<Box<SignedTx>>),
 }
 
 #[document(
@@ -883,7 +927,7 @@ impl Node {
 
         // Handled now, whatever comes of it, so it no longer counts against its peer.
         match &event {
-            NetEvent::Vote { from, .. } => self.backlog.release(Origin::Peer(*from)),
+            NetEvent::Block { from, .. } | NetEvent::Vote { from, .. } => self.backlog.release(Origin::Peer(*from)),
             NetEvent::PeerDown(peer) => self.backlog.forget(peer),
             _ => {}
         }
@@ -994,6 +1038,10 @@ impl Node {
             NetEvent::Listening(address) => self.listening.push(address),
             NetEvent::Report { txs, reply } => {
                 let _ = reply.send(self.report(now, txs));
+            }
+            #[cfg(feature = "ethereum")]
+            NetEvent::MempoolAsk { query, reply } => {
+                let _ = reply.send(self.answer_mempool(query));
             }
         }
 

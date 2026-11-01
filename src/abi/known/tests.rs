@@ -194,11 +194,13 @@ fn offsets_all_pointing_at_one_long_value_cannot_blow_up_what_reads_them() {
 }
 
 #[test]
-fn a_pasted_abi_too_big_to_count_reads_nothing_rather_than_overflowing() {
-    let kept = pasted("h", &format!(r#"{{"name": "x", "type": "uint256[{}]"}}"#, usize::MAX));
-    let input = kept.functions[0].selector();
+fn a_pasted_abi_with_a_fixed_array_too_big_to_measure_is_refused_at_parse() {
+    // Once this type's element count times a word overflowed a pointer while it was measured for
+    // the head advance, wrapping on a release node and panicking on an overflow-checked one; now
+    // the length is capped at parse, so the ABI that names it does not read at all, on any build.
+    let json = format!(r#"[{{"type": "function", "name": "h", "stateMutability": "nonpayable", "inputs": [{{"name": "x", "type": "uint256[{}]"}}], "outputs": []}}]"#, usize::MAX);
 
-    assert!(read_call(Some(&kept), &[], &input).is_none());
+    assert!(Abi::parse(&json).is_err());
 }
 
 #[test]

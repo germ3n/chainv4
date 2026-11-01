@@ -143,6 +143,28 @@ impl Mempool {
 
     #[document(
         parent = "Mempool",
+        summary = "The highest nonce this sender has waiting, so a pending nonce count can follow it. A range over the sender's keys, not a scan of the whole mempool.",
+        returns = "The highest nonce waiting from the sender, or None when it has none waiting.",
+    )]
+    pub fn highest_nonce(&self, sender: &Address) -> Option<u64> {
+        self.txs.range((*sender, 0)..=(*sender, u64::MAX)).next_back().map(|((_, nonce), _)| *nonce)
+    }
+
+    #[cfg(feature = "ethereum")]
+    #[document(
+        parent = "Mempool",
+        summary = "An Ethereum-signed transaction waiting by the keccak256 of its raw bytes, the hash its own nodes name it by. Scans the mempool once rather than copying it out for the caller to scan.",
+        returns = "The transaction, or None when none waits by that hash.",
+    )]
+    pub fn ethereum_by_hash(&self, hash: &[u8; 32]) -> Option<SignedTx> {
+        self.txs.values().find_map(|waiting| match &waiting.tx.tx {
+            Tx::Ethereum { raw } if &crate::crypto::ethereum::tx_hash(raw) == hash => Some(waiting.tx.clone()),
+            _ => None,
+        })
+    }
+
+    #[document(
+        parent = "Mempool",
         summary = "Admits a transaction after checking its signature, that its nonce is not already used, and on a chain with fees, that its gas limit could fit a block, its price could be taken, and its sender can pay for it now.",
         params = {
             tx = "The transaction.",
@@ -195,20 +217,23 @@ impl Mempool {
         see_also = "Mempool::insert",
     )]
     pub fn check(tx: &SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
-        checked.map_err(MempoolError::Invalid)?;
+        // Cheap state checks first, so a transaction that cannot pay or whose nonce is used is
+        // turned away before its signature, and a multisig's members' signatures, are verified.
+        Self::affordable(tx, state, fees)?;
+        Self::backed(tx, checked, genesis, state)
+    }
 
-        // A multisig's transaction that its members do not back yet never waits: it could not run,
-        // and nobody would pay for the room it took.
-        if let Tx::Multisig { account, tx: inner, signatures } = &tx.tx {
-            let body = crate::registry::multisig::MultisigBody { account: *account, tx: (**inner).clone(), nonce: tx.nonce, fee: tx.fee };
-
-            match crate::registry::Multisigs::new(state).backing(&body, signatures, genesis) {
-                Ok((policy, backed)) if backed >= policy.threshold => {}
-                Ok((policy, backed)) => return Err(MempoolError::Multisig(RegistryError::NotEnoughMembers { backed, needed: policy.threshold })),
-                Err(RegistryError::Db(err)) => return Err(MempoolError::Db(err)),
-                Err(err) => return Err(MempoolError::Multisig(err)),
-            }
-        }
+    #[document(
+        parent = "Mempool",
+        summary = "The checks that need no cryptography: that the nonce is not already used, and on a chain with fees, that the gas limit could fit a block, the price could be taken, and the sender can pay for the limit now. A node runs these before verifying a signature, so unpaid work is turned away cheaply.",
+        params = {
+            tx = "The transaction, whose sender's state these are checked against.",
+            state = "The state at the tip.",
+            fees = "The chain's fees, if it has any.",
+        },
+        see_also = "Mempool::check, Mempool::backed",
+    )]
+    pub fn affordable(tx: &SignedTx, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
         let account = Accounts::new(state).get(&tx.sender())?;
 
         if tx.nonce < account.nonce {
@@ -228,6 +253,36 @@ impl Mempool {
 
             if tx.fee.reserve().is_none_or(|reserve| reserve > account.balance) {
                 return Err(MempoolError::CannotPay);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "Mempool",
+        summary = "The checks that cost cryptography: the transaction's own signature, going by what verify found, and for a multisig's own transaction, that enough of its members back it. Run after affordable, so a transaction that could not be admitted anyway never costs a verify.",
+        params = {
+            tx = "The transaction.",
+            checked = "What its verify returned.",
+            genesis = "The chain's genesis id, which a multisig's members sign over.",
+            state = "The state at the tip.",
+        },
+        see_also = "Mempool::check, Mempool::affordable",
+    )]
+    pub fn backed(tx: &SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State) -> Result<(), MempoolError> {
+        checked.map_err(MempoolError::Invalid)?;
+
+        // A multisig's transaction that its members do not back yet never waits: it could not run,
+        // and nobody would pay for the room it took.
+        if let Tx::Multisig { account, tx: inner, signatures } = &tx.tx {
+            let body = crate::registry::multisig::MultisigBody { account: *account, tx: (**inner).clone(), nonce: tx.nonce, fee: tx.fee };
+
+            match crate::registry::Multisigs::new(state).backing(&body, signatures, genesis) {
+                Ok((policy, backed)) if backed >= policy.threshold => {}
+                Ok((policy, backed)) => return Err(MempoolError::Multisig(RegistryError::NotEnoughMembers { backed, needed: policy.threshold })),
+                Err(RegistryError::Db(err)) => return Err(MempoolError::Db(err)),
+                Err(err) => return Err(MempoolError::Multisig(err)),
             }
         }
 
@@ -422,6 +477,23 @@ mod tests {
     }
 
     #[test]
+    fn the_highest_nonce_a_sender_has_waiting_comes_from_a_range_not_a_scan() {
+        let state = state();
+        let mut mempool = Mempool::new(100);
+        let (one, two) = (keypair(), Keypair::generate(keypair().public().key_type()).unwrap());
+
+        assert_eq!(mempool.highest_nonce(&one.public().address()), None, "none waiting");
+
+        for nonce in 0..5 {
+            mempool.add(transfer(&one, nonce), &genesis(), &state, None).unwrap();
+        }
+        mempool.add(transfer(&two, 0), &genesis(), &state, None).unwrap();
+
+        assert_eq!(mempool.highest_nonce(&one.public().address()), Some(4), "the sender's own run, not another's");
+        assert_eq!(mempool.highest_nonce(&two.public().address()), Some(0));
+    }
+
+    #[test]
     fn selection_stops_at_each_bound_of_its_budget() {
         let state = state();
         let mut mempool = Mempool::new(100);
@@ -480,6 +552,20 @@ mod tests {
         roomy.insert(again.clone()).unwrap();
 
         assert_eq!(roomy.insert(again), Err(MempoolError::Duplicate));
+    }
+
+    #[test]
+    fn the_cheap_checks_come_before_the_signature_so_an_unpayable_transaction_costs_no_verify() {
+        let state = state();
+        let fees = FeeConfig::dev().build();
+        let genesis = genesis();
+        // A poor sender's transaction, whose signature does not hold either: affordable catches it
+        // first, so the result is CannotPay, not Invalid, which proves the verify was never reached.
+        let poor = Keypair::generate(keypair().public().key_type()).unwrap();
+        let tx = SignedTx::sign(Tx::Burn { from: poor.public().address(), amount: Amount::U128(1) }, 0, FeeOffer { gas_limit: 100_000, max_price: fees.pricing().floor(), tip: u256::ZERO }, &poor);
+
+        assert_eq!(Mempool::affordable(&tx, &state, Some(&fees)), Err(MempoolError::CannotPay));
+        assert_eq!(Mempool::check(&tx, Err(VerifyError::InvalidSignature), &genesis, &state, Some(&fees)), Err(MempoolError::CannotPay), "cheap first");
     }
 
     #[test]

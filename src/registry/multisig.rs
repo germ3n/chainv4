@@ -433,10 +433,19 @@ impl<'a> Multisigs<'a> {
         let policy = self.get(&body.account)?.ok_or(RegistryError::NotMultisig)?;
         let bytes = body.signing_bytes(genesis);
         let mut backers: Vec<PublicKey> = Vec::new();
+        let mut verified: Vec<&crate::structs::tx::MemberSignature> = Vec::new();
 
         for signed in signatures {
             policy.member(&signed.key).ok_or(RegistryError::NotMember)?;
-            signed.key.verify_signature(&bytes, &signed.signature).map_err(|_| RegistryError::BadMemberSignature)?;
+
+            // The same signature sent again is the same work and the same answer, so it is verified
+            // once however many copies ride along: a transaction carrying twenty copies of one
+            // member's signature costs one verify, not twenty. A different signature, even from the
+            // same member, is still verified, so a bad one is still refused.
+            if !verified.contains(&signed) {
+                signed.key.verify_signature(&bytes, &signed.signature).map_err(|_| RegistryError::BadMemberSignature)?;
+                verified.push(signed);
+            }
 
             if !backers.contains(&signed.key) {
                 backers.push(signed.key);

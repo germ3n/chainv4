@@ -174,12 +174,18 @@ impl Store {
     /// it, the next save writes them both. Neither reading, each that exists is set aside.
     fn read<T: DeserializeOwned>(&self, name: &str, loaded: &mut Loaded) -> Option<(T, Option<String>)> {
         let (first, copy) = (self.first(name), self.copy(name));
-        let (first_text, copy_text) = (fs::read_to_string(&first).ok(), fs::read_to_string(&copy).ok());
+        let (first_read, copy_read) = (fs::read_to_string(&first), fs::read_to_string(&copy));
+        let absent = |read: &std::io::Result<String>| matches!(read, Err(err) if err.kind() == std::io::ErrorKind::NotFound);
+        // A read that failed for any reason but absence is the device's fault, not the file's: a
+        // lock, a permission, a failing disk. The bytes may be perfectly good, so the file is left
+        // exactly as it is rather than set aside, and nothing is healed, so a later start reads it.
+        let unreadable = |read: &std::io::Result<String>| read.is_err() && !absent(read);
 
-        if first_text.is_none() && copy_text.is_none() && !first.exists() && !copy.exists() {
+        if absent(&first_read) && absent(&copy_read) {
             return None;
         }
 
+        let (first_text, copy_text) = (first_read.as_ref().ok().cloned(), copy_read.as_ref().ok().cloned());
         let read = first_text.as_deref().and_then(|text| ron::from_str::<T>(text).ok()).or_else(|| copy_text.as_deref().and_then(|text| ron::from_str::<T>(text).ok()));
 
         match read {
@@ -188,6 +194,12 @@ impl Store {
                 loaded.heal |= !same;
 
                 Some((value, first_text.filter(|_| same)))
+            }
+            None if unreadable(&first_read) || unreadable(&copy_read) => {
+                let what = if name == SETTINGS { "this device's settings" } else { "a wallet" };
+                loaded.trouble.push(format!("Could not read {what} just now, so it was left in place untouched; this is the device, not the file. Close anything else using it and reopen the app."));
+
+                None
             }
             None => {
                 let kept = self.set_aside(&[first, copy]);
@@ -287,11 +299,45 @@ impl Store {
         settings.wallets = held;
         let text = text?;
 
+        // What to delete: every wallet file this store wrote, and every one already on disk from a
+        // run before it, that no wallet in memory names any more. Going by what was written alone
+        // would leave a removed wallet whose files a kill had left unwritten, and a later start
+        // would read those orphans back in as a wallet the person had taken off this device.
+        let gone: Vec<String> = self
+            .written
+            .keys()
+            .cloned()
+            .chain(self.wallet_ids_on_disk())
+            .filter(|name| !names.contains(name))
+            .collect::<HashSet<String>>()
+            .into_iter()
+            .collect();
+
         Ok(Job {
-            gone: self.written.keys().filter(|name| !names.contains(*name)).cloned().collect(),
+            gone,
             wallets,
             settings: (self.settings_written.as_ref() != Some(&text)).then_some(text),
         })
+    }
+
+    /// The ids of wallets with a file on disk, first or copy: what a save reconciles against, so a
+    /// removed wallet's orphan files are cleared even if this run never wrote them.
+    fn wallet_ids_on_disk(&self) -> Vec<String> {
+        let mut ids = Vec::new();
+
+        for entry in fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+
+            if name.ends_with(&format!(".{WRITING}")) {
+                continue;
+            } else if let Some(stem) = name.strip_suffix(".ron").filter(|stem| !stem.contains('.') && *stem != SETTINGS) {
+                ids.push(stem.to_string());
+            } else if let Some(stem) = name.strip_suffix(".copy.ron").filter(|stem| *stem != SETTINGS) {
+                ids.push(stem.to_string());
+            }
+        }
+
+        ids
     }
 
     /// Waits for the save under way, and takes what came of it. Whether nothing has failed.
@@ -829,5 +875,53 @@ mod tests {
         assert_eq!(combined.wallets.len(), 2);
         assert_eq!(combined.wallets[0].name, "Here");
         assert_eq!(combined.node, "http://here");
+    }
+
+    #[test]
+    fn a_removed_wallets_orphan_files_are_cleared_even_when_this_run_never_wrote_them() {
+        let folder = Folder::new("orphans");
+        let mut kept = settings(&["Keep", "Drop"]);
+        saved(&mut folder.store(), &mut kept);
+        let dropped = id_of(&kept, "Drop");
+
+        assert!(folder.path(&format!("{dropped}.ron")).exists());
+
+        // A fresh store has written nothing this run. Remove "Drop" and save: its files, on disk
+        // from the run before, must go, or a later load reads them back as a wallet taken off.
+        let mut store = folder.store();
+        kept.wallets.retain(|entry| entry.name != "Drop");
+        saved(&mut store, &mut kept);
+
+        assert!(!folder.path(&format!("{dropped}.ron")).exists(), "the first file is gone: {:?}", folder.names());
+        assert!(!folder.path(&format!("{dropped}.copy.ron")).exists(), "the copy too");
+        assert_eq!(listed(&folder.store().load()), ["Keep"], "and it does not come back");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wallet_that_cannot_be_read_now_is_left_in_place_not_set_aside() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let folder = Folder::new("unreadable");
+        let mut kept = settings(&["Mine"]);
+        saved(&mut folder.store(), &mut kept);
+        let id = id_of(&kept, "Mine");
+
+        // Both the file and its copy unreadable: a lock or a permission, not corruption. The bytes
+        // may be good, so neither is set aside, nothing heals, and a later start reads it.
+        for suffix in ["ron", "copy.ron"] {
+            fs::set_permissions(folder.path(&format!("{id}.{suffix}")), fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let loaded = folder.store().load();
+
+        assert!(loaded.wallets.is_empty(), "it could not be read this time");
+        assert!(!loaded.heal, "nothing heals, so the file is not dropped from the list");
+        assert!(loaded.trouble.iter().any(|why| why.contains("left in place")), "{:?}", loaded.trouble);
+        assert!(folder.path(&format!("{id}.ron")).exists() && !folder.names().iter().any(|name| name.contains("unreadable-")), "nothing set aside: {:?}", folder.names());
+
+        for suffix in ["ron", "copy.ron"] {
+            fs::set_permissions(folder.path(&format!("{id}.{suffix}")), fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 }

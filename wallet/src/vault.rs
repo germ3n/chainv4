@@ -726,9 +726,21 @@ fn plain(book: &Book) -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(plain)
 }
 
+/// How a password is stretched, pinned rather than left to `Argon2::default()`: Argon2id, version
+/// 0x13, and the cost this build has always sealed with (argon2 0.5's defaults: 19456 KiB, 2
+/// passes, 1 lane, a 32-byte key). The parameters are not written beside a seal, so a future bump
+/// of the argon2 crate that moved its defaults would otherwise stretch to a different key and lock
+/// every existing wallet out, with no way to tell a wrong password from a changed default. Naming
+/// them here keeps them still; changing them is a change every vault must be re-sealed across.
+fn argon2() -> Argon2<'static> {
+    let params = argon2::Params::new(19_456, 2, 1, Some(32)).expect("the pinned Argon2 parameters are valid");
+
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+}
+
 fn stretch(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
     let mut key = Zeroizing::new([0; 32]);
-    Argon2::default()
+    argon2()
         .hash_password_into(password.as_bytes(), salt, &mut *key)
         .map_err(|err| format!("could not stretch the password: {err}"))?;
 
@@ -1525,11 +1537,24 @@ mod tests {
     }
 
     #[test]
+    fn the_password_stretch_is_pinned_and_still_matches_the_crate_default() {
+        // The pin exists so a future argon2 bump that moves its default cost cannot stretch to a
+        // different key and lock every wallet out. While the pin equals the default, this holds; if
+        // a bump breaks it, revisit the pin with a version on Sealed rather than changing it under
+        // sealed vaults.
+        let (salt, mut pinned, mut default) = ([7u8; 16], [0u8; 32], [0u8; 32]);
+        argon2().hash_password_into(b"a password", &salt, &mut pinned).unwrap();
+        Argon2::default().hash_password_into(b"a password", &salt, &mut default).unwrap();
+
+        assert_eq!(pinned, default, "the pinned parameters still match the crate default");
+    }
+
+    #[test]
     fn a_vault_with_a_password_or_none_is_made_and_read_as_it_always_was() {
-        // Sealed by hand as every build has: Argon2id's default, then the cipher, with no HKDF.
+        // Sealed by hand as every build has: the pinned Argon2id stretch, then the cipher, no HKDF.
         let salt = [3; 16];
         let mut key = [0; 32];
-        Argon2::default().hash_password_into(b"correct horse", &salt, &mut key).unwrap();
+        argon2().hash_password_into(b"correct horse", &salt, &mut key).unwrap();
         let plain = br#"{"phrase":null,"accounts":[],"watch":false,"swaps":[]}"#;
         let nonce = [5; 12];
         let sealed = Sealed {

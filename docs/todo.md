@@ -17,6 +17,39 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
   - tests that test nothing, or the wrong thing, and places that want more;
   - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
     todo asks for it), and fix what turns up, a commit per feature.
+- [x] **Review fixes: consensus and what strangers can send.** Done 2026-11-01, from the review in
+  the queue. In the node and its API:
+  - the ABI type parser caps a fixed array's length (`u32::MAX`), so measuring a static type's size
+    cannot overflow a pointer, which wrapped on a release node and panicked on an overflow-checked
+    one, and every node reads the same types whatever its width;
+  - `POST /rpc` caps a batch at 100 requests, and `eth_getTransactionByHash`/`eth_getTransactionCount`
+    ask the mempool a narrow question rather than cloning all of it on the node loop;
+  - the mining port caps connections per address (loopback, the relay's, exempt), and the HTTP
+    `/mining/ws` relay is capped per asker;
+  - a transaction's nonce and balance are checked against the tip before its signature is verified,
+    and a multisig verifies each distinct member signature once (`Mempool::affordable`/`backed`,
+    `Gate::affordable`, dedup in `Multisigs::backing`);
+  - gossiped blocks count against the per-peer backlog, released once judged;
+  - `--trusted-proxy` names the reverse proxies whose `X-Forwarded-For` the per-IP limits believe;
+    loopback alone otherwise, so a neighbour on a shared private network cannot spoof a client.
+- [x] **Review fixes: the wallet, its signer and the extension.** Done 2026-11-01, from the same
+  review. In the wallet:
+  - every signing screen lays a single transaction out in the same step frame a batch's step uses,
+    so a lone contract or EVM call shows its value, recipient and calldata rather than a one-line
+    summary, on the Send review, the offline signer, and a multisig bundle and proposal; the offline
+    multisig review now shows the fee a member signs for and the bundle's chain
+    (`airgap::laid`, `steps::single`, `views::steps::of_one`);
+  - changing the password writes the new seal at once and retires the old biometric key instead of
+    forgetting it before the seal is on disk (`views/settings::change_password`);
+  - the Argon2 password stretch is pinned, not left to the crate default, so a future bump cannot
+    lock sealed wallets out (`vault::argon2`);
+  - a wallet whose files cannot be read now (a lock or a permission, not corruption) is left in
+    place, not set aside; a removed wallet's orphan files are cleared even when this run never wrote
+    them; a new wallet that fails to seal is not opened; a browser save that does not take is
+    reported (`store::read`, `store::job`, `lock::keep`, `app::save`).
+  - The browser extension refuses a provider to an opaque origin, caps a site's waiting requests and
+    will not reopen the approval window the instant it is dismissed, drops a page's requests when it
+    goes, and will not relay a read to a loopback or private node for a site that has not connected.
 - [x] **A fresh test chain on the VPS.** Done 2026-10-28, genesis `0x9a7fbd89…`, as
   [Deploying](deploy.md) records; external EVM gateways wait for a funded key there, and the
   review pass runs on it. Once all queued changes and batches are in, delete the

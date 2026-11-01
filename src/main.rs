@@ -272,6 +272,14 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long)]
     report_token: Option<std::path::PathBuf>,
+    /// A reverse proxy's address whose X-Forwarded-For header the API believes, so it counts the
+    /// client it names against the per-IP limits rather than the proxy. Loopback is always
+    /// believed, which covers a proxy on the same host; name a proxy here only when it runs on
+    /// another box on a private network the node shares, as any unlisted host there could otherwise
+    /// spoof a client's address. Repeat for several.
+    #[cfg(feature = "http")]
+    #[arg(long, value_name = "IP")]
+    trusted_proxy: Vec<std::net::IpAddr>,
     /// Where workers reach the mining port from outside, such as 203.0.113.7:4002 or
     /// ADDRESS.onion:4002, as GET /status and GET /pool tell the apps; by default they take the
     /// API's host and the port --mining listens on.
@@ -729,6 +737,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             },
             sharing: api::sharing::Sharing::new(args.report, &args.hide, &args.show)?,
             report_token: args.report_token.as_deref().map(chainv4::mining::read_token).transpose()?,
+            trusted_proxies: args.trusted_proxy.clone(),
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");

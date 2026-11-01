@@ -1640,8 +1640,24 @@ impl eframe::App for Wallet {
             }
             None => eframe::set_value(storage, STORAGE_KEY, &self.settings),
         }
+        // In the browser there is no store to report a failure, and eframe only logs when the
+        // site's storage is full or blocked, so the wallet could keep a change in this tab alone
+        // with nothing shown. Read it back and compare, and say so when it did not take.
         #[cfg(target_arch = "wasm32")]
-        eframe::set_value(storage, STORAGE_KEY, &self.settings);
+        {
+            eframe::set_value(storage, STORAGE_KEY, &self.settings);
+            storage.flush();
+
+            let trouble = "This browser would not store the wallet: its site storage may be full or blocked. What you changed stays in this tab until that is fixed.".to_string();
+            let saved = eframe::get_value::<Settings>(storage, STORAGE_KEY).and_then(|settings| serde_json::to_string(&settings).ok());
+            let took = saved.is_some() && saved == serde_json::to_string(&self.settings).ok();
+
+            match took {
+                true => self.storage_trouble.retain(|why| why != &trouble),
+                false if !self.storage_trouble.contains(&trouble) => self.storage_trouble.push(trouble),
+                false => {}
+            }
+        }
 
         #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
         {

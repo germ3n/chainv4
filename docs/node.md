@@ -263,6 +263,9 @@ What is hidden keeps its place in the answer, empty, so apps from before still r
   with `Authorization: Bearer TOKEN`, from anywhere. Send it over HTTPS or Tor alone. A token the
   node does not take shares no more than none, and `GET /node` says `token_refused`.
 
+This is loopback alone: unlike the per-IP rate limits, report privacy does not honor
+`--trusted-proxy`, so naming a proxy there never lets it see what the operator sees.
+
 **What it does not cover:** what the network itself tells. A node's peers learn its address by
 connecting to it, and Kademlia and identify pass addresses between peers: this is about the API.
 `GET /mining` still gives the mining port, and `--mining-public` and `--mining-onion` if set, which miners need; `GET
@@ -358,13 +361,14 @@ is forgotten.
 
 ## The gossip backlog
 
-Gossiped transactions and votes, and transactions clients submit, wait between the network and
-the node loop: in the verifier's queue, then the loop's. The backlog (`src/net/backlog.rs`)
+Gossiped blocks, transactions and votes, and transactions clients submit, wait between the network
+and the node loop: in the verifier's queue, then the loop's. The backlog (`src/net/backlog.rs`)
 counts them, so a flood is turned away at the door instead of queueing without end.
-- **Counted in:** the network thread counts a transaction or vote in as it arrives, before it is
-  even decoded. A `NodeHandle` counts a submission in.
-- **Counted out:** the gate counts it out once it handled it, taken or refused, and the loop a
-  vote.
+- **Counted in:** the network thread counts a block, transaction or vote in as it arrives, before it
+  is even decoded. A `NodeHandle` counts a submission in.
+- **Counted out:** the gate counts a transaction out once it handled it, taken or refused, and the
+  loop counts a block or vote out once it has judged it. A block counting in bounds a peer that
+  streams blocks whose parent the node lacks: each would otherwise be decoded and queued for free.
 
 **The limits:**
 

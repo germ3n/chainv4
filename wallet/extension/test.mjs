@@ -237,3 +237,70 @@ test("EIP-6963 announces the provider, and window.ethereum is left to a wallet t
     window.dispatchEvent(new Event("eip6963:requestProvider"));
     assert.equal(announced.length, 2, "announced again when a site asks");
 });
+
+test("an opaque-origin page gets no wallet, so it cannot share a grant with another", async () => {
+    const bg = background();
+    // A sandboxed page's origin is "null"; the background must serve it no provider.
+    const port = bg.connect("chainv4-provider", { origin: "null", url: "null/" });
+    port.near.postMessage({ id: 1, method: "eth_chainId" });
+    await settle();
+
+    assert.equal(port.inbox.some((message) => message.id === 1), false, "a refused port is never answered");
+});
+
+test("a page cannot reach a private node through the extension until it connects", async () => {
+    const bg = background({ node: "http://127.0.0.1:8545" });
+    const { provider } = site(bg);
+
+    // Unconnected, a read to a loopback node is refused: the extension is no way past the browser.
+    await assert.rejects(provider.request({ method: "eth_blockNumber" }), { code: 4100 });
+
+    // A wallet that keeps the loopback node, and the site connects.
+    const port = bg.connect("chainv4-wallet", { url: "chrome-extension://wallet/index.html" });
+    port.near.postMessage({ type: "state", node: "http://127.0.0.1:8545", chainId: "0x22cc", accounts: ["0x" + "ab".repeat(20)], unlocked: true });
+    await settle();
+    const asked = provider.request({ method: "eth_requestAccounts" });
+    await settle();
+    const requests = port.inbox.filter((message) => message.type === "requests").at(-1)?.requests ?? [];
+    port.near.postMessage({ type: "answer", id: requests[0].id, result: ["0x" + "ab".repeat(20)] });
+    await asked;
+
+    assert.equal(await provider.request({ method: "eth_blockNumber" }), "0x10", "connected, the read goes through");
+});
+
+test("a site cannot pile up more than a few requests waiting", async () => {
+    const bg = background();
+    const { provider } = site(bg);
+    const open = wallet(bg);
+    const connected = provider.request({ method: "eth_requestAccounts" });
+    await settle();
+    open.answer(open.requests()[0].id, ["0x" + "ab".repeat(20)]);
+    await connected;
+
+    // The four that are taken stay pending (the wallet never answers them here); the extras reject
+    // at once. Counting in a handler rather than awaiting all of them keeps the pending ones from
+    // hanging the test.
+    let rejected = 0;
+    Array.from({ length: 6 }, () => provider.request({ method: "personal_sign", params: ["0x6869", "0x" + "ab".repeat(20)] }).then(() => {}, (err) => err.code === 4001 && rejected++));
+    await settle();
+
+    assert.ok(open.requests().filter((request) => request.method === "personal_sign").length <= 4, "at most four wait");
+    assert.ok(rejected >= 2, "the rest are turned away");
+});
+
+test("a page that goes drops what it left waiting", async () => {
+    const bg = background();
+    const { provider, port } = site(bg);
+    const open = wallet(bg);
+    const asked = provider.request({ method: "eth_requestAccounts" }).catch((err) => err);
+    await settle();
+
+    assert.equal(open.requests().length, 1);
+
+    // The page navigates away: its port drops, and the waiting request goes with it.
+    port().near.disconnect();
+    await settle();
+
+    assert.equal(open.requests().length, 0, "the wallet no longer shows it");
+    assert.equal((await asked).code, 4001);
+});

@@ -18,6 +18,18 @@ use {
 /// A transaction's batch in words, by what this wallet knows of the coin and the tokens: None for
 /// anything but a batch, or a multisig's or an approval's of one.
 pub fn of_tx(ctx: &Ctx, tx: &Tx, landing: Option<&Landing>) -> Option<Steps> {
+    Some(laid(ctx, tx.batch_steps()?, landing))
+}
+
+/// A single transaction laid out in the same step frame a batch's step is, by what this wallet
+/// knows of the coin and its tokens: for the signing screens, so a lone call shows its amount, its
+/// recipient and its data rather than a one-line summary.
+pub fn of_one(ctx: &Ctx, tx: &Tx, landing: Option<&Landing>) -> Steps {
+    laid(ctx, std::slice::from_ref(tx), landing)
+}
+
+/// The step layout of these transactions, naming the coin and tokens as this wallet proves them.
+fn laid(ctx: &Ctx, txs: &[Tx], landing: Option<&Landing>) -> Steps {
     let coin = Shown { symbol: ctx.coin.symbol.clone(), decimals: ctx.coin.decimals };
     let tokens = |token: &Address| {
         let proven = ctx.chain.tokens.get(&token.to_string())?;
@@ -25,7 +37,7 @@ pub fn of_tx(ctx: &Ctx, tx: &Tx, landing: Option<&Landing>) -> Option<Steps> {
         Some(Shown { symbol: proven.value.symbol.clone()?, decimals: proven.value.decimals? })
     };
 
-    Some(steps::of(tx.batch_steps()?, &coin, &tokens, landing))
+    steps::of(txs, &coin, &tokens, landing)
 }
 
 /// Where the deploys of a batch this wallet's account sends land, for the Send page to say: only
@@ -59,14 +71,28 @@ pub fn heading(ui: &mut Ui, ctx: &Ctx, steps: &Steps) {
     ui.add_space(6.0);
 }
 
-/// One frame of a step: its number and what it does, and its rows.
+/// One frame of a batch's step: its number and what it does, and its rows.
 pub fn one(ui: &mut Ui, ctx: &Ctx, index: usize, count: usize, step: &steps::Step) {
+    frame(ui, ctx, Some(format!("Step {} of {count}", index + 1)), index, step);
+}
+
+/// The same frame for a single transaction that is not a batch, so its amount, recipient and data
+/// show as a step's do, with no "Step 1 of 1" to call it a batch it is not.
+pub fn single(ui: &mut Ui, ctx: &Ctx, step: &steps::Step) {
+    frame(ui, ctx, None, 0, step);
+}
+
+/// A step's frame: an optional "Step n of m" pill, then what it does and every row it holds.
+fn frame(ui: &mut Ui, ctx: &Ctx, pill: Option<String>, index: usize, step: &steps::Step) {
     let palette = *ctx.palette;
 
     egui::Frame::new().fill(palette.row).corner_radius(8.0).inner_margin(10).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            theme::pill(ui, &format!("Step {} of {count}", index + 1), palette.soft);
+            if let Some(pill) = &pill {
+                theme::pill(ui, pill, palette.soft);
+            }
+
             ui.add(egui::Label::new(theme::strong(&step.kind, 14.5).color(if step.allowed { palette.ink } else { palette.bad })).wrap());
         });
 
