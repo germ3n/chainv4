@@ -1874,12 +1874,12 @@ fn a_node_too_old_for_an_upgrade_its_release_announces_takes_no_block_from_it_on
     let (mut producer, mut producer_net) = node(true);
     let (mut follower, follower_net) = node(false);
     let signer = Keypair::from_seed([4; 32]);
-    let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None };
+    let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None, floor: 0 };
     let ours = Version::ours();
     let upgrade = Upgrade { least: Version::new(ours.major + 1, 0, 0), from: 4 };
     let other_chain = Breaking { chain: vec![9; 32], upgrade: Upgrade { least: upgrade.least, from: 2 } };
     let ours_too = Breaking { chain: follower.chain().genesis().to_bytes(), upgrade };
-    let mut signed = SignedRelease { release: Release { issued: 1, products: Vec::new(), breaking: vec![other_chain, ours_too] }, signatures: Vec::new() };
+    let mut signed = SignedRelease { release: Release { issued: 1, expires: 1_000, products: Vec::new(), breaking: vec![other_chain, ours_too] }, signatures: Vec::new() };
     signed.sign(&signer);
     let releases = Arc::new(Releases::new(keys, None));
     releases.offer(signed, 1).unwrap();
@@ -1907,10 +1907,10 @@ fn a_node_keeps_the_newest_release_across_restarts_and_never_an_older_one() {
     use crate::release::{Release, ReleaseKeys, SignedRelease};
 
     let signer = Keypair::from_seed([5; 32]);
-    let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None };
+    let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None, floor: 0 };
     let file = std::env::temp_dir().join(format!("chainv4-release-{}.json", std::process::id()));
     let issued = |issued: u64| {
-        let mut signed = SignedRelease { release: Release { issued, ..Release::default() }, signatures: Vec::new() };
+        let mut signed = SignedRelease { release: Release { issued, expires: issued + 1_000, ..Release::default() }, signatures: Vec::new() };
         signed.sign(&signer);
 
         signed
@@ -1926,8 +1926,30 @@ fn a_node_keeps_the_newest_release_across_restarts_and_never_an_older_one() {
     assert_eq!(restarted.offer(issued(9), 3), Ok(false));
     assert_eq!(restarted.offer(issued(11), 4), Ok(true));
 
-    let untrusted = Releases::new(ReleaseKeys { threshold: 1, keys: vec![Keypair::from_seed([6; 32]).public()], updates: None }, Some(file.clone()));
+    let untrusted = Releases::new(ReleaseKeys { threshold: 1, keys: vec![Keypair::from_seed([6; 32]).public()], updates: None, floor: 0 }, Some(file.clone()));
 
     assert!(untrusted.known().signed.is_none(), "a kept release counts only while its keys are trusted");
+
+    // A file that does not read goes by the floor alone, and the next one taken writes it again.
+    std::fs::write(&file, "not a manifest").unwrap();
+    let unreadable = Releases::new(ReleaseKeys { floor: 8, ..keys.clone() }, Some(file.clone()));
+
+    assert!(unreadable.known().signed.is_none());
+    assert!(unreadable.offer(issued(7), 5).is_err(), "under the floor built in");
+    assert_eq!(unreadable.offer(issued(8), 5), Ok(true));
+    assert_eq!(Releases::new(keys.clone(), Some(file.clone())).known().signed.map(|signed| signed.release.issued), Some(8));
+    // A file gone is no trouble either, and a folder where it should be is said and survived.
     std::fs::remove_file(&file).unwrap();
+    assert!(Releases::new(keys.clone(), Some(file.clone())).known().signed.is_none());
+    assert!(Releases::new(keys.clone(), Some(std::env::temp_dir())).known().signed.is_none());
+
+    // Past its expires a release is refused, and one taken in time stops counting then, though it
+    // still orders what comes after.
+    let lapsing = Releases::new(keys, None);
+    assert_eq!(lapsing.offer(issued(20), 1_500_000), Err(crate::release::ReleaseError::Expired { expires: 1_020 }));
+    assert!(lapsing.known().error.is_some_and(|why| why.contains("clock")));
+    assert!(lapsing.known().expired(1_500));
+    assert_eq!(lapsing.known().standing(1_500), None);
+    assert_eq!(lapsing.offer(issued(19), 2_000), Ok(false), "still nothing older");
+    assert!(!lapsing.known().expired(1_000));
 }

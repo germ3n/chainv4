@@ -32,6 +32,9 @@ pub enum Installing {
 pub struct UpdateState {
     /// What the release the node last relayed says of this explorer: a newer one, or None.
     pub found: Option<Update>,
+    /// Whether the newest release seen is past its expires: its host is behind, or this device's
+    /// clock is wrong, and no notice can be trusted until one or the other is put right.
+    pub lapsed: bool,
     /// The newest version whose notice was dismissed: a newer one shows again.
     dismissed: Option<Version>,
     /// Shared with the thread downloading.
@@ -127,6 +130,10 @@ fn download(client: &Client, file: chainv4::release::ReleaseFile, newest: Versio
 /// one is downloading or in place. Returns whether Update was pressed.
 pub fn notice(ui: &mut Ui, look: Look, state: &mut UpdateState) -> bool {
     let installing = state.installing();
+    if state.lapsed {
+        ui.label(RichText::new("The newest release this explorer knows of has expired, so it cannot say whether it is up to date: its node's host is behind, or this device's clock is wrong.").small().color(look.palette.warn));
+    }
+
     let Some(update) = state.found.clone().filter(|update| !update.blocks()) else {
         return false;
     };

@@ -396,22 +396,37 @@ fn confirmations(hash: Vec<u8>) -> u64 {
     <[u8; 32]>::try_from(hash).map_or(0, |hash| depth(&hash))
 }
 
-/// Whether a transaction, by its id in Bitcoin's byte order, is the index-th in a main-chain
-/// block, by its Merkle path: the siblings, 32 bytes each, from the transaction up.
+/// Whether bytes are a coinbase, as a block's first transaction is, without its witness: one input,
+/// spending nothing. Never 64 bytes, as an inner node of a Merkle tree is.
+fn is_coinbase(raw: &[u8]) -> bool {
+    raw.len() != 64 && raw.len() >= 41 && raw[4] == 1 && raw[5..37] == [0; 32] && raw[37..41] == [0xff; 4]
+}
+
+/// Whether a transaction, by its id in Bitcoin's byte order, is the index-th in a main-chain block,
+/// by its Merkle path: the siblings, 32 bytes each, from the transaction up. A block's header says
+/// nothing of how tall its tree is, so an inner node, the 64 bytes of two ids, could pass for a
+/// transaction a level up (CVE-2017-12842). So its coinbase comes too, the transaction itself and
+/// its path: it shows how tall the tree is, and the path must be just as long.
 #[export]
-fn includes(block: Vec<u8>, txid: Vec<u8>, index: u64, path: Vec<u8>) -> bool {
+fn includes(block: Vec<u8>, txid: Vec<u8>, index: u64, path: Vec<u8>, coinbase: Vec<u8>, coinbase_path: Vec<u8>) -> bool {
     let (Ok(block), Ok(txid)) = (<[u8; 32]>::try_from(block), <[u8; 32]>::try_from(txid)) else {
         return false;
     };
 
-    if depth(&block) == 0 || !path.len().is_multiple_of(32) || path.len() / 32 > 32 {
+    if depth(&block) == 0 || !path.len().is_multiple_of(32) || path.len() / 32 > 32 || path.len() != coinbase_path.len() || !is_coinbase(&coinbase) {
         return false;
     }
 
     let Some(record) = kept(&block) else {
         return false;
     };
-    let mut at = txid;
+
+    leads_to(&sha256d(&coinbase), 0, &coinbase_path, &record.merkle) && leads_to(&txid, index, &path, &record.merkle)
+}
+
+/// Whether a leaf at a place, by its path, comes to a Merkle root.
+fn leads_to(leaf: &[u8; 32], index: u64, path: &[u8], root: &[u8; 32]) -> bool {
+    let mut at = *leaf;
     let mut index = index;
 
     for sibling in path.chunks(32) {
@@ -426,7 +441,7 @@ fn includes(block: Vec<u8>, txid: Vec<u8>, index: u64, path: Vec<u8>) -> bool {
         index >>= 1;
     }
 
-    index == 0 && at == record.merkle
+    index == 0 && at == *root
 }
 
 /// The difficulty Bitcoin's rules give after a period that started at one time and ended at

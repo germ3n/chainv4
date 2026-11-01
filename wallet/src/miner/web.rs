@@ -260,7 +260,9 @@ fn closed(state: &Rc<RefCell<State>>, event: &CloseEvent) {
         (true, reason) => format!("the node closed the connection: {reason}"),
         (false, _) => format!("the WebSocket closed before the handshake ended, with code {}", event.code()),
     });
-    log::info!("[miner] {why}; connecting again in {}s", RECONNECT_MS / 1_000);
+    // Asked again it would say the same, or mine for someone else: this needs a person.
+    let stopping = why.starts_with(chainv4::mining::protocol::PAYOUT_DIFFERS);
+    log::info!("[miner] {why}; {}", if stopping { "stopping".to_string() } else { format!("connecting again in {}s", RECONNECT_MS / 1_000) });
     (guard.socket, guard.session) = (None, Session::Closed);
     (guard.status.connected, guard.status.trouble) = (false, Some(why));
     // Nonces found from here on belong to no job the next connection knows.
@@ -269,7 +271,9 @@ fn closed(state: &Rc<RefCell<State>>, event: &CloseEvent) {
     guard.ctx.request_repaint();
     drop(guard);
 
-    again(state);
+    if !stopping {
+        again(state);
+    }
 }
 
 /// Connects again once RECONNECT_MS passed, and again after that while it fails.
@@ -498,6 +502,10 @@ impl State {
                 log::info!("[miner] mining as {}{}", self.config.name, if self.config.solo { ", alone" } else { "" });
             }
             Taken::Message(message) => {
+                if let Some(why) = chainv4::mining::protocol::pays_another(&message, Some(&self.config.payout)) {
+                    return Err(why);
+                }
+
                 let heard = work::heard(&mut self.status, &message)?;
                 // Pings come every 20 seconds, however a hidden tab slows its timers.
                 self.rate_if_due();

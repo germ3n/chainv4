@@ -91,7 +91,10 @@ pub struct NamedWithdrawal {
     pub id: u64,
     #[document(summary = "The output script it asked to be paid to.")]
     pub script: Vec<u8>,
+    #[document(summary = "What it burned: it arrives less its share of its release's fee.")]
     pub sats: u64,
+    #[document(summary = "The most it agreed to lose to that share.")]
+    pub most_fee: u64,
     #[document(summary = "queued, proposed or paid.")]
     pub state: String,
     #[document(summary = "The outpoint its release must spend, after one paying it was cancelled.")]
@@ -145,7 +148,7 @@ pub struct ReleaseFacts {
 
 #[cfg(feature = "bitcoin")]
 #[document(
-    summary = "Whether a federation signer should sign a release. The gateway checks all of this when it is proposed; a signer goes over it again, as what it signs pays real bitcoin and a fault in the contract should not be enough to take it: each withdrawal named once, paid as asked, and still waiting; each input once, held, pending; only change besides, of the size and to the federation it should be; a fee between the floor and the cap; and nothing Bitcoin would refuse or delay.",
+    summary = "Whether a federation signer should sign a release. The gateway checks all of this when it is proposed; a signer goes over it again, as what it signs pays real bitcoin and a fault in the contract should not be enough to take it: each withdrawal named once, paid what it burned less its share of the fee, within what it agreed to lose, and still waiting; each input once, held, pending; only change besides, of the size and to the federation it should be; a fee between the floor and the cap; and nothing Bitcoin would refuse or delay.",
     returns = "Why not, or nothing when it may sign.",
     category = "Bridges",
 )]
@@ -164,6 +167,10 @@ pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
 
     if tx.version != 2 || tx.lock_time != 0 {
         return Err("it is not version 2 with no lock time".to_string());
+    }
+
+    if facts.raw.len() < 65 {
+        return Err("it is under the 65 bytes Bitcoin's nodes relay".to_string());
     }
 
     if tx.inputs.len() != facts.inputs.len() {
@@ -193,21 +200,36 @@ pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
         spent += held.sats;
     }
 
-    let mut paid = 0;
+    let paid = tx.outputs.iter().map(|output| output.value).sum::<u64>();
+    let fee = spent.checked_sub(paid).ok_or("it pays more than it spends")?;
     let mut named = std::collections::HashSet::new();
 
-    for (at, withdrawal) in facts.withdrawals.iter().enumerate() {
-        if !named.insert(withdrawal.id) {
-            return Err(format!("it names withdrawal {} twice", withdrawal.id));
-        }
+    if let Some(twice) = facts.withdrawals.iter().find(|withdrawal| !named.insert(withdrawal.id)) {
+        return Err(format!("it names withdrawal {} twice", twice.id));
+    }
 
+    match &tx.outputs[facts.withdrawals.len().min(tx.outputs.len())..] {
+        [] if facts.withdrawals.is_empty() => return Err("it pays nothing".to_string()),
+        [] => {}
+        [change] if change.script == p2wsh(&facts.change_script) && change.value >= BTC_DUST => {}
+        [_] => return Err("its last output is not change to its federation".to_string()),
+        _ => return Err("it pays more than its withdrawals and change".to_string()),
+    }
+
+    for (at, withdrawal) in facts.withdrawals.iter().enumerate() {
         if withdrawal.state != "proposed" {
             return Err(format!("withdrawal {} is {}", withdrawal.id, withdrawal.state));
         }
 
         let output = tx.outputs.get(at).ok_or_else(|| format!("it does not pay withdrawal {}", withdrawal.id))?;
 
-        if output.script != withdrawal.script || output.value != withdrawal.sats {
+        let share = btc_fee_share(fee, facts.withdrawals.len() as u64, at);
+
+        if share > withdrawal.most_fee {
+            return Err(format!("its share of the fee is more than withdrawal {} agreed to lose", withdrawal.id));
+        }
+
+        if output.script != withdrawal.script || Some(output.value) != withdrawal.sats.checked_sub(share) {
             return Err(format!("it does not pay withdrawal {} as asked", withdrawal.id));
         }
 
@@ -216,19 +238,8 @@ pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
         {
             return Err(format!("withdrawal {} was in a cancelled release this does not conflict with", withdrawal.id));
         }
-
-        paid += output.value;
     }
 
-    match &tx.outputs[facts.withdrawals.len().min(tx.outputs.len())..] {
-        [] if facts.withdrawals.is_empty() => return Err("it pays nothing".to_string()),
-        [] => {}
-        [change] if change.script == p2wsh(&facts.change_script) && change.value >= BTC_DUST => paid += change.value,
-        [_] => return Err("its last output is not change to its federation".to_string()),
-        _ => return Err("it pays more than its withdrawals and change".to_string()),
-    }
-
-    let fee = spent.checked_sub(paid).ok_or("it pays more than it spends")?;
     let sizes: Vec<(u32, usize)> = facts.inputs.iter().map(|(_, held)| (held.threshold, held.script_len)).collect();
     let least = btc_release_vbytes(facts.raw.len(), &sizes) * facts.fee_floor;
 
@@ -237,6 +248,16 @@ pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "A withdrawal's share of its release's fee, as the Bitcoin gateway reckons it: the fee split evenly, the first taking what will not divide.",
+    params = { fee = "The release's fee.", count = "How many withdrawals it pays.", at = "This one's place among them, from 0." },
+    category = "Bridges",
+)]
+pub fn btc_fee_share(fee: u64, count: u64, at: usize) -> u64 {
+    fee / count + if at == 0 { fee % count } else { 0 }
 }
 
 #[cfg(feature = "bitcoin")]

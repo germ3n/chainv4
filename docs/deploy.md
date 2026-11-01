@@ -153,7 +153,11 @@ $B bridge --node $N --key $K btc deploy <relay> --fee-floor 2             # Bitc
 The gateway mints only what was mined past the relay's tip when it was set up, and every deposit
 address depends on the chain's id and the gateway, so each new chain gives everyone new ones: see
 [Bridges](bridges.md#the-gateway). After a reset, `bridge peer` joins Gateway.sol to the new gateway
-before anyone sends through it.
+before anyone sends through it. Signers sign for no chain the directory leaves out: list each
+Gateway.sol in the directory below, or give each signer `--evm-gateway CHAIN:0x…`. Withdrawals now
+start at 10,000 satoshis and pay their own fees, and every manifest lapses: re-sign it with
+`chainv4 release renew` within its 30 days, or nothing updates from it. Workers and the node must
+be on the same build, as the mining handshake is `/2`.
 
 Samples: tokens are `contracts/lua/token.lua` with `NAME` and `SYMBOL` changed (GLD, SLV, TUSD);
 `nft create nft "Test Pixels" PIX --factory …` and `nft create multi "Test Items" ITEM`, then

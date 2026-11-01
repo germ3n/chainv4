@@ -192,6 +192,8 @@ impl View {
 pub struct Settings {
     /// The node's HTTP API.
     pub node: String,
+    /// The newest release manifest seen, as JSON, so no node takes this explorer back past it.
+    pub newest_release: Option<String>,
     /// The proxy every request goes through, as socks5h://host:port or http://host:port, or empty
     /// to go direct. Never used in the browser, whose own proxy settings apply.
     pub proxy: String,

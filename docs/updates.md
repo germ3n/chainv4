@@ -14,6 +14,7 @@ A release is one JSON file, `manifest.json`, served by any static host:
 {
   "release": {
     "issued": 1793000000,
+    "expires": 1795592000,
     "products": [
       {
         "name": "chainv4",
@@ -37,6 +38,9 @@ A release is one JSON file, `manifest.json`, served by any static host:
 - **`issued`** orders releases: a node takes a manifest only if it was issued after the one it
   has, and keeps the newest in `release.json` beside its database, so a stale host or relay can
   never take it back to an older one.
+- **`expires`** is when it stops counting, signed with the rest: 30 days after `issued` unless
+  `release new --valid-days` says, up to 366. Past it nothing acts on it, so a host that keeps serving
+  an old manifest hides a newer one for that long at most.
 - **`breaking`** announces upgrades for chains without governance (see [Upgrades](#upgrades)).
 - **The signatures** are over the release's encoding behind a domain of its own (`chainv4
   release`), and cover every file's URL, size and SHA-256, so a binary is the one signed wherever
@@ -57,6 +61,8 @@ or the file `CHAINV4_RELEASE_KEYS` names at build time, which a build pipeline u
 - **No keys turns it all off.** The checked-in file has none, so a build from it fetches nothing,
   shows nothing and `chainv4 update` refuses. Make keys with `chainv4 keygen`: an Ed25519 key's
   address is its public key, as keys.json takes it.
+- **`floor`** in the same file is the oldest `issued` the build takes: raise it at each release
+  build, so a fresh install, with nothing kept yet, goes no further back than that.
 - **The keys are in the binary,** so a new build can carry new keys, and the old build trusts the
   old ones until it is replaced.
 
@@ -77,11 +83,38 @@ chainv4 release verify site/releases/manifest.json
   are released the same way, each on its own. Its signatures are cleared: the release changed.
   `--least` sets the oldest version that still works (it keeps the manifest's otherwise),
   `--breaking GENESIS:LEAST:FROM` announces an upgrade, and `--clear-breaking` drops the old ones.
+- **`renew`** issues a manifest anew, changing nothing it names, for it to count for another
+  `--valid-days`: `chainv4 release renew site/releases/manifest.json`, then sign it again. Do it
+  before the last one lapses, whether or not anything is released.
 - **`sign`** adds one key's signature, so each key holder signs on a machine of their own and
   passes the file on; it says once enough have.
 - **`verify`** shows what the manifest names and how many of this build's keys signed it.
 
 Then upload the directory to the host. Nothing else is needed: nodes find it within the hour.
+
+## What keeps a host honest
+
+A host can only serve what the keys signed, but it could serve an old manifest to hide a newer one.
+So everything that reads a manifest does what a node does:
+
+- **It keeps the newest it saw,** by `issued`, whatever a host or node says later: a node in
+  `release.json`, the CLI and a worker in `~/.chainv4/release.json` (or `update --seen FILE`), the
+  apps in their settings. One older, or none at all, changes nothing, and the kept one goes on
+  showing.
+- **It takes nothing older than the floor** built into it.
+- **It acts on nothing past `expires`:** no download, no notice and no screen that stops an app. A
+  node serving nothing newer says so, and the apps say they cannot tell whether they are up to date.
+- **A node goes on obeying an upgrade it already took,** even past `expires`: the chain's upgrade
+  does not lapse with the host, and running on past it would fork the node off alone.
+- **A file that will not read** counts as none: it says so, goes by the floor alone, and the next
+  manifest taken writes it again, whole, by rename.
+
+**A device whose clock is wrong.** What is kept comes from the manifest's own fields, never the
+clock, so no wrong clock does lasting harm. Far ahead, everything looks expired: nothing is
+installed or shown, and it says the host is behind or the clock is wrong; set right, it all counts
+again. Far behind, a manifest past its true expires looks current: it can show a stale notice, but
+only the newest it has seen, and it still takes any newer one. Going by a clock was chosen over
+pinning to block time, which a node serves and so could lie about.
 
 ## Nodes
 

@@ -6,7 +6,7 @@
 
 use {
     super::Bridge,
-    crate::bridge::{BTC_DUST, NamedWithdrawal, ReleaseFacts, SpentOutput, btc_cancel_digest, btc_release_vbytes, check_btc_release, sign_digest},
+    crate::bridge::{BTC_DUST, NamedWithdrawal, ReleaseFacts, SpentOutput, btc_cancel_digest, btc_fee_share, btc_release_vbytes, check_btc_release, sign_digest},
     crate::cli::CliResult,
     crate::crypto::bitcoin::sha256d,
     crate::crypto::bitcoin::tx::{Network, Transaction, TxIn, TxOut, address, der, p2wsh},
@@ -63,9 +63,19 @@ pub enum BtcAction {
     },
     /// Shows a deposit, by its transaction and output, minting its wBTC to the address it pays.
     Deposit { txid: String, vout: u32, recipient: Address },
-    /// Burns wBTC to be paid out to a Bitcoin address, bc1q…, or an output script, 0x….
-    Withdraw { address: String, sats: u64 },
-    /// Proposes a release paying the queued withdrawals from what the gateway holds, with this fee.
+    /// Burns wBTC to be paid out to a Bitcoin address, bc1q…, or an output script, 0x…. What arrives
+    /// is the amount less its share of its release's fee.
+    Withdraw {
+        address: String,
+        sats: u64,
+        /// The most it may lose to that share, in satoshis: a tenth of it unless told.
+        #[arg(long)]
+        most_fee: Option<u64>,
+    },
+    /// Changes the most a queued withdrawal of yours may lose to fees, as fees rise past it.
+    SetMostFee { withdrawal: u64, most_fee: u64 },
+    /// Proposes a release paying the queued withdrawals from what the gateway holds, with this fee,
+    /// which comes off them evenly. One that agreed to lose less than its share waits.
     Propose {
         #[arg(long)]
         fee: u64,
@@ -87,12 +97,15 @@ pub enum BtcAction {
     Released { proposal: u64 },
 }
 
-/// A transaction without its witness, its block, its place in it, and its Merkle path there.
+/// A transaction without its witness, its block, its place in it, and its Merkle path there; and
+/// the block's coinbase the same way, which shows how tall its tree is.
 struct Proof {
     tx: Vec<u8>,
     block: [u8; 32],
     index: u64,
     path: Vec<u8>,
+    coinbase: Vec<u8>,
+    coinbase_path: Vec<u8>,
 }
 
 /// Bitcoin's byte order for a hash written as explorers write it: reversed.
@@ -161,6 +174,13 @@ fn whole(value: &Value) -> u64 {
     text(value).parse().unwrap_or(0)
 }
 
+/// The path in Esplora's Merkle proof, each sibling in Bitcoin's own byte order.
+fn merkle_path(proof: &Value) -> CliResult<Vec<u8>> {
+    let path = proof["merkle"].as_array().into_iter().flatten().map(|sibling| internal(sibling.as_str().unwrap_or_default())).collect::<CliResult<Vec<_>>>()?;
+
+    Ok(path.concat())
+}
+
 impl Bridge {
     /// The newest block at or below a height that the relay's main chain and Esplora agree on. Bitcoin
     /// reorganizing leaves the relay's tip on a branch that lost, and headers from just past its height
@@ -204,14 +224,21 @@ impl Bridge {
     /// A transaction as the gateway takes it, without its witness, with its block, place and
     /// Merkle path, as Esplora proves it.
     fn proof(&self, txid: &str) -> CliResult<Proof> {
+        let (tx, proof) = self.placed(txid)?;
+        let height = proof["block_height"].as_u64().ok_or("the transaction is not in a block yet")?;
+        let hash = self.esplora(&format!("/block-height/{height}"))?;
+        let (coinbase, of_coinbase) = self.placed(self.esplora(&format!("/block/{}/txid/0", hash.trim()))?.trim())?;
+
+        Ok(Proof { tx, block: internal(&hash)?, index: proof["pos"].as_u64().unwrap_or(0), path: merkle_path(&proof)?, coinbase, coinbase_path: merkle_path(&of_coinbase)? })
+    }
+
+    /// A transaction without its witness, and Esplora's Merkle proof of it.
+    fn placed(&self, txid: &str) -> CliResult<(Vec<u8>, Value)> {
         let hex = self.esplora(&format!("/tx/{txid}/hex"))?;
         let (tx, _) = Transaction::read(&from_hex(&format!("0x{}", hex.trim())).ok_or("Esplora gave a transaction that is not hex")?)?;
-        let proof: Value = serde_json::from_str(&self.esplora(&format!("/tx/{txid}/merkle-proof"))?).map_err(|_| "Esplora gave a proof that is not JSON")?;
-        let height = proof["block_height"].as_u64().ok_or("the transaction is not in a block yet")?;
-        let block = internal(&self.esplora(&format!("/block-height/{height}"))?)?;
-        let path = proof["merkle"].as_array().into_iter().flatten().map(|sibling| internal(sibling.as_str().unwrap_or_default())).collect::<CliResult<Vec<_>>>()?;
+        let proof = serde_json::from_str(&self.esplora(&format!("/tx/{txid}/merkle-proof"))?).map_err(|_| "Esplora gave a proof that is not JSON")?;
 
-        Ok(Proof { tx: tx.base(), block, index: proof["pos"].as_u64().unwrap_or(0), path: path.concat() })
+        Ok((tx.base(), proof))
     }
 
     pub(super) fn btc(&self, action: &BtcAction) -> CliResult<()> {
@@ -279,11 +306,12 @@ impl Bridge {
                 Ok(())
             }
             BtcAction::Deposit { txid, vout, recipient } => {
-                let Proof { tx, block, index, path } = self.proof(txid)?;
-                let args = vec![bytes(block.to_vec()), bytes(tx), number(index), bytes(path), number(u64::from(*vout)), TxCallArgumentType::Address(*recipient), TxCallArgumentType::Nil];
+                let Proof { tx, block, index, path, coinbase, coinbase_path } = self.proof(txid)?;
+                let args = vec![bytes(block.to_vec()), bytes(tx), number(index), bytes(path), bytes(coinbase), bytes(coinbase_path), number(u64::from(*vout)), TxCallArgumentType::Address(*recipient), TxCallArgumentType::Nil];
                 self.call(self.btc_gateway()?, "deposit", u256::ZERO, args)
             }
-            BtcAction::Withdraw { address: text, sats } => {
+            BtcAction::SetMostFee { withdrawal, most_fee } => self.call(self.btc_gateway()?, "set_most_fee", u256::ZERO, vec![number(*withdrawal), number(*most_fee)]),
+            BtcAction::Withdraw { address: text, sats, most_fee } => {
                 let script = match text.strip_prefix("0x") {
                     Some(_) => from_hex(text).ok_or("the script is not hex")?,
                     None => {
@@ -291,7 +319,7 @@ impl Bridge {
                         [&[0x00, program.len() as u8][..], &program].concat()
                     }
                 };
-                self.call(self.btc_gateway()?, "withdraw", u256::ZERO, vec![bytes(script), number(*sats)])
+                self.call(self.btc_gateway()?, "withdraw", u256::ZERO, vec![bytes(script), number(*sats), most_fee.map_or(TxCallArgumentType::Nil, number)])
             }
             BtcAction::Propose { fee } => self.propose(*fee, false),
             BtcAction::Sweep { fee } => self.propose(*fee, true),
@@ -301,8 +329,8 @@ impl Bridge {
             BtcAction::Released { proposal } => {
                 let found = self.read(&self.btc_gateway()?, "proposal", json!([{ "type": "u64", "value": proposal.to_string() }]))?;
                 let txid = shown(&raw(found.get(1).ok_or("no such release")?));
-                let Proof { tx, block, index, path } = self.proof(&txid)?;
-                self.call(self.btc_gateway()?, "released", u256::ZERO, vec![number(*proposal), bytes(block.to_vec()), bytes(tx), number(index), bytes(path)])
+                let Proof { tx, block, index, path, coinbase, coinbase_path } = self.proof(&txid)?;
+                self.call(self.btc_gateway()?, "released", u256::ZERO, vec![number(*proposal), bytes(block.to_vec()), bytes(tx), number(index), bytes(path), bytes(coinbase), bytes(coinbase_path)])
             }
         }
     }
@@ -357,8 +385,8 @@ impl Bridge {
         let (_, floor) = self.fee_limits(&gateway)?;
         let held = self.unspent(&gateway)?;
         let mut anchors = std::collections::HashSet::new();
-        let mut ids = Vec::new();
-        let mut outputs = Vec::new();
+        // Each withdrawal it takes: its id, script, what it burned and the most it may lose.
+        let mut ids: Vec<(u64, Vec<u8>, u64, u64)> = Vec::new();
 
         if !sweep {
             let count = whole(self.read(&gateway, "withdrawal_count", json!([]))?.first().ok_or("no count")?);
@@ -377,17 +405,31 @@ impl Bridge {
                         anchors.insert(anchor);
                     }
 
-                    ids.push(id);
-                    outputs.push(TxOut { value: whole(&withdrawal[1]), script: raw(&withdrawal[0]) });
+                    ids.push((id, raw(&withdrawal[0]), whole(&withdrawal[1]), whole(&withdrawal[4])));
                 }
             }
 
             if ids.is_empty() {
                 return Err("no withdrawals are queued".into());
             }
+
+            // One that agreed to lose less than its share waits, and the others each pay more for
+            // it: until the shares stand.
+            while let Some(at) = ids.iter().enumerate().position(|(at, (_, _, _, most))| btc_fee_share(fee, ids.len() as u64, at) > *most) {
+                println!("withdrawal {} waits: its share of a fee of {fee} is past the {} it agreed to lose", ids[at].0, ids[at].3);
+                ids.remove(at);
+
+                if ids.is_empty() {
+                    return Err(format!("every queued withdrawal agreed to lose less than its share of a fee of {fee}").into());
+                }
+            }
         }
 
-        let wanted = outputs.iter().map(|output| output.value).sum::<u64>() + fee;
+        let mut outputs: Vec<TxOut> = ids.iter().enumerate().map(|(at, (_, script, sats, _))| TxOut { value: sats - btc_fee_share(fee, ids.len() as u64, at), script: script.clone() }).collect();
+        // Withdrawals pay their own fee, so a release spends just what they burned; a sweep's fee
+        // is the federation's.
+        let burned = ids.iter().map(|(_, _, sats, _)| *sats).sum::<u64>();
+        let wanted = if sweep { fee } else { burned + BTC_DUST };
         let mut inputs = Vec::new();
         let mut sizes = Vec::new();
         let mut taken = 0;
@@ -395,7 +437,7 @@ impl Bridge {
         let (needed, others): (Vec<_>, Vec<_>) = held.into_iter().partition(|(outpoint, ..)| anchors.contains(outpoint));
 
         for (outpoint, sats, at) in needed.into_iter().chain(others) {
-            if (sweep && at >= version) || (!sweep && taken >= wanted && !anchors.contains(&outpoint)) {
+            if (sweep && at >= version) || (!sweep && (taken >= wanted || taken == burned) && !anchors.contains(&outpoint)) {
                 continue;
             }
 
@@ -415,13 +457,16 @@ impl Bridge {
             taken += sats;
         }
 
-        if inputs.is_empty() || taken < wanted {
+        // Spending just what was burned leaves no change; anything else leaves change of at least
+        // dust, and it never goes to the fee, as that would come off the backing.
+        if inputs.is_empty() || (taken < wanted && (sweep || taken != burned)) {
             return Err(format!("the gateway holds {taken} satoshis to spend, short of {wanted}").into());
         }
 
-        // Change back to the federation, or to the fee when it is dust.
-        if taken - wanted >= BTC_DUST || sweep {
-            outputs.push(TxOut { value: taken - wanted, script: change });
+        if sweep {
+            outputs.push(TxOut { value: taken - fee, script: change });
+        } else if taken > burned {
+            outputs.push(TxOut { value: taken - burned, script: change });
         }
 
         let tx = Transaction { version: 2, inputs, outputs, lock_time: 0 };
@@ -432,7 +477,7 @@ impl Bridge {
         }
 
         let mut args = vec![TxCallArgumentType::Bytes(tx.base())];
-        args.extend(ids.iter().map(|id| TxCallArgumentType::U64(*id)));
+        args.extend(ids.iter().map(|(id, ..)| TxCallArgumentType::U64(*id)));
         println!("proposing {} paying {} withdrawals, txid {}", if sweep { "a sweep" } else { "a release" }, ids.len(), shown(&sha256d(&tx.base())));
 
         self.call(gateway, "propose", u256::ZERO, args)
@@ -448,7 +493,7 @@ impl Bridge {
         for id in found.get(2).map(text).unwrap_or_default().split(',').filter(|id| !id.is_empty()) {
             let id: u64 = id.parse().map_err(|_| "a release names what is no withdrawal")?;
             let withdrawal = self.read(gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
-            withdrawals.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), state: text(&withdrawal[2]), anchor: self.anchor(gateway, id)? });
+            withdrawals.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), most_fee: whole(&withdrawal[4]), state: text(&withdrawal[2]), anchor: self.anchor(gateway, id)? });
         }
 
         let inputs = tx.inputs.iter().map(|input| {

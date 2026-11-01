@@ -118,6 +118,12 @@ pub struct CoinProof {
     pub raw: String,
     pub index: u32,
     pub path: String,
+    /// The block's coinbase without its witness, and its path, which show how tall its tree is;
+    /// empty for a proof kept before the gateway asked for them.
+    #[serde(default)]
+    pub coinbase: String,
+    #[serde(default)]
+    pub coinbase_path: String,
 }
 
 /// What spent a coin: the transaction, its block, and the input's witness, each item in hex.
@@ -462,13 +468,20 @@ pub fn scan(seen: &mut Seen, block: &Block, height: u32, watched: &BTreeSet<Vec<
 
             if watched.contains(script) && !seen.coins.iter().any(|coin| coin.txid == txid && coin.vout == vout as u32) {
                 let ids = ids.get_or_insert_with(|| block.txdata.iter().map(|tx| tx.compute_txid().to_byte_array()).collect());
-                let mut base = tx.clone();
-                base.input.iter_mut().for_each(|input| input.witness.clear());
+                let without_witness = |tx: &bitcoin::Transaction| {
+                    let mut base = tx.clone();
+                    base.input.iter_mut().for_each(|input| input.witness.clear());
+
+                    hex(&bitcoin::consensus::serialize(&base))
+                };
+                let path_of = |at: usize| chainv4::crypto::bitcoin::merkle_path(ids, at).iter().map(|sibling| hex(sibling)).collect();
                 let proof = CoinProof {
                     block: hex(&block.block_hash().to_byte_array()),
-                    raw: hex(&bitcoin::consensus::serialize(&base)),
+                    raw: without_witness(tx),
                     index: index as u32,
-                    path: chainv4::crypto::bitcoin::merkle_path(ids, index).iter().map(|sibling| hex(sibling)).collect(),
+                    path: path_of(index),
+                    coinbase: without_witness(&block.txdata[0]),
+                    coinbase_path: path_of(0),
                 };
                 seen.coins.push(Coin { txid: txid.clone(), vout: vout as u32, value: output.value.to_sat(), script: hex(script), height, spent: None, proof: Some(proof) });
                 found = true;

@@ -134,6 +134,20 @@ A signer runs, with its federation key as `--evm-key`:
 chainv4 bridge watch --eth-rpc URL --evm-key signer.key --key payer.key
 ```
 
+**A signer goes by the directory.** It signs only for an EVM chain the chain's
+[directory](governance.md#directory) lists, with that gateway as the peer. What a peer says left it
+is what the federation vouches for, and the gateway's owner sets its peers alone, so one key could
+otherwise have anything minted here. On a chain with no directory, or for a chain it leaves out,
+every chain is refused, and each pass says why, until governance lists it or the signer's own
+operator vouches for that very gateway:
+
+```sh
+chainv4 bridge watch --evm-gateway 11155111:0x… --eth-rpc URL --evm-key signer.key --key payer.key
+```
+
+The flag is the operator's own word, never the chain's, and it must match the peer. `send` refuses a
+chain no signer would sign for, as it would never arrive.
+
 - **sign** reads what left here (`Sent` events, so the node keeps `--index-events`) and what left
   each EVM chain given (Gateway.sol's `Sent` logs), and once each is final, finalized here or
   `chain_depth` deep, at the RPC's finalized block or `evm_depth` deep there, posts its signature
@@ -166,7 +180,16 @@ Bitcoin light client contract rather than vouched for, and the federation signs 
   hours past the chain's block time, and a parent it holds.
 - **The most work wins:** a branch with more total work becomes the main chain, as a reorg.
 - **Contracts ask it** `tip()`, `block_at(height)`, `confirmations(block)` (0 off the main chain)
-  and `includes(block, txid, index, path)`, a transaction's Merkle path to the block's root.
+  and `includes(block, txid, index, path, coinbase, coinbase_path)`, a transaction's Merkle path to
+  the block's root.
+
+**A proof comes with the block's coinbase.** A header does not say how tall its Merkle tree is, so
+the 64 bytes of two ids, an inner node, could pass for a transaction a level up with a path one
+short (CVE-2017-12842), and a real 64-byte transaction could be taken for an inner node with one too
+long. So `includes` takes the coinbase, without its witness, and its path too: it must read as a
+coinbase, one input spending nothing and not 64 bytes, lead to the root at place 0, and its path be
+just as long as the transaction's. The gateway also refuses any transaction of 64 bytes outright, as
+Bitcoin's nodes do not relay one.
 
 | Network | Checks |
 | --- | --- |
@@ -189,7 +212,7 @@ force, for this chain and this gateway, a P2WSH any wallet pays:
 ```
 
 Once a payment to it is `bitcoin_depth` deep in the relay, anyone shows it, `deposit(block, tx,
-index, path, vout, recipient)`, and its value is minted as wBTC to that address, once. The gateway
+index, path, coinbase, coinbase_path, vout, recipient)`, and its value is minted as wBTC to that address, once. The gateway
 holds the output, by its transaction and place, for a later release.
 
 A proof of a payment outlives a chain, and a gateway on a new one holds nothing yet, under the same
@@ -199,15 +222,19 @@ there the gateway refuses what was mined at or under the relay's tip when it was
 the relay before you deploy the gateway**, or that tip protects nothing. The gateway's `setup`
 refuses a relay that has not started.
 
-**Withdrawing** burns wBTC for a Bitcoin output script and an amount, 1,000 satoshis or more, and
-queues it. The script is one Bitcoin's nodes relay: P2PKH, P2SH, or a witness program (P2WPKH,
+**Withdrawing** burns wBTC for a Bitcoin output script and an amount, 10,000 satoshis or more, and
+as much as a release of its own costs at the floor, `least_withdrawal()`, and queues it, with the
+most it agrees to lose to fees: a tenth of it unless it says, and never so much that under 1,000
+satoshis would arrive. It may change that while it waits, `set_most_fee(id, most)`, by who asked for
+it alone. The script is one Bitcoin's nodes relay: P2PKH, P2SH, or a witness program (P2WPKH,
 P2WSH, P2TR or a later version), as a release with any other output would never be mined.
 
 **Releasing** pays queued withdrawals:
 1. **Proposed:** anyone proposes a release, an unsigned Bitcoin transaction, with the
    withdrawals it pays, at most 50, each once. The gateway checks its inputs are outputs it holds
-   unspent, each once, it pays each withdrawal exactly, its one other output is change to the
-   federation in force, 546 satoshis or more, and its fee is between the floor and the cap. It is
+   unspent, each once, it pays each withdrawal what it burned less its share of the fee, its one
+   other output is change to the federation in force, 546 satoshis or more, and its fee is between
+   the floor and the cap. It is
    version 2, with sequence `0xffffffff` and no lock time, so nothing delays it, and at most
    100,000 virtual bytes, what Bitcoin's nodes relay. Its inputs are then pending.
 2. **Signed:** each signer signs each input as BIP143 has it, SIGHASH_ALL, and posts the 64-byte
@@ -216,7 +243,18 @@ P2WSH, P2TR or a later version), as a release with any other output would never 
 3. **Broadcast:** once each input holds the threshold, anyone assembles the witnesses,
    `input_signatures(proposal, input)` giving them in the keys' order, and broadcasts it.
 4. **Shown:** once it is `bitcoin_depth` deep, anyone shows it, `released(proposal, block, tx,
-   index, path)`: its inputs are spent, its change held, and its withdrawals paid.
+   index, path, coinbase, coinbase_path)`: its inputs are spent, its change held, and its withdrawals paid.
+
+**Withdrawers pay the fee.** A release's fee comes off the withdrawals it pays, split evenly, the
+first taking what will not divide: each output costs about the same to carry, whatever it pays, and
+that is exact enough for the contract to check. No share may pass the most that withdrawal agreed to
+lose, so one that said little waits, or the fee is lower. Its change is all it spends past what those
+withdrawals burned, so what the gateway holds falls by just what was burned, and wBTC stays backed
+one for one whatever the fee. It follows that a release spends just what they burned, or leaves
+change of at least dust; the last satoshis under dust wait for a deposit. A sweep pays no one, so its
+fee stays the federation's. Anyone may propose, so anyone may propose at the most a withdrawal agreed
+to lose: that limit, and the cap, are the protection against it. `withdrawal(id)` says the limit, and
+its share once it is in a release.
 
 **The fee** of a release is held between two limits set once, at setup: `fee_cap`, the most it may
 pay in satoshis, and `fee_floor`, the least per virtual byte, so a release cannot hold its inputs
@@ -276,15 +314,17 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
 
 - **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told. Sync the relay first.
 - **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or another output script Bitcoin's nodes
-  relay as `0x…` (a Taproot output as its `5120…` script).
+  relay as `0x…` (a Taproot output as its `5120…` script). `--most-fee` is the most it may lose, a
+  tenth of it unless told; **set-most-fee** changes that while it waits.
 - **propose** pays the queued withdrawals, oldest first, up to 50, from what the gateway holds
   unspent, in the order it took it, starting with what a withdrawal's anchor requires; one whose
-  anchor is in another release waits for it. Change under dust (546 satoshis) goes to the fee. A
-  fee under the floor for that size is refused here, naming what it takes.
+  anchor is in another release waits for it, and so does one that agreed to lose less than its
+  share of `--fee`. A fee under the floor for that size is refused here, naming what it takes.
 - **sweep** pays what older federations hold to the one in force, as much as the fee pays at the
   floor; sweep again for the rest.
 - **sign** goes over every open release against the gateway's state before signing it: each
-  withdrawal named once, still proposed, paid exactly, and with its anchor among the inputs; each
+  withdrawal named once, still proposed, paid what it burned less its share of the fee, within what
+  it agreed to lose, and with its anchor among the inputs; each
   input once, pending and held; only change besides, to the federation it was proposed under; the
   fee within its limits; the version, sequence and lock time fixed; and the transaction written as
   Bitcoin writes it, with the id the gateway keeps. One that fails is logged and left unsigned, for
@@ -312,8 +352,9 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
   peer` named the new one the same: join them before anyone sends.
 - **The gateway's owner sets its peers.** A signer vouches for what the peer gateway says left it,
   so an owner who repointed a peer could have fake deposits signed. `chainv4 bridge` refuses to
-  sign or relay through a peer other than the Gateway.sol the directory names on that chain;
-  the gateway taking its peers from the directory itself is in the todo.
+  sign or relay through a peer other than the Gateway.sol the directory names on that chain, or
+  through any on a chain it leaves out, but for one its own operator names; the gateway taking its
+  peers from the directory itself is in the todo.
 - **Gateway.sol's signer set follows chainv4's** only when the federation in force signs the next
   one over (`setSigners`); the tooling for that is in the todo.
 - **Names are the asset's own,** cut to what the registries take: a wrapped token says what it

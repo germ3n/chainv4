@@ -2,9 +2,13 @@
 //! it, which share a token.
 //!
 //! **The handshake** proves each side knows the token without sending it. The node sends a random
-//! challenge; the worker answers with its name, a random nonce of its own, and an HMAC of both
-//! under the token; the node answers with its own HMAC of both. The session key is a third HMAC of
-//! both, so it differs every connection.
+//! challenge; the worker answers with its name, payout and whether it mines alone, a random nonce
+//! of its own, and an HMAC of all of it under the token; the node answers with what it took the
+//! payout to be and its own HMAC of all that, and the worker stops if that payout is not its own.
+//! The session key is a third HMAC of them, so it differs every connection. So nothing between them
+//! changes where a worker's work pays, while the token is a secret. An open port's token is public:
+//! anyone on the path can make these MACs too, so only the transport, wss:// or a private network,
+//! protects a worker's payout there.
 //!
 //! **Every message after** is `MAC JSON`: an HMAC under the session key of its direction, its
 //! number in that direction, and the JSON. A message changed, made up, replayed or dropped does not
@@ -36,9 +40,21 @@ use {
 };
 
 /// What both sides say first, so a stray connection, or a worker of a chain under another
-/// protocol name, is told apart: chainv4-mining/1 for the default name.
+/// protocol name, is told apart: chainv4-mining/2 for the default name.
 pub fn version(protocol: &str) -> String {
-    format!("{protocol}-mining/1")
+    format!("{protocol}-mining/2")
+}
+
+/// What a worker's error starts with when the node says it pays another address than the worker's
+/// own: it stops, as connecting again would only mine for that address or nothing.
+pub const PAYOUT_DIFFERS: &str = "the node says it would pay";
+
+/// Whether what a node says it pays, in its standing, is another address than this worker's own.
+pub fn pays_another(message: &Value, payout: Option<&crate::structs::address::Address>) -> Option<String> {
+    let said = message["payout"].as_str()?;
+    let ours = payout?.to_string();
+
+    (said != ours).then(|| format!("{PAYOUT_DIFFERS} {said}, and this worker's payout is {ours}"))
 }
 
 /// The longest line either side reads: a work or rate message is far shorter.
@@ -156,6 +172,19 @@ impl Opener {
     }
 }
 
+/// A hello's fields as the MACs take them, each with its length, so no two hellos read alike.
+fn hello_fields(version: &str, name: &str, payout: &str, solo: bool) -> Vec<u8> {
+    let mut fields = Vec::new();
+
+    for field in [version, name, payout] {
+        fields.extend((field.len() as u64).to_le_bytes());
+        fields.extend(field.as_bytes());
+    }
+
+    fields.push(u8::from(solo));
+    fields
+}
+
 /// What a worker says of itself in the handshake.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Hello {
@@ -187,17 +216,21 @@ pub fn welcome(token: &[u8], protocol: &str, challenge: &[u8; 32], hello: &Value
         return Err(format!("a worker speaking {}, not {version}", hello["version"]));
     }
 
-    if !checks(token, &[b"worker", challenge, &nonce], &proof) {
-        return Err("a worker without the token".to_string());
+    let fields = hello_fields(&version, hello["name"].as_str().unwrap_or_default(), hello["payout"].as_str().unwrap_or_default(), hello["solo"] == true);
+
+    if !checks(token, &[b"worker", challenge, &nonce, &fields], &proof) {
+        return Err("a worker without the token, or a hello changed on its way".to_string());
     }
 
-    let answer = json!({ "proof": hex(&mac(token, &[b"node", challenge, &nonce])) });
-    let key = mac(token, &[b"session", challenge, &nonce]);
     let said = Hello {
         name: hello["name"].as_str().unwrap_or("worker").chars().filter(|c| !c.is_control()).take(64).collect(),
         payout: hello["payout"].as_str().and_then(|payout| payout.parse().ok()),
         solo: hello["solo"] == true,
     };
+    // What it took the payout to be, for the worker to compare with its own.
+    let payout = said.payout.map(|payout| payout.to_string()).unwrap_or_default();
+    let answer = json!({ "proof": hex(&mac(token, &[b"node", challenge, &nonce, &fields, payout.as_bytes()])), "payout": payout });
+    let key = mac(token, &[b"session", challenge, &nonce, &fields]);
 
     Ok((said, answer, Sealer { key, way: Way::ToWorker, sent: 0 }, Opener { key, way: Way::ToNode, received: 0 }))
 }
@@ -206,6 +239,8 @@ pub fn welcome(token: &[u8], protocol: &str, challenge: &[u8; 32], hello: &Value
 pub struct Joining {
     challenge: [u8; 32],
     nonce: [u8; 32],
+    fields: Vec<u8>,
+    payout: String,
 }
 
 /// The worker's hello to the node's greeting: its name, payout and whether it mines alone, and the
@@ -219,7 +254,9 @@ pub fn hello(greeting: &Value, token: &[u8], protocol: &str, me: &Hello) -> Resu
 
     let challenge: [u8; 32] = unhex(&greeting["challenge"])?;
     let nonce = random()?;
-    let proof = mac(token, &[b"worker", &challenge, &nonce]);
+    let payout = me.payout.map(|payout| payout.to_string()).unwrap_or_default();
+    let fields = hello_fields(&version, &me.name, &payout, me.solo);
+    let proof = mac(token, &[b"worker", &challenge, &nonce, &fields]);
     let mut hello = json!({ "version": version, "name": me.name, "nonce": hex(&nonce), "proof": hex(&proof) });
 
     if let Some(payout) = me.payout {
@@ -230,20 +267,25 @@ pub fn hello(greeting: &Value, token: &[u8], protocol: &str, me: &Hello) -> Resu
         hello["solo"] = json!(true);
     }
 
-    Ok((hello, Joining { challenge, nonce }))
+    Ok((hello, Joining { challenge, nonce, fields, payout }))
 }
 
 impl Joining {
-    /// The session's halves once the node's answer proves it knows the token: not the node meant
-    /// otherwise.
+    /// The session's halves once the node's answer proves it knows the token, not the node meant
+    /// otherwise, and it would pay this worker's own payout.
     pub fn finish(self, token: &[u8], answer: &Value) -> Result<(Sealer, Opener), String> {
         let theirs: [u8; 32] = unhex(&answer["proof"])?;
+        let payout = answer["payout"].as_str().unwrap_or_default();
 
-        if !checks(token, &[b"node", &self.challenge, &self.nonce], &theirs) {
+        if !checks(token, &[b"node", &self.challenge, &self.nonce, &self.fields, payout.as_bytes()], &theirs) {
             return Err("the node does not know the token: not the node meant".to_string());
         }
 
-        let key = mac(token, &[b"session", &self.challenge, &self.nonce]);
+        if payout != self.payout {
+            return Err(format!("{PAYOUT_DIFFERS} {payout}, and this worker's payout is {}", self.payout));
+        }
+
+        let key = mac(token, &[b"session", &self.challenge, &self.nonce, &self.fields]);
 
         Ok((Sealer { key, way: Way::ToNode, sent: 0 }, Opener { key, way: Way::ToWorker, received: 0 }))
     }
@@ -327,6 +369,21 @@ pub fn accept(stream: TcpStream, token: &[u8], protocol: &str) -> Result<(Sender
     write_line(&mut writer, &answer)?;
 
     Ok((Sender { stream: writer, sealer }, Receiver { reader, opener }, said))
+}
+
+/// A node's handshake, had it taken another payout from the hello: for the worker's tests.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn accept_paying_for_tests(stream: TcpStream, token: &[u8], protocol: &str, payout: &crate::structs::address::Address) {
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    let (greeting, challenge) = greeting(protocol).unwrap();
+    write_line(&mut writer, &greeting).unwrap();
+    let hello = read_json(&mut reader).unwrap();
+    let nonce: [u8; 32] = unhex(&hello["nonce"]).unwrap();
+    let fields = hello_fields(&version(protocol), hello["name"].as_str().unwrap_or_default(), hello["payout"].as_str().unwrap_or_default(), hello["solo"] == true);
+    let payout = payout.to_string();
+    let proof = mac(token, &[b"node", &challenge, &nonce, &fields, payout.as_bytes()]);
+    write_line(&mut writer, &json!({ "proof": hex(&proof), "payout": payout })).unwrap();
 }
 
 /// The worker's side of the handshake: the halves of the connection once the node proved it knows

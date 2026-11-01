@@ -2223,8 +2223,16 @@ mod btc_relay;
 #[cfg(feature = "bitcoin")]
 mod btc_gateway;
 
-/// A regtest header mined here, for the CLI's Bitcoin tests.
+/// A regtest header mined here, for the CLI's Bitcoin tests, which need more features than this.
 #[cfg(feature = "bitcoin")]
+#[allow(dead_code)]
 pub(crate) fn btc_relay_mined(prev: &[u8; 32], merkle: &[u8; 32], time: u32, bits: u32) -> Vec<u8> {
     btc_relay::mined(prev, merkle, time, bits)
+}
+
+/// A coinbase for one of those headers' blocks.
+#[cfg(feature = "bitcoin")]
+#[allow(dead_code)]
+pub(crate) fn btc_relay_coinbase(stamp: u32) -> Vec<u8> {
+    btc_relay::coinbase(stamp)
 }

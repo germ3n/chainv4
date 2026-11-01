@@ -68,6 +68,9 @@ pub struct Proof {
     pub raw: Vec<u8>,
     pub index: u64,
     pub path: Vec<u8>,
+    /// The block's coinbase without its witness, and its path, which show how tall its tree is.
+    pub coinbase: Vec<u8>,
+    pub coinbase_path: Vec<u8>,
 }
 
 pub struct BridgeState {
@@ -245,23 +248,41 @@ pub fn output_script(text: &str) -> Option<Vec<u8>> {
 }
 
 /// A deposit's proof from Esplora's answers: the transaction as it holds it, witness and all, its
-/// Merkle proof, and the hash of the block at the proof's height, each hash as explorers write it.
-pub fn esplora_proof(tx_hex: &str, merkle: &Value, block_hash: &str) -> Result<Proof, String> {
+/// Merkle proof, the hash of the block at the proof's height, each hash as explorers write it, and
+/// the same two for the block's coinbase.
+pub fn esplora_proof(tx_hex: &str, merkle: &Value, block_hash: &str, coinbase_hex: &str, coinbase_merkle: &Value) -> Result<Proof, String> {
     let internal = |shown: &str| -> Option<Vec<u8>> {
         let mut bytes = from_hex(&format!("0x{}", shown.trim()))?;
         bytes.reverse();
 
         (bytes.len() == 32).then_some(bytes)
     };
-    let (tx, _) = Transaction::read(&from_hex(&format!("0x{}", tx_hex.trim())).ok_or("Esplora gave a transaction that is not hex")?)?;
-    let path = merkle["merkle"]
-        .as_array()
-        .ok_or("Esplora gave no Merkle path: is it mined?")?
-        .iter()
-        .map(|sibling| internal(sibling.as_str().unwrap_or_default()).ok_or("Esplora gave a Merkle path that does not read"))
-        .collect::<Result<Vec<_>, _>>()?;
+    let base = |hex: &str| -> Result<Vec<u8>, String> { Ok(Transaction::read(&from_hex(&format!("0x{}", hex.trim())).ok_or("Esplora gave a transaction that is not hex")?)?.0.base()) };
+    let path_of = |merkle: &Value| -> Result<Vec<u8>, String> {
+        let path = merkle["merkle"]
+            .as_array()
+            .ok_or("Esplora gave no Merkle path: is it mined?")?
+            .iter()
+            .map(|sibling| internal(sibling.as_str().unwrap_or_default()).ok_or("Esplora gave a Merkle path that does not read"))
+            .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(Proof { block: internal(block_hash).ok_or("Esplora gave a block hash that does not read")?, raw: tx.base(), index: merkle["pos"].as_u64().ok_or("Esplora gave no place")?, path: path.concat() })
+        Ok(path.concat())
+    };
+
+    Ok(Proof {
+        block: internal(block_hash).ok_or("Esplora gave a block hash that does not read")?,
+        raw: base(tx_hex)?,
+        index: merkle["pos"].as_u64().ok_or("Esplora gave no place")?,
+        path: path_of(merkle)?,
+        coinbase: base(coinbase_hex)?,
+        coinbase_path: path_of(coinbase_merkle)?,
+    })
+}
+
+/// What a withdrawal of this much arrives as at the least: all but a tenth, the most the wallet lets
+/// it lose to its share of a release's fee.
+pub fn least_arriving(sats: u64) -> u64 {
+    sats - sats / 10
 }
 
 /// The account's deposit address's script on Bitcoin, under the federation in force, for this
@@ -729,6 +750,8 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
             TxCallArgumentType::Bytes(proof.raw.clone()),
             TxCallArgumentType::U64(proof.index),
             TxCallArgumentType::Bytes(proof.path.clone()),
+            TxCallArgumentType::Bytes(proof.coinbase.clone()),
+            TxCallArgumentType::Bytes(proof.coinbase_path.clone()),
             TxCallArgumentType::U64(u64::from(vout)),
             TxCallArgumentType::Address(me),
             TxCallArgumentType::U64(federation.version),
@@ -770,18 +793,18 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
                     });
                 }, |ui| {
                     match &coin.proof {
-                        Some(proof) if depth >= federation.federation.bitcoin_depth => {
+                        Some(proof) if !proof.coinbase.is_empty() && depth >= federation.federation.bitcoin_depth => {
                             let bytes = |text: &str| from_hex(&format!("0x{text}")).unwrap_or_default();
-                            let proof = Proof { block: bytes(&proof.block), raw: bytes(&proof.raw), index: u64::from(proof.index), path: bytes(&proof.path) };
+                            let proof = Proof { block: bytes(&proof.block), raw: bytes(&proof.raw), index: u64::from(proof.index), path: bytes(&proof.path), coinbase: bytes(&proof.coinbase), coinbase_path: bytes(&proof.coinbase_path) };
 
                             if theme::primary(ui, &palette, "Mint wBTC", true).clicked() {
                                 prepared = Some(mint(&proof, coin.vout));
                             }
                         }
-                        Some(_) => {
+                        Some(proof) if !proof.coinbase.is_empty() => {
                             ui.colored_label(palette.warn, "not deep enough yet");
                         }
-                        None => {
+                        _ => {
                             ui.colored_label(palette.soft, "found before proofs were kept: show it through Esplora below");
                         }
                     }
@@ -839,14 +862,19 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
         });
         let script = output_script(&state.withdraw_to);
         let sats = format::parse_units(&state.withdraw_sats, 8).and_then(|raw| raw.parse::<u64>().ok());
+        let least = state.read(ctx, &gateway, "least_withdrawal", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).unwrap_or(10_000);
 
-        if theme::primary(ui, &palette, "Withdraw", script.is_some() && sats.is_some_and(|sats| sats >= 1_000)).clicked()
-            && let (Some(script), Some(sats)) = (script, sats)
-        {
-            prepared = Some(native_call(me, gateway, "withdraw", vec![TxCallArgumentType::Bytes(script), TxCallArgumentType::U64(sats)], u256::ZERO, "Withdraw wBTC to Bitcoin".to_string()));
+        if let Some((burned, arrives)) = sats.filter(|sats| *sats >= least).map(|sats| (sats, least_arriving(sats))) {
+            ui.label(format!("You burn {} and get {} up to {}: the amount less its share of the release's fee, at most a tenth of it.", format::amount(&burned.to_string(), 8, "wBTC"), format::amount(&arrives.to_string(), 8, "BTC"), format::amount(&burned.to_string(), 8, "BTC")));
         }
 
-        ui.label(RichText::new("Burned here, it is paid in the federation's next release, at least 1,000 satoshis: a Taproot address as its 0x5120… script.").small().color(palette.muted));
+        if theme::primary(ui, &palette, "Withdraw", script.is_some() && sats.is_some_and(|sats| sats >= least)).clicked()
+            && let (Some(script), Some(sats)) = (script, sats)
+        {
+            prepared = Some(native_call(me, gateway, "withdraw", vec![TxCallArgumentType::Bytes(script), TxCallArgumentType::U64(sats), TxCallArgumentType::U64(sats - least_arriving(sats))], u256::ZERO, "Withdraw wBTC to Bitcoin".to_string()));
+        }
+
+        ui.label(RichText::new(format!("Burned here, it is paid in the federation's next release, at least {} satoshis: a Taproot address as its 0x5120… script. A release's fee comes off the withdrawals it pays, split evenly.", format::thousands(&least.to_string()))).small().color(palette.muted));
         ui.add_space(8.0);
         theme::caps(ui, &palette, "Your withdrawals");
         let count = state.read(ctx, &gateway, "withdrawal_count", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).unwrap_or(0);
@@ -865,7 +893,18 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
             let paid = values.get(2).map(text).unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 ui.label(theme::mono(format!("#{id}")).color(palette.muted));
-                ui.label(format::amount(&values.get(1).and_then(whole).unwrap_or(0).to_string(), 8, "BTC"));
+                let burned = values.get(1).and_then(whole).unwrap_or(0);
+
+                // Once a release takes it, what arrives is known; until then, up to what it may lose.
+                match values.get(5).and_then(whole) {
+                    Some(share) => {
+                        ui.label(format!("{}, after {} in fees", format::amount(&burned.saturating_sub(share).to_string(), 8, "BTC"), format::amount(&share.to_string(), 8, "BTC")));
+                    }
+                    None => {
+                        ui.label(format!("{}, up to {} less in fees", format::amount(&burned.to_string(), 8, "BTC"), format::amount(&values.get(4).and_then(whole).unwrap_or(0).to_string(), 8, "BTC")));
+                    }
+                }
+
                 ui.label(theme::mono(format::short(&address(&values.first().map(raw).unwrap_or_default(), network))).color(palette.soft));
                 ui.colored_label(if paid == "paid" { palette.good } else { palette.warn }, paid);
             });
@@ -887,7 +926,7 @@ fn look_up(ctx: &Ctx, state: &mut BridgeState, esplora: &str) {
     let (looked, wake, txid, base) = (state.looked.clone(), ctx.wake.clone(), state.txid.trim().to_string(), esplora.to_string());
     state.found = None;
     let get = |answer: Result<chainv4_ui::net::Answer, String>| answer.map(|answer| String::from_utf8_lossy(&answer.bytes).into_owned());
-    let (client_two, client_three) = (client.clone(), client.clone());
+    let (client_two, client_three, client_four, client_five, client_six) = (client.clone(), client.clone(), client.clone(), client.clone(), client.clone());
 
     client.fetch(format!("{base}/tx/{txid}/hex"), None, move |answer| {
         let tx = match get(answer) {
@@ -905,7 +944,33 @@ fn look_up(ctx: &Ctx, state: &mut BridgeState, esplora: &str) {
             };
 
             client_three.fetch(format!("{base}/block-height/{height}"), None, move |answer| {
-                finish(&looked, &wake, get(answer).and_then(|block| esplora_proof(&tx, &merkle, &block)));
+                let block = match get(answer) {
+                    Ok(block) => block,
+                    Err(why) => return finish(&looked, &wake, Err(why)),
+                };
+
+                // The block's coinbase, which shows how tall its tree is.
+                client_four.fetch(format!("{base}/block/{}/txid/0", block.trim()), None, move |answer| {
+                    let coinbase = match get(answer) {
+                        Ok(coinbase) => coinbase.trim().to_string(),
+                        Err(why) => return finish(&looked, &wake, Err(why)),
+                    };
+
+                    client_five.fetch(format!("{base}/tx/{coinbase}/hex"), None, move |answer| {
+                        let coinbase_hex = match get(answer) {
+                            Ok(coinbase_hex) => coinbase_hex,
+                            Err(why) => return finish(&looked, &wake, Err(why)),
+                        };
+
+                        client_six.fetch(format!("{base}/tx/{coinbase}/merkle-proof"), None, move |answer| {
+                            let found = get(answer)
+                                .and_then(|text| serde_json::from_str::<Value>(&text).map_err(|_| "Esplora gave a proof that is not JSON".to_string()))
+                                .and_then(|coinbase_merkle| esplora_proof(&tx, &merkle, &block, &coinbase_hex, &coinbase_merkle));
+
+                            finish(&looked, &wake, found);
+                        });
+                    });
+                });
             });
         });
     });

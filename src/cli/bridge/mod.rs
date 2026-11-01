@@ -60,6 +60,19 @@ pub struct BridgeArgs {
     /// An Esplora API, such as https://mempool.space/api: where btc's commands read Bitcoin.
     #[arg(long, global = true)]
     pub esplora: Option<String>,
+    /// A Gateway.sol this operator vouches for on a chain the directory lists none on, as
+    /// CHAIN:0x…; repeat for each. A signer signs for no other chain, as whatever the gateway's
+    /// owner set there could say anything left it. On a chain with a directory, listing it there is
+    /// the better way; this is for one without. It must match the gateway's peer.
+    #[arg(long = "evm-gateway", global = true, value_parser = parse_evm_gateway)]
+    pub evm_gateways: Vec<(u64, [u8; 20])>,
+}
+
+fn parse_evm_gateway(text: &str) -> Result<(u64, [u8; 20]), String> {
+    let wrong = || format!("{text} is not CHAIN:0x…, such as 11155111:0x5fbd…");
+    let (chain, gateway) = text.split_once(':').ok_or_else(wrong)?;
+
+    Ok((chain.parse().map_err(|_| wrong())?, from_hex(gateway).and_then(|bytes| bytes.try_into().ok()).ok_or_else(wrong)?))
 }
 
 #[derive(clap::Subcommand)]
@@ -416,8 +429,10 @@ impl Bridge {
         })
     }
 
-    /// The gateway on an EVM chain, as the one here knows it: refused when the chain announces
-    /// another there, so no signer vouches for a peer its owner repointed.
+    /// The gateway on an EVM chain, as the one here knows it: only one the chain's directory lists,
+    /// or this operator named with --evm-gateway. A signer vouches for what a peer says left it, and
+    /// the gateway's owner sets its peers alone, so going by the peer would let one key mint anything
+    /// here, and a chain with no directory is no exception.
     fn evm_gateway(&self, gateway: &Address, chain: u64) -> CliResult<[u8; 20]> {
         let peer = self.read(gateway, "peer", json!([{ "type": "u64", "value": chain.to_string() }]))?;
         let peer: [u8; 20] = peer
@@ -433,9 +448,15 @@ impl Bridge {
             .find(|evm| evm["chain_id"].as_u64() == Some(chain))
             .and_then(|evm| evm["gateway"].as_str().and_then(from_hex));
 
-        match announced {
-            Some(announced) if announced != peer => Err(format!("the gateway here names {} its peer on chain {chain}, but the chain announces {}", to_hex(&peer), to_hex(&announced)).into()),
-            _ => Ok(peer),
+        let vouched = self.args.evm_gateways.iter().find(|(named, _)| *named == chain).map(|(_, gateway)| gateway);
+
+        match (announced, vouched) {
+            (Some(announced), _) if announced != peer => Err(format!("the gateway here names {} its peer on chain {chain}, but the chain announces {}", to_hex(&peer), to_hex(&announced)).into()),
+            (Some(_), Some(vouched)) if *vouched != peer => Err(format!("--evm-gateway names {} on chain {chain}, and the chain announces {}", to_hex(vouched), to_hex(&peer)).into()),
+            (Some(_), _) => Ok(peer),
+            (None, Some(vouched)) if *vouched == peer => Ok(peer),
+            (None, Some(vouched)) => Err(format!("the gateway here names {} its peer on chain {chain}, but --evm-gateway names {}", to_hex(&peer), to_hex(vouched)).into()),
+            (None, None) => Err(format!("the chain's directory lists no gateway on chain {chain}: have governance list it, or vouch for it yourself with --evm-gateway {chain}:{}", to_hex(&peer)).into()),
         }
     }
 
@@ -447,6 +468,8 @@ impl Bridge {
                 let rpc = self.rpc()?;
                 let recipient = parse_address(recipient)?;
                 let target = rpc.chain_id()?;
+                // No signer signs for a chain it may not vouch for, so it would never arrive.
+                self.evm_gateway(&gateway, target)?;
                 let asset = asset.map(|asset| asset.parse::<Address>().map_err(|_| format!("{asset} is not an address here"))).transpose()?;
                 let wrapped = match asset {
                     Some(asset) => !self.read(&gateway, "origin_of", json!([{ "type": "address", "value": asset.to_string() }]))?.first().is_none_or(|value| value["value"].is_null()),
@@ -552,9 +575,7 @@ impl Bridge {
     fn sign_from_evm(&self, url: &str, gateway: &Address, identity: &[u8], here: u64, federation: &Value, from_block: u64, secret: &[u8; 32]) -> CliResult<()> {
         let rpc = Rpc::new(self.agent.clone(), url);
         let chain = rpc.chain_id()?;
-        let Ok(evm_gateway) = self.evm_gateway(gateway, chain) else {
-            return Ok(());
-        };
+        let evm_gateway = self.evm_gateway(gateway, chain)?;
         let (tip, finalized) = rpc.heads()?;
         let safe = finalized.unwrap_or_else(|| tip.saturating_sub(federation["evm_depth"].as_u64().unwrap_or(12)));
         let topic: [u8; 32] = Hasher::digest(HashType::Keccak256, b"Sent(uint64,uint64,bytes32)").to_bytes().try_into().expect("32 bytes");
@@ -679,8 +700,13 @@ impl Bridge {
                     continue;
                 }
             };
-            let Ok(evm_gateway) = self.evm_gateway(&gateway, chain) else {
-                continue;
+            let evm_gateway = match self.evm_gateway(&gateway, chain) {
+                Ok(evm_gateway) => evm_gateway,
+                Err(err) => {
+                    eprintln!("relaying to {url}: {err}");
+
+                    continue;
+                }
             };
 
             for nonce in 1..=count {
@@ -729,6 +755,14 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gateway_a_signer_vouches_for_reads_as_chain_and_address() {
+        assert_eq!(parse_evm_gateway(&format!("11155111:{}", to_hex(&[0xab; 20]))), Ok((11155111, [0xab; 20])));
+        assert!(parse_evm_gateway("11155111").is_err());
+        assert!(parse_evm_gateway("sepolia:0xabab").is_err());
+        assert!(parse_evm_gateway(&format!("1:{}", to_hex(&[0xab; 19]))).is_err());
+    }
 
     #[test]
     fn a_refused_transfer_sits_out_more_passes_each_time_and_stays_listed_until_it_goes_through() {

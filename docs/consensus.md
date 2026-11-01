@@ -250,9 +250,11 @@ Tor builds a circuit first, so the connection may take some seconds; the message
 WebSocket, `GET /mining/ws`, for a browser, one line a message: the node relays them to its port as
 they are, so the handshake and the MACs are the same either way:
 - **The handshake proves the token without sending it.** The node sends a random challenge; the
-  worker answers with its name, a nonce of its own, and an HMAC-SHA256 of both under the token;
-  the node answers with its own HMAC, so the worker knows it found the node meant. Both say the
-  protocol, `{name}-mining/1` for the `--protocol` name, and a worker of another name is turned
+  worker answers with its name, its payout, whether it mines alone, a nonce of its own, and an
+  HMAC-SHA256 of them all under the token; the node answers with the payout it took and its own HMAC
+  of all that, so the worker knows it found the node meant. So nothing on the path changes where a
+  worker's work pays, and a worker told it pays another address stops rather than mine for it. Both
+  say the protocol, `{name}-mining/2` for the `--protocol` name, and a worker of another name is turned
   away before anything else.
 - **Every message after carries an HMAC** under a session key both derive from the token and
   both randoms, over its direction, its number in that direction and its text. A message changed,
@@ -260,6 +262,10 @@ they are, so the handshake and the MACs are the same either way:
 - **It is not encrypted.** Anyone on the path sees the work and the nonces, which only matter
   until the block is out, and cannot change them. Put the port behind a VPN or an SSH tunnel to
   hide even that.
+- **An open port's token is public,** so all of this holds only against someone without it, which
+  is no one. Someone on the path of a `--mining-open` port can make the same MACs, and rewrite a
+  miner's payout both ways, unseen. There the transport has to protect it: the WebSocket over wss://,
+  or a private network.
 
 **What it does not do, without `--pool`:** pay anybody but the node. Workers send only nonces
 that meet the block's difficulty, and the rewards go to its `--reward-to`. For miners who are not

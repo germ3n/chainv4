@@ -7,7 +7,7 @@
 use {
     super::{CliResult, signer},
     crate::node::{download, fetch_release},
-    crate::release::{Breaking, Product, ReleaseFile, ReleaseKeys, SignedRelease, Standing, TARGET, sha256},
+    crate::release::{Breaking, DEFAULT_VALID_DAYS, Product, ReleaseError, ReleaseFile, ReleaseKeys, SignedRelease, Standing, TARGET, current_release, kept_path, kept_release, sha256, take_newest, write_kept},
     crate::structs::hex::from_hex,
     crate::structs::version::{Upgrade, Version},
     std::io::Write,
@@ -33,6 +33,10 @@ pub struct UpdateArgs {
     /// Replace this binary without asking.
     #[arg(long)]
     pub yes: bool,
+    /// Where to keep the newest release seen, so no host goes back past it: .chainv4/release.json
+    /// in the home directory unless told.
+    #[arg(long)]
+    pub seen: Option<PathBuf>,
 }
 
 pub fn update(args: UpdateArgs) -> CliResult<()> {
@@ -52,8 +56,29 @@ pub(super) fn update_reading(args: UpdateArgs, keys: &ReleaseKeys, path: &Path, 
         (None, Some(url), _) | (None, None, Some(url)) => url.clone(),
         (None, None, None) => return Err("give --node or --updates: the release keys built in name no manifest".into()),
     };
-    let signed = fetch_release(&url, args.proxy.as_deref())?;
-    let signers = signed.verify(keys).map_err(|err| format!("the release from {url} is refused: {err}"))?;
+    let offered = fetch_release(&url, args.proxy.as_deref())?;
+    let seen = args.seen.clone().or_else(kept_path);
+    let mut kept = seen.as_ref().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| kept_release(&text, keys));
+    let before = kept.as_ref().map(|kept| kept.release.issued);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let offered_issued = offered.release.issued;
+    let taken = take_newest(keys, &mut kept, offered, now);
+
+    if let (Some(path), Some(newest)) = (&seen, kept.as_ref().filter(|kept| Some(kept.release.issued) != before))
+        && let Err(why) = write_kept(path, newest)
+    {
+        eprintln!("the newest release seen is not kept: {why}");
+    }
+
+    match taken {
+        // Expired or not, the newest seen is what it goes by, if that still counts.
+        Ok(false) if kept.as_ref().is_some_and(|kept| kept.release.issued > offered_issued) => println!("{url} serves an older release than this machine has seen: going by the newest seen"),
+        Ok(_) | Err(ReleaseError::Expired { .. }) => {}
+        Err(err) => return Err(format!("the release from {url} is refused: {err}").into()),
+    }
+
+    let signed = current_release(&kept, now).ok_or_else(|| format!("the newest release seen has expired, so nothing is taken from {url}: its host is behind, or this machine's clock is wrong"))?;
+    let signers = signed.check(keys, now).map_err(|err| format!("the release from {url} is refused: {err}"))?;
     let ours = Version::ours();
     let product = signed.release.product("chainv4").ok_or("the release names no chainv4")?;
     println!("chainv4 {} is the newest, signed by {signers} of the {} release keys; this is {ours}", product.version, keys.keys.len());
@@ -108,6 +133,9 @@ pub enum ReleaseCommand {
     /// PRODUCT/VERSION/TARGET/NAME, and manifest.json naming it beside the other products and
     /// upgrades already there, unsigned until the release keys sign it.
     New(NewArgs),
+    /// Issues a manifest anew, changing nothing it names: it counts for longer, and needs signing
+    /// again. A release lapses, so this is what keeps one current between releases.
+    Renew(RenewArgs),
     /// Signs a manifest with a release key, beside the signatures it has.
     Sign(SignArgs),
     /// Shows what a manifest says and how many of the release keys built in signed it.
@@ -146,6 +174,18 @@ pub struct NewArgs {
     /// Drop the upgrades the manifest announced before.
     #[arg(long)]
     pub clear_breaking: bool,
+    /// How many days it counts for, up to 366: how long a host could hide a newer one at most.
+    #[arg(long, default_value_t = DEFAULT_VALID_DAYS)]
+    pub valid_days: u64,
+}
+
+#[derive(clap::Args)]
+pub struct RenewArgs {
+    /// The manifest, written back unsigned.
+    pub manifest: PathBuf,
+    /// How many days it counts for from now, up to 366.
+    #[arg(long, default_value_t = DEFAULT_VALID_DAYS)]
+    pub valid_days: u64,
 }
 
 #[derive(clap::Args)]
@@ -166,6 +206,7 @@ pub struct VerifyArgs {
 pub fn release(args: ReleaseArgs) -> CliResult<()> {
     match args.command {
         ReleaseCommand::New(args) => new(args),
+        ReleaseCommand::Renew(args) => renew(args),
         ReleaseCommand::Sign(args) => sign(args),
         ReleaseCommand::Verify(args) => verify(args),
     }
@@ -212,16 +253,31 @@ fn new(args: NewArgs) -> CliResult<()> {
     }
 
     release.breaking.extend(args.breaking);
-    // Issued after the release it replaces, so nodes that took that one take this.
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    release.issued = now.max(release.issued + 1);
-
-    if let Some(problem) = release.problem() {
-        return Err(problem.into());
-    }
-
+    issue(&mut release, args.valid_days)?;
     write_manifest(&manifest, &SignedRelease { release, signatures: Vec::new() })?;
     println!("wrote {}: sign it with chainv4 release sign --key KEY {}", manifest.display(), manifest.display());
+
+    Ok(())
+}
+
+/// Dates a release anew: issued after the one it replaces, so nodes that took that one take this,
+/// counting for these days.
+fn issue(release: &mut crate::release::Release, valid_days: u64) -> CliResult<()> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    release.issued = now.max(release.issued + 1);
+    release.expires = release.issued + valid_days.saturating_mul(86_400).min(u64::MAX / 2);
+
+    match release.problem() {
+        Some(problem) => Err(problem.into()),
+        None => Ok(()),
+    }
+}
+
+fn renew(args: RenewArgs) -> CliResult<()> {
+    let mut release = read_manifest(&args.manifest)?.release;
+    issue(&mut release, args.valid_days)?;
+    write_manifest(&args.manifest, &SignedRelease { release, signatures: Vec::new() })?;
+    println!("wrote {}: it counts for {} days once signed again, with chainv4 release sign --key KEY {}", args.manifest.display(), args.valid_days, args.manifest.display());
 
     Ok(())
 }
@@ -255,9 +311,11 @@ fn verify(args: VerifyArgs) -> CliResult<()> {
         println!("upgrade of {}: older than {} stop at block {}", crate::structs::hex::to_hex(&breaking.chain), breaking.upgrade.least, breaking.upgrade.from);
     }
 
+    println!("issued {}, expires {}", signed.release.issued, signed.release.expires);
     let keys = ReleaseKeys::built_in()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
 
-    match signed.verify(&keys) {
+    match signed.check(&keys, now) {
         Ok(signers) => println!("{signers} of the {} release keys signed it, of {} needed: it counts", keys.keys.len(), keys.threshold),
         Err(err) => return Err(err.to_string().into()),
     }
@@ -314,6 +372,7 @@ mod tests {
             file: vec![(TARGET.to_string(), binary.clone())],
             breaking: Vec::new(),
             clear_breaking: false,
+            valid_days: DEFAULT_VALID_DAYS,
         };
 
         new(args("wallet", Version::new(0, 1, 0))).unwrap();
@@ -323,6 +382,21 @@ mod tests {
 
         assert_eq!(second.products.iter().map(|product| product.name.as_str()).collect::<Vec<_>>(), ["chainv4", "wallet"]);
         assert!(second.issued > first.issued);
+        assert_eq!(second.expires, second.issued + DEFAULT_VALID_DAYS * 86_400, "counting for what it says, by default");
+
+        // Renewed, it is the same release, issued later, counting longer, and unsigned.
+        let manifest = dir.join("out/manifest.json");
+        let key = crate::crypto::keypair::Keypair::from_seed([3; 32]);
+        let mut signed = read_manifest(&manifest).unwrap();
+        signed.sign(&key);
+        write_manifest(&manifest, &signed).unwrap();
+        renew(RenewArgs { manifest: manifest.clone(), valid_days: 90 }).unwrap();
+        let renewed = read_manifest(&manifest).unwrap();
+        assert!(renewed.signatures.is_empty());
+        assert_eq!(renewed.release.products, second.products);
+        assert!(renewed.release.issued > second.issued);
+        assert_eq!(renewed.release.expires, renewed.release.issued + 90 * 86_400);
+        assert!(renew(RenewArgs { manifest: manifest.clone(), valid_days: 367 }).unwrap_err().to_string().contains("366 days"), "none that never lapses");
         let file = second.product("chainv4").unwrap().file(TARGET).unwrap();
         assert_eq!(file.url, format!("https://example.org/releases/chainv4/0.2.0/{TARGET}/chainv4"));
         assert_eq!(std::fs::read(dir.join(format!("out/chainv4/0.2.0/{TARGET}/chainv4"))).unwrap(), b"a node");

@@ -797,6 +797,16 @@ fn deposits(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, events: &[FoundEvent]) {
     });
 }
 
+/// A withdrawal's fee, from what withdrawal returns: its share once a release took it, or the most
+/// it may lose until then.
+fn withdrawal_fee(values: &[String]) -> String {
+    match (values.get(5).filter(|share| share.parse::<u64>().is_ok()), values.get(4).filter(|most| most.parse::<u64>().is_ok())) {
+        (Some(share), _) => btc(share),
+        (None, Some(most)) => format!("up to {}", btc(most)),
+        (None, None) => "—".to_string(),
+    }
+}
+
 /// Withdrawals, from WithdrawRequested(id, script, sats, sender) events, each with where it stands
 /// now.
 fn withdrawals(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, events: &[FoundEvent]) {
@@ -813,21 +823,24 @@ fn withdrawals(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &st
     }
 
     let network = state.network();
-    let rows: Vec<(u64, String, String, String, String, String)> = found
+    let rows: Vec<(u64, String, String, String, String, String, String)> = found
         .iter()
         .map(|event| {
             let id = number(event.data.first());
             let script = from_hex(&event.data.get(1).map(bytes_hex).unwrap_or_default()).unwrap_or_default();
-            let standing = texts(ctx, state, gateway, "withdrawal", json!([whole(id)])).and_then(|values| values.get(2).cloned()).unwrap_or_else(|| "…".to_string());
-
+            let said = texts(ctx, state, gateway, "withdrawal", json!([whole(id)]));
+            let standing = said.as_ref().and_then(|values| values.get(2).cloned()).unwrap_or_else(|| "…".to_string());
+            let sats = event.data.get(2).map(Argument::text).unwrap_or_default();
+            let fee = said.as_ref().map_or("…".to_string(), |values| withdrawal_fee(values));
             let by = event.data.get(3).map(Argument::text).unwrap_or_default();
 
-            (id, by, bitcoin_address(&script, network), event.data.get(2).map(Argument::text).unwrap_or_default(), standing, event.tx.clone())
+            (id, by, bitcoin_address(&script, network), sats, fee, standing, event.tx.clone())
         })
         .collect();
 
-    super::table(ui, look, ("bridge withdrawals", gateway.to_string()), &["#", "by", "to", "amount", "state", "asked in"], |ui| {
-        for (id, by, to, sats, standing, tx) in &rows {
+    super::note(ui, look, "Each arrives as what it burned, less its share of its release's fee, up to the most it agreed to lose: the fee comes off the withdrawals, not off what backs wBTC.");
+    super::table(ui, look, ("bridge withdrawals", gateway.to_string()), &["#", "by", "to", "burned", "fee", "state", "asked in"], |ui| {
+        for (id, by, to, sats, fee, standing, tx) in &rows {
             ui.monospace(id.to_string());
 
             // Gateways from before it named no sender.
@@ -840,6 +853,7 @@ fn withdrawals(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &st
 
             ui.monospace(format::short(to)).on_hover_text(to);
             ui.monospace(btc(sats));
+            ui.monospace(fee);
             let color = match standing.as_str() {
                 "paid" => look.palette.good,
                 "queued" => look.palette.warn,

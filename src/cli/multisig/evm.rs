@@ -71,6 +71,9 @@ pub enum EvmAction {
     /// Signs every call in a bundle's file as --key, one of its owners. Needs no node or chain.
     Sign {
         bundle: PathBuf,
+        /// Sign without asking, for scripts: it still shows what it signs.
+        #[arg(long)]
+        yes: bool,
     },
     /// Sends a bundle's calls in order, each once threshold of the owners signed it, deploying the
     /// contract first if it is not yet; --key pays the gas, and need not be an owner.
@@ -173,6 +176,18 @@ fn write(path: &Path, bundles: &[EvmBundle]) -> CliResult<()> {
     std::fs::write(path, text).map_err(|err| format!("{}: {err}", path.display()))?;
 
     Ok(())
+}
+
+/// Shows what signing bundles has an owner agree to, each call in full, and asks for yes unless
+/// told.
+pub(crate) fn review(bundles: &[EvmBundle], yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    use crate::structs::hex::to_hex as hex;
+
+    for bundle in bundles {
+        println!("on chain {}, {} calls {} with {} wei, at nonce {}: {}", bundle.chain_id, hex(&bundle.contract), hex(&bundle.to), bundle.value, bundle.nonce, hex(&bundle.data));
+    }
+
+    crate::cli::send::typed_yes("Sign this?", yes, input, "nothing is signed")
 }
 
 /// How many of the owners signed a bundle.
@@ -314,9 +329,10 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
             let call = Call { to: side.contract, value: u256::ZERO, input: change_owners_input(&now), what: "Execute" };
             propose_calls(&rpc, account, &side, &[call], &evm_secret(keypair)?, None, Some(&out))?;
         }
-        EvmAction::Sign { bundle: path } => {
+        EvmAction::Sign { bundle: path, yes } => {
             let secret = evm_secret(keypair)?;
             let mut bundles = read(&path)?;
+            review(&bundles, yes, &mut std::io::stdin().lock())?;
             bundles.iter_mut().for_each(|bundle| bundle.sign(&secret));
             write(&path, &bundles)?;
             let counts: Vec<String> = bundles.iter().map(|bundle| bundle.signers().len().to_string()).collect();

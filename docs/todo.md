@@ -810,22 +810,40 @@ offline; these would make that hold up as a treasury.
   time, and `watch` then skipped relaying; a name that was not UTF-8 did the same, either way. Both gateways refuse a
   recipient that cannot arrive and drop a name that is not text, and each transfer now stands alone: one refused is
   logged with why, tried less and less often, and stays listed, and old logs after a reset pass quietly.
-- [ ] **One gateway-owner key can drain coins through a fake peer where the directory omits that chain.** The owner
-  sets the gateway's peers, and a signer only refuses a peer the directory contradicts, so on a chain the directory
-  does not name it signs what the owner's fake peer says left.
-- [ ] **The relay's SPV proofs have the inner-node weakness, CVE-2017-12842.** `includes`
-  (`contracts/examples/btc_relay/src/lib.rs:402-430`) takes a 64-byte inner node of the Merkle tree as a transaction.
-- [ ] **A mining hello's `payout` and `solo` are unauthenticated.** `src/mining/protocol.rs:190-200`.
-- [ ] **`multisig bitcoin sign` signs a PSBT blind.** `src/cli/multisig.rs:449,483`.
-- [ ] **Bitcoin withdrawal fees come from the pool.** A release's fee is taken from what the gateway holds, not from what
-  was burned (`contracts/lua/btc_gateway.lua`, where `propose` reckons the fee), so wBTC slowly stops being backed.
-- [ ] **Release manifests have no expiry, and only the node orders them by `issued`.**
 - [x] **A chain's own signature on a transaction is bound to its chain.** `signing_bytes` covered the transaction,
   nonce, fee offer and signer, while votes, EIP-155 and EIP-712 named the genesis. So a transaction signed on one
   chain was valid on another where its account had that nonce: with the keys reused, as across the devnet's
   genesises, anyone could send it again there. It covers the genesis id now, `SignedTx::verify_on` is the only check
   of a signature, the offline signer's request names its chain, and the apps sign nothing with none known. It
   needs every node and app at once, and a new genesis.
+- [x] **One gateway-owner key could drain coins through a fake peer.** The owner sets the gateway's peers, and a signer
+  refused only a peer the directory contradicted, so on a chain it left out, or with no directory at all, a signer signed
+  whatever the owner's peer said left. Signers now refuse any chain the directory does not list, unless their own operator
+  names that very gateway with `--evm-gateway CHAIN:0x…`; nothing on the chain can.
+- [x] **The relay's proofs had the inner-node weakness, CVE-2017-12842.** `includes` took a path of any length, so the 64
+  bytes of two ids could pass for a transaction a level up. A proof now brings the block's coinbase, itself and its path,
+  which must be just as long, and the gateway refuses any 64-byte transaction. The CLI and the wallet, both its Esplora
+  and light client proofs, bring it.
+- [x] **A mining hello's `payout` and `solo` were unauthenticated.** On the way, one could be rewritten. The worker's and
+  the node's proofs and the session key now cover every field, the node says what payout it took, and the worker stops if
+  it is not its own; the native miner, the wallet's and the web one all go through it. An open port's token is public, so
+  there only wss:// or a private network protects a payout from someone on the path, and the docs say so.
+- [x] **`multisig bitcoin sign` signed a PSBT blind.** It showed nothing before using the seed. It now shows each output's
+  address and amount and the fee, and takes a typed yes or `--yes`; what it cannot read is refused. `multisig sign`,
+  `approve` and `multisig evm sign` show what they sign and ask the same.
+- [x] **Bitcoin withdrawal fees came from the pool.** Nobody was charged, so a 1,000-satoshi withdrawal could spend the
+  whole cap of what backs wBTC. A release's fee now comes off its withdrawals, evenly, each up to the most it agreed to
+  lose, a tenth unless it says, and what the gateway holds falls by just what was burned. Withdrawals start at 10,000
+  satoshis. Sweeps stay the federation's.
+- [x] **Release manifests had no expiry, and only the node ordered them by `issued`.** A manifest now carries a signed
+  `expires`, 30 days unless told, renewed with `chainv4 release renew`, and nothing acts on one past it. Every build has
+  an `issued` floor, and the wallet, explorer, worker and CLI keep the newest they saw as the node does, so a host can
+  hide a newer one for as long as the last one counts, and no longer.
+- [ ] **A chain's own signature on a transaction is not bound to its chain.** `signing_bytes` covers the transaction,
+  nonce, fee offer and signer, while votes, EIP-155 and EIP-712 name the genesis. So a transaction signed on one
+  chain is valid on another where its account has that nonce: with the keys reused, as across the devnet's
+  genesises, anyone can send it again there. Binding it changes what every signer signs, so it needs every node
+  and app at once, and a new genesis.
 - [x] **After a new chain, Activity showed the old one's transactions.** A row kept from the old chain stood in for
   a transaction with the same id on the new one, and being final was never proven again. With no chain followed,
   it listed every chain's. Each is kept with its genesis and goes by it now, the pinned one with none followed.

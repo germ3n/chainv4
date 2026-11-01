@@ -682,7 +682,8 @@ against their own release keys: the node only relays it.
 | `version`, `target` | The node's chainv4 version and the target it was built for. |
 | `updates` | Whether its build trusts any release keys; without, it takes no releases. |
 | `manifest` | `null`, or the manifest as signed: `release` and `signatures`. |
-| `standing` | Where the node stands against the newest chainv4: `current`, `behind`, `unsupported` (below its `least`), or `unknown` without a manifest. |
+| `standing` | Where the node stands against the newest chainv4: `current`, `behind`, `unsupported` (below its `least`), or `unknown` without a manifest that still counts. |
+| `expired` | Whether the newest manifest it took is past its `expires`: it is still relayed, for what orders the next one, and nothing acts on it. |
 | `newest` | The newest chainv4, when the node is behind. |
 | `checked`, `error` | When the node last looked, in milliseconds, and why that failed, or `null`. |
 | `installed` | The version `--auto-update` put in place, which runs once the node restarts, or `null`. |

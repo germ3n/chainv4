@@ -165,7 +165,7 @@ fn a_worker_of_another_protocol_name_is_told_apart() {
 
     assert_eq!(
         protocol::connect(stream, TOKEN, "otherchain", "stray", None).err().as_deref(),
-        Some("a node speaking \"chainv4-mining/1\", not otherchain-mining/1")
+        Some("a node speaking \"chainv4-mining/2\", not otherchain-mining/2")
     );
     assert!(pool.mining().unwrap().workers.is_empty());
 }

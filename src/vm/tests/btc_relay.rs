@@ -51,6 +51,17 @@ impl Relay {
     }
 }
 
+/// A coinbase, without its witness, one of its own for each stamp: one input spending nothing.
+pub(super) fn coinbase(stamp: u32) -> Vec<u8> {
+    crate::crypto::bitcoin::tx::Transaction {
+        version: 1,
+        inputs: vec![crate::crypto::bitcoin::tx::TxIn { txid: [0; 32], vout: u32::MAX, script_sig: stamp.to_le_bytes().to_vec(), sequence: u32::MAX, witness: Vec::new() }],
+        outputs: vec![crate::crypto::bitcoin::tx::TxOut { value: 50_0000_0000, script: vec![0x51; 20] }],
+        lock_time: 0,
+    }
+    .base()
+}
+
 /// A regtest header on prev with a Merkle root, mined at regtest's difficulty: a nonce until its
 /// hash meets it.
 pub(super) fn mined(prev: &[u8; 32], merkle: &[u8; 32], time: u32, bits: u32) -> Vec<u8> {
@@ -93,7 +104,8 @@ fn bitcoin_s_own_first_blocks_and_transaction_check() {
 
     // Its coinbase is its one transaction: the Merkle root is its id, the path empty.
     let txid = sha256d(&from_hex(COINBASE_1).unwrap());
-    let includes = |txid: &[u8], index: u64| relay.call("includes", &[bytes(&sha256d(&block_1)), bytes(txid), number(index), bytes(&[])]).unwrap();
+    let coinbase_1 = from_hex(COINBASE_1).unwrap();
+    let includes = |txid: &[u8], index: u64| relay.call("includes", &[bytes(&sha256d(&block_1)), bytes(txid), number(index), bytes(&[]), bytes(&coinbase_1), bytes(&[])]).unwrap();
 
     assert_eq!(includes(&txid, 0), [TxCallArgumentType::Bool(true)]);
     assert_eq!(includes(&[0; 32], 0), [TxCallArgumentType::Bool(false)]);
@@ -167,4 +179,58 @@ fn regtest_headers_follow_the_most_work_and_the_time_rules() {
     assert!(relay.call("submit", &[bytes(&orphan)]).unwrap_err().contains("builds on none"));
     assert!(relay.call("submit", &[bytes(&ahead)]).unwrap_err().contains("two hours ahead"));
     assert!(relay.call("submit", &[bytes(&[0; 79])]).unwrap_err().contains("80 bytes each"));
+}
+
+/// CVE-2017-12842: the 64 bytes of two ids hash to an inner node of a block's tree, so with a path
+/// one short they pass for a transaction a level up, and could be made to read as one that pays
+/// anyone. Nothing in a header says how tall its tree is; a coinbase's path does.
+#[test]
+fn an_inner_node_does_not_pass_for_a_transaction() {
+    let relay = Relay::new();
+    let start = mined(&[0; 32], &[0; 32], 1_700_000_000, REGTEST);
+    relay.call("start", &[bytes(&start), number(0), TxCallArgumentType::String("regtest".into())]).unwrap();
+
+    // A block of four: its coinbase and three more, the last two under one inner node.
+    let coinbase_tx = coinbase(7);
+    let leaves = [sha256d(&coinbase_tx), [0xa1; 32], [0xa2; 32], [0xa3; 32]];
+    let left = sha256d(&[leaves[0], leaves[1]].concat());
+    let inner = [leaves[2], leaves[3]].concat();
+    let right = sha256d(&inner);
+    let root = sha256d(&[left, right].concat());
+    let block = mined(&sha256d(&start), &root, 1_700_000_600, REGTEST);
+    relay.call("submit", &[bytes(&block)]).unwrap();
+    let hash = sha256d(&block);
+    let includes = |txid: &[u8], index: u64, path: &[u8], coinbase: &[u8], coinbase_path: &[u8]| relay.call("includes", &[bytes(&hash), bytes(txid), number(index), bytes(path), bytes(coinbase), bytes(coinbase_path)]).unwrap() == [TxCallArgumentType::Bool(true)];
+    let coinbase_path = [leaves[1], right].concat();
+
+    // A real transaction, with the coinbase beside it: taken.
+    assert!(includes(&leaves[2], 2, &[leaves[3], left].concat(), &coinbase_tx, &coinbase_path));
+    assert!(includes(&leaves[0], 0, &coinbase_path, &coinbase_tx, &coinbase_path));
+
+    // The inner node as a transaction at place 1, a path of one: its path reaches the root, but the
+    // tree is two tall, as the coinbase's says.
+    assert_eq!(sha256d(&[left, sha256d(&inner)].concat()), root, "the forged path does lead to the root");
+    assert!(!includes(&right, 1, &left, &coinbase_tx, &coinbase_path), "one level short of the coinbase's");
+
+    // Nor does a shorter coinbase path help: the coinbase's own id does not lead there in one step.
+    assert!(!includes(&right, 1, &left, &coinbase_tx, &right));
+
+    // And an inner node cannot stand in for the coinbase: 64 bytes, and no coinbase's shape.
+    assert!(!includes(&right, 1, &left, &[leaves[0], leaves[1]].concat(), &right), "the inner node's own bytes");
+    let not_one = pays_nothing();
+    assert!(!includes(&right, 1, &left, &not_one, &right), "any other transaction");
+    assert!(!includes(&leaves[2], 2, &[leaves[3], left].concat(), &not_one, &coinbase_path));
+    assert!(!includes(&leaves[2], 2, &[leaves[3], left].concat(), &[], &coinbase_path), "no coinbase at all");
+    assert!(!includes(&leaves[2], 2, &[leaves[3], left].concat(), &coinbase(8), &coinbase_path), "another block's");
+}
+
+/// A transaction that is no coinbase: its input spends something.
+fn pays_nothing() -> Vec<u8> {
+    crate::crypto::bitcoin::tx::Transaction {
+        version: 2,
+        inputs: vec![crate::crypto::bitcoin::tx::TxIn { txid: [3; 32], vout: 0, script_sig: Vec::new(), sequence: u32::MAX, witness: Vec::new() }],
+        outputs: vec![crate::crypto::bitcoin::tx::TxOut { value: 1, script: vec![0x51; 20] }],
+        lock_time: 0,
+    }
+    .base()
 }

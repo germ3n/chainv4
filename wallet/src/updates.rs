@@ -13,7 +13,7 @@ use {
     crate::app::Settings,
     crate::node::Failure,
     crate::theme::{self, Palette},
-    chainv4::release::{ReleaseFile, ReleaseKeys, SignedRelease, Standing},
+    chainv4::release::{ReleaseFile, ReleaseKeys, SignedRelease, Standing, current_release, kept_release, take_newest},
     chainv4::structs::version::{Upgrade, Version},
     egui::{RichText, Ui},
     serde_json::Value,
@@ -66,17 +66,27 @@ pub fn ours() -> Version {
     env!("CARGO_PKG_VERSION").parse().expect("Cargo.toml's version is major.minor.patch")
 }
 
-/// What to show of a release the node relayed, as GET /release's manifest: nothing without keys
-/// to check it by, for no release, for one fewer of the keys signed than it takes, for one that
-/// names no wallet, and for a wallet as new as its newest.
-pub fn notice(manifest: &Value, keys: &ReleaseKeys, ours: Version) -> Option<Notice> {
-    if !keys.on() || manifest.is_null() {
+/// What to show of the newest release seen, kept, once what the node relayed has had its say, as
+/// GET /release's manifest: nothing without keys to check it by, for one fewer of the keys signed
+/// than it takes, for one past its expires, for one that names no wallet, and for a wallet as new as
+/// its newest. A node relaying an older one, or none, hides nothing that was seen.
+pub fn notice(manifest: &Value, kept: &mut Option<SignedRelease>, keys: &ReleaseKeys, ours: Version, now: u64) -> Option<Notice> {
+    if !keys.on() {
         return None;
     }
 
-    let signed = SignedRelease::from_json(manifest).inspect_err(|why| log::warn!("the node's release does not read: {why}")).ok()?;
-    signed.verify(keys).inspect_err(|why| log::warn!("the node's release is not taken: {why}")).ok()?;
-    let product = signed.release.product(PRODUCT)?;
+    if !manifest.is_null() {
+        match SignedRelease::from_json(manifest) {
+            Ok(offered) => {
+                if let Err(why) = take_newest(keys, kept, offered, now) {
+                    log::warn!("the node's release is not taken: {why}");
+                }
+            }
+            Err(why) => log::warn!("the node's release does not read: {why}"),
+        }
+    }
+
+    let product = current_release(kept, now)?.release.product(PRODUCT)?;
 
     match product.standing(ours) {
         Standing::Current => None,
@@ -201,6 +211,9 @@ pub struct Updates {
     status_stops: Option<Upgrade>,
     release_stops: Option<Upgrade>,
     download: Download,
+    /// Whether the newest release seen is past its expires: its host is behind, or this device's
+    /// clock is wrong, and no notice can be trusted until one or the other is put right.
+    lapsed: bool,
 }
 
 impl Updates {
@@ -223,23 +236,35 @@ impl Updates {
         true
     }
 
-    /// Takes the node's GET /release, checked with these keys. A node from before releases has
-    /// none to give; one that did not answer is asked again in a minute, and what it said before
-    /// stands until then.
-    pub fn answered(&mut self, result: &Result<Value, Failure>, keys: &ReleaseKeys, time: f64) {
+    /// Takes the node's GET /release, checked with these keys, beside the newest release this
+    /// wallet has seen, kept in its settings as JSON and written back if this one is newer. A node
+    /// from before releases has none to give; one that did not answer is asked again in a minute,
+    /// and what it said before stands until then. now is the time, in seconds since the Unix epoch.
+    pub fn answered(&mut self, result: &Result<Value, Failure>, keys: &ReleaseKeys, time: f64, seen: &mut Option<String>, now: u64) {
+        let mut kept = seen.as_deref().and_then(|text| kept_release(text, keys));
+        let before = kept.as_ref().map(|kept| kept.release.issued);
+
         match result {
             Ok(value) => {
-                self.notice = notice(&value["manifest"], keys, ours());
+                self.notice = notice(&value["manifest"], &mut kept, keys, ours(), now);
                 self.release_stops = stopping(value);
             }
             Err(failure) if failure.status == NOT_FOUND => {
-                self.notice = None;
+                self.notice = notice(&Value::Null, &mut kept, keys, ours(), now);
                 self.release_stops = None;
             }
             Err(failure) => {
                 log::warn!("could not ask the node for its release: {}", failure.message);
                 self.next = Some(time + RETRY);
+
+                return;
             }
+        }
+
+        self.lapsed = kept.as_ref().is_some_and(|kept| kept.release.expired(now));
+
+        if let Some(newest) = kept.as_ref().filter(|kept| Some(kept.release.issued) != before) {
+            *seen = Some(newest.to_json().to_string());
         }
     }
 
@@ -266,6 +291,10 @@ impl Updates {
 
     /// Above every page, while a newer wallet is out and its notice was not put away.
     pub fn banner(&mut self, ui: &mut Ui, palette: &Palette, settings: &Settings, wake: &egui::Context) {
+        if self.lapsed {
+            ui.label(RichText::new("The newest release this wallet knows of has expired, so it cannot say whether it is up to date: its node's host is behind, or this device's clock is wrong.").small().color(palette.warn));
+        }
+
         let Some(notice) = self.notice.clone().filter(|notice| !notice.unsupported() && self.dismissed != Some(notice.newest())) else {
             return;
         };
@@ -390,8 +419,16 @@ mod tests {
         Keypair::from_seed([seed; 32])
     }
 
+    /// The time these tests run at, in seconds since the Unix epoch.
+    const NOW: u64 = 1_800_000_100;
+
+    /// What to show of one manifest, with nothing seen before.
+    fn notice(manifest: &Value, keys: &ReleaseKeys, ours: Version) -> Option<Notice> {
+        super::notice(manifest, &mut None, keys, ours, NOW)
+    }
+
     fn keys(threshold: usize, seeds: &[u8]) -> ReleaseKeys {
-        ReleaseKeys { threshold, keys: seeds.iter().map(|seed| key(*seed).public()).collect(), updates: None }
+        ReleaseKeys { threshold, keys: seeds.iter().map(|seed| key(*seed).public()).collect(), updates: None, floor: 0 }
     }
 
     /// A release of wallet 0.2.0 that works back to 0.1.5, with a binary for these targets,
@@ -402,6 +439,7 @@ mod tests {
         targets.sort_unstable();
         let release = Release {
             issued: 1_800_000_000,
+            expires: 1_800_000_000 + 86_400,
             products: vec![Product {
                 name: "wallet".to_string(),
                 version: Version::new(0, 2, 0),
@@ -478,6 +516,51 @@ mod tests {
     }
 
     #[test]
+    fn what_was_seen_stands_whatever_a_node_relays_later_until_it_expires() {
+        let trusted = keys(1, &[1]);
+        let mut seen = None;
+        let mut updates = Updates::default();
+        let relayed = |manifest: Value| Ok(json!({ "manifest": manifest }));
+        let failure = |status: u16| Err(Failure { status, message: String::new() });
+
+        updates.answered(&relayed(manifest(&[TARGET], &[1])), &trusted, 0.0, &mut seen, NOW);
+        let kept = seen.clone().expect("kept");
+        let showing = updates.notice.clone();
+        assert!(showing.is_some() || super::ours() >= Version::new(0, 2, 0));
+
+        // A node with none, an older one, one too few signed, or none at all, hides nothing, and
+        // changes nothing kept.
+        let mut older = SignedRelease::from_json(&manifest(&[TARGET], &[1])).unwrap();
+        older.release.issued -= 10;
+        older.signatures.clear();
+        older.sign(&key(1));
+
+        for answer in [relayed(Value::Null), relayed(older.to_json()), relayed(manifest(&[TARGET], &[9])), failure(NOT_FOUND)] {
+            updates.answered(&answer, &trusted, 0.0, &mut seen, NOW);
+            assert_eq!(updates.notice, showing);
+            assert_eq!(seen.as_deref(), Some(kept.as_str()));
+            assert!(!updates.lapsed);
+        }
+
+        // Across a restart, by what the settings kept.
+        let mut restarted = Updates::default();
+        restarted.answered(&relayed(Value::Null), &trusted, 0.0, &mut seen, NOW);
+        assert_eq!(restarted.notice, showing);
+
+        // Past its expires nothing shows, not even a block, and it says why not.
+        let later = 1_800_000_000 + 86_400;
+        restarted.answered(&relayed(manifest(&[TARGET], &[1])), &trusted, 0.0, &mut seen, later);
+        assert!(restarted.lapsed);
+        assert_eq!(restarted.notice, None);
+        assert!(!restarted.blocks());
+
+        // Under the floor built in, nothing is taken at all.
+        let (mut fresh, mut none) = (None, Updates::default());
+        none.answered(&relayed(manifest(&[TARGET], &[1])), &ReleaseKeys { floor: 1_800_000_001, ..trusted.clone() }, 0.0, &mut fresh, NOW);
+        assert_eq!((fresh, none.notice), (None, None));
+    }
+
+    #[test]
     fn without_a_binary_for_this_target_there_is_nothing_to_install() {
         let shown = notice(&manifest(&["riscv64gc-unknown-none-elf"], &[1]), &keys(1, &[1]), Version::new(0, 1, 7)).expect("still a notice");
 
@@ -497,19 +580,19 @@ mod tests {
         assert!(!updates.due(CHECK_EVERY - 1.0), "an hour apart");
 
         let answer = json!({ "version": "0.1.0", "manifest": manifest(&[TARGET], &[1]), "upgrade": { "least": "0.2.0", "from": 150_000, "source": "release" } });
-        updates.answered(&Ok(answer), &keys(1, &[1]), 10.0);
+        updates.answered(&Ok(answer), &keys(1, &[1]), 10.0, &mut None, NOW);
 
         assert_eq!(updates.notice.as_ref().map(Notice::newest), Some(Version::new(0, 2, 0)));
         assert_eq!(updates.stops(), Some(Upgrade { least: Version::new(0, 2, 0), from: 150_000 }));
 
         // A failure keeps what was said, and asks again in a minute; a node from before releases
         // has none.
-        updates.answered(&Err(Failure { status: 0, message: "refused".to_string() }), &keys(1, &[1]), 20.0);
+        updates.answered(&Err(Failure { status: 0, message: "refused".to_string() }), &keys(1, &[1]), 20.0, &mut None, NOW);
 
         assert!(updates.notice.is_some());
         assert!(!updates.due(20.0 + RETRY - 1.0) && updates.due(20.0 + RETRY));
 
-        updates.answered(&Err(Failure { status: NOT_FOUND, message: "not found".to_string() }), &keys(1, &[1]), 30.0);
+        updates.answered(&Err(Failure { status: NOT_FOUND, message: "not found".to_string() }), &keys(1, &[1]), 30.0, &mut None, NOW);
 
         assert_eq!((updates.notice.is_none(), updates.stops()), (true, None));
 

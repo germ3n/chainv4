@@ -207,6 +207,13 @@ fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStrea
             break;
         }
 
+        // Asked again it would say the same, or mine for someone else: this needs a person.
+        if let Err(why) = &result
+            && why.starts_with(protocol::PAYOUT_DIFFERS)
+        {
+            return log::error!("[worker] {}: {why}; stopping", config.node);
+        }
+
         match result {
             Ok(()) => log::info!("[worker] the node closed the connection; connecting again in {}s", RECONNECT.as_secs()),
             Err(why) => log::warn!("[worker] {}: {why}; connecting again in {}s", config.node, RECONNECT.as_secs()),
@@ -480,6 +487,10 @@ fn take_work(
             #[cfg(feature = "release")]
             Some("release") => said_release(&message["manifest"]),
             Some("standing") => {
+                if let Some(why) = protocol::pays_another(&message, config.payout.as_ref()) {
+                    return Err(why);
+                }
+
                 log::info!(
                     "[worker] {shares} shares taken since connecting; {} in the window, {:.4}% of the next block; {} earned in all for {}, claimed with chainv4 claim",
                     message["shares"].as_u64().unwrap_or(0),
@@ -537,21 +548,47 @@ fn keep_claim(config: &WorkerConfig, message: &serde_json::Value) {
 /// against the release keys built in: the node only relays it.
 #[cfg(feature = "release")]
 fn said_release(manifest: &serde_json::Value) {
-    use crate::release::{ReleaseKeys, SignedRelease, Standing};
+    use crate::release::{ReleaseKeys, Standing, kept_path};
     use crate::structs::version::Version;
 
     let Ok(keys) = ReleaseKeys::built_in() else {
         return;
     };
-    let Some(signed) = SignedRelease::from_json(manifest).ok().filter(|signed| signed.verify(&keys).is_ok()) else {
-        return log::debug!("[worker] the node told of a release that does not verify");
-    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs());
 
-    match signed.release.product("chainv4").map(|product| product.standing(Version::ours())) {
+    match standing_in(manifest, &keys, kept_path().as_deref(), now) {
         Some(Standing::Behind { newest }) => log::warn!("[worker] chainv4 {newest} is out, and this worker runs {}: update it with chainv4 update", Version::ours()),
         Some(Standing::Unsupported { newest, least }) => log::warn!("[worker] chainv4 {newest} is out, and versions older than {least} are no longer supported; this worker runs {}: update it with chainv4 update", Version::ours()),
         _ => {}
     }
+}
+
+/// Where this worker stands against the newest release it has seen, the node's among them, in the
+/// file it keeps it in so no node takes it back to an older one; None without one that still counts.
+#[cfg(feature = "release")]
+fn standing_in(manifest: &serde_json::Value, keys: &crate::release::ReleaseKeys, file: Option<&std::path::Path>, now: u64) -> Option<crate::release::Standing> {
+    use crate::release::{SignedRelease, current_release, kept_release, take_newest, write_kept};
+    use crate::structs::version::Version;
+
+    let mut kept = file.and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| kept_release(&text, keys));
+    let before = kept.as_ref().map(|kept| kept.release.issued);
+
+    match SignedRelease::from_json(manifest) {
+        Ok(offered) => {
+            if let Err(why) = take_newest(keys, &mut kept, offered, now) {
+                log::debug!("[worker] the node told of a release that does not count: {why}");
+            }
+        }
+        Err(why) => log::debug!("[worker] the node told of a release that does not read: {why}"),
+    }
+
+    if let (Some(path), Some(newest)) = (file, kept.as_ref().filter(|kept| Some(kept.release.issued) != before))
+        && let Err(why) = write_kept(path, newest)
+    {
+        log::debug!("[worker] the newest release seen is not kept: {why}");
+    }
+
+    current_release(&kept, now)?.release.product("chainv4").map(|product| product.standing(Version::ours()))
 }
 
 /// Opens the devices for a work hash, each nonce they find going to found.
@@ -615,6 +652,77 @@ mod tests {
         });
 
         (at, served)
+    }
+
+    #[cfg(feature = "release")]
+    #[test]
+    fn a_worker_goes_by_the_newest_release_it_saw_whatever_a_node_says_later() {
+        use crate::crypto::keypair::Keypair;
+        use crate::release::{Product, Release, ReleaseKeys, SignedRelease, Standing};
+        use crate::structs::version::Version;
+
+        const NOW: u64 = 1_800_000_000;
+        let signer = Keypair::from_seed([4; 32]);
+        let keys = ReleaseKeys { threshold: 1, keys: vec![signer.public()], updates: None, floor: 0 };
+        let ours = Version::ours();
+        let newest = Version::new(ours.major, ours.minor + 1, 0);
+        let release = |issued: u64, version: Version| {
+            let product = Product { name: "chainv4".to_string(), version, least: Version::new(0, 0, 0), notes: String::new(), files: Vec::new() };
+            let mut signed = SignedRelease { release: Release { issued, expires: issued + 1_000, products: vec![product], breaking: Vec::new() }, signatures: Vec::new() };
+            signed.sign(&signer);
+            signed.to_json()
+        };
+        let file = std::env::temp_dir().join(format!("chainv4-worker-seen-{}", std::process::id())).join("release.json");
+        let _ = std::fs::remove_file(&file);
+
+        assert_eq!(standing_in(&release(NOW, newest), &keys, Some(&file), NOW), Some(Standing::Behind { newest }));
+        // A node serving an older one, or nothing that reads, hides nothing: across runs, as kept.
+        assert_eq!(standing_in(&release(NOW - 10, ours), &keys, Some(&file), NOW), Some(Standing::Behind { newest }));
+        assert_eq!(standing_in(&serde_json::json!({ "release": {} }), &keys, Some(&file), NOW), Some(Standing::Behind { newest }));
+        // Past its expires it says nothing, rather than what may be long out of date.
+        assert_eq!(standing_in(&release(NOW - 10, ours), &keys, Some(&file), NOW + 1_000), None);
+        // With nowhere to keep it, it still goes by what it was told.
+        assert_eq!(standing_in(&release(NOW, newest), &keys, None, NOW), Some(Standing::Behind { newest }));
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    /// A node with the token that pays another address than the worker gave: what a port's owner
+    /// could do, or anyone on the path of an open port, which is why the worker looks.
+    #[test]
+    fn a_worker_told_it_pays_another_address_stops_and_says_so() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let theirs = Address::Ed25519([0xe; 32]);
+        let served = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            protocol::accept_paying_for_tests(stream, b"token", "chainv4", &theirs);
+            // The worker hangs up rather than wait for work.
+            listener.set_nonblocking(true).unwrap();
+            std::thread::sleep(RECONNECT + Duration::from_millis(500));
+
+            listener.accept().is_ok()
+        });
+        let ours = Address::Ed25519([0xa; 32]);
+        let worker = Worker::start(WorkerConfig {
+            node: address.to_string(),
+            token: b"token".to_vec(),
+            name: "rig".to_string(),
+            protocol: "chainv4".to_string(),
+            devices: Devices::Cpu(1),
+            proxy: None,
+            payout: Some(ours),
+            claims: None,
+            solo: false,
+        })
+        .unwrap();
+
+        assert!(!served.join().unwrap(), "it did not connect again");
+        let status = worker.status();
+
+        assert!(!status.connected);
+        assert_eq!(status.jobs, 0, "it mined nothing for them");
+        assert!(status.trouble.as_deref().is_some_and(|why| why.contains(&theirs.to_string()) && why.contains(&ours.to_string())), "{:?}", status.trouble);
+        worker.wait();
     }
 
     #[test]

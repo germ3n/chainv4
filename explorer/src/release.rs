@@ -3,7 +3,7 @@
 //! word counts for nothing here: a manifest counts once a threshold of those keys signed it.
 
 use {
-    chainv4::release::{ReleaseError, ReleaseFile, ReleaseKeys, SignedRelease, Standing, TARGET},
+    chainv4::release::{ReleaseError, ReleaseFile, ReleaseKeys, SignedRelease, Standing, TARGET, current_release, kept_release, take_newest},
     chainv4::structs::version::Version,
     serde_json::Value,
 };
@@ -43,36 +43,61 @@ impl Update {
     }
 }
 
-/// What to show of the manifest a node relays, as GET /release's manifest carries it: an update,
-/// when it names a newer explorer than this version, or None, when the node relays none, the
-/// release names no explorer, or this one is the newest.
+/// What to show of the newest release seen, kept, once the manifest a node relays had its say, as
+/// GET /release's manifest carries it: an update, when it names a newer explorer than this version,
+/// or None, when none is kept that still counts, the release names no explorer, or this one is the
+/// newest. A node relaying an older one, or none, hides nothing that was seen.
 ///
-/// A manifest this build has no keys to check, or one too few of them signed, is an error, and so
-/// is one that does not read as a release: either way it shows nothing.
-pub fn update(manifest: &Value, keys: &ReleaseKeys, ours: Version) -> Result<Option<Update>, ReleaseError> {
+/// A manifest this build has no keys to check, one too few of them signed, one past its expires or
+/// under the floor built in is an error, and so is one that does not read as a release: what shows
+/// is then what was kept, if that still counts.
+pub fn update(manifest: &Value, kept: &mut Option<SignedRelease>, keys: &ReleaseKeys, ours: Version, now: u64) -> Result<Option<Update>, ReleaseError> {
     if !keys.on() {
         return Err(ReleaseError::NoKeys);
     }
 
-    if manifest.is_null() {
-        return Ok(None);
+    if !manifest.is_null() {
+        take_newest(keys, kept, SignedRelease::from_json(manifest).map_err(ReleaseError::Malformed)?, now)?;
     }
 
-    let signed = SignedRelease::from_json(manifest).map_err(ReleaseError::Malformed)?;
-    signed.verify(keys)?;
+    Ok(standing(kept, ours, now))
+}
 
-    let Some(product) = signed.release.product(PRODUCT) else {
-        return Ok(None);
-    };
+/// What the newest release kept says of this explorer, if it still counts.
+pub fn standing(kept: &Option<SignedRelease>, ours: Version, now: u64) -> Option<Update> {
+    let product = current_release(kept, now)?.release.product(PRODUCT)?;
 
-    Ok(match product.standing(ours) {
+    match product.standing(ours) {
         Standing::Current => None,
         standing => Some(Update {
             standing,
             notes: product.notes.clone(),
             file: product.file(TARGET).cloned(),
         }),
-    })
+    }
+}
+
+/// What the explorer does with a node's release: an update to show, whether the newest it has seen
+/// is past its expires, and that newest written back to its settings, as JSON, if this one is newer.
+pub fn answered(manifest: &Value, keys: &ReleaseKeys, seen: &mut Option<String>, ours: Version, now: u64) -> (Option<Update>, bool) {
+    let mut kept = seen.as_deref().and_then(|text| kept_release(text, keys));
+    let before = kept.as_ref().map(|kept| kept.release.issued);
+    let found = match update(manifest, &mut kept, keys, ours, now) {
+        Ok(found) => found,
+        // A build without release keys shows no update notices at all.
+        Err(ReleaseError::NoKeys) => None,
+        Err(why) => {
+            log::warn!("the release the node relays does not count: {why}");
+
+            standing(&kept, ours, now)
+        }
+    };
+
+    if let Some(newest) = kept.as_ref().filter(|kept| Some(kept.release.issued) != before) {
+        *seen = Some(newest.to_json().to_string());
+    }
+
+    (found, kept.is_some_and(|kept| kept.release.expired(now)))
 }
 
 #[cfg(test)]
@@ -92,7 +117,16 @@ mod tests {
             threshold,
             keys: seeds.iter().map(|seed| key(*seed).public()).collect(),
             updates: None,
+            floor: 0,
         }
+    }
+
+    /// The time these tests run at, in seconds since the Unix epoch.
+    const NOW: u64 = 1_800_000_100;
+
+    /// What to show of one manifest, with nothing seen before.
+    fn update(manifest: &Value, keys: &ReleaseKeys, ours: Version) -> Result<Option<Update>, ReleaseError> {
+        super::update(manifest, &mut None, keys, ours, NOW)
     }
 
     /// A manifest naming explorer 0.2.0, which works back to least, with a binary for target,
@@ -102,6 +136,7 @@ mod tests {
         let mut signed = SignedRelease {
             release: Release {
                 issued: 1_800_000_000,
+                expires: 1_800_000_000 + 86_400,
                 products: vec![Product {
                     name: "explorer".to_string(),
                     version: Version::new(0, 2, 0),
@@ -169,6 +204,38 @@ mod tests {
 
         assert_eq!(update(&signed, &keys(1, &[1]), Version::new(0, 2, 0)), Ok(None));
         assert_eq!(update(&signed, &keys(1, &[1]), Version::new(0, 3, 0)), Ok(None));
+    }
+
+    #[test]
+    fn what_was_seen_stands_whatever_a_node_relays_later_until_it_expires() {
+        let (trusted, ours) = (keys(1, &[1]), Version::new(0, 1, 0));
+        let mut seen = None;
+
+        // Taken and kept.
+        let (found, lapsed) = answered(&manifest(ours, TARGET, &[1]), &trusted, &mut seen, ours, NOW);
+        assert!(found.is_some() && !lapsed);
+        let kept = seen.clone().unwrap();
+
+        // A node with none, or an older one, or one too few signed, hides nothing, and changes nothing.
+        assert!(answered(&Value::Null, &trusted, &mut seen, ours, NOW).0.is_some());
+        let mut older: SignedRelease = SignedRelease::from_json(&manifest(ours, TARGET, &[1])).unwrap();
+        older.release.issued -= 10;
+        older.release.products[0].version = ours;
+        older.signatures.clear();
+        older.sign(&key(1));
+        assert!(answered(&older.to_json(), &trusted, &mut seen, ours, NOW).0.is_some());
+        assert!(answered(&manifest(ours, TARGET, &[9]), &trusted, &mut seen, ours, NOW).0.is_some());
+        assert_eq!(seen.as_deref(), Some(kept.as_str()));
+
+        // Past its expires, whatever the node says, nothing shows, and it says why not.
+        let (found, lapsed) = answered(&manifest(ours, TARGET, &[1]), &trusted, &mut seen, ours, 1_800_000_000 + 86_400);
+        assert!(found.is_none() && lapsed);
+
+        // Under the floor built in, nothing is taken at all.
+        let mut fresh = None;
+        let later = ReleaseKeys { floor: 1_800_000_001, ..trusted.clone() };
+        assert!(answered(&manifest(ours, TARGET, &[1]), &later, &mut fresh, ours, NOW).0.is_none());
+        assert_eq!(fresh, None);
     }
 
     #[test]

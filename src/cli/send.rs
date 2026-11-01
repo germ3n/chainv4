@@ -901,21 +901,27 @@ pub(super) fn wait(agent: &Agent, node: &str, id: &str, wanted: Wanted, timeout:
     }
 }
 
-/// Asks before the directory's admin role is given up: nobody sets the directory again after.
-pub(super) fn renouncing(yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+/// Asks before what cannot be undone: a typed yes, or --yes for a script; anything else is what
+/// otherwise says.
+pub(super) fn typed_yes(question: &str, yes: bool, input: &mut dyn std::io::BufRead, otherwise: &str) -> CliResult<()> {
     if yes {
         return Ok(());
     }
 
-    print!("Renouncing leaves the directory as it is for good: nobody may set it again. Type yes to go on: ");
+    print!("{question} Type yes to go on: ");
     std::io::Write::flush(&mut std::io::stdout())?;
     let mut answer = String::new();
     input.read_line(&mut answer)?;
 
     match answer.trim() {
         "yes" => Ok(()),
-        _ => Err("the role is kept".into()),
+        _ => Err(otherwise.into()),
     }
+}
+
+/// Asks before the directory's admin role is given up: nobody sets the directory again after.
+pub(super) fn renouncing(yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    typed_yes("Renouncing leaves the directory as it is for good: nobody may set it again.", yes, input, "the role is kept")
 }
 
 /// Prints where the transaction landed, what it did and what it emitted.

@@ -4,6 +4,13 @@
 //! threshold of them have, so no one key, and no node or host relaying it, can push a binary. A
 //! node fetches it, checks it, and serves it at GET /release; workers, the apps and chainv4 update
 //! check it again themselves.
+//!
+//! A host cannot take anyone back to an older one or hide a newer one for long. Each consumer keeps
+//! the newest it saw and orders by `issued`, none takes one issued before the floor built into it,
+//! and none acts on one past its signed `expires`. Only a manifest's own fields go into what is kept,
+//! never this machine's clock, so a wrong clock cannot do lasting harm: ahead, it stops acting on
+//! releases until it is put right; behind, it lets an expired one count, as far as the ordering
+//! allows.
 
 use {
     crate::crypto::keypair::{PublicKey, Signature},
@@ -32,6 +39,15 @@ const BUILT_IN_KEYS: &str = include_str!(concat!(env!("OUT_DIR"), "/release-keys
 /// What a release's signatures are made over, before its encoding: so no other signature a key
 /// makes is one over a release.
 const DOMAIN: &[u8] = b"chainv4 release\0";
+
+#[document(summary = "How long a release counts unless chainv4 release new says otherwise, in days: how long a host could hide a newer one at most, and how often the release keys sign again with chainv4 release renew.", category = "Releases")]
+pub const DEFAULT_VALID_DAYS: u64 = 30;
+
+#[document(summary = "The most days a release may count for: no key signs one that never lapses.", category = "Releases")]
+pub const MOST_VALID_DAYS: u64 = 366;
+
+/// Seconds in a day.
+const DAY: u64 = 86_400;
 
 #[document(
     summary = "The products a release names: the node and CLI, the wallet and the explorer.",
@@ -123,7 +139,7 @@ pub struct Breaking {
 }
 
 #[document(
-    summary = "What the release keys sign: when it was issued, which orders releases so an older one never replaces a newer, each product's newest release, and the upgrades it announces.",
+    summary = "What the release keys sign: when it was issued, which orders releases so an older one never replaces a newer, when it stops counting, each product's newest release, and the upgrades it announces.",
     category = "Releases",
     see_also = "SignedRelease, Product, Breaking",
 )]
@@ -131,6 +147,8 @@ pub struct Breaking {
 pub struct Release {
     #[document(summary = "When it was issued, in seconds since the Unix epoch.")]
     pub issued: u64,
+    #[document(summary = "When it stops counting, in seconds since the Unix epoch: nothing acts on it past this, so a host serving an old one hides a newer one for this long at most.")]
+    pub expires: u64,
     #[document(summary = "Each product's newest release, in the order of their names.")]
     pub products: Vec<Product>,
     #[document(summary = "The upgrades it announces, for chains without governance.")]
@@ -167,8 +185,21 @@ impl Release {
             .min_by_key(|upgrade| upgrade.from)
     }
 
-    #[document(parent = "Release", summary = "Why it is not a release: products not in order or named twice, a name not in PRODUCTS, a least version above the newest, or a product's targets out of order or repeated.")]
+    #[document(parent = "Release", summary = "Whether it stopped counting by a time, in seconds since the Unix epoch.")]
+    pub fn expired(&self, now: u64) -> bool {
+        now >= self.expires
+    }
+
+    #[document(parent = "Release", summary = "Why it is not a release: one that lapses before it is issued or counts past MOST_VALID_DAYS, products not in order or named twice, a name not in PRODUCTS, a least version above the newest, or a product's targets out of order or repeated.")]
     pub fn problem(&self) -> Option<String> {
+        if self.expires <= self.issued {
+            return Some(format!("it expires at {}, not after it is issued, at {}", self.expires, self.issued));
+        }
+
+        if self.expires - self.issued > MOST_VALID_DAYS * DAY {
+            return Some(format!("it counts for more than {MOST_VALID_DAYS} days"));
+        }
+
         if self.products.windows(2).any(|pair| pair[0].name >= pair[1].name) {
             return Some("its products go in the order of their names, each once".to_string());
         }
@@ -194,6 +225,7 @@ impl Release {
     pub fn to_json(&self) -> Value {
         json!({
             "issued": self.issued,
+            "expires": self.expires,
             "products": self.products.iter().map(|product| json!({
                 "name": product.name,
                 "version": product.version.to_string(),
@@ -255,12 +287,12 @@ impl Release {
             });
         }
 
-        Ok(Release { issued: number(&value["issued"], "issued")?, products, breaking })
+        Ok(Release { issued: number(&value["issued"], "issued")?, expires: number(&value["expires"], "expires")?, products, breaking })
     }
 }
 
 #[document(
-    summary = "The release keys a build trusts and how many must sign: release/keys.json, or the file CHAINV4_RELEASE_KEYS named when it was built, with where its node looks for releases. No keys turns the release side off: nodes fetch nothing and the apps show nothing.",
+    summary = "The release keys a build trusts and how many must sign: release/keys.json, or the file CHAINV4_RELEASE_KEYS named when it was built, with where its node looks for releases and the oldest it takes. No keys turns the release side off: nodes fetch nothing and the apps show nothing.",
     category = "Releases",
     see_also = "ReleaseKeys::built_in, SignedRelease::verify",
 )]
@@ -272,6 +304,8 @@ pub struct ReleaseKeys {
     pub keys: Vec<PublicKey>,
     #[document(summary = "Where nodes fetch the manifest from unless --updates names another.")]
     pub updates: Option<String>,
+    #[document(summary = "The oldest issued this build takes: nothing a host serves takes a fresh install back past the release it was built around.")]
+    pub floor: u64,
 }
 
 impl ReleaseKeys {
@@ -280,7 +314,7 @@ impl ReleaseKeys {
         ReleaseKeys::from_json(&serde_json::from_str(BUILT_IN_KEYS).map_err(|err| format!("the release keys built in are not JSON: {err}"))?)
     }
 
-    #[document(parent = "ReleaseKeys", summary = "Reads keys.json: {\"threshold\":2,\"keys\":[\"ed25519:0x…\",…],\"updates\":\"https://…/manifest.json\"}. A threshold of 0, or above the number of keys, is refused, and so is a key named twice.")]
+    #[document(parent = "ReleaseKeys", summary = "Reads keys.json: {\"threshold\":2,\"keys\":[\"ed25519:0x…\",…],\"updates\":\"https://…/manifest.json\",\"floor\":1793000000}. A threshold of 0, or above the number of keys, is refused, and so is a key named twice.")]
     pub fn from_json(value: &Value) -> Result<ReleaseKeys, String> {
         let mut keys = Vec::new();
 
@@ -301,7 +335,7 @@ impl ReleaseKeys {
             return Err(format!("a threshold of {threshold} is not between 1 and the {} release keys", keys.len()));
         }
 
-        Ok(ReleaseKeys { threshold, keys, updates: value["updates"].as_str().filter(|url| !url.is_empty()).map(str::to_string) })
+        Ok(ReleaseKeys { threshold, keys, updates: value["updates"].as_str().filter(|url| !url.is_empty()).map(str::to_string), floor: value["floor"].as_u64().unwrap_or(0) })
     }
 
     #[document(parent = "ReleaseKeys", summary = "Whether there are any: without them there are no releases to trust.")]
@@ -323,6 +357,10 @@ pub enum ReleaseError {
     TooFewSignatures { valid: usize, threshold: usize },
     #[document(summary = "It is not a release, as Release::problem says.")]
     Malformed(String),
+    #[document(summary = "It was issued before the floor built into this build.")]
+    BelowFloor { issued: u64, floor: u64 },
+    #[document(summary = "It stopped counting: its host is behind, or this machine's clock is wrong.")]
+    Expired { expires: u64 },
 }
 
 impl fmt::Display for ReleaseError {
@@ -331,6 +369,8 @@ impl fmt::Display for ReleaseError {
             ReleaseError::NoKeys => write!(f, "this build trusts no release keys"),
             ReleaseError::TooFewSignatures { valid, threshold } => write!(f, "{valid} of the release keys signed it, and it takes {threshold}"),
             ReleaseError::Malformed(why) => write!(f, "not a release: {why}"),
+            ReleaseError::BelowFloor { issued, floor } => write!(f, "it was issued at {issued}, before the oldest this build takes, {floor}"),
+            ReleaseError::Expired { expires } => write!(f, "it expired at {expires}: the host is behind, or this machine's clock is wrong"),
         }
     }
 }
@@ -378,6 +418,30 @@ impl SignedRelease {
         }
     }
 
+    #[document(
+        parent = "SignedRelease",
+        summary = "Checks all that makes it count now: that verify takes it, it was issued at or after this build's floor, and it has not expired. What anything acts on goes through this, or through take_newest.",
+        params = { keys = "The release keys built in.", now = "The time, in seconds since the Unix epoch." },
+        returns = "How many of the keys signed it.",
+    )]
+    pub fn check(&self, keys: &ReleaseKeys, now: u64) -> Result<usize, ReleaseError> {
+        let signers = self.verified_above_floor(keys)?;
+
+        match self.release.expired(now) {
+            true => Err(ReleaseError::Expired { expires: self.release.expires }),
+            false => Ok(signers),
+        }
+    }
+
+    fn verified_above_floor(&self, keys: &ReleaseKeys) -> Result<usize, ReleaseError> {
+        let signers = self.verify(keys)?;
+
+        match self.release.issued < keys.floor {
+            true => Err(ReleaseError::BelowFloor { issued: self.release.issued, floor: keys.floor }),
+            false => Ok(signers),
+        }
+    }
+
     #[document(parent = "SignedRelease", summary = "Adds a key's signature, replacing one it made before.")]
     pub fn sign(&mut self, key: &crate::crypto::keypair::Keypair) {
         let signer = key.public();
@@ -406,6 +470,66 @@ impl SignedRelease {
 
         Ok(SignedRelease { release: Release::from_json(&value["release"])?, signatures })
     }
+}
+
+#[document(
+    summary = "What every consumer does with a manifest a host or node gave it, as a node does: keeps it if a threshold signed it, it is above the floor and it was issued after the newest kept. An expired one that is newer is kept too, as it is signed word that nothing older counts any more, and refused all the same.",
+    params = {
+        keys = "The release keys built in.",
+        kept = "The newest seen, kept across runs by whoever calls this.",
+        offered = "What was given.",
+        now = "The time, in seconds since the Unix epoch.",
+    },
+    returns = "Whether it was newer than what was kept; an older one, or the same one, leaves that in place and is no error.",
+    see_also = "current_release, kept_release",
+)]
+pub fn take_newest(keys: &ReleaseKeys, kept: &mut Option<SignedRelease>, offered: SignedRelease, now: u64) -> Result<bool, ReleaseError> {
+    offered.verified_above_floor(keys)?;
+
+    if kept.as_ref().is_some_and(|had| had.release.issued >= offered.release.issued) {
+        return Ok(false);
+    }
+
+    let expires = offered.release.expires;
+    let expired = offered.release.expired(now);
+    *kept = Some(offered);
+
+    match expired {
+        true => Err(ReleaseError::Expired { expires }),
+        false => Ok(true),
+    }
+}
+
+#[document(summary = "The newest kept, if it still counts: what a consumer acts on. None past its expires, however new it is.", category = "Releases", see_also = "take_newest")]
+pub fn current_release(kept: &Option<SignedRelease>, now: u64) -> Option<&SignedRelease> {
+    kept.as_ref().filter(|signed| !signed.release.expired(now))
+}
+
+#[document(summary = "A manifest kept across runs, as its JSON text, if it reads and these keys still take it, expired or not: what orders the next one. None for anything else, which leaves the floor alone to go by.", category = "Releases", see_also = "take_newest")]
+pub fn kept_release(text: &str, keys: &ReleaseKeys) -> Option<SignedRelease> {
+    let value = serde_json::from_str(text).ok()?;
+
+    SignedRelease::from_json(&value).ok().filter(|signed| signed.verified_above_floor(keys).is_ok())
+}
+
+#[document(summary = "Where the CLI and a worker keep the newest manifest they saw: .chainv4/release.json in the home directory; None without one, which leaves the floor alone to go by.", category = "Releases", see_also = "take_newest")]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn kept_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+
+    Some(std::path::PathBuf::from(home).join(".chainv4").join("release.json"))
+}
+
+#[document(summary = "Writes a kept manifest, whole or not at all: beside it, then renamed over it, so a crash leaves the last one readable.", category = "Releases", see_also = "kept_release")]
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_kept(path: &std::path::Path, signed: &SignedRelease) -> Result<(), String> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder).map_err(|err| format!("{}: {err}", folder.display()))?;
+    }
+
+    let fresh = path.with_extension("new");
+    std::fs::write(&fresh, serde_json::to_string_pretty(&signed.to_json()).expect("JSON writes")).map_err(|err| format!("{}: {err}", fresh.display()))?;
+    std::fs::rename(&fresh, path).map_err(|err| format!("{}: {err}", path.display()))
 }
 
 /// A signature in the scheme of the key that made it.

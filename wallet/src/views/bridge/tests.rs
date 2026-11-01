@@ -92,11 +92,20 @@ fn esplora_s_proof_is_given_in_bitcoin_s_own_byte_order_without_the_witness() {
         to_hex(&reversed).trim_start_matches("0x").to_string()
     };
     let merkle = json!({ "block_height": 9, "merkle": [shown([0xaa; 32]), shown([0x01; 32])], "pos": 2 });
-    let proof = esplora_proof(to_hex(&tx.encode()).trim_start_matches("0x"), &merkle, &shown([0x0b; 32])).unwrap();
+    let of_coinbase = json!({ "block_height": 9, "merkle": [shown([0xcc; 32]), shown([0x02; 32])], "pos": 0 });
+    let hex = to_hex(&tx.encode());
+    let hex = hex.trim_start_matches("0x");
+    let proof = esplora_proof(hex, &merkle, &shown([0x0b; 32]), hex, &of_coinbase).unwrap();
 
-    assert_eq!(proof, Proof { block: vec![0x0b; 32], raw: tx.base(), index: 2, path: [[0xaa; 32], [0x01; 32]].concat() });
-    assert!(esplora_proof("00", &merkle, &shown([0; 32])).is_err());
-    assert!(esplora_proof(to_hex(&tx.encode()).trim_start_matches("0x"), &json!({ "pos": 1 }), &shown([0; 32])).unwrap_err().contains("Merkle"));
+    assert_eq!(proof, Proof { block: vec![0x0b; 32], raw: tx.base(), index: 2, path: [[0xaa; 32], [0x01; 32]].concat(), coinbase: tx.base(), coinbase_path: [[0xcc; 32], [0x02; 32]].concat() });
+    assert!(esplora_proof("00", &merkle, &shown([0; 32]), hex, &of_coinbase).is_err());
+    assert!(esplora_proof(hex, &merkle, &shown([0; 32]), "00", &of_coinbase).is_err());
+    assert!(esplora_proof(hex, &json!({ "pos": 1 }), &shown([0; 32]), hex, &of_coinbase).unwrap_err().contains("Merkle"));
+    assert!(esplora_proof(hex, &merkle, &shown([0; 32]), hex, &json!({ "pos": 0 })).unwrap_err().contains("Merkle"));
+
+    // What a withdrawal says it arrives as: all but the tenth the wallet lets it lose.
+    assert_eq!(least_arriving(10_000), 9_000);
+    assert_eq!(least_arriving(123_456), 111_111);
 }
 
 #[test]

@@ -109,6 +109,9 @@ impl Role {
 pub struct Settings {
     /// What this install is; None until its first launch asks.
     pub role: Option<Role>,
+    /// The newest release manifest seen, as JSON, so no node takes this wallet back past it.
+    #[serde(default)]
+    pub newest_release: Option<String>,
     /// The node's HTTP API.
     pub node: String,
     /// The proxy every request goes through, as socks5h://host:port or http://host:port, or empty
@@ -286,6 +289,7 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
+            newest_release: None,
             role: None,
             node: String::new(),
             proxy: String::new(),
@@ -771,7 +775,7 @@ impl Wallet {
                 (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. } | Ask::Mining, _) => self.views.mining.answered(&ask, &result),
                 (Ask::Governance | Ask::GovernanceHistory { .. } | Ask::GovernanceWeight(_), _) => self.views.governance.answered(&ask, &result),
                 (Ask::Release, _) => match chainv4::release::ReleaseKeys::built_in() {
-                    Ok(keys) => self.updates.answered(&result, &keys, time),
+                    Ok(keys) => self.updates.answered(&result, &keys, time, &mut self.settings.newest_release, now / 1_000),
                     Err(why) => log::warn!("{why}"),
                 },
                 (Ask::Multisig(_), _) => {

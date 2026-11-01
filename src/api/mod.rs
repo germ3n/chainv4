@@ -852,7 +852,8 @@ async fn release(Shared(api): Shared<Api>) -> Answer {
         (Some(decided), _) => Some((decided, "governance")),
         (None, announced) => announced.map(|announced| (announced, "release")),
     };
-    let (standing, newest) = match known.standing() {
+    let now = crate::node::now_ms() / 1_000;
+    let (standing, newest) = match known.standing(now) {
         Some(Standing::Current) => ("current", None),
         Some(Standing::Behind { newest }) => ("behind", Some(newest)),
         Some(Standing::Unsupported { newest, .. }) => ("unsupported", Some(newest)),
@@ -865,6 +866,7 @@ async fn release(Shared(api): Shared<Api>) -> Answer {
         "updates": api.releases.as_ref().is_some_and(|releases| releases.keys().on()),
         "manifest": known.signed.as_ref().map(crate::release::SignedRelease::to_json),
         "standing": standing,
+        "expired": known.expired(now),
         "newest": newest.map(|newest| newest.to_string()),
         "checked": known.checked,
         "error": known.error,

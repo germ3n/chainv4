@@ -24,7 +24,7 @@ use {
         settings::SettingsState, tokens::TokensState, dex::DexState, swaps::SwapsState, bridge::BridgeState, collections::CollectionsState,
         update::UpdateState, governance::GovernanceState,
     },
-    chainv4::release::{ReleaseError, ReleaseKeys},
+    chainv4::release::ReleaseKeys,
     chainv4_ui::{Palette, layout, widgets},
     egui::{RichText, Ui},
     serde_json::Value,
@@ -300,8 +300,9 @@ impl Explorer {
                                 }
                                 // An older node, which has no releases to relay.
                                 Ask::Release if failure.status == 404 => {
+                                    // It has none to relay, which takes back nothing seen before.
+                                    (self.update.found, self.update.lapsed) = crate::release::answered(&Value::Null, &self.keys, &mut self.settings.newest_release, crate::release::ours(), now / 1_000);
                                     self.store.release = None;
-                                    self.update.found = None;
                                 }
                                 Ask::Release => self.asked.release = time - RELEASE_EVERY + RELEASE_RETRY,
                                 // A chain without governance, or one whose node no longer has it.
@@ -407,16 +408,7 @@ impl Explorer {
             Ask::Pool => store.pool = parse(value),
             Ask::Release => {
                 if let Some(release) = parse::<crate::model::NodeRelease>(value) {
-                    self.update.found = match crate::release::update(&release.manifest, &self.keys, crate::release::ours()) {
-                        Ok(found) => found,
-                        // A build without release keys shows no update notices at all.
-                        Err(ReleaseError::NoKeys) => None,
-                        Err(why) => {
-                            log::warn!("the release the node relays does not count: {why}");
-
-                            None
-                        }
-                    };
+                    (self.update.found, self.update.lapsed) = crate::release::answered(&release.manifest, &self.keys, &mut self.settings.newest_release, crate::release::ours(), now / 1_000);
                     store.release = Some(release);
                 }
             }

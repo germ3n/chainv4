@@ -1078,7 +1078,9 @@ light client:
   A payment to it, found by the wallet's own [Bitcoin light client](#bitcoin-followed-by-the-wallet-itself)
   and deep enough, is minted as wBTC by its proof from the block it came in; without the light
   client, by Esplora's proof of a transaction typed in. wBTC is withdrawn to a `bc1q…` address or
-  any output script, and the account's withdrawals show queued or paid.
+  an output script nodes relay, from 10,000 satoshis: it says what you get, the amount up to a tenth
+  less, as a release's fee comes off the withdrawals it pays. The account's withdrawals show queued,
+  proposed or paid, and what each lost.
 
 Settings gives the EVM chains' JSON-RPC URLs and the Esplora API, as for Swaps.
 

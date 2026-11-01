@@ -1024,6 +1024,9 @@ voting finality it now goes back to the checkpoint and follows the node from the
   nonce taken.
 - **A pass of `sign`, `relay` or `watch` gives no error for a refused transfer.** It logs it, and
   under `watch` lists it each pass, `still refused: …`: watch stderr, not the exit code.
+- **A signer refuses a chain the directory does not list,** including every chain on a chain with
+  no directory. `--evm-gateway CHAIN:0x…` is its operator's own way round that, naming that very
+  gateway. The sign and relay passes say why, and `send` refuses such a chain up front.
 - **A signer relaying pays gas with `--evm-key`:** under `watch` too, so fund it on each EVM chain,
   or every delivery stays listed.
 - **Signers need the event index:** `chainv4 bridge sign` reads what left here from `Sent` events.
@@ -1049,7 +1052,14 @@ voting finality it now goes back to the checkpoint and follows the node from the
   gateway mints only what was mined past the relay's tip when it was set up.
 - **A new federation makes new deposit addresses:** pay
   an old one only within the grace period, after which its deposits do not mint.
-- **Withdrawals start at 1,000 satoshis,** and a release pays at most 50.
+- **Withdrawals start at 10,000 satoshis,** more if the floor is high, and a release pays at most 50.
+- **A withdrawal pays its own fee.** It arrives as what it burned less its share of the release's
+  fee, split evenly, up to the most it agreed to lose, a tenth unless it says. So `--fee` to `btc
+  propose` comes off them, not the pool, and change is exactly what was spent past what they burned.
+  A release that would leave change under dust cannot be proposed: the rest waits for a deposit.
+- **A proof needs the block's coinbase:** `deposit` and `released` take it and its path, without its
+  witness. Esplora gives it as `/block/HASH/txid/0`, then as any transaction. A wallet's coin kept
+  before that is shown through Esplora instead.
 - **`setup` takes a fee floor:** `setup(relay, template, fee_cap, fee_floor, grace_ms)`, the floor in
   satoshis a virtual byte, at least 1, and the cap at least 710 virtual bytes of it, or it is
   refused. A release paying less for its size than the floor is refused too: `--fee` is checked
@@ -1079,6 +1089,10 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Bridges in the apps
 
+- **The mining handshake covers the hello.** A worker's name, payout and whether it mines alone are
+  under the MACs, so a worker and node of different `mining/` versions do not talk. An open port's
+  token is public, so someone on the path can still make those MACs: serve it over wss://, or keep
+  it on a private network, if a miner's payout matters to it.
 - **Deposit addresses are computed, not asked:** the wallet builds the account's deposit address
   from the proven federation and directory, and the chain's id from its genesis, so a node cannot hand it one of its own; the gateway's
   `deposit_script` says the same, for the CLI.
@@ -1532,6 +1546,14 @@ voting finality it now goes back to the checkpoint and follows the node from the
   manifest, covering every binary's URL, size and SHA-256, so a node relaying it at
   `GET /release`, a mirror or a CDN can withhold a release but never change one. Workers, the apps
   and `chainv4 update` check it again themselves.
+- **A manifest lapses.** `expires` is signed, 30 days after `issued` unless `--valid-days` says, 366
+  at most. Run `chainv4 release renew` and sign again before it passes, or nothing acts on it: no
+  node installs from it and no app shows it, though a node still stops at an upgrade it already took.
+- **`floor` in `release/keys.json`** is the oldest `issued` a build takes. Raise it at each release
+  build, to that release's `issued`: a fresh install then goes no further back than that.
+- **Everything keeps the newest manifest it saw:** the node in `release.json`, the CLI and a worker
+  in `~/.chainv4/release.json`, the apps in their settings. Lose it and the floor is all there is
+  to go by, until the next one comes.
 - **An older manifest never replaces a newer.** Releases order by `issued`, and a node keeps the
   newest in `release.json` beside its database: `chainv4 release new` issues each one after the
   last.

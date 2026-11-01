@@ -13,7 +13,8 @@
 --
 -- Releases: a withdrawal burns wBTC for a Bitcoin script and amount. Anyone proposes a release:
 -- an unsigned Bitcoin transaction this contract checks pays exactly queued withdrawals from the
--- deposits it holds, change back to the federation, its fee under the cap. The signers sign each
+-- deposits it holds, less their shares of its fee, change back to the federation, its fee under the
+-- cap. What it holds falls by just what was burned, so wBTC stays backed. The signers sign each
 -- input as BIP143 does, and post their signatures here, each checked; anyone assembles the
 -- witnesses and broadcasts it; and once it is deep enough, anyone shows it, and its inputs are
 -- spent and its change held. A sweep is a release that pays everything an old federation holds
@@ -28,8 +29,15 @@ local M = {}
 
 local SIGHASH_ALL = 1
 local MOST_WITHDRAWALS = 50
--- What a withdrawal pays at least, in satoshis: above Bitcoin's dust for any output.
-local LEAST = 1000
+-- What a withdrawal is at least, in satoshis, whatever the floor asks; and what reaches its
+-- script at least, above Bitcoin's dust for any output, so a fee never eats it whole.
+local LEAST = 10000
+local LEAST_PAYOUT = 1000
+-- The most a withdrawal may lose to its share of a fee unless it says, as a part of it.
+local DEFAULT_FEE_PART = 10
+-- What Bitcoin's nodes relay at the least, without witnesses; an inner node of a Merkle tree is
+-- 64 bytes, and a transaction of that size could be taken for one (CVE-2017-12842).
+local LEAST_TX = 65
 -- What change is at least: Bitcoin's nodes relay nothing with an output under its dust.
 local LEAST_CHANGE = 546
 -- What a release's transaction is, and each of its inputs' sequence: fixed, so none of them can
@@ -296,15 +304,20 @@ local function relay()
     return address.parse(storage.get("relay") or error("the gateway has no relay: setup first"))
 end
 
--- Whether a transaction is in a Bitcoin block deep enough, by the relay: its id.
-local function proven(block, raw, index, path, depth)
+-- Whether a transaction is in a Bitcoin block deep enough, by the relay: its id. The block's
+-- coinbase and its path show how tall the block's tree is: see the relay's includes.
+local function proven(block, raw, index, path, coinbase, coinbase_path, depth)
+    if #raw == 64 then
+        error("a transaction of 64 bytes: it could be an inner node of a Merkle tree")
+    end
+
     local txid = crypto.sha256d(raw)
 
     if tonumber(tostring(contracts.call(relay(), "confirmations", block))) < depth then
         error("not deep enough yet in the relay's main chain")
     end
 
-    if not contracts.call(relay(), "includes", block, txid, index, path) then
+    if not contracts.call(relay(), "includes", block, txid, index, path, coinbase, coinbase_path) then
         error("the transaction is not in that block at that place")
     end
 
@@ -403,9 +416,10 @@ end
 
 -- Shows a payment to a deposit address, bitcoin_depth deep, and mints its value as wBTC to the
 -- address it was for. raw is the transaction without its witness; index and path are its place
--- and Merkle path in the block; vout the output; version the federation the address was made
--- under, the one in force or one retired within the grace period.
-function M.deposit(block, raw, index, path, vout, recipient, version)
+-- and Merkle path in the block; coinbase and coinbase_path the block's first transaction, without
+-- its witness, and its path; vout the output; version the federation the address was made under,
+-- the one in force or one retired within the grace period.
+function M.deposit(block, raw, index, path, coinbase, coinbase_path, vout, recipient, version)
     local fed = remember()
     version = tostring(whole(version or fed.version, "the version"))
     local threshold, keys, retired = fed_at(version)
@@ -414,7 +428,7 @@ function M.deposit(block, raw, index, path, vout, recipient, version)
         error("that federation's deposit addresses closed")
     end
 
-    local txid = proven(block, raw, index, path, fed.bitcoin_depth)
+    local txid = proven(block, raw, index, path, coinbase, coinbase_path, fed.bitcoin_depth)
     local depth = tonumber(tostring(contracts.call(relay(), "confirmations", block)))
 
     if relay_height(relay()) - depth + 1 < tonumber(storage.get("first_height")) then
@@ -440,13 +454,33 @@ function M.deposit(block, raw, index, path, vout, recipient, version)
     return output.sats
 end
 
--- Burns wBTC to be paid out in BTC to a Bitcoin output script, such as a bc1q… address's.
-function M.withdraw(script, sats)
+-- What a withdrawal is at least: enough to pay a release of its own at the floor and leave what
+-- reaches its script.
+local function least_withdrawal()
+    return math.max(LEAST, tonumber(storage.get("fee_floor")) * ONE_INPUT_VBYTES + LEAST_PAYOUT)
+end
+
+-- The most a withdrawal of this much may say it loses to fees, checked.
+local function fee_limit(most_fee, sats)
+    most_fee = whole(most_fee, "the most fee")
+
+    if most_fee < 1 or most_fee > sats - LEAST_PAYOUT then
+        error("the most a withdrawal may lose to fees is from 1 satoshi to all but " .. LEAST_PAYOUT .. " of it")
+    end
+
+    return most_fee
+end
+
+-- Burns wBTC to be paid out in BTC to a Bitcoin output script, such as a bc1q… address's. What
+-- arrives is sats less its share of its release's fee, at most most_fee; a tenth of it unless told.
+function M.withdraw(script, sats, most_fee)
     sats = whole(sats, "the amount")
 
-    if sats < LEAST then
-        error("a withdrawal pays at least " .. LEAST .. " satoshis")
+    if sats < least_withdrawal() then
+        error("a withdrawal pays at least " .. least_withdrawal() .. " satoshis")
     end
+
+    most_fee = fee_limit(most_fee or math.floor(sats / DEFAULT_FEE_PART), sats)
 
     if not relayed(script) then
         error("an output script Bitcoin's nodes relay: P2PKH, P2SH or a witness program")
@@ -457,16 +491,42 @@ function M.withdraw(script, sats)
     storage.set("withdrawal_count", tostring(id))
     withdrawals:set(id .. ":script", script)
     withdrawals:set(id .. ":sats", tostring(sats))
+    withdrawals:set(id .. ":most_fee", tostring(most_fee))
     withdrawals:set(id .. ":state", "queued")
     withdrawals:set(id .. ":by", ctx.sender:text())
     events.emit("WithdrawRequested", id, script, u256(sats), ctx.sender)
     return id
 end
 
+-- Who asked for a withdrawal changes the most it may lose to fees, while it waits: as fees rise
+-- past it, or to a lower limit before a release takes it.
+function M.set_most_fee(id, most_fee)
+    id = whole(id, "the withdrawal")
+
+    if withdrawals:get(id .. ":by") ~= ctx.sender:text() then
+        error("only who asked for a withdrawal may")
+    end
+
+    if withdrawals:get(id .. ":state") ~= "queued" then
+        error("a withdrawal that is not queued")
+    end
+
+    withdrawals:set(id .. ":most_fee", tostring(fee_limit(most_fee, tonumber(withdrawals:get(id .. ":sats")))))
+    return true
+end
+
+-- What a withdrawal's share of a fee is: all of it evenly, the first in a release taking what will
+-- not divide. Each output costs about the same to carry, whatever it pays.
+local function fee_share(fee, count, at)
+    return math.floor(fee / count) + (at == 1 and fee % count or 0)
+end
+
 -- Proposes a release: raw, an unsigned transaction without witnesses, spending deposits and
--- change this gateway holds, whose first outputs pay the given withdrawals in order, and whose
--- one more output, if any, is change to the federation in force. With no withdrawals it is a
--- sweep: everything it spends an old federation's, all of it to the one in force. Whatever it
+-- change this gateway holds, whose first outputs pay the given withdrawals in order, each less its
+-- share of the fee, and whose one more output, if any, is change to the federation in force: all it
+-- spends past what those withdrawals burned, so the fee costs the backing nothing. With no
+-- withdrawals it is a sweep: everything it spends an old federation's, all of it to the one in
+-- force, the fee the federation's. Whatever it
 -- proposes Bitcoin must be able to mine, as its inputs and withdrawals wait on it until it is
 -- shown mined or cancelled.
 function M.propose(raw, ...)
@@ -492,6 +552,10 @@ function M.propose(raw, ...)
 
     if tx.version ~= VERSION then
         error("a release is a version 2 transaction")
+    end
+
+    if #raw < LEAST_TX then
+        error("a release under " .. LEAST_TX .. " bytes, which Bitcoin's nodes do not relay")
     end
 
     if tx.locktime ~= "\0\0\0\0" then
@@ -533,6 +597,18 @@ function M.propose(raw, ...)
 
     local paid = 0
 
+    for _, output in ipairs(tx.outputs) do
+        paid = paid + output.sats
+    end
+
+    local fee = spent - paid
+
+    if fee <= 0 or fee > tonumber(storage.get("fee_cap")) then
+        error("a fee of nothing, or past the cap")
+    end
+
+    local shares = {}
+
     for at, id in ipairs(ids) do
         local output = tx.outputs[at] or error("a withdrawal the transaction does not pay")
 
@@ -540,9 +616,17 @@ function M.propose(raw, ...)
             error("a withdrawal that is not queued")
         end
 
-        if output.script ~= withdrawals:get(id .. ":script") or output.sats ~= tonumber(withdrawals:get(id .. ":sats")) then
-            error("an output that does not pay its withdrawal as asked")
+        local share = fee_share(fee, #ids, at)
+
+        if share > tonumber(withdrawals:get(id .. ":most_fee")) then
+            error("a share of the fee past what withdrawal " .. id .. " agreed to lose")
         end
+
+        if output.script ~= withdrawals:get(id .. ":script") or output.sats ~= tonumber(withdrawals:get(id .. ":sats")) - share then
+            error("an output that does not pay its withdrawal as asked: what it burned, less its share of the fee")
+        end
+
+        shares[at] = share
 
         -- See M.cancel: every release paying it must conflict with the ones cancelled before,
         -- until Bitcoin showed they can no longer be mined.
@@ -551,8 +635,6 @@ function M.propose(raw, ...)
         if anchor and utxos:get(anchor .. ":state") ~= "spent" and not spends[anchor] then
             error("a withdrawal from a cancelled release, which must spend " .. anchor)
         end
-
-        paid = paid + output.sats
     end
 
     local change = tx.outputs[#ids + 1]
@@ -567,16 +649,8 @@ function M.propose(raw, ...)
         end
 
         if change.sats < LEAST_CHANGE then
-            error("change under Bitcoin's dust: leave it to the fee")
+            error("change under Bitcoin's dust")
         end
-
-        paid = paid + change.sats
-    end
-
-    local fee = spent - paid
-
-    if fee <= 0 or fee > tonumber(storage.get("fee_cap")) then
-        error("a fee of nothing, or past the cap")
     end
 
     local vbytes = math.ceil(weight / 4)
@@ -602,8 +676,9 @@ function M.propose(raw, ...)
         utxos:set(outpoint(input) .. ":state", "pending")
     end
 
-    for _, withdrawal in ipairs(ids) do
+    for at, withdrawal in ipairs(ids) do
         withdrawals:set(withdrawal .. ":state", "proposed")
+        withdrawals:set(withdrawal .. ":fee", tostring(shares[at]))
     end
 
     events.emit("Proposed", id, txid)
@@ -832,10 +907,11 @@ function M.input_signatures(id, index)
     return witness_script(version, utxos:get(key .. ":recipient")), threshold, table.unpack(found)
 end
 
--- Shows a release, bitcoin_depth deep: its inputs are spent, its withdrawals paid, and its change,
--- if any, held for the federation it was proposed under. One cancelled may still be shown, if it
--- was finished anyway: Bitcoin mined it, so what it spent and paid is what the gateway must know.
-function M.released(id, block, raw, index, path)
+-- Shows a release, bitcoin_depth deep, with its block's coinbase and that one's path: its inputs
+-- are spent, its withdrawals paid, and its change, if any, held for the federation it was proposed
+-- under. One cancelled may still be shown, if it was finished anyway: Bitcoin mined it, so what it
+-- spent and paid is what the gateway must know.
+function M.released(id, block, raw, index, path, coinbase, coinbase_path)
     id = whole(id, "the proposal")
     local fed = remember()
     local state = proposals:get(id .. ":state")
@@ -844,7 +920,7 @@ function M.released(id, block, raw, index, path)
         error("no open release by that number")
     end
 
-    local txid = proven(block, raw, index, path, fed.bitcoin_depth)
+    local txid = proven(block, raw, index, path, coinbase, coinbase_path, fed.bitcoin_depth)
 
     if txid ~= proposals:get(id .. ":txid") then
         error("not that release's transaction")
@@ -919,13 +995,20 @@ function M.fee_limits()
     return tonumber(storage.get("fee_cap")), tonumber(storage.get("fee_floor"))
 end
 
--- A withdrawal: its output script, satoshis and state: queued, proposed or paid.
+-- A withdrawal: its output script, the satoshis it burned, its state: queued, proposed or paid; who
+-- asked; the most it may lose to fees; and its share of the fee of the release it is in, what it
+-- arrives less of, once it is in one.
 function M.withdrawal(id)
     id = whole(id, "the withdrawal")
 
     local by = withdrawals:get(id .. ":by")
 
-    return withdrawals:get(id .. ":script"), tonumber(withdrawals:get(id .. ":sats")), withdrawals:get(id .. ":state"), by and address.parse(by)
+    return withdrawals:get(id .. ":script"), tonumber(withdrawals:get(id .. ":sats")), withdrawals:get(id .. ":state"), by and address.parse(by), tonumber(withdrawals:get(id .. ":most_fee") or ""), tonumber(withdrawals:get(id .. ":fee") or "")
+end
+
+-- What a withdrawal is at least, in satoshis.
+function M.least_withdrawal()
+    return least_withdrawal()
 end
 
 function M.withdrawal_count()

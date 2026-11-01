@@ -9,6 +9,17 @@ A member also names its keys on the chains a multisig reaches beyond this one, s
 holds the matching Bitcoin P2WSH M-of-N (see [On Bitcoin](#on-bitcoin)) and a Safe-style contract
 at one address on every EVM chain (see [On EVM chains](#on-evm-chains)).
 
+**Nothing is signed blind.** Each of the commands that signs says what it agrees to and asks for a
+typed `yes`, or takes `--yes` in a script, which still shows it, as a signature that has left the
+file cannot be taken back:
+- **`multisig bitcoin sign`** shows each output's address and amount, what the coins hold and the
+  fee, before it even asks for the seed. It refuses a spend it cannot say that of: an input with no
+  amount, inputs naming no key or both networks, an output with no address, or one paying more than
+  it spends. It reads no node, so it cannot tell change from a payment: look at every line.
+- **`multisig sign`** and **`approve`** show the multisig, its nonce, the transaction in full, every
+  step of a batch, and what it may pay in gas.
+- **`multisig evm sign`** shows each call's chain, contract, whom it calls, value, nonce and data.
+
 ## Making one
 
 **All it takes is a key on this chain from each member, and how many of them must agree.** No
@@ -61,7 +72,7 @@ chainv4 multisig bitcoin multisig:0x… descriptor
 chainv4 multisig bitcoin multisig:0x… address --index 3
 chainv4 multisig bitcoin multisig:0x… balance --esplora https://mempool.space/testnet4/api
 chainv4 multisig bitcoin multisig:0x… send --esplora … --to tb1q… --amount 50000 --fee-rate 2 --out pay.psbt
-chainv4 multisig bitcoin multisig:0x… sign pay.psbt          # reads the member's seed phrase
+chainv4 multisig bitcoin multisig:0x… sign pay.psbt          # shows it, asks for yes, reads the member's seed phrase
 chainv4 multisig bitcoin multisig:0x… combine pay.psbt theirs.psbt
 chainv4 multisig bitcoin multisig:0x… finish pay.psbt --esplora …
 ```
@@ -108,7 +119,7 @@ on chains without PUSH0 (`src/abi/multisig.rs` speaks to it).
 chainv4 multisig evm multisig:0x… address
 chainv4 multisig evm multisig:0x… status --eth-rpc https://ethereum-sepolia-rpc.publicnode.com
 chainv4 multisig --key alice-evm.key evm multisig:0x… propose --eth-rpc … --to 0x… --value 1000000000000000 --out pay.evm
-chainv4 multisig --key bob-evm.key evm multisig:0x… sign pay.evm             # needs no node or chain
+chainv4 multisig --key bob-evm.key evm multisig:0x… sign pay.evm             # shows each call, asks for yes; needs no node or chain
 chainv4 multisig --key anyone-evm.key evm multisig:0x… submit pay.evm --eth-rpc …
 chainv4 multisig --key alice-evm.key evm multisig:0x… sync --eth-rpc … --out owners.evm
 ```
@@ -186,7 +197,7 @@ multisig's, priced by a dry run that carries as many signatures as the quorum wi
 
 ```sh
 chainv4 send --key alice.key --multisig multisig:0x… --out pay.bundle transfer --to ed25519:0x… --amount 1000
-chainv4 multisig --key bob.key sign pay.bundle --submit     # needs no node to sign; --submit sends it once backed
+chainv4 multisig --key bob.key sign pay.bundle --submit     # shows it, asks for yes; needs no node to sign; --submit sends it once backed
 chainv4 multisig --key carol.key approve pay.bundle         # on chain, from carol's account; submits once backed
 chainv4 multisig --key anyone.key submit pay.bundle
 chainv4 multisig --key carol.key withdraw multisig:0x… --proposal 0x…

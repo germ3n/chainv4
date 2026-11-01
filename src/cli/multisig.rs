@@ -56,12 +56,18 @@ pub enum MultisigAction {
         /// Submit it too, once it holds enough signatures with the approvals on chain.
         #[arg(long)]
         submit: bool,
+        /// Sign without asking, for scripts: it still shows what it signs.
+        #[arg(long)]
+        yes: bool,
     },
     /// Approves a bundle's transaction on chain, from --key's own account at its own cost, and
     /// submits it once the approvals and the bundle's signatures are enough.
     Approve {
         /// The bundle's file, from send --multisig.
         bundle: PathBuf,
+        /// Approve without asking, for scripts: it still shows what it approves.
+        #[arg(long)]
+        yes: bool,
     },
     /// Takes back --key's approval of an open proposal.
     Withdraw {
@@ -137,14 +143,18 @@ pub enum BitcoinAction {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Signs a PSBT as a member, with its seed phrase read from input: the inputs it names this
-    /// seed's keys for, at m/48'/coin'/0'/2'.
+    /// Signs a PSBT as a member: shows each output's address and amount and the fee, asks for yes,
+    /// then reads its seed phrase from input and signs the inputs it names this seed's keys for, at
+    /// m/48'/coin'/0'/2'. A spend it cannot say that of is refused.
     #[cfg(feature = "mnemonic")]
     Sign {
         psbt: PathBuf,
         /// Ask for the seed's passphrase too.
         #[arg(long)]
         passphrase: bool,
+        /// Sign without asking, for scripts: it still shows what it signs.
+        #[arg(long)]
+        yes: bool,
     },
     /// Adds the signatures in other members' PSBTs of the same spend to the first.
     Combine {
@@ -169,9 +179,9 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
 
     match args.action {
         MultisigAction::Show { account } => show(&agent, &node, &account),
-        MultisigAction::Sign { bundle: path, submit } => {
+        MultisigAction::Sign { bundle: path, submit, yes } => {
             let mut bundle = read(&path)?;
-            list_steps(&bundle.body.tx);
+            review_bundle(&bundle, "Sign", yes, &mut std::io::stdin().lock())?;
             bundle.sign(&keypair);
             write(&path, &bundle)?;
             println!("signed as {}: {} signature{} now", keypair.public(), bundle.signatures.len(), plural(bundle.signatures.len()));
@@ -181,10 +191,10 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
                 false => Ok(()),
             }
         }
-        MultisigAction::Approve { bundle: path } => {
+        MultisigAction::Approve { bundle: path, yes } => {
             let bundle = read(&path)?;
             let body = &bundle.body;
-            list_steps(&body.tx);
+            review_bundle(&bundle, "Approve", yes, &mut std::io::stdin().lock())?;
             let approval = Tx::ApproveMultisig { account: body.account, nonce: body.nonce, fee: body.fee, tx: Box::new(body.tx.clone()) };
             println!("approving {} of {} on chain", body.id(&bundle.genesis), body.account);
             send_own(&agent, &node, &keypair, approval, timeout)?;
@@ -350,6 +360,18 @@ fn show(agent: &Agent, node: &str, account: &Address) -> CliResult<()> {
     Ok(())
 }
 
+/// Shows what a bundle has its member agree to, and asks for yes unless told: a signature on one
+/// cannot be taken back once it is out of the file.
+pub(super) fn review_bundle(bundle: &MultisigBundle, what: &str, yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    let body = &bundle.body;
+    println!("{}, its transaction {}, on the chain of genesis {}:", body.account, body.nonce, bundle.genesis);
+    println!("  {}", crate::structs::json::tx(&body.tx));
+    println!("  paying up to {} gas at {} each, tip {}", body.fee.gas_limit, body.fee.max_price, body.fee.tip);
+    list_steps(&body.tx);
+
+    super::send::typed_yes(&format!("{what} this?"), yes, input, "nothing is signed")
+}
+
 /// A batch's steps, each as the API writes it, before a member's key goes on them: what it agrees to.
 fn list_steps(tx: &Tx) {
     let Some(steps) = tx.batch_steps() else {
@@ -440,7 +462,11 @@ fn bitcoin(agent: &Agent, node: &str, account: &Address, action: BitcoinAction) 
             println!("next: each member signs it, chainv4 multisig bitcoin {account} sign {}, or in their own wallet", out.display());
         }
         #[cfg(feature = "mnemonic")]
-        BitcoinAction::Sign { psbt: path, passphrase } => sign_file(&path, &read_seed(passphrase)?)?,
+        BitcoinAction::Sign { psbt: path, passphrase, yes } => {
+            // Looked at before the seed is even asked for.
+            review_psbt(&path, yes, &mut std::io::stdin().lock())?;
+            sign_file(&path, &read_seed(passphrase)?)?;
+        }
         BitcoinAction::Combine { psbt: path, others } => {
             let mut psbt = read_psbt(&path)?;
 
@@ -467,6 +493,22 @@ fn bitcoin(agent: &Agent, node: &str, account: &Address, action: BitcoinAction) 
     }
 
     Ok(())
+}
+
+/// Shows what signing a PSBT's file agrees to, each output and the fee, and asks for yes unless
+/// told; an error for one that cannot be read that far, which is not signed.
+#[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
+pub(super) fn review_psbt(path: &Path, yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    let review = read_psbt(path)?.multisig_review().map_err(|why| format!("{} is not signed: {why}", path.display()))?;
+    println!("{} spends {} satoshis:", path.display(), review.spent);
+
+    for (to, sats) in &review.outputs {
+        println!("  {sats} satoshis to {to}");
+    }
+
+    println!("  {} satoshis in fees", review.fee);
+
+    super::send::typed_yes("Sign this?", yes, input, "nothing is signed")
 }
 
 /// Signs a PSBT's file with a member's seed, and writes it back.

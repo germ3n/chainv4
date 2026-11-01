@@ -109,3 +109,12 @@ fn a_release_and_a_held_output_read_as_the_gateway_gives_them() {
     assert_eq!((held.outpoint, held.sats, held.state.as_str()), (format!("{}01:0", "00".repeat(31)), 50_000, "unspent"));
     assert_eq!(party(&held.recipient), "", "change is no one's deposit");
 }
+
+#[test]
+fn a_withdrawal_says_what_it_may_lose_and_then_what_it_lost() {
+    let said = |most: &str, share: &str| ["0x00", "20000", "queued", "ed25519:0x", most, share].map(str::to_string);
+
+    assert_eq!(withdrawal_fee(&said("2000", "")), format!("up to {}", btc("2000")));
+    assert_eq!(withdrawal_fee(&said("2000", "500")), btc("500"));
+    assert_eq!(withdrawal_fee(&["0x00".to_string()]), "—");
+}

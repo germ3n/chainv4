@@ -3,7 +3,7 @@
 //! signs input by input as BIP143 has it, and a sweep of an old federation's coins.
 
 use {
-    super::btc_relay::{REGTEST, mined},
+    super::btc_relay::{REGTEST, coinbase, mined},
     super::*,
     crate::crypto::bitcoin::sha256d,
     crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut},
@@ -91,18 +91,18 @@ impl Btc {
         self.call_as(DEPLOYER, function, args)
     }
 
-    /// A block holding a coinbase and the transaction, on the relay's tip: its hash, and the
-    /// transaction's place and Merkle path in it.
-    fn mine(&mut self, tx: &[u8]) -> ([u8; 32], u64, Vec<u8>) {
-        let coinbase = sha256d(&self.time.to_le_bytes());
+    /// A block holding a coinbase and the transaction, on the relay's tip: its hash, the
+    /// transaction's place and Merkle path in it, and the coinbase with its own path.
+    fn mine(&mut self, tx: &[u8]) -> ([u8; 32], u64, Vec<u8>, Vec<u8>, Vec<u8>) {
+        let first = coinbase(self.time);
         let txid = sha256d(tx);
-        let root = sha256d(&[coinbase, txid].concat());
+        let root = sha256d(&[sha256d(&first), txid].concat());
         self.time += 600;
         let header = mined(&self.tip, &root, self.time, REGTEST);
         self.world.call_at(DEPLOYER, self.relay, "submit", &[bytes(&header)], 0, NOW).result.unwrap();
         self.tip = sha256d(&header);
 
-        (self.tip, 1, coinbase.to_vec())
+        (self.tip, 1, sha256d(&first).to_vec(), first, txid.to_vec())
     }
 
     /// An empty block on the tip, burying what came before one deeper.
@@ -134,9 +134,9 @@ impl Btc {
     /// Satoshis paid to Alice's deposit address, buried, shown and minted: its transaction's id.
     fn deposited(&mut self, sats: u64) -> [u8; 32] {
         let deposit = pays(&self.deposit_output(ALICE), sats);
-        let (block, index, path) = self.mine(&deposit);
+        let (block, index, path, first, first_path) = self.mine(&deposit);
         self.bury();
-        self.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), number(0), address(ALICE), TxCallArgumentType::Nil]).unwrap();
+        self.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]).unwrap();
 
         sha256d(&deposit)
     }
@@ -248,8 +248,8 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
 
     // Paid on Bitcoin, mined, but one block deep: not yet.
     let deposit = pays(output, 50_000);
-    let (block, index, path) = btc.mine(&deposit);
-    let show = |btc: &Btc, recipient: Address| btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), number(0), address(recipient), TxCallArgumentType::Nil]);
+    let (block, index, path, first, first_path) = btc.mine(&deposit);
+    let show = |btc: &Btc, recipient: Address| btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(recipient), TxCallArgumentType::Nil]);
 
     assert!(show(&btc, alice).unwrap_err().contains("not deep enough"));
     btc.bury();
@@ -264,12 +264,17 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
 
     // Alice withdraws 20,000 to Bob's Bitcoin address: burned, queued.
     let bob = crate::crypto::bitcoin::tx::p2wpkh(&[0xb0; 20]);
-    assert!(btc.call_as(alice, "withdraw", &[bytes(&bob), number(500)]).unwrap_err().contains("at least"));
+    assert!(btc.call_as(alice, "withdraw", &[bytes(&bob), number(9_999)]).unwrap_err().contains("at least"));
     assert_eq!(btc.call_as(alice, "withdraw", &[bytes(&bob), number(20_000)]).unwrap(), [TxCallArgumentType::I64(1)]);
-    assert_eq!(btc.call("withdrawal", &[number(1)]).unwrap(), [bytes(&bob), TxCallArgumentType::I64(20_000), TxCallArgumentType::String("queued".into()), address(alice)], "and who asked, for wallets");
+    assert_eq!(
+        btc.call("withdrawal", &[number(1)]).unwrap(),
+        [bytes(&bob), TxCallArgumentType::I64(20_000), TxCallArgumentType::String("queued".into()), address(alice), TxCallArgumentType::I64(2_000), TxCallArgumentType::Nil],
+        "and who asked, for wallets, and the most it may lose, a tenth unless told"
+    );
     assert_eq!(btc.wbtc_of(alice), u256::from(30_000u64));
 
-    // A release spends the deposit: Bob's 20,000, change to the federation, 1,000 in fees.
+    // A release spends the deposit: Bob's 20,000 less the 1,000 in fees, which come off what he is
+    // paid, and all the rest back to the federation.
     let change = match &btc.call("change_script", &[]).unwrap()[..] {
         [TxCallArgumentType::Bytes(script)] => crate::crypto::bitcoin::tx::p2wsh(script),
         other => panic!("{other:?}"),
@@ -283,10 +288,11 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     let deposit_id = sha256d(&deposit);
     let propose = |btc: &Btc, tx: &Transaction| btc.call("propose", &[bytes(&tx.base()), number(1)]);
 
-    assert!(propose(&btc, &release(19_000, 30_000, deposit_id)).unwrap_err().contains("does not pay its withdrawal"));
-    assert!(propose(&btc, &release(20_000, 10_000, deposit_id)).unwrap_err().contains("past the cap"));
-    assert!(propose(&btc, &release(20_000, 29_000, [1; 32])).unwrap_err().contains("not an output the gateway holds"));
-    let good = release(20_000, 29_000, deposit_id);
+    assert!(propose(&btc, &release(20_000, 29_000, deposit_id)).unwrap_err().contains("does not pay its withdrawal"), "the pool paying the fee");
+    assert!(propose(&btc, &release(18_500, 30_500, deposit_id)).unwrap_err().contains("does not pay its withdrawal"), "Bob paying the pool");
+    assert!(propose(&btc, &release(9_000, 30_000, deposit_id)).unwrap_err().contains("past the cap"));
+    assert!(propose(&btc, &release(19_000, 30_000, [1; 32])).unwrap_err().contains("not an output the gateway holds"));
+    let good = release(19_000, 30_000, deposit_id);
 
     assert_eq!(propose(&btc, &good).unwrap(), [TxCallArgumentType::I64(1)]);
     assert!(propose(&btc, &good).unwrap_err().contains("not an output the gateway holds unspent"), "its input is pending");
@@ -307,14 +313,15 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     );
 
     // Mined and buried: released, the withdrawal paid, the change held.
-    let (block, index, path) = btc.mine(&good.base());
+    let (block, index, path, first, first_path) = btc.mine(&good.base());
     btc.bury();
-    btc.call("released", &[number(1), bytes(&block), bytes(&good.base()), number(index), bytes(&path)]).unwrap();
+    btc.call("released", &[number(1), bytes(&block), bytes(&good.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)]).unwrap();
 
     assert_eq!(btc.call("withdrawal", &[number(1)]).unwrap()[2], TxCallArgumentType::String("paid".into()));
     assert_eq!(btc.call("utxo_count", &[]).unwrap(), [TxCallArgumentType::I64(2)]);
     assert_eq!(btc.call("utxo", &[number(0)]).unwrap()[4], TxCallArgumentType::String("spent".into()));
-    assert_eq!(btc.call("utxo", &[number(1)]).unwrap()[1], TxCallArgumentType::I64(29_000));
+    assert_eq!(btc.call("utxo", &[number(1)]).unwrap()[1], TxCallArgumentType::I64(30_000), "all but what Bob burned: the wBTC left, 30,000, is backed");
+    assert_eq!(btc.call("withdrawal", &[number(1)]).unwrap()[5], TxCallArgumentType::I64(1_000), "what it lost, for wallets");
 
     // A new federation: the old one's change is swept to it, all of it; the new one's is not.
     let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
@@ -326,7 +333,7 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     let sweep = Transaction {
         version: 2,
         inputs: vec![TxIn { txid: sha256d(&good.base()), vout: 1, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }],
-        outputs: vec![TxOut { value: 28_500, script: new_change }],
+        outputs: vec![TxOut { value: 29_500, script: new_change }],
         lock_time: 0,
     };
 
@@ -340,9 +347,9 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
 
     assert_ne!(&old_output, output, "a new federation, new deposit addresses");
     let late = pays(output, 7_000);
-    let (block, index, path) = btc.mine(&late);
+    let (block, index, path, first, first_path) = btc.mine(&late);
     btc.bury();
-    btc.call("deposit", &[bytes(&block), bytes(&late), number(index), bytes(&path), number(0), address(alice), number(0)]).unwrap();
+    btc.call("deposit", &[bytes(&block), bytes(&late), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(alice), number(0)]).unwrap();
 
     assert_eq!(btc.wbtc_of(alice), u256::from(37_000u64));
 }
@@ -355,12 +362,12 @@ fn a_release_naming_one_withdrawal_twice_is_refused() {
     btc.deposited(100_001);
     let id = btc.withdrawal(20_000);
     // It would pay Bob twice for the one burn.
-    let tx = spending(&[deposit], vec![pays_bob(20_000), pays_bob(20_000), btc.change(59_000)]);
+    let tx = spending(&[deposit], vec![pays_bob(19_500), pays_bob(19_500), btc.change(60_000)]);
 
     assert!(btc.call("propose", &[bytes(&tx.base()), number(id), number(id)]).unwrap_err().contains("named twice"));
     assert_eq!(btc.state_of_withdrawal(id), text("queued"));
 
-    let once = spending(&[deposit], vec![pays_bob(20_000), btc.change(79_000)]);
+    let once = spending(&[deposit], vec![pays_bob(19_000), btc.change(80_000)]);
     btc.call("propose", &[bytes(&once.base()), number(id)]).unwrap();
 }
 
@@ -370,7 +377,7 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
     let mut btc = Btc::new();
     let deposit = btc.deposited(100_000);
     let id = btc.withdrawal(20_000);
-    let good = spending(&[deposit], vec![pays_bob(20_000), btc.change(79_000)]);
+    let good = spending(&[deposit], vec![pays_bob(19_000), btc.change(80_000)]);
     let propose = |tx: &[u8]| btc.call("propose", &[bytes(tx), number(id)]);
 
     // The same output twice: no block can hold it, and it would hold what it spends for good.
@@ -396,13 +403,23 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
     assert!(propose(&long).unwrap_err().contains("longer than it needs"));
 
     // Change under Bitcoin's dust is not relayed.
-    let mut near = Btc::new();
-    let small = near.deposited(21_500);
-    let id = near.withdrawal(20_000);
-    let tx = spending(&[small], vec![pays_bob(20_000), near.change(545)]);
-    assert!(near.call("propose", &[bytes(&tx.base()), number(id)]).unwrap_err().contains("dust"));
-    let tx = spending(&[small], vec![pays_bob(20_000), near.change(546)]);
-    near.call("propose", &[bytes(&tx.base()), number(id)]).unwrap();
+    for (over, took) in [(545, false), (546, true)] {
+        let mut near = Btc::new();
+        let small = near.deposited(20_000 + over);
+        let id = near.withdrawal(20_000);
+        let tx = spending(&[small], vec![pays_bob(19_000), near.change(over)]);
+        let answer = near.call("propose", &[bytes(&tx.base()), number(id)]);
+
+        assert_eq!(answer.is_ok(), took, "{answer:?}");
+    }
+
+    // Nor is a transaction of 64 bytes or under: one input, and one output of a 4-byte script.
+    let mut tiny = Btc::new();
+    let exact = tiny.deposited(20_000);
+    let id = tiny.call_as(ALICE, "withdraw", &[bytes(&[0x52, 2, 1, 1]), number(20_000)]).unwrap();
+    let tx = spending(&[exact], vec![TxOut { value: 19_000, script: vec![0x52, 2, 1, 1] }]);
+    assert_eq!(tx.base().len(), 64);
+    assert!(tiny.call("propose", &[bytes(&tx.base()), id[0].clone()]).unwrap_err().contains("do not relay"));
 
     propose(&good.base()).unwrap();
 }
@@ -412,7 +429,7 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
 fn a_withdrawal_goes_only_to_a_script_bitcoin_s_nodes_relay() {
     let mut btc = Btc::new();
     btc.deposited(100_000);
-    let withdraw = |script: &[u8]| btc.call_as(ALICE, "withdraw", &[bytes(script), number(1_000)]);
+    let withdraw = |script: &[u8]| btc.call_as(ALICE, "withdraw", &[bytes(script), number(10_000)]);
 
     for standard in [
         [&[0x76, 0xa9, 20][..], &[1; 20], &[0x88, 0xac]].concat(),
@@ -436,7 +453,7 @@ fn a_release_pays_at_least_the_floor_for_its_size_and_at_most_the_cap() {
     let mut btc = Btc::new();
     let deposit = btc.deposited(100_000);
     let id = btc.withdrawal(20_000);
-    let release = |fee: u64| spending(&[deposit], vec![pays_bob(20_000), btc.change(80_000 - fee)]);
+    let release = |fee: u64| spending(&[deposit], vec![pays_bob(20_000 - fee), btc.change(80_000)]);
     let script = match &btc.call("utxo", &[number(0)]).unwrap()[..] {
         [TxCallArgumentType::String(key), ..] => match &btc.call("utxo_of", &[text(key)]).unwrap()[..] {
             [_, _, _, _, TxCallArgumentType::Bytes(script), _] => script.len(),
@@ -485,7 +502,7 @@ fn a_release_short_of_its_threshold_is_cancelled_by_the_federation_and_proposed_
     let mut btc = Btc::new();
     let (first, second) = (btc.deposited(50_000), btc.deposited(60_000));
     let id = btc.withdrawal(20_000);
-    let release = spending(&[first], vec![pays_bob(20_000), btc.change(29_000)]);
+    let release = spending(&[first], vec![pays_bob(19_000), btc.change(30_000)]);
     btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
     btc.sign(1, &release, 0, 21).unwrap();
 
@@ -513,12 +530,12 @@ fn a_release_short_of_its_threshold_is_cancelled_by_the_federation_and_proposed_
 
     // Its withdrawal is paid again only by what conflicts with it on Bitcoin, as it may yet be
     // finished there with a signature no one posted: from other inputs alone would pay Bob twice.
-    let elsewhere = spending(&[second], vec![pays_bob(20_000), btc.change(39_000)]);
+    let elsewhere = spending(&[second], vec![pays_bob(19_000), btc.change(40_000)]);
     assert!(btc.call("propose", &[bytes(&elsewhere.base()), number(id)]).unwrap_err().contains("must spend"));
     let hex = crate::structs::hex::to_hex(&first);
     assert_eq!(btc.call("anchor", &[number(id)]).unwrap(), [text(&format!("{}:0", hex.trim_start_matches("0x")))]);
 
-    let again = spending(&[second, first], vec![pays_bob(20_000), btc.change(89_000)]);
+    let again = spending(&[second, first], vec![pays_bob(19_000), btc.change(90_000)]);
     assert_eq!(btc.call("propose", &[bytes(&again.base()), number(id)]).unwrap(), [TxCallArgumentType::I64(2)]);
     assert_eq!(btc.call("input_signatures", &[number(2), number(1)]).unwrap().len(), 2, "signed anew");
 
@@ -527,9 +544,9 @@ fn a_release_short_of_its_threshold_is_cancelled_by_the_federation_and_proposed_
     btc.sign(2, &again, 0, 22).unwrap();
     btc.sign(2, &again, 1, 21).unwrap();
     btc.sign(2, &again, 1, 22).unwrap();
-    let (block, index, path) = btc.mine(&again.base());
+    let (block, index, path, first, first_path) = btc.mine(&again.base());
     btc.bury();
-    btc.call("released", &[number(2), bytes(&block), bytes(&again.base()), number(index), bytes(&path)]).unwrap();
+    btc.call("released", &[number(2), bytes(&block), bytes(&again.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)]).unwrap();
 
     assert_eq!(btc.state_of_withdrawal(id), text("paid"));
     assert_eq!(btc.call("anchor", &[number(id)]).unwrap(), [TxCallArgumentType::Nil]);
@@ -541,7 +558,7 @@ fn a_release_with_every_input_at_its_threshold_cannot_be_cancelled() {
     let mut btc = Btc::new();
     let (first, second) = (btc.deposited(50_000), btc.deposited(60_000));
     let id = btc.withdrawal(20_000);
-    let release = spending(&[first, second], vec![pays_bob(20_000), btc.change(89_000)]);
+    let release = spending(&[first, second], vec![pays_bob(19_000), btc.change(90_000)]);
     btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
 
     // One input there and one not: it cannot be finished yet, so a vote is taken.
@@ -563,15 +580,15 @@ fn a_release_with_every_input_at_its_threshold_cannot_be_cancelled() {
 fn a_cancelled_release_finished_anyway_pays_no_one_twice_and_frees_what_waited_on_it() {
     let mut btc = Btc::new();
     let (first, second, third) = (btc.deposited(50_000), btc.deposited(60_000), btc.deposited(70_000));
-    let (paid, other) = (btc.withdrawal(20_000), btc.withdrawal(5_000));
-    let cancelled = spending(&[first], vec![pays_bob(20_000), TxOut { value: 5_000, script: bob() }, btc.change(24_000)]);
+    let (paid, other) = (btc.withdrawal(20_000), btc.withdrawal(10_000));
+    let cancelled = spending(&[first], vec![pays_bob(19_500), TxOut { value: 9_500, script: bob() }, btc.change(20_000)]);
     btc.call("propose", &[bytes(&cancelled.base()), number(paid), number(other)]).unwrap();
     btc.vote(1, &cancelled, 21).unwrap();
     btc.vote(1, &cancelled, 22).unwrap();
 
     // Proposed again, as it must be, on the same input, and signed in full: it conflicts with the
     // first, so Bitcoin takes one of them.
-    let again = spending(&[first, third], vec![pays_bob(20_000), btc.change(99_000)]);
+    let again = spending(&[first, third], vec![pays_bob(19_000), btc.change(100_000)]);
     btc.call("propose", &[bytes(&again.base()), number(paid)]).unwrap();
 
     for (input, signer) in [(0, 21), (0, 22), (1, 21), (1, 22)] {
@@ -580,9 +597,9 @@ fn a_cancelled_release_finished_anyway_pays_no_one_twice_and_frees_what_waited_o
 
     // The first was finished with signatures that came too late for the board. Shown, the gateway
     // knows: its input is spent, what it paid is paid, and its change held.
-    let (block, index, path) = btc.mine(&cancelled.base());
+    let (block, index, path, first, first_path) = btc.mine(&cancelled.base());
     btc.bury();
-    btc.call("released", &[number(1), bytes(&block), bytes(&cancelled.base()), number(index), bytes(&path)]).unwrap();
+    btc.call("released", &[number(1), bytes(&block), bytes(&cancelled.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)]).unwrap();
 
     assert_eq!(btc.state_of_proposal(1), text("released"));
     assert_eq!(btc.state_of_withdrawal(paid), text("paid"));
@@ -601,7 +618,7 @@ fn a_cancelled_release_finished_anyway_pays_no_one_twice_and_frees_what_waited_o
     assert_eq!(btc.call("utxo", &[number(1)]).unwrap()[0], text(&format!("{}:0", crate::structs::hex::to_hex(&second).trim_start_matches("0x"))));
 
     // Showing a release again, cancelled or not, changes nothing.
-    assert!(btc.call("released", &[number(1), bytes(&block), bytes(&cancelled.base()), number(index), bytes(&path)]).unwrap_err().contains("no open release"));
+    assert!(btc.call("released", &[number(1), bytes(&block), bytes(&cancelled.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)]).unwrap_err().contains("no open release"));
 }
 
 #[cfg(feature = "bridge")]
@@ -610,14 +627,14 @@ fn a_cancelled_release_proposed_again_as_it_was_is_shown_once() {
     let mut btc = Btc::new();
     let first = btc.deposited(50_000);
     let id = btc.withdrawal(20_000);
-    let release = spending(&[first], vec![pays_bob(20_000), btc.change(29_000)]);
+    let release = spending(&[first], vec![pays_bob(19_000), btc.change(30_000)]);
     btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
     btc.vote(1, &release, 21).unwrap();
     btc.vote(1, &release, 22).unwrap();
     btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
-    let (block, index, path) = btc.mine(&release.base());
+    let (block, index, path, first, first_path) = btc.mine(&release.base());
     btc.bury();
-    let show = |proposal: u64| btc.call("released", &[number(proposal), bytes(&block), bytes(&release.base()), number(index), bytes(&path)]);
+    let show = |proposal: u64| btc.call("released", &[number(proposal), bytes(&block), bytes(&release.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)]);
 
     show(2).unwrap();
     assert!(show(1).unwrap_err().contains("shown spent already"));
@@ -636,11 +653,11 @@ fn a_proof_of_a_deposit_mints_on_its_own_chain_and_on_no_other() {
     assert_ne!(here.deposit_output(ALICE), elsewhere.deposit_output(ALICE));
 
     let deposit = pays(&here.deposit_output(ALICE), 50_000);
-    let (block, index, path) = here.mine(&deposit);
+    let (block, index, path, first, first_path) = here.mine(&deposit);
     here.bury();
-    assert_eq!(elsewhere.mine(&deposit), (block, index, path.clone()), "one Bitcoin");
+    assert_eq!(elsewhere.mine(&deposit), (block, index, path.clone(), first.clone(), first_path.clone()), "one Bitcoin");
     elsewhere.bury();
-    let show = |btc: &Btc| btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), number(0), address(ALICE), TxCallArgumentType::Nil]);
+    let show = |btc: &Btc| btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]);
 
     assert!(show(&elsewhere).unwrap_err().contains("does not pay that address"));
     assert_eq!(elsewhere.wbtc_of(ALICE), u256::ZERO);
@@ -653,9 +670,9 @@ fn a_proof_of_a_deposit_mints_on_its_own_chain_and_on_no_other() {
 fn a_chain_restarted_from_the_identical_genesis_does_not_mint_a_deposit_from_before_its_gateway() {
     let mut old = Btc::on_chain(HERE);
     let deposit = pays(&old.deposit_output(ALICE), 50_000);
-    let (block, index, path) = old.mine(&deposit);
+    let (block, index, path, first, first_path) = old.mine(&deposit);
     old.bury();
-    let show = |btc: &Btc| btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), number(0), address(ALICE), TxCallArgumentType::Nil]);
+    let show = |btc: &Btc| btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]);
     show(&old).unwrap();
 
     // The same id, the same gateway, the same deposit address, and nothing held: only that its
@@ -672,9 +689,9 @@ fn a_chain_restarted_from_the_identical_genesis_does_not_mint_a_deposit_from_bef
 
     // A payment since mints.
     let fresh = pays(&new.deposit_output(ALICE), 7_000);
-    let (block, index, path) = new.mine(&fresh);
+    let (block, index, path, first, first_path) = new.mine(&fresh);
     new.bury();
-    new.call("deposit", &[bytes(&block), bytes(&fresh), number(index), bytes(&path), number(0), address(ALICE), TxCallArgumentType::Nil]).unwrap();
+    new.call("deposit", &[bytes(&block), bytes(&fresh), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]).unwrap();
     assert_eq!(new.wbtc_of(ALICE), u256::from(7_000u64));
 }
 
@@ -702,7 +719,7 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     let mut btc = Btc::new();
     let (first, second) = (btc.deposited(50_000), btc.deposited(60_000));
     let id = btc.withdrawal(20_000);
-    let release = spending(&[first, second], vec![pays_bob(20_000), btc.change(88_000)]);
+    let release = spending(&[first, second], vec![pays_bob(18_000), btc.change(90_000)]);
     btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
 
     let held = |txid: &[u8; 32]| {
@@ -717,7 +734,7 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
         raw: release.base(),
         txid: sha256d(&release.base()).to_vec(),
         version: 0,
-        withdrawals: vec![NamedWithdrawal { id, script: bob(), sats: 20_000, state: "proposed".to_string(), anchor: None }],
+        withdrawals: vec![NamedWithdrawal { id, script: bob(), sats: 20_000, most_fee: 2_000, state: "proposed".to_string(), anchor: None }],
         inputs: vec![held(&first), held(&second)],
         change_script: change_script.clone(),
         fee_cap: CAP,
@@ -744,13 +761,14 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     refused(&|facts| facts.withdrawals[0].state = "paid".to_string(), "is paid");
     refused(&|facts| facts.withdrawals[0].state = "queued".to_string(), "is queued");
     refused(&|facts| facts.withdrawals[0].sats = 19_000, "as asked");
+    refused(&|facts| facts.withdrawals[0].most_fee = 1_999, "agreed to lose");
     refused(&|facts| facts.withdrawals[0].script = vec![0x51], "as asked");
     refused(&|facts| facts.withdrawals[0].anchor = Some("00:9".to_string()), "cancelled release");
     refused(&|facts| facts.inputs[1].1.state = "spent".to_string(), "is spent");
     refused(&|facts| facts.inputs[1].0 = facts.inputs[0].0.clone(), "twice");
     refused(&|facts| facts.inputs.truncate(1), "account of its inputs");
     refused(&|facts| facts.change_script = vec![0x51], "not change");
-    refused(&|facts| facts.fee_cap = 1_000, "fee");
+    refused(&|facts| facts.fee_cap = 1_999, "fee");
     refused(&|facts| facts.fee_floor = 1_000, "fee");
     refused(&|facts| facts.txid = vec![0; 32], "the id the gateway keeps");
     refused(&with_tx(Transaction { version: 3, ..release.clone() }), "version 2");
@@ -767,6 +785,14 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     let mut dust = release.clone();
     dust.outputs[1].value = 10;
     refused(&with_tx(dust), "not change");
+    // The fee taken from the pool rather than from the withdrawal.
+    let mut pool_pays = release.clone();
+    (pool_pays.outputs[0].value, pool_pays.outputs[1].value) = (20_000, 88_000);
+    refused(&with_tx(pool_pays), "as asked");
+    let mut tiny = facts.clone();
+    tiny.raw = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    tiny.txid = sha256d(&tiny.raw).to_vec();
+    assert!(check_btc_release(&tiny).is_err());
 
     // A sweep is of older federations alone, and pays something.
     let mut sweep = facts.clone();
@@ -782,14 +808,94 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
 
 #[cfg(feature = "bridge")]
 #[test]
+fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_never_off_the_backing() {
+    use crate::bridge::btc_fee_share;
+
+    let mut btc = Btc::new();
+    let (first, second) = (btc.deposited(100_000), btc.deposited(100_001));
+    let (small, large) = (btc.withdrawal(10_000), btc.withdrawal(50_000));
+    let (minted, burned) = (200_001u64, 60_000u64);
+
+    // Even, the first taking what will not divide, whatever each is for: 1,001 over two.
+    let release = |at_first: u64, at_second: u64| spending(&[first], vec![pays_bob(10_000 - at_first), TxOut { value: 50_000 - at_second, script: bob() }, btc.change(100_000 - burned)]).base();
+    let propose = |raw: &[u8]| btc.call("propose", &[bytes(raw), number(small), number(large)]);
+
+    assert_eq!((btc_fee_share(1_001, 2, 0), btc_fee_share(1_001, 2, 1)), (501, 500));
+    assert!(propose(&release(500, 501)).unwrap_err().contains("does not pay its withdrawal"), "the rest on the second");
+    assert!(propose(&release(1_001, 0)).unwrap_err().contains("does not pay its withdrawal"), "all on one");
+
+    // Past what the small one agreed to lose, a thousand, it is refused, however the large one's
+    // limit could take it.
+    assert!(propose(&release(1_001, 1_001)).unwrap_err().contains("agreed to lose"));
+
+    // It may say it loses more, as who asked, while it waits; no one else may.
+    assert!(btc.call_as(Address::Ed25519([0xb; 32]), "set_most_fee", &[number(small), number(2_000)]).unwrap_err().contains("only who asked"));
+    assert!(btc.call_as(ALICE, "set_most_fee", &[number(small), number(9_001)]).unwrap_err().contains("all but"), "not all of it");
+    assert!(btc.call_as(ALICE, "set_most_fee", &[number(small), number(0)]).unwrap_err().contains("from 1"));
+    btc.call_as(ALICE, "set_most_fee", &[number(small), number(1_001)]).unwrap();
+
+    let taken = release(1_001, 1_001);
+    propose(&taken).unwrap();
+    assert!(btc.call_as(ALICE, "set_most_fee", &[number(small), number(2_000)]).unwrap_err().contains("not queued"));
+    assert_eq!(btc.call("withdrawal", &[number(small)]).unwrap()[5], TxCallArgumentType::I64(1_001));
+
+    // What the gateway holds falls by just what was burned, whatever the fee was: a full release
+    // leaves all of it backed.
+    let (tx, _) = Transaction::read(&taken).unwrap();
+    let (block, index, path, first_tx, first_path) = btc.mine(&taken);
+    btc.bury();
+    btc.call("released", &[number(1), bytes(&block), bytes(&taken), number(index), bytes(&path), bytes(&first_tx), bytes(&first_path)]).unwrap();
+    let change = tx.outputs[2].value;
+
+    assert_eq!(100_001 + change, minted - burned, "held, unspent");
+    assert_eq!(btc.wbtc_of(ALICE), u256::from(minted - burned), "what stands against it");
+    let _ = second;
+
+    // A withdrawal cannot lose it all, nor be too small to pay for a release of its own.
+    assert!(btc.call_as(ALICE, "withdraw", &[bytes(&bob()), number(10_000), number(9_001)]).unwrap_err().contains("all but"));
+    assert!(btc.call_as(ALICE, "withdraw", &[bytes(&bob()), number(10_000), number(0)]).unwrap_err().contains("from 1"));
+    assert_eq!(btc.call("least_withdrawal", &[]).unwrap(), [TxCallArgumentType::I64(10_000)]);
+
+    // A sweep's fee stays the federation's: no withdrawal to bear it.
+    let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
+    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+    let sweep = spending(&[second], vec![btc.change(99_001)]);
+    btc.call("propose", &[bytes(&sweep.base())]).unwrap();
+}
+
+/// A transaction of 64 bytes could be an inner node of a block's tree: not the relay's to tell apart
+/// by its id, and nothing Bitcoin's nodes relay. The gateway has its bytes, and refuses it.
+#[cfg(feature = "bridge")]
+#[test]
+fn a_deposit_of_64_bytes_is_refused_as_it_could_be_an_inner_node() {
+    let mut btc = Btc::new();
+    let raw = [7u8; 64];
+    let (block, index, path, first, first_path) = btc.mine(&raw);
+    btc.bury();
+    let answer = btc.call("deposit", &[bytes(&block), bytes(&raw), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]);
+
+    assert!(answer.unwrap_err().contains("64 bytes"));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn the_least_withdrawal_rises_with_a_floor_so_one_can_always_pay_for_its_own_release() {
+    let btc = Btc::started(HERE);
+    btc.call("setup", &[address(btc.relay), address(btc.template), number(1_000_000), number(100), number(3_600_000)]).unwrap();
+
+    assert_eq!(btc.call("least_withdrawal", &[]).unwrap(), [TxCallArgumentType::I64(100 * 710 + 1_000)]);
+}
+
+#[cfg(feature = "bridge")]
+#[test]
 fn the_largest_release_of_withdrawals_fits_in_a_call_s_fuel_with_all_it_now_checks() {
     let mut btc = Btc::new();
     let deposits: Vec<[u8; 32]> = (0..10).map(|n| btc.deposited(100_000 + n)).collect();
-    let ids: Vec<u64> = (0..50).map(|_| btc.withdrawal(1_000)).collect();
+    let ids: Vec<u64> = (0..50).map(|_| btc.withdrawal(10_000)).collect();
     let spent: u64 = (0..10).map(|n| 100_000 + n).sum();
     let fee = 9_000;
-    let mut outputs: Vec<TxOut> = ids.iter().map(|_| pays_bob(1_000)).collect();
-    outputs.push(btc.change(spent - 50_000 - fee));
+    let mut outputs: Vec<TxOut> = ids.iter().map(|_| pays_bob(10_000 - fee / 50)).collect();
+    outputs.push(btc.change(spent - 500_000));
     let tx = spending(&deposits, outputs);
     let mut args = vec![bytes(&tx.base())];
     args.extend(ids.iter().map(|id| number(*id)));
@@ -878,9 +984,9 @@ fn bitcoin_core_takes_a_release_of_a_deposit_with_every_kind_of_output_the_gatew
     let (paying, _) = Transaction::read(&from_hex(&format!("0x{whole}")).unwrap()).unwrap();
     let vout = paying.outputs.iter().position(|out| out.script == output).unwrap() as u64;
     let deposit = paying.base();
-    let (block, index, path) = btc.mine(&deposit);
+    let (block, index, path, first, first_path) = btc.mine(&deposit);
     btc.bury();
-    btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), number(vout), address(ALICE), TxCallArgumentType::Nil]).unwrap();
+    btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(vout), address(ALICE), TxCallArgumentType::Nil]).unwrap();
 
     // Withdrawals to every kind of script the gateway takes, and change.
     let scripts = [
@@ -895,13 +1001,13 @@ fn bitcoin_core_takes_a_release_of_a_deposit_with_every_kind_of_output_the_gatew
     let mut args = vec![bytes(&[])];
 
     for script in &scripts {
-        let id = btc.call_as(ALICE, "withdraw", &[bytes(script), number(1_000)]).unwrap();
+        let id = btc.call_as(ALICE, "withdraw", &[bytes(script), number(10_000)]).unwrap();
         args.push(id[0].clone());
-        outputs.push(TxOut { value: 1_000, script: script.clone() });
+        outputs.push(TxOut { value: 10_000 - 200, script: script.clone() });
     }
 
-    let fee = 1_000;
-    outputs.push(btc.change(100_000 - 6_000 - fee));
+    // 1,200 in fees, 200 from each of the six, and all the rest back.
+    outputs.push(btc.change(100_000 - 60_000));
     let mut release = Transaction { version: 2, inputs: vec![TxIn { txid: sha256d(&deposit), vout: vout as u32, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }], outputs, lock_time: 0 };
     args[0] = bytes(&release.base());
     assert_eq!(btc.call("propose", &args).unwrap(), [TxCallArgumentType::I64(1)]);

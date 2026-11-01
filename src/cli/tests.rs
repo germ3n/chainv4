@@ -724,7 +724,13 @@ mod send {
             ..running.args(TxArgs::Batch { file: None, steps: vec![step(&bob, "10"), step(&carol, "20")] })
         })
         .unwrap();
-        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true }).unwrap();
+        // It shows what it signs, and takes a typed yes.
+        let read = crate::registry::multisig::MultisigBundle::from_text(&fs::read_to_string(&bundle).unwrap()).unwrap();
+        assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, &mut "no\n".as_bytes()).unwrap_err().to_string().contains("nothing is signed"));
+        assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, &mut "".as_bytes()).is_err());
+        crate::cli::multisig::review_bundle(&read, "Sign", false, &mut "yes\n".as_bytes()).unwrap();
+        crate::cli::multisig::review_bundle(&read, "Sign", true, &mut "".as_bytes()).unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true }).unwrap();
         let node = running.stop();
         let held = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap();
 
@@ -768,13 +774,13 @@ mod send {
         });
         propose(&bundle, 10).unwrap();
         let submitted_short = multisig(&files[0], MultisigAction::Submit { bundle: bundle.clone() });
-        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true }).unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true }).unwrap();
 
         // The next one goes by approval on chain: member 2 approves, and that is enough with the
         // proposer's signature, so approving submits it.
         let second = dir.0.join("again.bundle");
         propose(&second, 5).unwrap();
-        multisig(&files[2], MultisigAction::Approve { bundle: second.clone() }).unwrap();
+        multisig(&files[2], MultisigAction::Approve { bundle: second.clone(), yes: true }).unwrap();
         let shown = multisig(&files[0], MultisigAction::Show { account });
         let node = running.stop();
         let balance = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap().balance;
@@ -829,6 +835,37 @@ mod send {
         let (first, second) = (dir.0.join("spend.psbt"), dir.0.join("other.psbt"));
         fs::write(&first, psbt.to_base64()).unwrap();
         fs::write(&second, psbt.to_base64()).unwrap();
+
+        // Signing shows where it goes first and takes a typed yes: anything else signs nothing.
+        let untouched = fs::read(&first).unwrap();
+        assert!(crate::cli::multisig::review_psbt(&first, false, &mut "no\n".as_bytes()).unwrap_err().to_string().contains("nothing is signed"));
+        assert!(crate::cli::multisig::review_psbt(&first, false, &mut "".as_bytes()).is_err());
+        crate::cli::multisig::review_psbt(&first, false, &mut "yes\n".as_bytes()).unwrap();
+        crate::cli::multisig::review_psbt(&first, true, &mut "".as_bytes()).unwrap();
+        assert_eq!(fs::read(&first).unwrap(), untouched);
+        let review = psbt.multisig_review().unwrap();
+        assert_eq!(review.spent, 50_000);
+        assert_eq!(review.outputs[0].0, "tb1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesrxh6hy");
+        assert_eq!(review.fee, 50_000 - review.outputs.iter().map(|(_, sats)| sats).sum::<u64>());
+
+        // What cannot be read that far is refused.
+        // A PSBT writes the transaction it read: another one goes in its first pair too.
+        let with_output = |change: &dyn Fn(&mut crate::crypto::bitcoin::tx::TxOut)| {
+            let mut changed = psbt.clone();
+            change(&mut changed.tx.outputs[0]);
+            let base = changed.tx.base();
+            changed.global.iter_mut().find(|pair| pair.key == [crate::crypto::bitcoin::psbt::GLOBAL_UNSIGNED_TX]).unwrap().value = base;
+            changed
+        };
+        fs::write(dir.0.join("odd.psbt"), with_output(&|output| output.script = vec![0xff; 3]).to_base64()).unwrap();
+        assert!(crate::cli::multisig::review_psbt(&dir.0.join("odd.psbt"), true, &mut "".as_bytes()).unwrap_err().to_string().contains("no address"));
+        fs::write(dir.0.join("greedy.psbt"), with_output(&|output| output.value = 60_000).to_base64()).unwrap();
+        assert!(crate::cli::multisig::review_psbt(&dir.0.join("greedy.psbt"), true, &mut "".as_bytes()).unwrap_err().to_string().contains("more than"));
+        let mut blind = psbt.clone();
+        blind.inputs[0].retain(|pair| pair.key[0] != crate::crypto::bitcoin::psbt::IN_WITNESS_UTXO);
+        fs::write(dir.0.join("blind.psbt"), blind.to_base64()).unwrap();
+        assert!(crate::cli::multisig::review_psbt(&dir.0.join("blind.psbt"), true, &mut "".as_bytes()).unwrap_err().to_string().contains("says nothing"));
+
         sign_file(&first, &seeds[0]).unwrap();
         sign_file(&second, &seeds[2]).unwrap();
 
@@ -1216,7 +1253,7 @@ mod send {
         let path = dir.join("chainv4");
         std::fs::write(&path, b"this chainv4").unwrap();
         let signers: Vec<Keypair> = (1..=3).map(|seed| Keypair::from_seed([seed; 32])).collect();
-        let keys = ReleaseKeys { threshold: 2, keys: signers.iter().map(Keypair::public).collect(), updates: None };
+        let keys = ReleaseKeys { threshold: 2, keys: signers.iter().map(Keypair::public).collect(), updates: None, floor: 0 };
         let releases = Arc::new(crate::node::Releases::new(keys.clone(), None));
         // The API serves the directory from /, as it would an explorer, so the binary downloads from it.
         let options = crate::api::ApiOptions { explorer: Some(served.clone()), releases: Some(releases.clone()), ..Default::default() };
@@ -1225,21 +1262,27 @@ mod send {
         let newest = Version::new(ours.major, ours.minor + 1, 0);
         let file = ReleaseFile { target: TARGET.to_string(), url: format!("http://{}/chainv4-next", running.api), sha256: sha256(&next), size: next.len() as u64 };
         let product = Product { name: "chainv4".to_string(), version: newest, least: ours, notes: "the next one".to_string(), files: vec![file] };
-        let mut signed = SignedRelease { release: Release { issued: 1, products: vec![product], breaking: Vec::new() }, signatures: Vec::new() };
-        signed.sign(&signers[0]);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let dated = |issued: u64, expires: u64| {
+            let mut signed = SignedRelease { release: Release { issued, expires, products: vec![product.clone()], breaking: Vec::new() }, signatures: Vec::new() };
+            signed.sign(&signers[0]);
+            signed
+        };
+        let mut signed = dated(now - 100, now + 1_000);
 
-        assert!(releases.offer(signed.clone(), 1).is_err(), "one of the three keys is too few");
+        assert!(releases.offer(signed.clone(), now * 1_000).is_err(), "one of the three keys is too few");
 
         signed.sign(&signers[2]);
-        assert_eq!(releases.offer(signed.clone(), 1), Ok(true));
-        assert_eq!(releases.offer(signed, 2), Ok(false), "the same release again is no newer");
+        assert_eq!(releases.offer(signed.clone(), now * 1_000), Ok(true));
+        assert_eq!(releases.offer(signed.clone(), now * 1_000), Ok(false), "the same release again is no newer");
 
         let release: serde_json::Value = serde_json::from_str(&ureq::get(format!("http://{}/release", running.api)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
 
         assert_eq!(release["standing"], "behind");
         assert_eq!(release["newest"], newest.to_string());
 
-        let args = || UpdateArgs { node: Some(format!("http://{}", running.api)), updates: None, proxy: None, check: false, yes: false };
+        let seen = dir.join("seen.json");
+        let args = || UpdateArgs { node: Some(format!("http://{}", running.api)), updates: None, proxy: None, check: false, yes: false, seen: Some(seen.clone()) };
         let stricter = ReleaseKeys { threshold: 3, ..keys.clone() };
         let refused = update_reading(args(), &stricter, &path, &mut "yes\n".as_bytes()).unwrap_err();
 
@@ -1250,6 +1293,34 @@ mod send {
         update_reading(args(), &keys, &path, &mut "yes\n".as_bytes()).unwrap();
 
         assert_eq!(std::fs::read(&path).unwrap(), next);
+
+        // It kept what it saw: a host serving an older one takes it back to nothing. Here the node's
+        // is the older, as the machine saw a newer one, and the newer one's file is what it installs.
+        std::fs::write(&path, b"this chainv4").unwrap();
+        let mut newer = dated(now - 50, now + 1_000);
+        newer.sign(&signers[2]);
+        crate::release::write_kept(&seen, &newer).unwrap();
+        update_reading(args(), &keys, &path, &mut "yes\n".as_bytes()).unwrap();
+        assert_eq!(crate::release::kept_release(&std::fs::read_to_string(&seen).unwrap(), &keys).unwrap().release.issued, now - 50, "not gone back");
+
+        // Past its expires, the newest seen counts for nothing: this says why, and replaces nothing.
+        std::fs::write(&path, b"this chainv4").unwrap();
+        let mut lapsed = dated(now - 50, now - 1);
+        lapsed.sign(&signers[2]);
+        crate::release::write_kept(&seen, &lapsed).unwrap();
+        let refused = update_reading(args(), &keys, &path, &mut "yes\n".as_bytes()).unwrap_err().to_string();
+        assert!(refused.contains("expired") && refused.contains("clock"), "{refused}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"this chainv4");
+
+        // Nor is one older than the floor built in taken, with nothing seen.
+        std::fs::remove_file(&seen).unwrap();
+        let later = ReleaseKeys { floor: now, ..keys.clone() };
+        assert!(update_reading(args(), &later, &path, &mut "yes\n".as_bytes()).unwrap_err().to_string().contains("before the oldest"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"this chainv4");
+
+        // An expired one a node relays is refused, and nothing without a file to keep it stops that.
+        let quiet = Arc::new(crate::node::Releases::new(keys.clone(), None));
+        assert!(quiet.offer(lapsed, now * 1_000).is_err());
         running.stop();
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1760,7 +1831,8 @@ mod send {
         fn block(&mut self, txs: &[Vec<u8>], first: bool) {
             use crate::crypto::bitcoin::sha256d;
 
-            let coinbase = sha256d(&self.time.to_le_bytes());
+            let first_tx = crate::vm::tests::btc_relay_coinbase(self.time);
+            let coinbase = sha256d(&first_tx);
             let ids: Vec<[u8; 32]> = std::iter::once(coinbase).chain(txs.iter().map(|tx| sha256d(tx))).collect();
             // Two leaves at most here: the root, and each one's sibling as its path.
             let root = match ids.as_slice() {
@@ -1774,12 +1846,17 @@ mod send {
             let esplora = &self.esplora;
             esplora.serve(&format!("/block-height/{height}"), FakeBitcoin::display(&hash));
             esplora.serve(&format!("/block/{}/header", FakeBitcoin::display(&hash)), crate::structs::hex::to_hex(&header).trim_start_matches("0x").to_string());
+            esplora.serve(&format!("/block/{}/txid/0", FakeBitcoin::display(&hash)), FakeBitcoin::display(&coinbase));
             esplora.serve("/blocks/tip/height", height.to_string());
-
-            for (tx, id) in txs.iter().zip(&ids[1..]) {
+            let serve_tx = |tx: &[u8], id: &[u8; 32], merkle: Vec<String>, pos: u64| {
                 let txid = FakeBitcoin::display(id);
                 esplora.serve(&format!("/tx/{txid}/hex"), crate::structs::hex::to_hex(tx).trim_start_matches("0x").to_string());
-                esplora.serve(&format!("/tx/{txid}/merkle-proof"), serde_json::json!({ "block_height": height, "merkle": [FakeBitcoin::display(&coinbase)], "pos": 1 }).to_string());
+                esplora.serve(&format!("/tx/{txid}/merkle-proof"), serde_json::json!({ "block_height": height, "merkle": merkle, "pos": pos }).to_string());
+            };
+            serve_tx(&first_tx, &coinbase, ids[1..].iter().map(|id| FakeBitcoin::display(id)).collect(), 0);
+
+            for (tx, id) in txs.iter().zip(&ids[1..]) {
+                serve_tx(tx, id, vec![FakeBitcoin::display(&coinbase)], 1);
             }
 
             (self.tip, self.height, self.time) = (hash, height, self.time + 600);
@@ -1815,6 +1892,7 @@ mod send {
                 evm_key: None,
                 btc_gateway: None,
                 esplora: Some(esplora.clone()),
+                evm_gateways: Vec::new(),
             })
         };
         let tip = || -> (String, u64) {
@@ -1901,6 +1979,7 @@ mod send {
                 evm_key,
                 btc_gateway,
                 esplora: Some(esplora.clone()),
+                evm_gateways: Vec::new(),
             })
         };
         run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None, None).unwrap();
@@ -1937,7 +2016,7 @@ mod send {
 
         // 20,000 withdrawn to a bc1q… address, proposed with a 1,000 fee, signed by two signers.
         let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
-        run(BtcAction::Withdraw { address: to, sats: 20_000 }, None, None).unwrap();
+        run(BtcAction::Withdraw { address: to, sats: 20_000, most_fee: None }, None, None).unwrap();
         assert_eq!(wbtc_of(&me), "30000");
         run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
 
@@ -1955,7 +2034,7 @@ mod send {
 
         assert!(witnessed);
         assert_eq!(signed.inputs[0].witness.len(), 4, "the extra pop, two signatures, the script");
-        assert_eq!((signed.outputs[0].value, signed.outputs[1].value), (20_000, 29_000));
+        assert_eq!((signed.outputs[0].value, signed.outputs[1].value), (19_000, 30_000), "the fee off the withdrawal, none off the backing");
 
         // Mined and buried: shown released, the withdrawal paid, the change held.
         let release = signed.base();
@@ -1970,7 +2049,11 @@ mod send {
 
         // Another withdrawal, proposed from the change, signed by one, then cancelled by two: a
         // signer that voted does not sign it, and the next one spends the same input.
-        run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]), sats: 5_000 }, None, None).unwrap();
+        run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]), sats: 10_000, most_fee: Some(500) }, None, None).unwrap();
+
+        // A fee past what it agreed to lose takes nothing, until it says otherwise.
+        assert!(run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap_err().to_string().contains("less than its share"));
+        run(BtcAction::SetMostFee { withdrawal: 2, most_fee: 1_000 }, None, None).unwrap();
         run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
         let state = |proposal: &str| read(&gateway, "proposal", serde_json::json!([{ "type": "u64", "value": proposal }]))[4]["value"].as_str().unwrap().to_string();
         let posted = |proposal: &str| read(&gateway, "input_signatures", serde_json::json!([{ "type": "u64", "value": proposal }, { "type": "u64", "value": "0" }])).as_array().unwrap().len();
@@ -2021,7 +2104,8 @@ mod send {
         use crate::registry::federation::Federation;
         use crate::structs::hex::to_hex;
 
-        // Chain A runs the gateway here and the federation; chain B's EVM is the other chain.
+        // Chain A runs the gateway here and the federation, and lists Gateway.sol in its directory;
+        // chain B's EVM is the other chain.
         let federation = Federation {
             signers: [11u8, 12, 13].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
             threshold: 2,
@@ -2031,8 +2115,14 @@ mod send {
         };
         let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
         let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();
-        let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), finality: finality.clone(), ..genesis }, indexed, Default::default());
         let b = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), ..genesis }, |node| node, Default::default());
+        let chain_b = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("http://{}/status", b.api)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["chain_id"].as_u64().unwrap();
+        let listed_gateway = match crate::vm::evm::create_address(&Address::Secp256k1(from_key(&[0x42; 32]).unwrap()), 3) {
+            Address::Evm(gateway) => gateway,
+            _ => unreachable!(),
+        };
+        let directory = crate::registry::directory::Directory { evm_gateways: vec![crate::registry::directory::EvmGateway { chain_id: chain_b, gateway: listed_gateway }], ..Default::default() };
+        let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), directory: Some(directory.clone()), finality: finality.clone(), ..genesis }, indexed, Default::default());
         let (node_a, rpc_b) = (format!("http://{}", a.api), format!("http://{}/rpc", b.api));
         let dir = TempDir::new("bridge");
         let key_file = |name: &str, secret: [u8; 32]| {
@@ -2045,7 +2135,7 @@ mod send {
         let relayer_address = from_key(&[0x42; 32]).unwrap();
         send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new() })
         };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -2062,7 +2152,7 @@ mod send {
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
         assert!(run(BridgeAction::Deploy, None).is_ok());
         let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new() })
         };
         with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
@@ -2123,6 +2213,77 @@ mod send {
         b.stop();
     }
 
+    /// The owner of the gateway here names a peer of its own on a chain the directory leaves out:
+    /// one key, and no signer may take its word for what left there.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "ethereum", feature = "finality-ffg"))]
+    #[test]
+    fn no_signer_vouches_for_a_chain_neither_the_directory_nor_its_operator_names() {
+        use crate::chain::{IndexKind, KeepFrom};
+        use crate::cli::bridge::{Bridge, BridgeAction, BridgeArgs, bridge};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::registry::federation::Federation;
+        use crate::structs::tx::TxCallArgumentType;
+
+        const FAKE: [u8; 20] = [0xfa; 20];
+        const CHAIN: u64 = 777;
+        let federation = Federation { signers: vec![crate::crypto::secp256k1::public_key(&[11; 32]).unwrap()], threshold: 1, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6 };
+        let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
+        let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), finality: finality.clone(), ..genesis }, |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap(), Default::default());
+        let node = format!("http://{}", a.api);
+        let dir = TempDir::new("bridge-unlisted");
+        let key = dir.0.join("signer.key");
+        fs::write(&key, Keypair::from_private(PrivateKey::Secp256k1([11; 32])).to_key_file()).unwrap();
+        let me = DevAuthority::dev_keypair().public().address();
+        let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
+        let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
+        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways };
+        bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, Vec::new()) }).unwrap();
+
+        // Its owner's own peer, and a coin sent to it.
+        let call = |function: &str, amount: u256, values: Vec<TxCallArgumentType>| send(a.args(TxArgs::Call { to: gateway, function: function.to_string(), amount, args: values })).unwrap();
+        call("set_peer", u256::ZERO, vec![TxCallArgumentType::U64(CHAIN), TxCallArgumentType::Bytes(FAKE.to_vec())]);
+        call("send", u256::new(5), vec![TxCallArgumentType::U64(CHAIN), TxCallArgumentType::Bytes(vec![0xb0; 20]), TxCallArgumentType::U64(0), TxCallArgumentType::Nil, TxCallArgumentType::U256(u256::ZERO), TxCallArgumentType::U256(u256::new(5))]);
+        let posted = || {
+            let body = serde_json::json!({ "contract": gateway.to_string(), "function": "sent", "args": [{ "type": "u64", "value": "1" }] });
+            let sent: serde_json::Value = serde_json::from_str(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap();
+            let digest = sent["values"][11]["value"].clone();
+            let body = serde_json::json!({ "contract": gateway.to_string(), "function": "signatures", "args": [{ "type": "bytes", "value": digest }] });
+            let answer: serde_json::Value = serde_json::from_str(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap();
+
+            answer["values"].as_array().unwrap().len() - 1
+        };
+        let signing = |evm_gateways: Vec<(u64, [u8; 20])>| {
+            let signer = Bridge::new(args(BridgeAction::Relay, evm_gateways)).unwrap();
+            let started = std::time::Instant::now();
+
+            // Until the event is final, nothing is even looked at.
+            loop {
+                signer.pass(0);
+
+                if !signer.refused_now().is_empty() || posted() > 0 || started.elapsed() > std::time::Duration::from_secs(20) {
+                    return signer.refused_now();
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+
+        // No directory at all, and no word of its own: refused, and it says what would do.
+        let refused = signing(Vec::new());
+        assert!(refused.iter().any(|line| line.contains("lists no gateway on chain 777") && line.contains("--evm-gateway")), "{refused:?}");
+        assert_eq!(posted(), 0);
+
+        // Its operator names another: refused too, so the flag does not bless whatever the owner set.
+        let refused = signing(vec![(CHAIN, [0xbb; 20])]);
+        assert!(refused.iter().any(|line| line.contains("--evm-gateway names")), "{refused:?}");
+        assert_eq!(posted(), 0);
+
+        // Only its operator's own word for that very gateway signs.
+        assert_eq!(signing(vec![(CHAIN, FAKE)]), Vec::<String>::new());
+        assert_eq!(posted(), 1);
+        a.stop();
+    }
+
     /// Everything between the gateways going wrong as it may in the field: a recipient that could
     /// never arrive, a token whose name is not text, a gateway set up anew with Gateway.sol's logs
     /// still naming the last one, and a transfer that gateway must refuse, each passed over for what
@@ -2167,8 +2328,11 @@ mod send {
             send(b.args(TxArgs::Transfer { to: Address::Secp256k1(from_key(&secret).unwrap()).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         }
 
-        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None };
         let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &rpc_b);
+        // This chain has no directory, so each signer vouches for Gateway.sol itself.
+        let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
+        let vouched = vec![(rpc.chain_id().unwrap(), evm_gateway)];
+        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone() };
         let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
             let started = std::time::Instant::now();
 
@@ -2196,7 +2360,6 @@ mod send {
         let gateway = deployed_at(&me, nonce_of() + 3, hash);
         bridge(args(BridgeAction::Deploy, None, None)).unwrap();
         bridge(args(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(gateway), Some(relayer.clone()))).unwrap();
-        let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
         bridge(args(BridgeAction::Peer { evm_gateway: to_hex(&evm_gateway) }, Some(gateway), Some(relayer.clone()))).unwrap();
 
         // One wei for a recipient that could never arrive: Gateway.sol takes it no more, whichever
@@ -2345,7 +2508,11 @@ mod send {
         multisig(&files[0], EvmAction::Propose { eth_rpc: eth_rpc.clone(), to: to_hex(&payee), value: "300".into(), data: None, nonce: None, out: pay.clone() }).unwrap();
         let short = multisig(&files[3], EvmAction::Submit { bundle: pay.clone(), eth_rpc: eth_rpc.clone() }).unwrap_err();
         assert!(short.to_string().contains("1 of the contract's owners signed"), "{short}");
-        multisig(&files[1], EvmAction::Sign { bundle: pay.clone() }).unwrap();
+        // It shows each call, and takes a typed yes.
+        let read = fs::read_to_string(&pay).unwrap().lines().map(|line| crate::abi::multisig::EvmBundle::from_text(line).unwrap()).collect::<Vec<_>>();
+        assert!(crate::cli::multisig::evm::review(&read, false, &mut "no\n".as_bytes()).unwrap_err().to_string().contains("nothing is signed"));
+        crate::cli::multisig::evm::review(&read, false, &mut "yes\n".as_bytes()).unwrap();
+        multisig(&files[1], EvmAction::Sign { bundle: pay.clone(), yes: true }).unwrap();
         multisig(&files[3], EvmAction::Submit { bundle: pay.clone(), eth_rpc: eth_rpc.clone() }).unwrap();
 
         assert!(rpc.has_code(&side.contract).unwrap());
@@ -2373,11 +2540,11 @@ mod send {
             ..running.args(TxArgs::ChangeMultisig { members: vec![member(0), member(1), member(3)], threshold: 2 })
         })
         .unwrap();
-        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true } }).unwrap();
+        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true, yes: true } }).unwrap();
 
         let sync = dir.0.join("sync.evm");
         multisig(&files[0], EvmAction::Sync { eth_rpc: eth_rpc.clone(), out: sync.clone() }).unwrap();
-        multisig(&files[1], EvmAction::Sign { bundle: sync.clone() }).unwrap();
+        multisig(&files[1], EvmAction::Sign { bundle: sync.clone(), yes: true }).unwrap();
         multisig(&files[3], EvmAction::Submit { bundle: sync, eth_rpc: eth_rpc.clone() }).unwrap();
         let [owners, threshold, nonce] = crate::abi::multisig::multisig_reads().map(|input| rpc.call(&side.contract, &input).unwrap());
         let (now, nonce) = crate::abi::multisig::multisig_read(&owners, &threshold, &nonce).unwrap();
@@ -2400,7 +2567,7 @@ mod send {
         let lock = dir.0.join("lock.evm");
         let action = LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: vec![eth_rpc.clone()], tls: Default::default(), key: Some(files[0].clone()), anyway: false, multisig: Some(account), out: Some(lock.clone()) };
         swap(SwapArgs { action: SwapAction::Lock(action) }).unwrap();
-        multisig(&files[3], EvmAction::Sign { bundle: lock.clone() }).unwrap();
+        multisig(&files[3], EvmAction::Sign { bundle: lock.clone(), yes: true }).unwrap();
         multisig(&files[3], EvmAction::Submit { bundle: lock, eth_rpc: eth_rpc.clone() }).unwrap();
         let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
         running.stop();
@@ -2465,7 +2632,7 @@ mod send {
         on_anvil.send(&Call { to: side.contract, value: u256::new(1_000_000), input: Vec::new(), what: "Fund the multisig" }, false, &rich).unwrap();
         let pay = dir.0.join("pay.evm");
         multisig(EvmAction::Propose { eth_rpc: anvil_rpc.clone(), to: to_hex(&[0x99; 20]), value: "400000".into(), data: None, nonce: None, out: pay.clone() }).unwrap();
-        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(files[2].clone()), timeout: 10, action: MultisigAction::Evm { account, action: EvmAction::Sign { bundle: pay.clone() } } }).unwrap();
+        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(files[2].clone()), timeout: 10, action: MultisigAction::Evm { account, action: EvmAction::Sign { bundle: pay.clone(), yes: true } } }).unwrap();
         multisig(EvmAction::Submit { bundle: pay, eth_rpc: anvil_rpc.clone() }).unwrap();
 
         assert_eq!(on_anvil.balance(&[0x99; 20]).unwrap(), u256::new(400_000));

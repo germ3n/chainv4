@@ -6,7 +6,7 @@
 
 use {
     super::multisig::{account_path, member_key, parse_multisig_script, witness_script},
-    super::tx::{Network, Reader, SIGHASH_ALL, Transaction, TxIn, TxOut, compact, der, from_der, p2wsh},
+    super::tx::{Network, Reader, SIGHASH_ALL, Transaction, TxIn, TxOut, address, compact, der, from_der, p2wsh},
     crate::registry::multisig::BitcoinXpub,
     std::collections::HashSet,
 };
@@ -330,6 +330,15 @@ fn map(r: &mut Reader) -> Result<Vec<Pair>, String> {
 /// An input's signatures that check out, its threshold and its witness script.
 type Held = (Vec<Vec<u8>>, u32, Vec<u8>);
 
+/// What a member agrees to by signing a spend: each output's address and satoshis, what its coins
+/// hold, and the fee, what they hold past what it pays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpendReview {
+    pub outputs: Vec<(String, u64)>,
+    pub spent: u64,
+    pub fee: u64,
+}
+
 /// One of a native multisig's coins a spend takes: what it holds, and the address it is at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MultisigCoin {
@@ -465,6 +474,52 @@ impl Psbt {
         }
 
         Ok(signed)
+    }
+
+    /// What a member agrees to by signing a multisig's spend, for it to look at first: where each
+    /// output goes and how much, and the fee, read from the spend itself and the coins' amounts that
+    /// BIP143 signs. An error for a spend it cannot say that of: an input with no amount, inputs on
+    /// more than one network or naming none, an output with no address, or one paying more than it
+    /// spends.
+    pub fn multisig_review(&self) -> Result<SpendReview, String> {
+        let mut amounts = Vec::new();
+        let mut network = None;
+
+        for index in 0..self.inputs.len() {
+            let (output, _) = self.spent(index)?.ok_or_else(|| format!("input {} says nothing of the coins it spends: its fee cannot be told", index + 1))?;
+            amounts.push(output.value);
+
+            for derived in derivations(&self.inputs[index], IN_BIP32_DERIVATION)? {
+                let named = match derived.path.get(1).map(|coin| coin & !(1 << 31)) {
+                    Some(0) => Network::Main,
+                    Some(_) => Network::Test,
+                    None => return Err(format!("input {} names a key at a path that is no multisig's", index + 1)),
+                };
+
+                if network.replace(named).is_some_and(|had| had != named) {
+                    return Err("its inputs name keys of both main and test networks".to_string());
+                }
+            }
+        }
+
+        let network = network.ok_or("none of its inputs names a key: which network it pays on cannot be told")?;
+        let mut outputs = Vec::new();
+
+        for (index, output) in self.tx.outputs.iter().enumerate() {
+            let to = address(&output.script, network);
+
+            if to.starts_with("a script with no address") {
+                return Err(format!("output {} is {to}", index + 1));
+            }
+
+            outputs.push((to, output.value));
+        }
+
+        let spent = total(amounts.into_iter()).ok_or("its inputs hold more than there could be")?;
+        let paid = total(self.tx.outputs.iter().map(|output| output.value)).ok_or("its outputs pay more than there could be")?;
+        let fee = spent.checked_sub(paid).ok_or_else(|| format!("its outputs pay {paid} satoshis, more than the {spent} it spends"))?;
+
+        Ok(SpendReview { outputs, spent, fee })
     }
 
     /// How many signatures each input holds that check out, and how many it needs: what a wallet
