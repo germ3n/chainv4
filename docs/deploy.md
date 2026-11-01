@@ -124,7 +124,7 @@ restart nginx with it.
 `/etc/systemd/system/chainv4-worker.service`, `Restart=always`:
 
 ```sh
-/opt/chainv4/chainv4 worker --node PUBLIC:4002 --payout ADDRESS --threads 4 --name cloud-worker \
+/opt/chainv4/chainv4 worker --node https://PUBLIC --payout ADDRESS --threads 4 --name cloud-worker \
   --claims /opt/chainv4/pool-claims.json
 ```
 
@@ -149,6 +149,14 @@ $B bridge --node $N --key $K --esplora https://mempool.space/testnet4/api \
   btc relay-sync <relay>                                                  # to the tip, before its gateway
 $B bridge --node $N --key $K btc deploy <relay> --fee-floor 2             # Bitcoin gateway
 ```
+
+**The Bitcoin gateway's code changed with `propose`:** it is a new deployment, so a new gateway, new
+deposit addresses for everyone, and the directory naming it, which a chain's reset does in any case.
+Withdrawals are then paid only while a signer runs a pass: `bridge --node $N --key signer-payer.key
+--evm-key signer.key --esplora https://mempool.space/testnet4/api btc watch`, left running as the relay
+is in step 6. One signer running it is enough to propose and broadcast; the threshold must run it, or
+`btc sign`, for a release to be signed. A signer's key must hold the coin for what it posts, as with
+`bridge watch`.
 
 The gateway mints only what was mined past the relay's tip when it was set up, and every deposit
 address depends on the chain's id and the gateway, so each new chain gives everyone new ones: see
@@ -244,5 +252,5 @@ SHA-256s with the link.
 | Examples | `guestbook.cv4`, `counter.cv4`, Counter.sol `0x3c262351…88e8` |
 | Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
 | Onion | `njo4fijntpqch73yv4477hhn2vcngnpcxtw2vb4qwjasqdwbdeektuqd.onion` |
-| Mining | `66.78.40.94:4002`, an open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`), and `/mining/ws` behind nginx |
+| Mining | An open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`): `chainv4 worker --node https://66-78-40-94.sslip.io --payout ADDRESS`, over `/mining/ws` behind nginx. `66.78.40.94:4002` is the same port over plain TCP, for `--insecure-open-port` alone |
 | Apps | https://gofile.io/d/2FkgWeka |

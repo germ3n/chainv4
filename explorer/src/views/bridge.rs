@@ -838,7 +838,7 @@ fn withdrawals(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &st
         })
         .collect();
 
-    super::note(ui, look, "Each arrives as what it burned, less its share of its release's fee, up to the most it agreed to lose: the fee comes off the withdrawals, not off what backs wBTC.");
+    super::note(ui, look, "The federation pays each out by itself in a release its signers propose and sign: usually within the hour, longer while Bitcoin's fees run past what it agreed to lose. Each arrives as what it burned, less its share of its release's fee: the fee comes off the withdrawals, not off what backs wBTC.");
     super::table(ui, look, ("bridge withdrawals", gateway.to_string()), &["#", "by", "to", "burned", "fee", "state", "asked in"], |ui| {
         for (id, by, to, sats, fee, standing, tx) in &rows {
             ui.monospace(id.to_string());

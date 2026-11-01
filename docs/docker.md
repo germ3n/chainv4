@@ -73,8 +73,13 @@ port to anyone with a payout address, beside `POOL=1` or `MINING_SOLO=1`, as `PO
 a pool. `MINING_PUBLIC=HOST:PORT` is where the apps are told to reach the port, `GET /mining`, when
 it is not the API's host and port 4002; with `TOR=1` and `TOR_MINING=1`, an app on the onion is told
 the onion's port on `MINING_PORT` instead, as soon as tor has made the onion. nginx passes `/mining/ws`, the port over a WebSocket, on
-to the node for the web wallet, which mines through it; the TCP port still needs opening for the
-desktop and phone wallets and for `chainv4 worker`.
+to the node, behind its TLS. Every miner on an open port comes through it, as its token is public and
+anyone on the way could rewrite a payout over plain TCP ([why](consensus.md#mining-with-workers)):
+the web wallet, the desktop and phone wallets, and `chainv4 worker --node https://YOUR-HOST`, or
+`PAYOUT=ADDRESS docker/pow.sh worker https://YOUR-HOST`. The TCP port needs opening only for a private
+port's workers, which stay on it, and the `--insecure-open-port` of whoever insists. With a
+self-signed certificate workers need `--ca-cert vps.pem`, the certificate as below: Let's Encrypt's needs
+nothing.
 
 **Peers that dial too early:** a peer's QUIC packets that arrive before the node's port mapping is
 up leave a UDP entry in the host's connection tracking that skips the mapping, and its retries,
@@ -173,7 +178,7 @@ apps show and retry after, and a `Retry-After` of a second:
 | Contract calls, `POST /call` and `/rpc` (`RATE_CALLS`), on top | 5 | 20 | Each address |
 | Blocks with proofs, `GET /blocks/range` (`RATE_RANGE`), on top | 5 | 20 | Each address |
 | Everything over the onion | 90 | 360 | Everyone on it, as all come from tor |
-| Connections | 64 at once, 8 for `/stream` and `/mining/ws` | | Each address |
+| Connections | 64 at once, 8 for `/stream`, 32 for `/mining/ws`, as many as the mining port lets a rig run | | Each address |
 
 - **Set in `.env`:** `RATE_API`, `RATE_CALLS` and `RATE_RANGE`, the bursts and the onion's following them, and
   `RATE_LIMIT=off` for none. A restart of nginx takes them up.
@@ -187,7 +192,8 @@ apps show and retry after, and a `Retry-After` of a second:
 
 **Workers authenticate with the token.** Every message on the mining port carries an HMAC under
 it, so no one without it can mine for the node or feed it nonces; the messages are not
-encrypted, and need not be (see [Consensus](consensus.md#mining-with-workers)).
+encrypted, and on a private port need not be. An open port's token is public, so its workers go
+over `/mining/ws` behind TLS (see [Consensus](consensus.md#mining-with-workers)).
 
 **Peer-to-peer needs no proxy for its encryption.** It is libp2p over QUIC, which is always TLS
 1.3, with certificates bound to each peer's id: every connection is encrypted and authenticated

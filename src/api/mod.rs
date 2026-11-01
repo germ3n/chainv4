@@ -104,7 +104,7 @@ pub const DEFAULT_PER_IP: usize = 64;
 /// How many mining WebSocket relays one client may hold open at once. Each opens a connection into
 /// the mining port on this machine, which sees them all as loopback, so they are capped here by who
 /// asked rather than there. Past it, 503, as the port itself answers when full.
-const MINING_RELAYS_PER_IP: usize = 16;
+const MINING_RELAYS_PER_IP: usize = 32;
 
 /// What every handler reads from.
 #[derive(Clone)]

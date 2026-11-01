@@ -1,8 +1,9 @@
 //! Mining from the wallet, alone or in a pool, for the account picked: a worker of the node's
 //! mining port (`chainv4::mining`), on this device's GPU or CPU. The desktop and the phones speak
-//! the port's protocol over TCP, through the wallet's proxy when it has one (`native`); a browser,
-//! which opens no TCP connections, speaks it over the node's WebSocket, GET /mining/ws, and mines
-//! on WebGPU or on Web Workers (`web`). Both are the same Miner to the Mining page.
+//! the port's protocol over TCP, or over the node's wss:// to a port open to anyone, whose token is
+//! public, through the wallet's proxy when it has one (`native`); a browser, which opens no TCP
+//! connections, speaks it over the node's WebSocket, GET /mining/ws, and mines on WebGPU or on Web
+//! Workers (`web`). Both are the same Miner to the Mining page.
 //!
 //! Whoever mines, the node checks every nonce before it seals a block with it, and a pool's or a
 //! solo block's reward goes where the chain's rules send it: the wallet holds no key to mine.
@@ -22,14 +23,14 @@ pub use web::{Miner, cpus, gpus};
 /// Where the mining port is reached.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Port {
-    /// Its TCP address, host:port: the desktop's and the phones' way, through `proxy` when set,
-    /// which the browser refuses.
+    /// Its TCP address, host:port: the desktop's and the phones' way to a private port, or one that
+    /// cannot be read on the way, through `proxy` when set, which the browser refuses.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Tcp { address: String, proxy: Option<String> },
-    /// A node's WebSocket for it, ws:// or wss://…/mining/ws: the browser's way, which the
-    /// desktop and the phones refuse.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-    WebSocket(String),
+    /// A node's WebSocket for it: the browser's way, ws:// or wss://, which goes by the browser's own
+    /// proxy; and the desktop's and the phones' to a port open to anyone, wss:// alone, through
+    /// `proxy` when set.
+    WebSocket { url: String, proxy: Option<String> },
 }
 
 /// What the wallet mines on.

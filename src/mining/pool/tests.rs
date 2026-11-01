@@ -113,6 +113,8 @@ fn a_worker_on_another_thread_seals_blocks_the_rules_accept() {
         payout: None,
         claims: None,
         solo: false,
+        insecure_open_port: false,
+        ca_cert: None,
     })
     .unwrap();
     let parent = header(5, 10_000, 500);
@@ -410,6 +412,8 @@ fn a_worker_mining_for_a_pool_sends_share_after_share_on_one_job() {
         payout: Some(payout),
         claims: None,
         solo: false,
+        insecure_open_port: false,
+        ca_cert: None,
     })
     .unwrap();
     until(&pool, |report| report.workers.len() == 1);

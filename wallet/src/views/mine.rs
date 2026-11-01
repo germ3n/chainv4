@@ -12,6 +12,7 @@ use {
     crate::miner::{self, Devices, MineConfig, Miner, Port},
     crate::node::Failure,
     crate::theme,
+    chainv4::mining::protocol,
     chainv4::mining::status::Mode,
     chainv4::structs::address::Address,
     egui::{RichText, Ui},
@@ -244,28 +245,67 @@ fn socks(proxy: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// How the desktop and the phones reach a port: wss:// or plain TCP as typed, and the node's own by
+/// what it says. A port open to anyone goes over wss://, as its token is public and anyone on the way
+/// could rewrite where the work pays, unless plain TCP to it cannot be read on the way; a private port
+/// goes over plain TCP, as its token protects it. Why not, for an open port with no safe way to it.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn native_port(typed: &str, mining: Option<&Value>, node: &str, proxy: Option<String>, open: bool) -> Result<Port, String> {
+    if typed.starts_with("wss://") {
+        return Ok(Port::WebSocket { url: typed.to_string(), proxy });
+    }
+
+    let address = match typed {
+        "" => mining.and_then(|mining| port_address(mining, node)).ok_or("the node said no mining port: give its host:port")?,
+        typed => typed.to_string(),
+    };
+
+    if !open || protocol::plain_cannot_be_read(&address, proxy.as_deref()) {
+        return Ok(Port::Tcp { address, proxy });
+    }
+
+    if !typed.is_empty() {
+        return Err(format!("{address} takes anyone, with a token everyone knows, so anyone on the way could change where your work pays: type its wss://…/mining/ws, or the port's token if it has one"));
+    }
+
+    match node.trim().starts_with("https://") {
+        true => Ok(Port::WebSocket { url: socket_url(node, mining.and_then(|mining| mining["ws"].as_str()).unwrap_or("/mining/ws")).ok_or("the node's URL is neither http:// nor https://")?, proxy }),
+        false => Err("this port takes anyone, with a token everyone knows, so anyone on the way could change where your work pays, and this node is not at https://, so there is no encrypted way to it: reach the node at https://".to_string()),
+    }
+}
+
+/// How a browser reaches a port: its node's WebSocket, as ws:// or wss:// as the node is reached. To a
+/// port open to anyone, ws:// goes only where it cannot be read on the way, as with TCP: this machine,
+/// or an onion, which only Tor's browser opens.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn web_port(node: &str, path: &str, open: bool) -> Result<Port, String> {
+    let url = socket_url(node, path).ok_or("the node's URL is neither http:// nor https://")?;
+    let safe = |url: &str| url.split_once("://").map(|(_, rest)| rest.split('/').next().unwrap_or_default()).is_some_and(|host| protocol::is_loopback(host) || protocol::is_onion(host));
+
+    if open && url.starts_with("ws://") && !safe(&url) {
+        return Err("this port takes anyone, with a token everyone knows, so anyone on the way could change where your work pays, and this node is not at https://: reach the node at https://".to_string());
+    }
+
+    Ok(Port::WebSocket { url, proxy: None })
+}
+
+/// What a worker elsewhere is told to mine for: the node's API for a port open to anyone at
+/// https://, which leads it to wss://; the port itself otherwise.
+pub(super) fn worker_node(mining: &Value, node: &str) -> Option<String> {
+    let node = node.trim().trim_end_matches('/');
+
+    if mining["open"] == true && node.starts_with("https://") {
+        return Some(node.to_string());
+    }
+
+    port_address(mining, node)
+}
+
 /// How to mine, from the settings and GET /mining's answer: where, with which token, alone or in
 /// the pool, and on what; why not, for a port that cannot be mined on as asked.
 fn plan(settings: &Settings, mining: Option<&Value>, payout: Address, gpus: usize) -> Result<MineConfig, String> {
     let node = mining_node(settings);
     let typed = settings.mine_port.trim();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let port = {
-        let address = match typed {
-            "" => mining.and_then(|mining| port_address(mining, &node)).ok_or("the node said no mining port: give its host:port")?,
-            typed => typed.to_string(),
-        };
-
-        Port::Tcp { address, proxy: socks(&settings.proxy)? }
-    };
-    #[cfg(target_arch = "wasm32")]
-    let port = {
-        let _ = typed;
-        let path = mining.and_then(|mining| mining["ws"].as_str()).unwrap_or("/mining/ws");
-
-        Port::WebSocket(socket_url(&node, path).ok_or("the node's URL is neither http:// nor https://")?)
-    };
 
     // The node's word on its own port, which a port typed in place of it may not be.
     let said = mining.filter(|_| typed.is_empty() || cfg!(target_arch = "wasm32"));
@@ -276,6 +316,11 @@ fn plan(settings: &Settings, mining: Option<&Value>, payout: Address, gpus: usiz
         "" => OPEN_TOKEN.to_vec(),
         typed => typed.as_bytes().to_vec(),
     };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let port = native_port(typed, mining, &node, socks(&settings.proxy)?, token == OPEN_TOKEN)?;
+    #[cfg(target_arch = "wasm32")]
+    let port = web_port(&node, mining.and_then(|mining| mining["ws"].as_str()).unwrap_or("/mining/ws"), token == OPEN_TOKEN)?;
 
     if let Some(mining) = said {
         match (settings.mine_solo, mining["solo"] == true, mining["pool"] == true) {
@@ -362,7 +407,10 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
             None => super::waiting(ui, &palette, "Asking the node where it takes miners…"),
             Some(Ok(mining)) => {
                 #[cfg(not(target_arch = "wasm32"))]
-                let at = port_address(mining, node);
+                let at = match native_port("", Some(mining), node, socks(&ctx.settings.proxy).ok().flatten(), mining["open"] == true) {
+                    Ok(Port::WebSocket { url, .. }) => Some(url),
+                    _ => port_address(mining, node),
+                };
                 #[cfg(target_arch = "wasm32")]
                 let at = socket_url(node, mining["ws"].as_str().unwrap_or("/mining/ws"));
 
@@ -387,7 +435,7 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
             // A browser reaches the port only through its node's WebSocket.
             #[cfg(not(target_arch = "wasm32"))]
             super::row(ui, &palette, "Other port", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut ctx.settings.mine_port).hint_text("host:port, empty for the node's").font(egui::TextStyle::Monospace).desired_width(260.0));
+                ui.add(egui::TextEdit::singleline(&mut ctx.settings.mine_port).hint_text("host:port or wss://…, empty for the node's").font(egui::TextStyle::Monospace).desired_width(260.0));
             });
 
             let said = mining.as_ref().filter(|_| ctx.settings.mine_port.trim().is_empty() || cfg!(target_arch = "wasm32"));
@@ -581,17 +629,17 @@ fn mining_now(ui: &mut Ui, ctx: &Ctx, mine: &Mine) {
 /// mining port, paying it.
 pub(super) fn how_to_mine(ui: &mut Ui, ctx: &mut Ctx, from: &Address, port: Option<&str>) {
     let palette = *ctx.palette;
-    let command = format!("chainv4 worker --node {} --payout {from}", port.unwrap_or("HOST:PORT"));
+    let command = format!("chainv4 worker --node {} --payout {from}", port.unwrap_or("NODE"));
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Mining from other machines");
-        ui.label(RichText::new("Run a worker on each machine, pointed at the mining port, which is not the node's API, and paying this address:").color(palette.soft));
+        ui.label(RichText::new("Run a worker on each machine, pointed at the node or its mining port, and paying this address:").color(palette.soft));
         ui.add_space(4.0);
         super::text_block(ui, &palette, &command);
         ui.horizontal_wrapped(|ui| {
             super::copy(ui, &palette, &command);
         });
-        theme::note(ui, &palette, "Add --solo to mine alone. A private port also wants --token FILE, the token its operator gave you. The pool credits your part of each block it finds once the block is final, so earnings show a while after the blocks; one claim takes everything credited so far.");
+        theme::note(ui, &palette, "Add --solo to mine alone. A private port also wants --token FILE, the token its operator gave you. A port open to anyone goes over the node's https://, as anyone on the way could otherwise change where your work pays; a worker refuses plain TCP to one elsewhere unless given --insecure-open-port. The pool credits your part of each block it finds once the block is final, so earnings show a while after the blocks; one claim takes everything credited so far.");
     });
 }
 
@@ -708,9 +756,14 @@ mod tests {
             settings.proxy = "socks5h://127.0.0.1:9050".to_string();
         });
         let open = json!({ "port": 4002, "public": null, "protocol": "mainnet", "pool": true, "solo": false, "open": true, "fee": 10_000_000, "ws": "/mining/ws" });
+
+        // A port open to anyone goes over the node's wss://, through the proxy set; a node at http://
+        // has no encrypted way to it, and the wallet says so rather than go anyway.
+        assert!(plan(&settings, Some(&open), payout, 0).is_err_and(|why| why.contains("https://") && why.contains("change where your work pays")));
+        let settings = with(&settings, &|settings| settings.node = "https://pool.example/".to_string());
         let config = plan(&settings, Some(&open), payout, 0).unwrap();
 
-        assert_eq!(config.port, Port::Tcp { address: "203.0.113.7:4002".to_string(), proxy: Some("socks5h://127.0.0.1:9050".to_string()) });
+        assert_eq!(config.port, Port::WebSocket { url: "wss://pool.example/mining/ws".to_string(), proxy: Some("socks5h://127.0.0.1:9050".to_string()) });
         assert_eq!((config.token.as_slice(), config.protocol.as_str(), config.solo), (OPEN_TOKEN, "mainnet", false));
         assert_eq!((config.payout, config.devices), (payout, Devices::Cpu(1)));
 
@@ -732,11 +785,49 @@ mod tests {
         let http = with(&solo, &|settings| (settings.mine_token, settings.proxy) = ("secret".to_string(), "http://127.0.0.1:8118".to_string()));
         assert!(plan(&http, Some(&private), payout, 0).is_err_and(|why| why.contains("HTTP")), "never around the proxy set");
 
-        // A port typed in place of the node's: the node's word on its own does not hold for it.
+        // A port typed in place of the node's: the node's word on its own does not hold for it, and
+        // without a token it takes the public one, so it is refused over plain TCP elsewhere.
         let typed = with(&settings, &|settings| settings.mine_port = "rig.example:5000".to_string());
-        let config = plan(&typed, Some(&private), payout, 0).unwrap();
+        assert!(plan(&typed, Some(&private), payout, 0).is_err_and(|why| why.contains("wss://")));
+        let with_token = with(&typed, &|settings| settings.mine_token = "secret".to_string());
+        assert_eq!(plan(&with_token, Some(&private), payout, 0).unwrap().port, Port::Tcp { address: "rig.example:5000".to_string(), proxy: Some("socks5h://127.0.0.1:9050".to_string()) });
+        let typed_wss = with(&settings, &|settings| settings.mine_port = "wss://rig.example/mining/ws".to_string());
+        let config = plan(&typed_wss, Some(&private), payout, 0).unwrap();
+        assert_eq!(config.port, Port::WebSocket { url: "wss://rig.example/mining/ws".to_string(), proxy: Some("socks5h://127.0.0.1:9050".to_string()) });
         assert_eq!((config.token.as_slice(), config.protocol.as_str()), (OPEN_TOKEN, DEFAULT_PROTOCOL));
         assert!(plan(&settings, None, payout, 0).is_err_and(|why| why.contains("host:port")), "no port known");
+
+        // On this machine, or at an onion through Tor here, plain TCP cannot be read on the way.
+        let local = with(&settings, &|settings| (settings.node, settings.proxy) = ("http://127.0.0.1:8080".to_string(), String::new()));
+        assert_eq!(plan(&local, Some(&open), payout, 0).unwrap().port, Port::Tcp { address: "127.0.0.1:4002".to_string(), proxy: None });
+        let onion = with(&settings, &|settings| settings.node = "http://abcdef.onion".to_string());
+        assert_eq!(plan(&onion, Some(&open), payout, 0).unwrap().port, Port::Tcp { address: "abcdef.onion:4002".to_string(), proxy: Some("socks5h://127.0.0.1:9050".to_string()) });
+        let away = with(&onion, &|settings| settings.proxy = "socks5h://203.0.113.9:9050".to_string());
+        assert!(plan(&away, Some(&open), payout, 0).is_err(), "through a proxy elsewhere it can be");
+    }
+
+    #[test]
+    fn a_browser_goes_to_a_port_open_to_anyone_over_wss_or_where_ws_cannot_be_read_on_the_way() {
+        let url = |port: Port| match port {
+            Port::WebSocket { url, .. } => url,
+            other => panic!("{other:?}"),
+        };
+
+        assert_eq!(url(web_port("https://pool.example/", "/mining/ws", true).unwrap()), "wss://pool.example/mining/ws");
+        assert_eq!(url(web_port("http://127.0.0.1:8080", "/mining/ws", true).unwrap()), "ws://127.0.0.1:8080/mining/ws");
+        assert_eq!(url(web_port("http://abcdef.onion", "/mining/ws", true).unwrap()), "ws://abcdef.onion/mining/ws");
+        assert!(web_port("http://203.0.113.7:8080", "/mining/ws", true).is_err_and(|why| why.contains("https://")));
+        assert_eq!(url(web_port("http://203.0.113.7:8080", "/mining/ws", false).unwrap()), "ws://203.0.113.7:8080/mining/ws", "a private port's token protects it");
+    }
+
+    #[test]
+    fn a_worker_elsewhere_is_told_the_nodes_api_for_a_port_open_to_anyone_at_https() {
+        let open = json!({ "port": 4002, "public": "203.0.113.7:4002", "open": true });
+        let private = json!({ "port": 4002, "public": "203.0.113.7:4002", "open": false });
+
+        assert_eq!(worker_node(&open, "https://pool.example/").as_deref(), Some("https://pool.example"));
+        assert_eq!(worker_node(&open, "http://pool.example").as_deref(), Some("203.0.113.7:4002"));
+        assert_eq!(worker_node(&private, "https://pool.example").as_deref(), Some("203.0.113.7:4002"));
     }
 
     #[test]

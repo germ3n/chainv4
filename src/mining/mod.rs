@@ -7,7 +7,8 @@
 //!
 //! Without the node feature, the worker feature builds the worker's side alone: the protocol, its
 //! devices and the claims it keeps, for an app that mines but keeps no chain. The protocol's
-//! handshake and MACs carry over any transport, so a browser speaks it over a WebSocket.
+//! handshake and MACs carry over any transport, so a browser speaks it over a WebSocket, and a worker
+//! too, over TLS, to an open port, whose token protects nothing from someone on the path.
 
 pub mod claims;
 #[cfg(feature = "node")]
@@ -18,6 +19,8 @@ pub mod shares;
 pub mod status;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod worker;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wss;
 
 use {r#macro::document, std::path::Path};
 

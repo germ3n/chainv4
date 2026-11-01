@@ -49,10 +49,16 @@ location = /stream {
     proxy_read_timeout 1h;
 }
 
-# Mining in a browser: the mining port's protocol over a WebSocket, kept open while it mines.
+# Mining over a WebSocket: the mining port's protocol, kept open while it mines, as every worker on an
+# open port does and every browser. As many from one place as the mining port itself lets a rig run.
+# proxy_set_header here replaces the server's, so what they say is said again: without X-Forwarded-For
+# the node would count every worker as nginx, and turn all but its first few away.
 location = /mining/ws {
-    limit_conn conns 8;
+    limit_conn conns 32;
     proxy_pass http://chainv4;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_buffering off;

@@ -113,6 +113,41 @@ impl Btc {
         self.tip = sha256d(&header);
     }
 
+    /// A release proposed under a signer of the federation in force's signature, for the number it
+    /// will take, the withdrawals given as the gateway is given them.
+    fn propose(&self, raw: &[u8], ids: &[TxCallArgumentType]) -> Result<Vec<TxCallArgumentType>, String> {
+        self.propose_as(21, raw, ids)
+    }
+
+    fn propose_as(&self, secret: u8, raw: &[u8], ids: &[TxCallArgumentType]) -> Result<Vec<TxCallArgumentType>, String> {
+        self.call("propose", &[&[bytes(raw), bytes(&self.propose_signature(secret, self.next_proposal(), raw, ids))], ids].concat())
+    }
+
+    fn next_proposal(&self) -> u64 {
+        match self.call("proposal_count", &[]).unwrap()[..] {
+            [TxCallArgumentType::I64(count)] => count as u64 + 1,
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    /// What a signer signs to propose a release: as btc_propose_digest has it, which a build without
+    /// the bridges has not.
+    fn propose_signature(&self, secret: u8, number: u64, raw: &[u8], ids: &[TxCallArgumentType]) -> Vec<u8> {
+        self.signature_for(secret, self.world.vm.chain_id(), self.gateway, number, raw, ids)
+    }
+
+    fn signature_for(&self, secret: u8, chain_id: u64, gateway: Address, number: u64, raw: &[u8], ids: &[TxCallArgumentType]) -> Vec<u8> {
+        let named: Vec<u8> = ids.iter().flat_map(|id| match id {
+            TxCallArgumentType::U64(id) => id.to_le_bytes(),
+            TxCallArgumentType::I64(id) => (*id as u64).to_le_bytes(),
+            other => panic!("{other:?}"),
+        }).collect();
+        let digest = sha256d(&[b"chainv4-btc-propose".as_slice(), &chain_id.to_le_bytes(), &gateway.to_abi(), &number.to_le_bytes(), &sha256d(raw), &(ids.len() as u64).to_le_bytes(), &named].concat());
+        let (signature, parity) = crate::crypto::secp256k1::sign_recoverable(&[secret; 32], &digest);
+
+        [&signature[..], &[27 + parity]].concat()
+    }
+
     fn wbtc_of(&self, holder: Address) -> u256 {
         match self.world.call(self.wbtc, "balance_of", &[address(holder)]).result.unwrap()[..] {
             [TxCallArgumentType::U256(held)] => held,
@@ -146,6 +181,14 @@ impl Btc {
         match self.call_as(ALICE, "withdraw", &[bytes(&bob()), number(sats)]).unwrap()[..] {
             [TxCallArgumentType::I64(id)] => id as u64,
             ref other => panic!("{other:?}"),
+        }
+    }
+
+    /// The input of a release from what was first deposited.
+    fn gateway_input(&self) -> [u8; 32] {
+        match &self.call("utxo", &[number(0)]).unwrap()[..] {
+            [TxCallArgumentType::String(outpoint), ..] => crate::structs::hex::from_hex(&format!("0x{}", outpoint.split_once(':').unwrap().0)).unwrap().try_into().unwrap(),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -286,7 +329,7 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
         lock_time: 0,
     };
     let deposit_id = sha256d(&deposit);
-    let propose = |btc: &Btc, tx: &Transaction| btc.call("propose", &[bytes(&tx.base()), number(1)]);
+    let propose = |btc: &Btc, tx: &Transaction| btc.propose(&tx.base(), &[number(1)]);
 
     assert!(propose(&btc, &release(20_000, 29_000, deposit_id)).unwrap_err().contains("does not pay its withdrawal"), "the pool paying the fee");
     assert!(propose(&btc, &release(18_500, 30_500, deposit_id)).unwrap_err().contains("does not pay its withdrawal"), "Bob paying the pool");
@@ -337,7 +380,7 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
         lock_time: 0,
     };
 
-    assert_eq!(btc.call("propose", &[bytes(&sweep.base())]).unwrap(), [TxCallArgumentType::I64(2)]);
+    assert_eq!(btc.propose_as(31, &sweep.base(), &[]).unwrap(), [TxCallArgumentType::I64(2)]);
 
     // Deposits to the old federation's addresses still mint within the grace period.
     let old_output = match &btc.call("deposit_script", &[address(alice)]).unwrap()[..] {
@@ -354,6 +397,104 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     assert_eq!(btc.wbtc_of(alice), u256::from(37_000u64));
 }
 
+/// A release to propose, and the gateway's answer to everyone who may not propose it.
+#[cfg(feature = "bridge")]
+fn a_release_to_propose() -> (Btc, Transaction, Vec<TxCallArgumentType>) {
+    let mut btc = Btc::new();
+    let deposit = btc.deposited(50_000);
+    let id = btc.withdrawal(20_000);
+    let tx = spending(&[deposit], vec![pays_bob(19_000), btc.change(30_000)]);
+
+    (btc, tx, vec![number(id)])
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_stranger_cannot_propose_a_release_whoever_posts_it_and_a_signer_can() {
+    let (btc, tx, ids) = a_release_to_propose();
+    let raw = tx.base();
+    let refused = |secret: u8| btc.propose_as(secret, &raw, &ids).unwrap_err();
+
+    assert!(refused(99).contains("only a signer"), "{}", refused(99));
+    assert!(btc.call("propose", &[&[bytes(&raw), bytes(&[0; 65])], &ids[..]].concat()).unwrap_err().contains("only a signer"), "no signature that recovers");
+    assert_eq!(btc.state_of_withdrawal(1), text("queued"));
+
+    // Anyone may post what a signer signed: the gas is theirs, the word the signer's.
+    let signature = btc.propose_signature(22, 1, &raw, &ids);
+    assert_eq!(btc.call_as(ALICE, "propose", &[&[bytes(&raw), bytes(&signature)], &ids[..]].concat()).unwrap(), [TxCallArgumentType::I64(1)]);
+    assert_eq!(btc.state_of_withdrawal(1), text("proposed"));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_signature_to_propose_says_nothing_of_any_other_release_chain_gateway_or_message() {
+    let (btc, tx, ids) = a_release_to_propose();
+    let raw = tx.base();
+    let post = |signature: &[u8], raw: &[u8], ids: &[TxCallArgumentType]| btc.call("propose", &[&[bytes(raw), bytes(signature)], ids].concat());
+    let good = btc.propose_signature(21, 1, &raw, &ids);
+    let refused = |signature: &[u8], raw: &[u8], ids: &[TxCallArgumentType]| assert!(post(signature, raw, ids).unwrap_err().contains("only a signer"));
+
+    // Another transaction: a higher fee, what a griefer would want.
+    let dearer = spending(&[btc.gateway_input()], vec![pays_bob(18_000), btc.change(30_000)]).base();
+    refused(&good, &dearer, &ids);
+    // Other withdrawals, none, or more of them.
+    refused(&good, &raw, &[]);
+    refused(&good, &raw, &[number(1), number(2)]);
+    // Another number, another chain, another gateway.
+    refused(&btc.propose_signature(21, 2, &raw, &ids), &raw, &ids);
+    refused(&btc.signature_for(21, HERE + 1, btc.gateway, 1, &raw, &ids), &raw, &ids);
+    refused(&btc.signature_for(21, HERE, btc.relay, 1, &raw, &ids), &raw, &ids);
+
+    // What the federation signs for anything else: a vote to cancel, over the same transaction.
+    let vote = crate::bridge::sign_digest(&[21; 32], &crate::bridge::btc_cancel_digest(HERE, &btc.gateway, 1, &sha256d(&raw)));
+    refused(&vote, &raw, &ids);
+
+    // Nor does what proposes it pass for a vote to cancel it, once it is open.
+    assert_eq!(post(&good, &raw, &ids).unwrap(), [TxCallArgumentType::I64(1)]);
+    assert!(btc.call("cancel", &[number(1), bytes(&good)]).unwrap_err().contains("not signed by a signer"));
+
+    // The tools sign what the gateway checks.
+    let numbers = [1];
+    let tools = crate::bridge::sign_digest(&[21; 32], &crate::bridge::btc_propose_digest(HERE, &btc.gateway, 1, &raw, &numbers));
+    assert_eq!(tools.as_slice(), good.as_slice());
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn what_proposed_a_release_does_not_bring_it_back_once_cancelled_and_signing_it_again_does() {
+    let (btc, tx, ids) = a_release_to_propose();
+    let raw = tx.base();
+    let first = btc.propose_signature(21, 1, &raw, &ids);
+    let post = |signature: &[u8]| btc.call("propose", &[&[bytes(&raw), bytes(signature)], &ids[..]].concat());
+
+    post(&first).unwrap();
+    btc.vote(1, &tx, 21).unwrap();
+    btc.vote(1, &tx, 22).unwrap();
+    assert_eq!(btc.state_of_withdrawal(1), text("queued"));
+
+    // Anyone holding the old signature, public since it was posted, gets nowhere: the federation
+    // cancelled it, and the griefer would have it hold all it did.
+    assert!(post(&first).unwrap_err().contains("only a signer"));
+    assert_eq!(btc.state_of_withdrawal(1), text("queued"));
+
+    // A signer's fresh word brings it back.
+    assert_eq!(post(&btc.propose_signature(21, 2, &raw, &ids)).unwrap(), [TxCallArgumentType::I64(2)]);
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn only_a_signer_of_the_federation_in_force_proposes_a_release_or_a_sweep() {
+    let (btc, _, _) = a_release_to_propose();
+    let deposit = btc.gateway_input();
+    let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
+    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+    let sweep = spending(&[deposit], vec![btc.change(49_000)]).base();
+
+    assert!(btc.propose_as(21, &sweep, &[]).unwrap_err().contains("only a signer"), "of the federation before");
+    assert!(btc.propose_as(99, &sweep, &[]).unwrap_err().contains("only a signer"), "of none");
+    assert_eq!(btc.propose_as(31, &sweep, &[]).unwrap(), [TxCallArgumentType::I64(1)]);
+}
+
 #[cfg(feature = "bridge")]
 #[test]
 fn a_release_naming_one_withdrawal_twice_is_refused() {
@@ -364,11 +505,11 @@ fn a_release_naming_one_withdrawal_twice_is_refused() {
     // It would pay Bob twice for the one burn.
     let tx = spending(&[deposit], vec![pays_bob(19_500), pays_bob(19_500), btc.change(60_000)]);
 
-    assert!(btc.call("propose", &[bytes(&tx.base()), number(id), number(id)]).unwrap_err().contains("named twice"));
+    assert!(btc.propose(&tx.base(), &[number(id), number(id)]).unwrap_err().contains("named twice"));
     assert_eq!(btc.state_of_withdrawal(id), text("queued"));
 
     let once = spending(&[deposit], vec![pays_bob(19_000), btc.change(80_000)]);
-    btc.call("propose", &[bytes(&once.base()), number(id)]).unwrap();
+    btc.propose(&once.base(), &[number(id)]).unwrap();
 }
 
 #[cfg(feature = "bridge")]
@@ -378,7 +519,7 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
     let deposit = btc.deposited(100_000);
     let id = btc.withdrawal(20_000);
     let good = spending(&[deposit], vec![pays_bob(19_000), btc.change(80_000)]);
-    let propose = |tx: &[u8]| btc.call("propose", &[bytes(tx), number(id)]);
+    let propose = |tx: &[u8]| btc.propose(tx, &[number(id)]);
 
     // The same output twice: no block can hold it, and it would hold what it spends for good.
     let mut twice = good.clone();
@@ -408,7 +549,7 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
         let small = near.deposited(20_000 + over);
         let id = near.withdrawal(20_000);
         let tx = spending(&[small], vec![pays_bob(19_000), near.change(over)]);
-        let answer = near.call("propose", &[bytes(&tx.base()), number(id)]);
+        let answer = near.propose(&tx.base(), &[number(id)]);
 
         assert_eq!(answer.is_ok(), took, "{answer:?}");
     }
@@ -419,7 +560,7 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
     let id = tiny.call_as(ALICE, "withdraw", &[bytes(&[0x52, 2, 1, 1]), number(20_000)]).unwrap();
     let tx = spending(&[exact], vec![TxOut { value: 19_000, script: vec![0x52, 2, 1, 1] }]);
     assert_eq!(tx.base().len(), 64);
-    assert!(tiny.call("propose", &[bytes(&tx.base()), id[0].clone()]).unwrap_err().contains("do not relay"));
+    assert!(tiny.propose(&tx.base(), &[id[0].clone()]).unwrap_err().contains("do not relay"));
 
     propose(&good.base()).unwrap();
 }
@@ -464,11 +605,11 @@ fn a_release_pays_at_least_the_floor_for_its_size_and_at_most_the_cap() {
     // The floor as the signers' tools reckon it is the gateway's: one satoshi under it is refused,
     // and it is enough.
     let least = crate::bridge::btc_release_vbytes(release(1_000).base().len(), &[(2, script)]) * FLOOR;
-    let answer = btc.call("propose", &[bytes(&release(least - 1).base()), number(id)]).unwrap_err();
+    let answer = btc.propose(&release(least - 1).base(), &[number(id)]).unwrap_err();
 
     assert!(answer.contains("under the floor") && answer.contains(&least.to_string()), "{answer}");
-    assert!(btc.call("propose", &[bytes(&release(CAP + 1).base()), number(id)]).unwrap_err().contains("past the cap"));
-    btc.call("propose", &[bytes(&release(least).base()), number(id)]).unwrap();
+    assert!(btc.propose(&release(CAP + 1).base(), &[number(id)]).unwrap_err().contains("past the cap"));
+    btc.propose(&release(least).base(), &[number(id)]).unwrap();
 
     assert_eq!(btc.call("fee_limits", &[]).unwrap(), [TxCallArgumentType::I64(CAP as i64), TxCallArgumentType::I64(FLOOR as i64)]);
 }
@@ -503,7 +644,7 @@ fn a_release_short_of_its_threshold_is_cancelled_by_the_federation_and_proposed_
     let (first, second) = (btc.deposited(50_000), btc.deposited(60_000));
     let id = btc.withdrawal(20_000);
     let release = spending(&[first], vec![pays_bob(19_000), btc.change(30_000)]);
-    btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
+    btc.propose(&release.base(), &[number(id)]).unwrap();
     btc.sign(1, &release, 0, 21).unwrap();
 
     // Only the federation in force votes, each once; one vote changes nothing.
@@ -531,12 +672,12 @@ fn a_release_short_of_its_threshold_is_cancelled_by_the_federation_and_proposed_
     // Its withdrawal is paid again only by what conflicts with it on Bitcoin, as it may yet be
     // finished there with a signature no one posted: from other inputs alone would pay Bob twice.
     let elsewhere = spending(&[second], vec![pays_bob(19_000), btc.change(40_000)]);
-    assert!(btc.call("propose", &[bytes(&elsewhere.base()), number(id)]).unwrap_err().contains("must spend"));
+    assert!(btc.propose(&elsewhere.base(), &[number(id)]).unwrap_err().contains("must spend"));
     let hex = crate::structs::hex::to_hex(&first);
     assert_eq!(btc.call("anchor", &[number(id)]).unwrap(), [text(&format!("{}:0", hex.trim_start_matches("0x")))]);
 
     let again = spending(&[second, first], vec![pays_bob(19_000), btc.change(90_000)]);
-    assert_eq!(btc.call("propose", &[bytes(&again.base()), number(id)]).unwrap(), [TxCallArgumentType::I64(2)]);
+    assert_eq!(btc.propose(&again.base(), &[number(id)]).unwrap(), [TxCallArgumentType::I64(2)]);
     assert_eq!(btc.call("input_signatures", &[number(2), number(1)]).unwrap().len(), 2, "signed anew");
 
     // Paid at last, by the second, the anchor is spent; the first can no longer be mined.
@@ -559,7 +700,7 @@ fn a_release_with_every_input_at_its_threshold_cannot_be_cancelled() {
     let (first, second) = (btc.deposited(50_000), btc.deposited(60_000));
     let id = btc.withdrawal(20_000);
     let release = spending(&[first, second], vec![pays_bob(19_000), btc.change(90_000)]);
-    btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
+    btc.propose(&release.base(), &[number(id)]).unwrap();
 
     // One input there and one not: it cannot be finished yet, so a vote is taken.
     btc.sign(1, &release, 0, 21).unwrap();
@@ -582,14 +723,14 @@ fn a_cancelled_release_finished_anyway_pays_no_one_twice_and_frees_what_waited_o
     let (first, second, third) = (btc.deposited(50_000), btc.deposited(60_000), btc.deposited(70_000));
     let (paid, other) = (btc.withdrawal(20_000), btc.withdrawal(10_000));
     let cancelled = spending(&[first], vec![pays_bob(19_500), TxOut { value: 9_500, script: bob() }, btc.change(20_000)]);
-    btc.call("propose", &[bytes(&cancelled.base()), number(paid), number(other)]).unwrap();
+    btc.propose(&cancelled.base(), &[number(paid), number(other)]).unwrap();
     btc.vote(1, &cancelled, 21).unwrap();
     btc.vote(1, &cancelled, 22).unwrap();
 
     // Proposed again, as it must be, on the same input, and signed in full: it conflicts with the
     // first, so Bitcoin takes one of them.
     let again = spending(&[first, third], vec![pays_bob(19_000), btc.change(100_000)]);
-    btc.call("propose", &[bytes(&again.base()), number(paid)]).unwrap();
+    btc.propose(&again.base(), &[number(paid)]).unwrap();
 
     for (input, signer) in [(0, 21), (0, 22), (1, 21), (1, 22)] {
         btc.sign(2, &again, input, signer).unwrap();
@@ -628,10 +769,10 @@ fn a_cancelled_release_proposed_again_as_it_was_is_shown_once() {
     let first = btc.deposited(50_000);
     let id = btc.withdrawal(20_000);
     let release = spending(&[first], vec![pays_bob(19_000), btc.change(30_000)]);
-    btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
+    btc.propose(&release.base(), &[number(id)]).unwrap();
     btc.vote(1, &release, 21).unwrap();
     btc.vote(1, &release, 22).unwrap();
-    btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
+    btc.propose(&release.base(), &[number(id)]).unwrap();
     let (block, index, path, first, first_path) = btc.mine(&release.base());
     btc.bury();
     let show = |proposal: u64| btc.call("released", &[number(proposal), bytes(&block), bytes(&release.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)]);
@@ -720,7 +861,7 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     let (first, second) = (btc.deposited(50_000), btc.deposited(60_000));
     let id = btc.withdrawal(20_000);
     let release = spending(&[first, second], vec![pays_bob(18_000), btc.change(90_000)]);
-    btc.call("propose", &[bytes(&release.base()), number(id)]).unwrap();
+    btc.propose(&release.base(), &[number(id)]).unwrap();
 
     let held = |txid: &[u8; 32]| {
         let key = format!("{}:0", crate::structs::hex::to_hex(txid).trim_start_matches("0x"));
@@ -739,7 +880,14 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
         change_script: change_script.clone(),
         fee_cap: CAP,
         fee_floor: FLOOR,
+        most_rate: 1_000,
     };
+
+    // The fee is 2,000 over what this release weighs: at the limit it is signed, a byte under it not.
+    let vbytes = crate::bridge::btc_release_vbytes(facts.raw.len(), &[(facts.inputs[0].1.threshold, facts.inputs[0].1.script_len), (facts.inputs[1].1.threshold, facts.inputs[1].1.script_len)]);
+    let exact = 2_000 / vbytes;
+    assert!(check_btc_release(&ReleaseFacts { most_rate: exact + 1, ..facts.clone() }).is_ok());
+    assert!(check_btc_release(&ReleaseFacts { most_rate: exact, ..facts.clone() }).unwrap_err().contains("past the"), "a release over the rate");
 
     assert_eq!(check_btc_release(&facts), Ok(()));
 
@@ -818,7 +966,7 @@ fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_ne
 
     // Even, the first taking what will not divide, whatever each is for: 1,001 over two.
     let release = |at_first: u64, at_second: u64| spending(&[first], vec![pays_bob(10_000 - at_first), TxOut { value: 50_000 - at_second, script: bob() }, btc.change(100_000 - burned)]).base();
-    let propose = |raw: &[u8]| btc.call("propose", &[bytes(raw), number(small), number(large)]);
+    let propose = |raw: &[u8]| btc.propose(raw, &[number(small), number(large)]);
 
     assert_eq!((btc_fee_share(1_001, 2, 0), btc_fee_share(1_001, 2, 1)), (501, 500));
     assert!(propose(&release(500, 501)).unwrap_err().contains("does not pay its withdrawal"), "the rest on the second");
@@ -860,7 +1008,7 @@ fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_ne
     let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
     btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
     let sweep = spending(&[second], vec![btc.change(99_001)]);
-    btc.call("propose", &[bytes(&sweep.base())]).unwrap();
+    btc.propose_as(31, &sweep.base(), &[]).unwrap();
 }
 
 /// A transaction of 64 bytes could be an inner node of a block's tree: not the relay's to tell apart
@@ -897,8 +1045,8 @@ fn the_largest_release_of_withdrawals_fits_in_a_call_s_fuel_with_all_it_now_chec
     let mut outputs: Vec<TxOut> = ids.iter().map(|_| pays_bob(10_000 - fee / 50)).collect();
     outputs.push(btc.change(spent - 500_000));
     let tx = spending(&deposits, outputs);
-    let mut args = vec![bytes(&tx.base())];
-    args.extend(ids.iter().map(|id| number(*id)));
+    let numbers: Vec<TxCallArgumentType> = ids.iter().map(|id| number(*id)).collect();
+    let args = [&[bytes(&tx.base()), bytes(&btc.propose_signature(21, 1, &tx.base(), &numbers))], &numbers[..]].concat();
     let proposed = btc.world.call_at(DEPLOYER, btc.gateway, "propose", &args, 0, NOW);
 
     proposed.result.unwrap();
@@ -1009,8 +1157,7 @@ fn bitcoin_core_takes_a_release_of_a_deposit_with_every_kind_of_output_the_gatew
     // 1,200 in fees, 200 from each of the six, and all the rest back.
     outputs.push(btc.change(100_000 - 60_000));
     let mut release = Transaction { version: 2, inputs: vec![TxIn { txid: sha256d(&deposit), vout: vout as u32, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }], outputs, lock_time: 0 };
-    args[0] = bytes(&release.base());
-    assert_eq!(btc.call("propose", &args).unwrap(), [TxCallArgumentType::I64(1)]);
+    assert_eq!(btc.propose(&release.base(), &args[1..]).unwrap(), [TxCallArgumentType::I64(1)]);
     btc.sign(1, &release, 0, 21).unwrap();
     btc.sign(1, &release, 0, 23).unwrap();
 

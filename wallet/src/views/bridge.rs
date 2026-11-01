@@ -13,7 +13,7 @@
 //! - **Bitcoin:** the account's deposit address is computed here, from the proven federation, so
 //!   no node can hand it another. A payment to it, once deep enough, is shown to the Bitcoin
 //!   gateway with its proof, from the light client's block or Esplora's, and minted as wBTC.
-//!   wBTC is withdrawn to a Bitcoin address; the federation pays it in its next release.
+//!   wBTC is withdrawn to a Bitcoin address; the federation pays it in its next release, by itself.
 
 use {
     super::send::{Prepared, SendState},
@@ -874,7 +874,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
             prepared = Some(native_call(me, gateway, "withdraw", vec![TxCallArgumentType::Bytes(script), TxCallArgumentType::U64(sats), TxCallArgumentType::U64(sats - least_arriving(sats))], u256::ZERO, "Withdraw wBTC to Bitcoin".to_string()));
         }
 
-        ui.label(RichText::new(format!("Burned here, it is paid in the federation's next release, at least {} satoshis: a Taproot address as its 0x5120… script. A release's fee comes off the withdrawals it pays, split evenly.", format::thousands(&least.to_string()))).small().color(palette.muted));
+        ui.label(RichText::new(format!("Burned here, there is nothing more to do: the federation pays it out in a release of its own, usually within the hour, longer while Bitcoin's fees run past what it agreed to lose. At least {} satoshis: a Taproot address as its 0x5120… script. A release's fee comes off the withdrawals it pays, split evenly.", format::thousands(&least.to_string()))).small().color(palette.muted));
         ui.add_space(8.0);
         theme::caps(ui, &palette, "Your withdrawals");
         let count = state.read(ctx, &gateway, "withdrawal_count", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).unwrap_or(0);

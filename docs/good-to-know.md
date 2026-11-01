@@ -1065,6 +1065,22 @@ voting finality it now goes back to the checkpoint and follows the node from the
   refused. A release paying less for its size than the floor is refused too: `--fee` is checked
   against it before anything is sent.
 - **A withdrawal's script is one nodes relay:** P2PKH, P2SH or a witness program, not any 80 bytes.
+- **Only a signer proposes a release,** `propose(raw, signature, ids…)` over `btc_propose_digest`, as a
+  release's fee comes off the withdrawals and anyone could otherwise burn what they agreed to lose.
+  Anyone may post it. The digest takes the number the release will have, so a signature is good until
+  any release takes that number: a cancelled release's own does not bring it back, and two signers
+  building the same release race for the one number, the loser's transaction failing at worst once.
+- **Something has to run a pass.** `bridge btc watch`, or `bridge watch --esplora`, or nothing is ever
+  proposed, signed, broadcast or shown. A withdrawal says why it waits in the pass's log, not on chain.
+- **`/fee-estimates` is Esplora's,** and mempool.space's API has it too, a rate by how many blocks for.
+  A pass reads it once, asking twice at most, as a read that goes unanswered must not hold it up. No
+  estimates, as on regtest, proposes at the floor; out of reach proposes nothing and signs up to 200
+  satoshis a virtual byte.
+- **A signer's limit is against what it reads now,** not when a release was proposed, so a release from
+  a rush can fall past 3 times the fastest rate as the network calms. It is then refused until cancelled
+  or `--max-fee-rate` says otherwise: nothing stays held past a cancel.
+- **`Esplora /tx/ID/status` says a transaction it never heard of is unconfirmed,** so a pass asks
+  `/tx/ID/hex` too before it broadcasts.
 - **A cancelled release can still be mined.** Its signatures are public, the board only stops
   counting them. So the withdrawals it paid must spend one of its inputs, `anchor(id)`, in their next
   release, until that input is shown spent; `bridge btc propose` does this itself, and one whose
@@ -1361,6 +1377,26 @@ voting finality it now goes back to the checkpoint and follows the node from the
   payout mining alone every time it builds its own, at most 16 (`MOST_SOLO`); the 17th is turned
   away. Any seal ends every template of the round. A solo worker sends no shares, so its hashrate
   shows only in what it says, and it hears of nothing until it finds a block.
+- **An open port goes over wss://.** Its token is public, so its MACs stop no one on the path, who can
+  rewrite a payout both ways, unseen. `Worker::start` refuses plain TCP to one, and everything that
+  mines comes through it, unless plain TCP cannot be read on the way (`plain_cannot_be_read`: this
+  machine with no proxy, or this machine or an onion through a proxy on this machine; a proxy elsewhere
+  reads what it is sent, and an onion with no proxy goes by the system's resolver) or `--insecure-open-port`
+  says so. An open port is told by its token, not by what the node says, so writing the public token out
+  as a file changes nothing. Private tokens stay on TCP: the token protects them.
+- **A worker does TLS and the WebSocket on a thread of its own** (`mining::wss::pump`), as a TLS session
+  cannot be read and written from two threads at once, unlike the TCP connection it cloned before. It
+  waits 25 ms at most to read before what is waiting goes out, so a nonce waits no longer than that.
+- **The certificate is always checked.** rustls on ring with the Mozilla roots built in, the same on a
+  desktop, Android and iOS, and no flag skips it. `--ca-cert` gives what to trust in their place, its
+  host's name checked all the same. rustls refuses a certificate with `CA:TRUE` as a server's own,
+  which is what plain `openssl req -x509` makes; docker/nginx/tls.sh makes one without.
+- **nginx drops what a location does not say again.** `proxy_set_header` in a location replaces all the
+  server's, so `/mining/ws` setting `Upgrade` lost `X-Forwarded-For`, and the node counted every
+  worker as nginx, 16 at most on the whole Internet. It says them all now, and allows 32 from an
+  address, as the mining port does.
+- **A worker behind a relay has no address of its own to the port,** which sees loopback. Its limits
+  are nginx's and the relay's, per asker, and the report's address for it is the node's own.
 - **The WebSocket only relays.** `GET /mining/ws` passes lines to the mining port on the node's own
   machine, so the port's limit of 256 connections counts them, and its report shows each as a
   connection from the node itself. Behind nginx, the location needs the WebSocket upgrade headers.

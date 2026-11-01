@@ -1,6 +1,7 @@
 //! The Miner on the desktop and the phones: chainv4's worker, on a thread of its own, reaching the
-//! port over TCP, through the wallet's proxy when it has a SOCKS5 one. A thread beside it asks the
-//! page to draw again every second while it mines, so the numbers move.
+//! port over TCP, or over wss:// if it is open to anyone, through the wallet's proxy when it has a
+//! SOCKS5 one. A thread beside it asks the page to draw again every second while it mines, so the
+//! numbers move.
 //!
 //! A phone mines only while the wallet is in front: Android and iOS stop drawing an app they send
 //! to the background, so that thread also watches egui's frames, and stops the worker once none
@@ -45,18 +46,19 @@ pub struct Miner {
 }
 
 impl Miner {
-    /// Starts mining as the config says: an error for a port only a browser reaches, or a worker
-    /// that does not start.
+    /// Starts mining as the config says: an error for a port the worker's own rule refuses, as an open
+    /// one over plain TCP someone could read on the way, or a worker that does not start.
     pub fn start(config: MineConfig, ctx: &egui::Context) -> Result<Miner, String> {
-        let Port::Tcp { address, proxy } = &config.port else {
-            return Err("this app reaches a mining port over TCP, host:port, not a WebSocket".to_string());
+        let (node, proxy) = match &config.port {
+            Port::Tcp { address, proxy } => (address, proxy),
+            Port::WebSocket { url, proxy } => (url, proxy),
         };
         let devices = match &config.devices {
             Devices::Cpu(threads) => worker::Devices::Cpu((*threads).max(1)),
             Devices::Gpu(which) => worker::Devices::Gpu(which.clone()),
         };
         let worker = Worker::start(WorkerConfig {
-            node: address.clone(),
+            node: node.clone(),
             token: config.token.clone(),
             name: config.name.clone(),
             protocol: config.protocol.clone(),
@@ -66,6 +68,9 @@ impl Miner {
             // The page keeps the pool's claims itself, from the pool's node.
             claims: None,
             solo: config.solo,
+            // The wallet offers no way around either: a port it cannot reach safely, it says why.
+            insecure_open_port: false,
+            ca_cert: None,
         })?;
         let running = Arc::new(Mutex::new(Running { worker: Some(worker), last: WorkerStatus::default() }));
         let stop = Arc::new(AtomicBool::new(false));
@@ -301,10 +306,19 @@ mod tests {
     }
 
     #[test]
-    fn a_websocket_is_the_browsers_way_and_refused_here() {
+    fn a_websocket_without_tls_or_plain_tcp_to_an_open_port_someone_could_read_is_refused_here() {
         let ctx = egui::Context::default();
+        let open = |port: Port| MineConfig { token: protocol::OPEN_TOKEN.to_vec(), ..config(port) };
 
-        assert!(Miner::start(config(Port::WebSocket("ws://node/mining/ws".to_string())), &ctx).is_err_and(|why| why.contains("WebSocket")));
+        assert!(Miner::start(config(Port::WebSocket { url: "ws://node/mining/ws".to_string(), proxy: None }), &ctx).is_err_and(|why| why.contains("without TLS")));
+        assert!(Miner::start(open(Port::Tcp { address: "pool.example:4002".to_string(), proxy: None }), &ctx).is_err_and(|why| why.contains("open to anyone")));
+        assert!(Miner::start(open(Port::Tcp { address: "abcdef.onion:4002".to_string(), proxy: Some("socks5h://203.0.113.7:9050".to_string()) }), &ctx).is_err_and(|why| why.contains("open to anyone")), "a proxy elsewhere reads it");
+
+        // What goes over TLS, or cannot be read on the way, or is no one's business but its token's.
+        assert!(Miner::start(open(Port::WebSocket { url: "wss://pool.invalid/mining/ws".to_string(), proxy: None }), &ctx).is_ok());
+        assert!(Miner::start(open(Port::Tcp { address: "127.0.0.1:1".to_string(), proxy: None }), &ctx).is_ok());
+        assert!(Miner::start(open(Port::Tcp { address: "abcdef.onion:4002".to_string(), proxy: Some("socks5h://127.0.0.1:1".to_string()) }), &ctx).is_ok());
+        assert!(Miner::start(config(Port::Tcp { address: "pool.invalid:4002".to_string(), proxy: None }), &ctx).is_ok());
     }
 
     #[test]

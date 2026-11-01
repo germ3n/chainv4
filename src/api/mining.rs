@@ -1,6 +1,7 @@
 //! Where workers mine for this node: GET /mining tells the apps its mining port, as they reach it,
 //! and what it takes on it; GET /mining/ws carries the port's protocol over a WebSocket, for a
-//! browser, which opens no TCP connections of its own.
+//! browser, which opens no TCP connections of its own, and behind TLS for a worker on an open port,
+//! whose token protects nothing from someone on the path.
 //!
 //! The WebSocket only relays: each text message is a line of the protocol, passed to the port on
 //! this machine as it is and back, so the handshake proves the token to the port itself and the
@@ -125,6 +126,19 @@ async fn relay(socket: WebSocket, to: SocketAddr, _counted: super::Counted) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// nginx's proxy_set_header in a location replaces all of the server's: left out there, the node
+    /// sees no X-Forwarded-For, takes every worker for nginx, and its count per asker turns away all but
+    /// the first few on the whole Internet.
+    #[test]
+    fn nginx_tells_the_relay_who_is_asking_as_it_does_for_everything_else() {
+        let locations = include_str!("../../docker/nginx/chainv4-locations.conf.template");
+        let relay = locations.split("location = /mining/ws {").nth(1).and_then(|rest| rest.split('}').next()).unwrap();
+
+        assert!(relay.contains("proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;"), "{relay}");
+        assert!(relay.contains("proxy_set_header Upgrade $http_upgrade;"), "{relay}");
+        assert!(relay.contains("proxy_read_timeout 1h;"), "longer than a quiet worker's silence, which is under a minute: {relay}");
+    }
 
     #[test]
     fn the_relay_reaches_a_port_listening_on_every_address_on_this_machine() {

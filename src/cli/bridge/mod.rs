@@ -66,6 +66,11 @@ pub struct BridgeArgs {
     /// the better way; this is for one without. It must match the gateway's peer.
     #[arg(long = "evm-gateway", global = true, value_parser = parse_evm_gateway)]
     pub evm_gateways: Vec<(u64, [u8; 20])>,
+    /// The most a Bitcoin release may pay for this signer to sign it, in satoshis a virtual byte.
+    /// Unless told: 3 times the fastest rate Esplora says, at least 25; with Esplora out of reach,
+    /// 200. What is past it is logged and passed over, for the federation to cancel.
+    #[arg(long, global = true)]
+    pub max_fee_rate: Option<u64>,
 }
 
 fn parse_evm_gateway(text: &str) -> Result<(u64, [u8; 20]), String> {
@@ -130,7 +135,8 @@ pub enum BridgeAction {
         #[command(subcommand)]
         action: btc::BtcAction,
     },
-    /// sign and relay, then again after a pause, until stopped.
+    /// sign and relay, then again after a pause, until stopped. With --esplora, Bitcoin's pass too:
+    /// btc pass.
     Watch {
         #[arg(long, default_value_t = 0)]
         from_block: u64,
@@ -197,6 +203,7 @@ pub(crate) struct Bridge {
     node: String,
     args: BridgeArgs,
     refused: std::cell::RefCell<Refusals>,
+    btc_done: std::cell::Cell<btc::BtcDone>,
 }
 
 fn kind_of(text: &str) -> CliResult<AssetKind> {
@@ -239,7 +246,7 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
 
 impl Bridge {
     pub(crate) fn new(args: BridgeArgs) -> CliResult<Bridge> {
-        Ok(Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default() })
+        Ok(Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default(), btc_done: Default::default() })
     }
 
     /// What this signer or relayer holds refused, each with why.
@@ -257,6 +264,12 @@ impl Bridge {
 
         if let Err(err) = self.relay() {
             eprintln!("relaying: {err}");
+        }
+
+        if self.args.esplora.is_some()
+            && let Err(err) = self.btc_pass()
+        {
+            eprintln!("the Bitcoin pass: {err}");
         }
 
         let mut refused = self.refused.borrow_mut();

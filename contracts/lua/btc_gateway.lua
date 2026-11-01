@@ -11,7 +11,8 @@
 -- and a gateway deployed by the same keys on a new one has the same address and holds nothing yet,
 -- so without the chain's id in the script the same proof would mint again there.
 --
--- Releases: a withdrawal burns wBTC for a Bitcoin script and amount. Anyone proposes a release:
+-- Releases: a withdrawal burns wBTC for a Bitcoin script and amount. A signer of the federation in
+-- force proposes a release, as its fee is what the withdrawals it pays lose:
 -- an unsigned Bitcoin transaction this contract checks pays exactly queued withdrawals from the
 -- deposits it holds, less their shares of its fee, change back to the federation, its fee under the
 -- cap. What it holds falls by just what was burned, so wBTC stays backed. The signers sign each
@@ -521,15 +522,31 @@ local function fee_share(fee, count, at)
     return math.floor(fee / count) + (at == 1 and fee % count or 0)
 end
 
--- Proposes a release: raw, an unsigned transaction without witnesses, spending deposits and
--- change this gateway holds, whose first outputs pay the given withdrawals in order, each less its
+-- What a signer of the federation in force signs to propose a release, posted by anyone: this chain,
+-- this gateway, the number it will have, its transaction and the withdrawals it pays, so a signature
+-- says nothing anywhere else, and nothing once any other release took that number. A release
+-- cancelled is not brought back by what proposed it: proposing it again takes signing it again.
+local function propose_digest(id, raw, ids)
+    local named = {}
+
+    for _, withdrawal in ipairs(ids) do
+        table.insert(named, le(withdrawal, 8))
+    end
+
+    return crypto.sha256d("chainv4-btc-propose" .. le(chain.id(), 8) .. ctx.contract:encode() .. le(id, 8) .. crypto.sha256d(raw) .. le(#ids, 8) .. table.concat(named))
+end
+
+-- Proposes a release, signed by a signer of the federation in force, as btc_propose_digest has it:
+-- what it pays in fees comes off the withdrawals, so a stranger could burn all they agreed to lose,
+-- or hold them in a release no one signs. raw is an unsigned transaction without witnesses, spending
+-- deposits and change this gateway holds, whose first outputs pay the given withdrawals in order, each less its
 -- share of the fee, and whose one more output, if any, is change to the federation in force: all it
 -- spends past what those withdrawals burned, so the fee costs the backing nothing. With no
 -- withdrawals it is a sweep: everything it spends an old federation's, all of it to the one in
 -- force, the fee the federation's. Whatever it
 -- proposes Bitcoin must be able to mine, as its inputs and withdrawals wait on it until it is
 -- shown mined or cancelled.
-function M.propose(raw, ...)
+function M.propose(raw, signature, ...)
     local fed = remember()
     local ids, named = {}, {}
 
@@ -542,6 +559,17 @@ function M.propose(raw, ...)
 
         named[number] = true
         table.insert(ids, number)
+    end
+
+    local signer = crypto.recover(propose_digest(count("proposal_count") + 1, raw, ids), signature)
+    local known = false
+
+    for _, key in ipairs(fed.signers) do
+        known = known or key == signer
+    end
+
+    if not known then
+        error("only a signer of the federation in force proposes a release")
     end
 
     local tx = parse(raw)

@@ -1325,6 +1325,130 @@ mod send {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A worker on an open port, end to end: TLS as nginx gives it, the node's real WebSocket relay and
+    /// mining port behind that, on one CPU thread. Asked over its API, it goes over wss:// without being
+    /// told, and blocks it finds pay what it said.
+    #[test]
+    fn a_worker_mines_on_an_open_port_over_wss_found_from_the_nodes_api_with_its_certificate_checked() {
+        use crate::consensus::PowConfig;
+        use crate::mining::pool::{MiningPort, OPEN_TOKEN};
+        use crate::mining::worker::{Devices, Worker, WorkerConfig};
+        use crate::mining::wss::tests::{CERT, accept_one, tls_listener};
+        use crate::node::{Mining, Producing};
+        use crate::structs::hash::HashType;
+        use std::io::{Read, Write};
+
+        let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let payout = Address::Ed25519([4; 32]);
+        let pow = |genesis: Genesis| Genesis {
+            consensus: ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 64, min_difficulty: 64 }),
+            ..genesis
+        };
+        let mining = move |node: Node| {
+            node.producing(Producing {
+                mine: Some(Mining {
+                    reward_to: Address::Ed25519([9; 32]),
+                    threads: 0,
+                    gpu: false,
+                    gpus: None,
+                    port: Some(MiningPort { listen, token: OPEN_TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true }),
+                }),
+                sign: None,
+            })
+        };
+        // It publishes its port elsewhere, as a real one does: on this machine it could go over TCP.
+        let options = crate::api::ApiOptions { mining_public: Some("pool.invalid:4002".to_string()), ..Default::default() };
+        let running = Running::launch_genesis(false, false, pow, mining, options);
+
+        // In front of the node's API, TLS, as nginx would have it: each connection passed on as it is.
+        let (front, config) = tls_listener();
+        let port = front.local_addr().unwrap().port();
+        let api = running.api;
+
+        std::thread::spawn(move || {
+            while let Ok(mut tls) = accept_one(&front, &config) {
+                let mut behind = std::net::TcpStream::connect(api).unwrap();
+                behind.set_read_timeout(Some(std::time::Duration::from_millis(5))).unwrap();
+                tls.sock.set_read_timeout(Some(std::time::Duration::from_millis(5))).unwrap();
+
+                std::thread::spawn(move || {
+                    let mut buffer = [0; 16 * 1024];
+
+                    loop {
+                        match tls.read(&mut buffer) {
+                            Ok(0) => return,
+                            Ok(size) => {
+                                if behind.write_all(&buffer[..size]).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                            Err(_) => return,
+                        }
+
+                        match behind.read(&mut buffer) {
+                            Ok(0) => return,
+                            Ok(size) => {
+                                if tls.write_all(&buffer[..size]).and_then(|()| tls.flush()).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                            Err(_) => return,
+                        }
+                    }
+                });
+            }
+        });
+
+        let dir = TempDir::new("worker-wss");
+        let ca = dir.0.join("node.pem");
+        fs::write(&ca, CERT).unwrap();
+        let about: serde_json::Value = serde_json::from_str(&ureq::get(format!("http://{api}/mining")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+        assert_eq!((about["open"].as_bool(), about["ws"].as_str()), (Some(true), Some("/mining/ws")), "what a worker needs of it");
+
+        let (node, token, protocol) = crate::cli::worker::route_for_tests(&format!("https://localhost:{port}"), None, false, Some(CERT)).unwrap();
+        assert_eq!(node, format!("wss://localhost:{port}/mining/ws"));
+
+        let worker = Worker::start(WorkerConfig {
+            node,
+            token,
+            name: "rig".to_string(),
+            protocol: protocol.unwrap(),
+            devices: Devices::Cpu(1),
+            proxy: None,
+            payout: Some(payout),
+            claims: None,
+            solo: true,
+            insecure_open_port: false,
+            ca_cert: Some(CERT.to_vec()),
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+
+        while worker.status().blocks == 0 {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "no block over wss://: {:?}", worker.status());
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let status = worker.status();
+        assert!(status.connected && status.trouble.is_none(), "{status:?}");
+        drop(worker);
+
+        // The node imports it a moment after the port takes it, paying what the worker said.
+        let tip: serde_json::Value = loop {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "the block never landed");
+
+            match ureq::get(format!("http://{api}/blocks/1")).call() {
+                Ok(mut answer) => break serde_json::from_str(&answer.body_mut().read_to_string().unwrap()).unwrap(),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        };
+
+        assert_eq!(tip["producer"].as_str().or(tip["header"]["producer"].as_str()), Some(payout.to_string().as_str()), "{tip}");
+        running.stop();
+    }
+
     #[test]
     fn a_browser_mines_alone_over_the_apis_websocket_with_the_ports_own_handshake() {
         use crate::consensus::{PowConfig, meets, work_hash};
@@ -1852,6 +1976,7 @@ mod send {
                 let txid = FakeBitcoin::display(id);
                 esplora.serve(&format!("/tx/{txid}/hex"), crate::structs::hex::to_hex(tx).trim_start_matches("0x").to_string());
                 esplora.serve(&format!("/tx/{txid}/merkle-proof"), serde_json::json!({ "block_height": height, "merkle": merkle, "pos": pos }).to_string());
+                esplora.serve(&format!("/tx/{txid}/status"), serde_json::json!({ "confirmed": true, "block_height": height }).to_string());
             };
             serve_tx(&first_tx, &coinbase, ids[1..].iter().map(|id| FakeBitcoin::display(id)).collect(), 0);
 
@@ -1893,6 +2018,7 @@ mod send {
                 btc_gateway: None,
                 esplora: Some(esplora.clone()),
                 evm_gateways: Vec::new(),
+                max_fee_rate: None,
             })
         };
         let tip = || -> (String, u64) {
@@ -1980,6 +2106,7 @@ mod send {
                 btc_gateway,
                 esplora: Some(esplora.clone()),
                 evm_gateways: Vec::new(),
+                max_fee_rate: None,
             })
         };
         run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None, None).unwrap();
@@ -2018,11 +2145,18 @@ mod send {
         let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
         run(BtcAction::Withdraw { address: to, sats: 20_000, most_fee: None }, None, None).unwrap();
         assert_eq!(wbtc_of(&me), "30000");
-        run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
-
-        for secret in [21u8, 22] {
+        let signer = |secret: u8| {
             let key = dir.0.join(format!("signer-{secret}.key"));
             fs::write(&key, Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).to_key_file()).unwrap();
+            Some(key)
+        };
+        // Not by a stranger, nor by a stranger's key: only a signer of the federation proposes.
+        assert!(run(BtcAction::Propose { fee: Some(1_000) }, None, None).unwrap_err().to_string().contains("only a signer"));
+        assert!(run(BtcAction::Propose { fee: Some(1_000) }, None, signer(99)).unwrap_err().to_string().contains("not a signer"));
+        run(BtcAction::Propose { fee: Some(1_000) }, None, signer(21)).unwrap();
+
+        for secret in [21u8, 22] {
+            let key = signer(secret).unwrap();
             run(BtcAction::Sign, None, Some(key.clone())).unwrap();
             run(BtcAction::Sign, None, Some(key)).unwrap();
         }
@@ -2045,33 +2179,33 @@ mod send {
 
         assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "1" }]))[2]["value"], "paid");
         assert_eq!(read(&gateway, "utxo_count", serde_json::json!([]))[0]["value"], "2");
-        assert!(run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap_err().to_string().contains("no withdrawals are queued"));
+        assert!(run(BtcAction::Propose { fee: Some(1_000) }, None, signer(21)).unwrap_err().to_string().contains("no withdrawals are queued"));
 
         // Another withdrawal, proposed from the change, signed by one, then cancelled by two: a
         // signer that voted does not sign it, and the next one spends the same input.
         run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]), sats: 10_000, most_fee: Some(500) }, None, None).unwrap();
 
         // A fee past what it agreed to lose takes nothing, until it says otherwise.
-        assert!(run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap_err().to_string().contains("less than its share"));
+        assert!(run(BtcAction::Propose { fee: Some(1_000) }, None, signer(21)).unwrap_err().to_string().contains("less than its share"));
         run(BtcAction::SetMostFee { withdrawal: 2, most_fee: 1_000 }, None, None).unwrap();
-        run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
+        run(BtcAction::Propose { fee: Some(1_000) }, None, signer(21)).unwrap();
         let state = |proposal: &str| read(&gateway, "proposal", serde_json::json!([{ "type": "u64", "value": proposal }]))[4]["value"].as_str().unwrap().to_string();
         let posted = |proposal: &str| read(&gateway, "input_signatures", serde_json::json!([{ "type": "u64", "value": proposal }, { "type": "u64", "value": "0" }])).as_array().unwrap().len();
-        let signer = |secret: u8| dir.0.join(format!("signer-{secret}.key"));
-        fs::write(signer(23), Keypair::from_private(PrivateKey::Secp256k1([23; 32])).to_key_file()).unwrap();
-        run(BtcAction::Cancel { proposal: 2 }, None, Some(signer(21))).unwrap();
-        run(BtcAction::Sign, None, Some(signer(21))).unwrap();
+        let signer_at = |secret: u8| dir.0.join(format!("signer-{secret}.key"));
+        fs::write(signer_at(23), Keypair::from_private(PrivateKey::Secp256k1([23; 32])).to_key_file()).unwrap();
+        run(BtcAction::Cancel { proposal: 2 }, None, Some(signer_at(21))).unwrap();
+        run(BtcAction::Sign, None, Some(signer_at(21))).unwrap();
         assert_eq!(posted("2"), 2, "the script and threshold, no signature: it voted to cancel");
-        run(BtcAction::Sign, None, Some(signer(22))).unwrap();
+        run(BtcAction::Sign, None, Some(signer_at(22))).unwrap();
         assert_eq!(posted("2"), 4, "one of the two it takes");
         assert!(run(BtcAction::Finish { proposal: 2 }, None, None).unwrap_err().to_string().contains("of the 2 signatures"));
-        run(BtcAction::Cancel { proposal: 2 }, None, Some(signer(22))).unwrap();
+        run(BtcAction::Cancel { proposal: 2 }, None, Some(signer_at(22))).unwrap();
         assert_eq!(state("2"), "cancelled");
         assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "2" }]))[2]["value"], "queued");
         assert!(run(BtcAction::Finish { proposal: 2 }, None, None).unwrap_err().to_string().contains("is cancelled"));
         // Too little for its size, the tools say so before the gateway has to.
-        assert!(run(BtcAction::Propose { fee: 1 }, None, None).unwrap_err().to_string().contains("under the floor"));
-        run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
+        assert!(run(BtcAction::Propose { fee: Some(1) }, None, signer(21)).unwrap_err().to_string().contains("under the floor"));
+        run(BtcAction::Propose { fee: Some(1_000) }, None, signer(21)).unwrap();
         assert_eq!(state("3"), "open");
 
         // The cancelled one was finished anyway, with a signature that came too late for the board:
@@ -2085,11 +2219,202 @@ mod send {
         run(BtcAction::Released { proposal: 2 }, None, None).unwrap();
         assert_eq!(state("2"), "released");
         assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "2" }]))[2]["value"], "paid");
-        run(BtcAction::Sign, None, Some(signer(23))).unwrap();
+        run(BtcAction::Sign, None, Some(signer_at(23))).unwrap();
         assert_eq!(posted("3"), 2, "not signed: its withdrawal is paid");
-        run(BtcAction::Cancel { proposal: 3 }, None, Some(signer(21))).unwrap();
-        run(BtcAction::Cancel { proposal: 3 }, None, Some(signer(22))).unwrap();
+        run(BtcAction::Cancel { proposal: 3 }, None, Some(signer_at(21))).unwrap();
+        run(BtcAction::Cancel { proposal: 3 }, None, Some(signer_at(22))).unwrap();
         assert_eq!(state("3"), "cancelled");
+        running.stop();
+    }
+
+    /// Signers leaving their passes running: what is queued is proposed, once, however many of them
+    /// go at it, signed, broadcast and shown, with no one choosing a fee or anything else. What cannot
+    /// go waits and says why, and what costs too much is passed over, by the network's word or, with
+    /// Esplora gone, a fixed limit.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn withdrawals_are_proposed_signed_and_paid_by_the_signers_own_passes() {
+        use crate::cli::bridge::{BridgeAction, BridgeArgs, bridge};
+        use crate::cli::bridge::btc::BtcAction;
+        use crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::registry::federation::Federation;
+
+        let federation = Federation {
+            signers: [21u8, 22, 23].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 2,
+        };
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        let announced = deployed_at(&me, 3, hash);
+        let directory = crate::registry::directory::Directory { btc_gateway: Some(announced), ..Default::default() };
+        let running = Running::launch_genesis(true, false, |genesis| Genesis { federation: Some(federation.clone()), directory: Some(directory.clone()), ..genesis }, |node| node, Default::default());
+        let node = format!("http://{}", running.api);
+        let mut bitcoin = FakeBitcoin::start();
+        let dir = TempDir::new("btc-passes");
+        let esplora = bitcoin.esplora.url.clone();
+        let nonce = |of: &Address| -> u64 { serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{of}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap() };
+        let read = |contract: &Address, function: &str, args: serde_json::Value| -> serde_json::Value {
+            let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": args });
+            serde_json::from_str::<serde_json::Value>(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()["values"].clone()
+        };
+        // Each signer pays its own posts with its own key, as signers do.
+        let signer = |secret: u8| -> PathBuf {
+            let key = dir.0.join(format!("signer-{secret}.key"));
+
+            if !key.exists() {
+                fs::write(&key, Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).to_key_file()).unwrap();
+            }
+
+            key
+        };
+        let payer = |secret: u8| Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).public().address();
+
+        for secret in [21u8, 22, 23] {
+            send(running.args(TxArgs::Transfer { to: payer(secret).into(), amount: u256::from(10u64).pow(20) })).unwrap();
+        }
+
+        let wasm = dir.0.join("btc_relay.wasm");
+        fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
+        let start = nonce(&me);
+        assert_eq!(start, 3, "the signers paid for, so the gateway is deployed past them");
+        let relay = deployed_at(&me, start, hash);
+        send(running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+        let args = |action: BtcAction, evm_key: Option<PathBuf>, key: Option<PathBuf>, esplora: &str, btc_gateway: Option<Address>, max_fee_rate: Option<u64>| BridgeArgs {
+            action: BridgeAction::Btc { action },
+            node: node.clone(),
+            tls: Default::default(),
+            key,
+            gateway: None,
+            eth_rpc: Vec::new(),
+            evm_key,
+            btc_gateway,
+            esplora: Some(esplora.to_string()),
+            evm_gateways: Vec::new(),
+            max_fee_rate,
+        };
+        let run = |action: BtcAction, gateway: Option<Address>| bridge(args(action, None, None, &esplora, gateway, None));
+        run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None).unwrap();
+        let gateway = deployed_at(&me, start + 3, hash);
+        run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1 }, Some(gateway)).unwrap();
+        let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
+
+        // What the gateway holds: three deposits to spend on all that follows, each release holding one.
+        for sats in [300_000, 300_001, 300_002] {
+            let deposit = Transaction { version: 2, inputs: vec![TxIn { txid: [0x5e; 32], vout: 0, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }], outputs: vec![TxOut { value: sats, script: output.clone() }], lock_time: 0 }.base();
+            bitcoin.block(std::slice::from_ref(&deposit), false);
+            bitcoin.block(&[], false);
+            run(BtcAction::RelaySync { relay, batch: 10 }, Some(gateway)).unwrap();
+            run(BtcAction::Deposit { txid: FakeBitcoin::display(&crate::crypto::bitcoin::sha256d(&deposit)), vout: 0, recipient: me }, Some(gateway)).unwrap();
+        }
+
+        bitcoin.esplora.serve("/fee-estimates", r#"{"1":5.0,"3":4.2,"6":2.0}"#.to_string());
+        let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
+        let withdraw = |sats: u64, most_fee: Option<u64>| run(BtcAction::Withdraw { address: to.clone(), sats, most_fee }, Some(gateway)).unwrap();
+        let state_of = |id: &str| read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": id }]))[2]["value"].as_str().unwrap().to_string();
+        let count = || read(&gateway, "proposal_count", serde_json::json!([]))[0]["value"].as_str().unwrap().to_string();
+        let signed = |proposal: &str| (read(&gateway, "input_signatures", serde_json::json!([{ "type": "u64", "value": proposal }, { "type": "u64", "value": "0" }])).as_array().unwrap().len() - 2) / 2;
+        let pass = |secret: u8| bridge(args(BtcAction::Pass, Some(signer(secret)), Some(signer(secret)), &esplora, Some(gateway), None)).map_err(|err| err.to_string());
+
+        // Withdrawal 1 agreed to lose next to nothing: it must not hold up 2.
+        withdraw(10_000, Some(1));
+        withdraw(20_000, None);
+
+        // A stranger's key passes without proposing or signing anything.
+        bridge(args(BtcAction::Pass, Some(signer(99)), None, &esplora, Some(gateway), None)).unwrap();
+        assert_eq!(count(), "0");
+        bridge(args(BtcAction::Pass, None, None, &esplora, Some(gateway), None)).unwrap();
+        assert_eq!(count(), "0", "nor does a pass with no signer's key");
+
+        // Two signers in the same pass, each building the same one: one release, no one failing.
+        let passes: Vec<Result<(), String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = [21u8, 22].map(|secret| {
+                let pass = &pass;
+                scope.spawn(move || pass(secret))
+            }).into_iter().collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+        });
+        assert_eq!(passes, [Ok(()), Ok(())]);
+        assert_eq!(count(), "1", "the first won, and the other found that");
+        assert_eq!(state_of("1"), "queued");
+        assert_eq!(state_of("2"), "proposed");
+        let found = read(&gateway, "proposal", serde_json::json!([{ "type": "u64", "value": "1" }]));
+        let (release, _) = Transaction::read(&crate::structs::hex::from_hex(found[0]["value"].as_str().unwrap()).unwrap()).unwrap();
+        // At the rate the network asks for soon, rounded up: 5 satoshis a virtual byte.
+        let vbytes = crate::bridge::btc_release_vbytes(release.base().len(), &[(2, read(&gateway, "utxo_of", serde_json::json!([{ "type": "string", "value": read(&gateway, "utxo", serde_json::json!([{ "type": "u64", "value": "0" }]))[0]["value"].as_str().unwrap() }]))[4]["value"].as_str().unwrap().len() / 2 - 1)]);
+        assert_eq!(release.outputs[0].value, 20_000 - vbytes * 5);
+
+        // Whichever went first, another pass signs what the other had not seen, and broadcasts it.
+        pass(21).unwrap();
+        pass(22).unwrap();
+        assert_eq!(signed("1"), 2);
+        assert!(!bitcoin.esplora.posted.lock().unwrap().is_empty(), "with its signatures, it is broadcast");
+        let (mined, witnessed) = Transaction::read(&crate::structs::hex::from_hex(&format!("0x{}", bitcoin.esplora.posted.lock().unwrap().last().unwrap())).unwrap()).unwrap();
+        assert!(witnessed);
+
+        // Mined, buried and relayed: a pass shows it, and the withdrawal is paid.
+        bitcoin.block(std::slice::from_ref(&mined.base()), false);
+        bitcoin.block(&[], false);
+        run(BtcAction::RelaySync { relay, batch: 10 }, Some(gateway)).unwrap();
+        pass(23).unwrap();
+        assert_eq!(state_of("2"), "paid");
+
+        // With nothing more it can do, a pass pays for nothing, however often it goes.
+        let before = (nonce(&payer(21)), nonce(&payer(22)));
+        let shown = bitcoin.esplora.posted.lock().unwrap().len();
+        pass(21).unwrap();
+        pass(22).unwrap();
+        assert_eq!((nonce(&payer(21)), nonce(&payer(22))), before);
+        assert_eq!(bitcoin.esplora.posted.lock().unwrap().len(), shown);
+        assert_eq!(state_of("1"), "queued", "and what cannot go stays, until it may");
+
+        // Raised, it goes on the next pass. A signer that worked out the same release a moment too late
+        // finds it beaten: no failure, and nothing paid, as the dry run finds it first.
+        run(BtcAction::SetMostFee { withdrawal: 1, most_fee: 2_000 }, Some(gateway)).unwrap();
+        let late = crate::cli::bridge::Bridge::new(args(BtcAction::Pass, Some(signer(22)), Some(signer(22)), &esplora, Some(gateway), None)).unwrap();
+        let planned = late.plan_queue(&gateway, crate::bridge::ReleaseFee::Rate(5)).unwrap().unwrap();
+        let tx = planned.tx.clone().unwrap();
+        // A stranger's word is a real failure, with no one having come first.
+        assert!(late.post_unless_beaten(&gateway, &[99; 32], &tx, &planned.ids, 1).unwrap_err().to_string().contains("only a signer"));
+        let paid_before = nonce(&payer(22));
+        pass(21).unwrap();
+        assert_eq!((count().as_str(), state_of("1").as_str()), ("2", "proposed"));
+        assert!(!late.post_unless_beaten(&gateway, &[22; 32], &tx, &planned.ids, 1).unwrap(), "beaten to it");
+        assert_eq!(nonce(&payer(22)), paid_before);
+        assert_eq!(count(), "2");
+
+        // A release that pays far too much, by a signer gone astray. At 5 fastest the others sign for
+        // up to 25 a virtual byte: 20,000 is about 100 of them. They pass over it, and each pass goes on.
+        let hand = |fee: u64| bridge(args(BtcAction::Propose { fee: Some(fee) }, Some(signer(23)), Some(signer(23)), &esplora, Some(gateway), None)).unwrap();
+        withdraw(200_000, Some(100_000));
+        hand(20_000);
+        assert_eq!(count(), "3");
+        pass(21).unwrap();
+        pass(22).unwrap();
+        assert_eq!(signed("3"), 0, "refused, and logged");
+
+        // Its operator may say otherwise.
+        bridge(args(BtcAction::Sign, Some(signer(21)), Some(signer(21)), &esplora, Some(gateway), Some(200))).unwrap();
+        assert_eq!(signed("3"), 1);
+
+        // Esplora gone: what is queued stays queued, a pass stops for nothing, and what stands under the
+        // fixed limit is signed, as fees going unread should not halt withdrawals.
+        let gone = "http://127.0.0.1:1";
+        let blind = |secret: u8| bridge(args(BtcAction::Pass, Some(signer(secret)), Some(signer(secret)), gone, Some(gateway), None));
+        blind(22).unwrap();
+        assert_eq!(signed("3"), 2, "about 100 a virtual byte, under the fixed 200");
+        withdraw(200_000, Some(100_000));
+        blind(22).unwrap();
+        assert_eq!(state_of("4"), "queued", "no rate to propose at");
+        assert_eq!(count(), "3");
+        // Past the fixed limit it is passed over all the same.
+        hand(80_000);
+        assert_eq!(count(), "4");
+        blind(21).unwrap();
+        assert_eq!(signed("4"), 0, "about 400 a virtual byte");
         running.stop();
     }
 
@@ -2135,7 +2460,7 @@ mod send {
         let relayer_address = from_key(&[0x42; 32]).unwrap();
         send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new() })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None })
         };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -2152,7 +2477,7 @@ mod send {
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
         assert!(run(BridgeAction::Deploy, None).is_ok());
         let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new() })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None })
         };
         with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
@@ -2236,7 +2561,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
-        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways };
+        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways, max_fee_rate: None };
         bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, Vec::new()) }).unwrap();
 
         // Its owner's own peer, and a coin sent to it.
@@ -2332,7 +2657,7 @@ mod send {
         // This chain has no directory, so each signer vouches for Gateway.sol itself.
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
         let vouched = vec![(rpc.chain_id().unwrap(), evm_gateway)];
-        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone() };
+        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None };
         let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
             let started = std::time::Instant::now();
 

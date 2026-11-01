@@ -667,10 +667,12 @@ anyone (`open`, `--mining-open`, whose workers prove the open token), the `ws` p
 many `workers` are connected, or `null` when the node keeps its workers to itself.
 
 `GET /mining/ws` is the mining port over a WebSocket, for a browser, which opens no TCP
-connections: each text message is one line of the port's [protocol](consensus.md#mining-with-workers),
+connections, and behind TLS for any worker on an open port, whose token is public
+([why](consensus.md#mining-with-workers)): each text message is one line of the port's protocol,
 relayed to the port on the node's machine as it is and back, so the handshake proves the token to
 the port itself. A message holding a line end, or anything but text, ends it. The port sees the
-relay as a connection from the node's own machine.
+relay as a connection from the node's own machine, so 32 are allowed from each asker, by
+`X-Forwarded-For` from a `--trusted-proxy`.
 
 ### `GET /release`
 

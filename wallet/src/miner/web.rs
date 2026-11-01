@@ -50,7 +50,7 @@ impl Miner {
     /// Starts mining as the config says: an error for a port only TCP reaches, GPUs the browser
     /// does not have, or a WebSocket address the browser does not take.
     pub fn start(config: MineConfig, ctx: &egui::Context) -> Result<Miner, String> {
-        let Port::WebSocket(url) = &config.port else {
+        let Port::WebSocket { url, .. } = &config.port else {
             return Err("a browser reaches a mining port over its node's WebSocket, ws:// or wss://…/mining/ws, not TCP".to_string());
         };
 
@@ -210,7 +210,7 @@ struct State {
 
 /// Opens a WebSocket to the node, its handshake to follow as the node greets it.
 fn connect(state: &Rc<RefCell<State>>) -> Result<(), String> {
-    let Port::WebSocket(url) = state.borrow().config.port.clone() else {
+    let Port::WebSocket { url, .. } = state.borrow().config.port.clone() else {
         return Err("not a WebSocket".to_string());
     };
     let socket = WebSocket::new(&url).map_err(|err| format!("{url}: {}", said(&err)))?;

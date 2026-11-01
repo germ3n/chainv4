@@ -259,13 +259,36 @@ they are, so the handshake and the MACs are the same either way:
 - **Every message after carries an HMAC** under a session key both derive from the token and
   both randoms, over its direction, its number in that direction and its text. A message changed,
   made up, replayed or dropped does not check, and the connection ends.
-- **It is not encrypted.** Anyone on the path sees the work and the nonces, which only matter
-  until the block is out, and cannot change them. Put the port behind a VPN or an SSH tunnel to
-  hide even that.
+- **It is not encrypted on a private port.** Anyone on the path sees the work and the nonces, which
+  only matter until the block is out, and cannot change them. Put the port behind a VPN or an SSH
+  tunnel to hide even that.
 - **An open port's token is public,** so all of this holds only against someone without it, which
   is no one. Someone on the path of a `--mining-open` port can make the same MACs, and rewrite a
-  miner's payout both ways, unseen. There the transport has to protect it: the WebSocket over wss://,
-  or a private network.
+  miner's payout both ways, unseen. So the transport protects it: see below.
+
+**An open port goes over wss://.** A worker told to mine on one, having no token of its own, reaches
+the node's WebSocket behind TLS, the same protocol unchanged:
+- **Finding it:** `--node https://pool.example` asks `GET /mining` over TLS, and goes to its `ws` path
+  if the port is `open`, by the token and plain TCP otherwise. `--node HOST:PORT` with no token asks
+  `https://HOST` the same way, and stops if that does not answer, for you to name the API. `--node
+  wss://…/mining/ws` says it outright. `--protocol` is what the API says, unless told.
+- **Plain TCP** to an open port is refused, with what to do, unless `--insecure-open-port` says so. Only
+  what cannot be read on the way needs no flag: this machine, with no proxy or through one on this
+  machine, and an onion through a proxy on this machine, which Tor encrypts to the service itself. A
+  proxy elsewhere does not count, nor does an onion with no proxy.
+- **The certificate** is checked against the host's name, with the Mozilla roots built in, and no flag
+  skips it; only `--insecure-open-port` avoids it, by going over plain TCP. A node with its own
+  certificate, as a self-signed one, is trusted with `--ca-cert FILE`, its host's name checked all the
+  same. Without that a worker pointed at one says `the certificate … does not check: UnknownIssuer` and
+  tries again every 5 seconds, and never falls back.
+- **A node needs TLS in front** for any of this: the Docker stack's nginx. Over `http://` alone an open
+  port has no encrypted way to it, and a worker elsewhere says so.
+- **Staying up:** a worker sends its rates every 5 seconds and the node pings every 20, so neither nginx
+  nor a proxy with a timeout of a minute finds the socket idle; one closing it anyway is reconnected to
+  in 5 seconds, over TLS again, with the same payout.
+
+A private port stays as it is, on plain TCP: its token protects it. `--node https://…` with `--token`
+finds it there too.
 
 **What it does not do, without `--pool`:** pay anybody but the node. Workers send only nonces
 that meet the block's difficulty, and the rewards go to its `--reward-to`. For miners who are not
@@ -289,9 +312,9 @@ what it owes them.
 chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --mining-token mining.token --pool --pool-fee 1 …
 chainv4 worker --node 203.0.113.7:4002 --token mining.token --payout ed25519:0x… --gpu
 
-# An open pool: anyone joins with a payout address alone.
+# An open pool: anyone joins with a payout address alone, over wss:// to the node's API behind TLS.
 chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --pool --mining-open …
-chainv4 worker --node 203.0.113.7:4002 --payout ed25519:0x… --threads 8
+chainv4 worker --node https://pool.example --payout ed25519:0x… --threads 8
 
 # A miner claims what it earned, from any key that pays the fee.
 chainv4 claim --node http://203.0.113.7:8080 --to ed25519:0x… --key mine.key
@@ -368,7 +391,7 @@ blocks it finds and nothing of the others'.
 ```sh
 # A port anyone may mine alone on, and join the pool on too.
 chainv4 --mine --mine-threads 0 --mining 0.0.0.0:4002 --mining-open --mining-solo --pool …
-chainv4 worker --node 203.0.113.7:4002 --solo --payout ed25519:0x… --gpu
+chainv4 worker --node https://pool.example --solo --payout ed25519:0x… --gpu
 ```
 
 **How it goes:**

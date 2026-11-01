@@ -229,9 +229,13 @@ satoshis would arrive. It may change that while it waits, `set_most_fee(id, most
 it alone. The script is one Bitcoin's nodes relay: P2PKH, P2SH, or a witness program (P2WPKH,
 P2WSH, P2TR or a later version), as a release with any other output would never be mined.
 
-**Releasing** pays queued withdrawals:
-1. **Proposed:** anyone proposes a release, an unsigned Bitcoin transaction, with the
-   withdrawals it pays, at most 50, each once. The gateway checks its inputs are outputs it holds
+**Releasing** pays queued withdrawals, and the federation does it, with no one withdrawing having
+anything more to do: its signers' [passes](#the-commands) go through these steps by themselves.
+1. **Proposed:** a signer of the federation in force proposes a release, an unsigned Bitcoin
+   transaction, with the withdrawals it pays, at most 50, each once, signing `btc_propose_digest`
+   (double SHA-256 of a domain, the chain's id, the gateway, the number the release will have, its
+   transaction's id, and the withdrawals it pays); anyone may post that, `propose(raw, signature,
+   ids…)`. The gateway checks its inputs are outputs it holds
    unspent, each once, it pays each withdrawal what it burned less its share of the fee, its one
    other output is change to the federation in force, 546 satoshis or more, and its fee is between
    the floor and the cap. It is
@@ -252,9 +256,15 @@ lose, so one that said little waits, or the fee is lower. Its change is all it s
 withdrawals burned, so what the gateway holds falls by just what was burned, and wBTC stays backed
 one for one whatever the fee. It follows that a release spends just what they burned, or leaves
 change of at least dust; the last satoshis under dust wait for a deposit. A sweep pays no one, so its
-fee stays the federation's. Anyone may propose, so anyone may propose at the most a withdrawal agreed
-to lose: that limit, and the cap, are the protection against it. `withdrawal(id)` says the limit, and
-its share once it is in a release.
+fee stays the federation's. `withdrawal(id)` says the limit, and its share once it is in a release.
+
+**Only a signer proposes.** A release's fee is burned to Bitcoin's miners, off the withdrawals it pays,
+so anyone able to propose could burn all each had agreed to lose, or tie them up in a release no one
+signs. A signature says nothing but that one release: not on another chain or gateway, and it passes
+for no vote to cancel, nor for a Bitcoin signature, whose preimages start otherwise. It is good for
+one number, the next, so what proposed a release does not bring it back once the federation cancelled
+it: proposing it again, which is allowed, takes a signer signing again. One signer alone may propose
+at a fee the others refuse: they then pass over it and cancel it, as below.
 
 **The fee** of a release is held between two limits set once, at setup: `fee_cap`, the most it may
 pay in satoshis, and `fee_floor`, the least per virtual byte, so a release cannot hold its inputs
@@ -264,7 +274,7 @@ largest release one input can be, is refused at setup, as it could leave no rele
 larger release past the cap is split. Read them with `fee_limits()`.
 
 **Cancelling** frees what a release holds when it cannot be finished: one stuck on an old
-federation no one can reach, or one signers refuse.
+federation no one can reach, or one signers refuse, such as one paying far past what the network asks.
 - **Who:** the threshold of the federation in force, each signing `btc_cancel_digest` (double
   SHA-256 of a domain, the chain's id, the gateway, the release and its transaction's id), posted
   by anyone with `cancel(proposal, signature)`.
@@ -283,7 +293,7 @@ federation no one can reach, or one signers refuse.
 
 **A new federation** takes over the deposit addresses: new ones are made under it, and the old
 ones stay open for the grace period. A **sweep** is a release with no withdrawals, paying what
-older federations hold to the one in force.
+older federations hold to the one in force, proposed by a signer as any release is.
 
 **Reading it:** `wbtc()`, `deposit_script(address)` (the witness script, the output script and
 the federation's version), `utxo(n)`, `utxo_of(outpoint)` and `utxo_count()`, `withdrawal(id)`,
@@ -304,13 +314,46 @@ chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --fee-floor 2 --grace-hours 
 chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…
 chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL
 chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
-chainv4 bridge btc propose --fee 1000 --btc-gateway 0x… --esplora URL
-chainv4 bridge btc sign --btc-gateway 0x… --evm-key signer.key  # each signer
+chainv4 bridge btc watch --esplora URL --evm-key signer.key --key payer.key  # each signer, left running
+chainv4 bridge btc pass --esplora URL --evm-key signer.key --key payer.key   # one pass, as from cron
 chainv4 bridge btc cancel 1 --btc-gateway 0x… --evm-key signer.key  # each signer's vote
+chainv4 bridge btc sweep --fee 1000 --evm-key signer.key --btc-gateway 0x… --esplora URL
+```
+
+By hand, each step of a pass, and with a fee told:
+
+```sh
+chainv4 bridge btc propose --fee 1000 --evm-key signer.key --btc-gateway 0x… --esplora URL
+chainv4 bridge btc sign --evm-key signer.key --btc-gateway 0x… --esplora URL  # each signer
 chainv4 bridge btc finish 1 --btc-gateway 0x… --esplora URL     # assembled and broadcast
 chainv4 bridge btc released 1 --btc-gateway 0x… --esplora URL
-chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
 ```
+
+**A signer's pass** is `btc pass`, or every `--every` seconds, 60 unless told, `btc watch`, or
+`bridge watch` given `--esplora`. Each step stands alone, as with the other bridges: one going wrong
+is said, and the next goes on.
+1. **Proposes** what is queued, oldest first, at what Esplora says the network asks to mine it within
+   3 blocks (`/fee-estimates`), rounded up, or the floor if that is more or Esplora has no estimates.
+   It is worked out from the gateway's state and that rate alone, so signers at it together build the
+   same release, and the first to land wins: the others see that before they send, by a dry run, or
+   at worst one transaction later, and say so; none fails or pays again for it. What cannot go now is
+   said with why, and stays queued, without holding up the rest:
+   - one whose limit is under its share of the fee, until fees fall or its owner raises it;
+   - one whose anchor is in another release;
+   - one past what the gateway holds unspent for now;
+   - one too large for the cap at this rate alone; a release of many past the cap pays fewer, for the
+     next one to pay the rest.
+
+   With Esplora out of reach, nothing is proposed, rather than guess a fee a release cannot then change.
+2. **Signs** every open release that stands, as **sign** below.
+3. **Broadcasts** any with all its signatures that Esplora has not heard of, and **shows** any
+   `bitcoin_depth` deep, a cancelled one that was mined anyway among them. This takes no signer's key:
+   anyone may run a pass with no `--evm-key` to do just this, and `relay-sync` is still what keeps the
+   relay able to prove it.
+
+How long a withdrawal takes is then one pass of the federation, its threshold's signatures, and
+Bitcoin's own time: usually under an hour to be mined, and a little more to show as `paid`. It waits
+longer while fees run past what it agreed to lose, or the gateway holds too little.
 
 - **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told. Sync the relay first.
 - **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or another output script Bitcoin's nodes
@@ -319,9 +362,10 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
 - **propose** pays the queued withdrawals, oldest first, up to 50, from what the gateway holds
   unspent, in the order it took it, starting with what a withdrawal's anchor requires; one whose
   anchor is in another release waits for it, and so does one that agreed to lose less than its
-  share of `--fee`. A fee under the floor for that size is refused here, naming what it takes.
+  share of `--fee`. A fee under the floor for that size is refused here, naming what it takes. It
+  takes a signer's `--evm-key`; without `--fee` it goes by the network as a pass does.
 - **sweep** pays what older federations hold to the one in force, as much as the fee pays at the
-  floor; sweep again for the rest.
+  floor; sweep again for the rest. It takes a signer's `--evm-key`.
 - **sign** goes over every open release against the gateway's state before signing it: each
   withdrawal named once, still proposed, paid what it burned less its share of the fee, within what
   it agreed to lose, and with its anchor among the inputs; each
@@ -331,6 +375,15 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
   the next one, as is one this signer voted to cancel. The check is `check_btc_release`: a fault
   in the gateway alone should not be enough to take real bitcoin. It then signs each input it has
   not signed.
+- **A signer refuses what pays too much.** A release past the most a virtual byte this signer signs
+  for is logged and left, each pass going on: `--max-fee-rate` if told, else 3 times the fastest rate
+  Esplora says, at least 25, and never under the gateway's floor, so a quiet network refuses no normal
+  fee. Esplora out of reach, or no `--esplora`, should not halt withdrawals, so it goes on signing up
+  to a fixed 200, saying so. A release it refuses, or that falls past the limit as fees calm, is under
+  its threshold, so the federation can cancel it, and fees rising past one proposed earlier refuse
+  nothing; one with all its signatures is left to be mined or bumped, as below. Esplora is trusted for
+  this, and the cap still holds whatever it says: run your own for a limit that does not rest on
+  someone else's.
 - **cancel** is a signer's vote, signed with `--evm-key`.
 
 ## Caveats

@@ -250,7 +250,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, send: &mut Send
 
     #[cfg(feature = "mining")]
     {
-        let port = state.rig.port.as_ref().and_then(|port| port.as_ref().ok()).and_then(|mining| mine::port_address(mining, &node));
+        let port = state.rig.port.as_ref().and_then(|port| port.as_ref().ok()).and_then(|mining| mine::worker_node(mining, &node));
         mine::how_to_mine(ui, ctx, &from, port.as_deref());
     }
 

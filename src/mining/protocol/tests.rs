@@ -129,3 +129,66 @@ fn nothing_on_the_path_changes_where_a_worker_s_work_pays() {
     assert_eq!(pays_another(&json!({ "payout": ours.to_string() }), Some(&ours)), None);
     assert_eq!(pays_another(&json!({ "shares": 1 }), Some(&ours)), None);
 }
+
+#[test]
+fn only_this_machine_or_an_onion_through_tor_here_cannot_be_read_on_the_way() {
+    let tor = Some("socks5h://127.0.0.1:9050");
+    let afar = Some("socks5h://203.0.113.7:9050");
+
+    for here in ["127.0.0.1:4002", "127.7.0.1:4002", "[::1]:4002", "localhost:4002", "LOCALHOST:4002", "[::ffff:127.0.0.1]:4002"] {
+        assert!(plain_cannot_be_read(here, None), "{here}");
+        assert!(plain_cannot_be_read(here, tor), "{here}, through a proxy here");
+        assert!(!plain_cannot_be_read(here, afar), "{here}: that is the proxy's machine, and the way to it can be read");
+    }
+
+    for onion in ["abcdef.onion:4002", "ABCDEF.ONION:4002", "[abcdef.onion]:4002"] {
+        assert!(plain_cannot_be_read(onion, tor), "{onion}");
+        assert!(!plain_cannot_be_read(onion, None), "{onion}: with no Tor, it goes by the system's resolver");
+        assert!(!plain_cannot_be_read(onion, afar), "{onion}: the way to Tor can be read");
+    }
+
+    for elsewhere in ["203.0.113.7:4002", "pool.example:4002", "localhost.example:4002", "127.0.0.1.example:4002", "onion.example:4002", "x.onion.example:4002", "[2001:db8::1]:4002", "10.0.0.1:4002"] {
+        assert!(!plain_cannot_be_read(elsewhere, None), "{elsewhere}");
+        assert!(!plain_cannot_be_read(elsewhere, tor), "{elsewhere}, through a proxy here: it goes on from there as it is");
+    }
+}
+
+/// The same handshake and MACs over lines carried for it, as a WebSocket's messages are: the node's
+/// side cannot tell.
+#[test]
+fn a_worker_shakes_hands_over_lines_as_over_tcp_and_a_changed_payout_gets_nowhere() {
+    use std::sync::mpsc::sync_channel;
+
+    let ours = crate::structs::address::Address::Ed25519([1; 32]);
+    let me = Hello { name: "rig".to_string(), payout: Some(ours), solo: false };
+    let (out, sent) = sync_channel::<String>(4);
+    let (give, came) = sync_channel(4);
+    let (greeting, challenge) = greeting("chainv4").unwrap();
+    give.send(Ok(greeting.to_string())).unwrap();
+
+    let node = thread::spawn(move || {
+        let hello: Value = serde_json::from_str(&sent.recv().unwrap()).unwrap();
+        let (said, answer, mut sealer, mut opener) = welcome(OPEN_TOKEN, "chainv4", &challenge, &hello).unwrap();
+        give.send(Ok(answer.to_string())).unwrap();
+        give.send(Ok(sealer.seal(&json!({ "type": "work" })))).unwrap();
+
+        (said, opener.open(&sent.recv().unwrap()).unwrap())
+    });
+    let (mut sender, mut receiver) = connect_over(out, came, OPEN_TOKEN, "chainv4", &me).unwrap();
+
+    assert_eq!(receiver.receive().unwrap()["type"], "work");
+    sender.send(&json!({ "type": "rate" })).unwrap();
+    let (said, rate) = node.join().unwrap();
+    assert_eq!((said.payout, rate["type"].as_str()), (Some(ours), Some("rate")));
+}
+
+#[test]
+fn lines_that_stop_coming_are_a_closed_connection_not_a_wait_for_ever() {
+    use std::sync::mpsc::sync_channel;
+
+    let (out, _sent) = sync_channel::<String>(1);
+    let (give, came) = sync_channel::<Result<String, String>>(1);
+    drop(give);
+
+    assert!(connect_over(out, came, OPEN_TOKEN, "chainv4", &Hello::default()).err().unwrap().contains("closed"));
+}

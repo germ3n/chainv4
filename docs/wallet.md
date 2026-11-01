@@ -688,11 +688,19 @@ inside the wallet, paying the address picked.
   with the port it names. **Other port** takes a `host:port` in its place, kept in settings as
   `mine_port`. A port open to anyone needs no token; a private one takes the token its operator
   hands its miners, typed into **Token** and kept in settings as `mine_token`: it is the port's
-  shared secret, not a key of the wallet's, and proves only that this worker may mine there. The
-  worker connects over TCP, through the wallet's proxy when one is set. That proxy must be a
-  `socks5h://` one: an HTTP proxy does not carry the port's protocol, and the wallet never goes
+  shared secret, not a key of the wallet's, and proves only that this worker may mine there. A
+  private port's worker connects over TCP, through the wallet's proxy when one is set. That proxy must
+  be a `socks5h://` one: an HTTP proxy does not carry the port's protocol, and the wallet never goes
   around a proxy set, so with one it does not mine. A node that
   takes no miners answers 404, and the card says so.
+- **A port open to anyone** goes over the node's `wss://`, through that proxy too, as its token is
+  public and anyone on the way could otherwise change where the work pays, unseen. The certificate is
+  checked against the host's name, against the roots built into the app, and nothing skips it. Plain
+  TCP goes only where it cannot be read on the way: the node on this device, or at its onion through a
+  proxy on this device, such as Orbot. A node at `http://` has no encrypted way to its open port, and
+  **Start** says so rather than go anyway; a self-signed node's certificate is refused, with the reason
+  under the card. **Other port** takes a `wss://…/mining/ws` too; without a token, a `host:port` is
+  taken for an open one and refused the same.
 - **Alone or in the pool:** alone, each block the device finds pays the address in full and
   nothing comes between blocks; in the pool, the pool pays the address its part of each block the
   pool finds, by the shares it sent, less the pool's fee, claimed below. Whichever the port does
@@ -721,13 +729,15 @@ inside the wallet, paying the address picked.
   every platform. The wallet never starts mining by itself as it opens.
 - **In the browser** the wallet reaches no TCP port: it mines over the node's WebSocket,
   `GET /mining/ws` (`ws://` for a node at `http://`, `wss://` for `https://`), which relays the
-  port's protocol unchanged, so the handshake and the MACs stay between the wallet and the port.
+  port's protocol unchanged, so the handshake and the MACs stay between the wallet and the port. A
+  port open to anyone takes `ws://` only on this device or at an onion, and says why not otherwise.
   **Other port** does not show there. See [Mining in the browser](#mining-in-the-browser).
 
 Whoever mines, the node checks every nonce before it seals a block with it; the wallet signs
 nothing to mine. For a rig, **Mining from other machines** gives the worker's command with the
-port and the address filled in, `chainv4 worker --node HOST:PORT --payout ADDRESS`, with `--solo`
-to mine alone and `--token FILE` for a private port.
+node and the address filled in, `chainv4 worker --node https://NODE --payout ADDRESS` for a port open
+to anyone and `--node HOST:PORT` otherwise, with `--solo` to mine alone and `--token FILE` for a private
+port.
 
 ### Mining in the browser
 
@@ -1079,8 +1089,9 @@ light client:
   and deep enough, is minted as wBTC by its proof from the block it came in; without the light
   client, by Esplora's proof of a transaction typed in. wBTC is withdrawn to a `bc1q…` address or
   an output script nodes relay, from 10,000 satoshis: it says what you get, the amount up to a tenth
-  less, as a release's fee comes off the withdrawals it pays. The account's withdrawals show queued,
-  proposed or paid, and what each lost.
+  less, as a release's fee comes off the withdrawals it pays. There is nothing more to do: the
+  federation pays it out in a release of its own, usually within the hour, longer while fees run past
+  what it agreed to lose. The account's withdrawals show queued, proposed or paid, and what each lost.
 
 Settings gives the EVM chains' JSON-RPC URLs and the Esplora API, as for Swaps.
 

@@ -789,6 +789,22 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Only federation signers propose a Bitcoin release, and they do it by themselves.** Done 2026-11-01. Anyone could
+  call `propose`, so a griefer could push a release's fee up to each withdrawer's limit, burning it to miners, or tie
+  withdrawals up in releases no one signs. It now takes a signature of the federation in force over
+  `btc_propose_digest` (chain, gateway, the number it will have, its transaction, its withdrawals), good once, so what
+  proposed a release does not bring it back after a cancel. Nothing proposed by itself before: `bridge btc pass`,
+  `bridge btc watch` and `bridge watch --esplora` now propose what is queued at Esplora's rate (`plan_btc_release`,
+  worked out alike by every signer, and what cannot go says why without holding up the rest), sign, broadcast and show.
+  Signers refuse what pays past `--max-fee-rate`, by default 3 times the fastest rate and at least 25 sat/vB, or a fixed
+  200 with Esplora out of reach. Needs a new gateway: new deposit addresses.
+- [x] **An open mining port goes over wss://.** Done 2026-11-01. Its token is public, so anyone on the path could rewrite a
+  payout both ways, unseen. The native worker spoke plain TCP alone: it now speaks the node's `/mining/ws` over rustls
+  (`mining::wss`), the certificate always checked, found from `GET /mining` with `--node https://…`, and `Worker::start`
+  refuses plain TCP to an open port unless `--insecure-open-port`, or it cannot be read on the way: this machine, or an
+  onion through a proxy here. The wallet's native miner follows the same rule, and the web wallet refuses `ws://` to an
+  open port elsewhere, which it used to take. nginx's `/mining/ws` lost `X-Forwarded-For` to its own `proxy_set_header`,
+  so the node counted every worker as nginx, 16 at most: it says it now, and both allow 32 an address.
 - [x] **One Bitcoin withdrawal could be paid up to 50 times.** `propose` checked each withdrawal was queued but marked
   them only after the loop, so a release naming one id 50 times paid one burn 50 times. A repeated id is refused, and
   `bridge btc sign` goes over each release against the gateway's state before signing, rather than signing every open

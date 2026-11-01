@@ -66,6 +66,25 @@ pub fn btc_cancel_digest(chain_id: u64, gateway: &Address, proposal: u64, txid: 
 
 #[cfg(feature = "bitcoin")]
 #[document(
+    summary = "What a federation signer signs to propose a release on the Bitcoin gateway: double SHA-256 of a domain, the chain's id, the gateway, the number the release will have, its transaction's id and the withdrawals it pays, as the gateway makes it. The number makes a signature good once: a release cancelled takes signing again to come back.",
+    params = {
+        chain_id = "The chain's id.",
+        gateway = "The Bitcoin gateway.",
+        proposal = "The number it will have: proposal_count and one.",
+        raw = "Its transaction without witnesses.",
+        ids = "The withdrawals it pays, in order.",
+    },
+    category = "Bridges",
+    see_also = "sign_digest, btc_cancel_digest",
+)]
+pub fn btc_propose_digest(chain_id: u64, gateway: &Address, proposal: u64, raw: &[u8], ids: &[u64]) -> [u8; 32] {
+    let named: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+
+    crate::crypto::bitcoin::sha256d(&[b"chainv4-btc-propose".as_slice(), &chain_id.to_le_bytes(), &gateway.to_abi(), &proposal.to_le_bytes(), &crate::crypto::bitcoin::sha256d(raw), &(ids.len() as u64).to_le_bytes(), &named].concat())
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
     summary = "The most virtual bytes a release can be once signed, as the Bitcoin gateway reckons it to hold its fee to the floor: its bytes without witnesses, and for each input, a threshold of signatures of at most 73 bytes and its witness script.",
     params = {
         base = "The length of the transaction without its witnesses.",
@@ -144,11 +163,13 @@ pub struct ReleaseFacts {
     pub fee_cap: u64,
     #[document(summary = "The least it may pay a virtual byte.")]
     pub fee_floor: u64,
+    #[document(summary = "The most a virtual byte this signer signs for, from btc_most_fee_rate: what a release pays past it is burned.")]
+    pub most_rate: u64,
 }
 
 #[cfg(feature = "bitcoin")]
 #[document(
-    summary = "Whether a federation signer should sign a release. The gateway checks all of this when it is proposed; a signer goes over it again, as what it signs pays real bitcoin and a fault in the contract should not be enough to take it: each withdrawal named once, paid what it burned less its share of the fee, within what it agreed to lose, and still waiting; each input once, held, pending; only change besides, of the size and to the federation it should be; a fee between the floor and the cap; and nothing Bitcoin would refuse or delay.",
+    summary = "Whether a federation signer should sign a release. The gateway checks all of this when it is proposed; a signer goes over it again, as what it signs pays real bitcoin and a fault in the contract should not be enough to take it: each withdrawal named once, paid what it burned less its share of the fee, within what it agreed to lose, and still waiting; each input once, held, pending; only change besides, of the size and to the federation it should be; a fee between the floor and the cap, and at no more a virtual byte than this signer takes; and nothing Bitcoin would refuse or delay.",
     returns = "Why not, or nothing when it may sign.",
     category = "Bridges",
 )]
@@ -247,7 +268,207 @@ pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
         return Err(format!("its fee of {fee} is not from {least}, the floor for its size, to the cap of {}", facts.fee_cap));
     }
 
+    let vbytes = btc_release_vbytes(facts.raw.len(), &sizes);
+
+    if fee > vbytes.saturating_mul(facts.most_rate) {
+        return Err(format!("its fee of {fee} is {} satoshis a virtual byte, past the {} this signer signs for now: give --max-fee-rate to sign it, or the federation cancels it", fee / vbytes.max(1), facts.most_rate));
+    }
+
     Ok(())
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "How many times the fastest fee rate Bitcoin's network asks a signer signs for: a release proposed a moment ago, or as the network calms, stays well under it.", category = "Bridges")]
+pub const BTC_RATE_TIMES_FASTEST: u64 = 3;
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "What a signer signs for whatever the network asks, in sat/vB, so a quiet one, where the fastest rate is 1, does not refuse a release proposed at a normal fee.", category = "Bridges")]
+pub const BTC_RATE_ALWAYS_SIGNED: u64 = 25;
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "The most a signer signs for not knowing what the network asks, in sat/vB: a fee rate past any but a rush, so fees going unread neither halt withdrawals nor sign just anything.", category = "Bridges")]
+pub const BTC_RATE_BLIND: u64 = 200;
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "The most a virtual byte a signer signs a release for: what the operator told it; else a few times the network's fastest rate, at least BTC_RATE_ALWAYS_SIGNED and the gateway's floor; else, with Esplora out of reach, BTC_RATE_BLIND, or the floor should it be higher.",
+    params = {
+        told = "--max-fee-rate, if given.",
+        fastest = "The network's fastest rate from Esplora, if it said one.",
+        fee_floor = "The least the gateway lets a release pay a virtual byte.",
+    },
+    category = "Bridges",
+    see_also = "check_btc_release",
+)]
+pub fn btc_most_fee_rate(told: Option<u64>, fastest: Option<f64>, fee_floor: u64) -> u64 {
+    match (told, fastest) {
+        (Some(told), _) => told,
+        (None, Some(fastest)) => ((fastest.ceil() as u64).saturating_mul(BTC_RATE_TIMES_FASTEST)).max(BTC_RATE_ALWAYS_SIGNED).max(fee_floor),
+        (None, None) => BTC_RATE_BLIND.max(fee_floor),
+    }
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "How much a release proposed from the queue pays.", category = "Bridges", see_also = "plan_btc_release")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseFee {
+    #[document(summary = "This many satoshis, as an operator told: it holds or nothing is proposed.")]
+    Fixed(u64),
+    #[document(summary = "This many satoshis a virtual byte of whatever it comes to, at least the gateway's floor.")]
+    Rate(u64),
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "What to propose of the queue, and what waits and why.", category = "Bridges", see_also = "plan_btc_release")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleasePlan {
+    #[document(summary = "The release, unsigned, if any can be made now.")]
+    pub tx: Option<crate::crypto::bitcoin::tx::Transaction>,
+    #[document(summary = "The withdrawals it pays, in the order of its outputs.")]
+    pub ids: Vec<u64>,
+    #[document(summary = "What it pays in fees.")]
+    pub fee: u64,
+    #[document(summary = "Each withdrawal it cannot pay now, with why.")]
+    pub waiting: Vec<(u64, String)>,
+}
+
+/// The most withdrawals one release pays, as the gateway allows.
+#[cfg(feature = "bitcoin")]
+const BTC_MOST_WITHDRAWALS: usize = 50;
+/// The most virtual bytes one release may be, as the gateway allows.
+#[cfg(feature = "bitcoin")]
+const BTC_MOST_VBYTES: u64 = 100_000;
+
+/// What pays these withdrawals, spending just what they burned or leaving change of at least dust:
+/// what their anchors require, then what the gateway holds in the order it took it. None if it holds
+/// too little.
+#[cfg(feature = "bitcoin")]
+fn btc_inputs<'a>(chosen: &[&NamedWithdrawal], held: &'a [(String, SpentOutput)]) -> Option<Vec<&'a (String, SpentOutput)>> {
+    let burned: u64 = chosen.iter().map(|withdrawal| withdrawal.sats).sum();
+    let required = |outpoint: &str| chosen.iter().any(|withdrawal| withdrawal.anchor.as_deref() == Some(outpoint));
+    let mut inputs: Vec<_> = held.iter().filter(|(outpoint, _)| required(outpoint)).collect();
+    let enough = |taken: u64| taken == burned || taken >= burned + BTC_DUST;
+    let mut taken: u64 = inputs.iter().map(|(_, output)| output.sats).sum();
+
+    for output in held.iter().filter(|(outpoint, _)| !required(outpoint)) {
+        if enough(taken) {
+            break;
+        }
+
+        inputs.push(output);
+        taken += output.1.sats;
+    }
+
+    enough(taken).then_some(inputs)
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "The release to propose from what is queued and what the gateway holds, oldest first. It is worked out from the gateway's state and the fee alone, so signers doing it at once build the same one, and the first to land wins. A withdrawal it cannot pay now is left out and said why, never holding up the rest: one whose anchor is in another release, one past what the gateway holds, one that agreed to lose less than its share of the fee. A release past the cap at this rate pays fewer, for another to pay the rest.",
+    params = {
+        queued = "What is queued, oldest first.",
+        held = "What the gateway holds unspent, in the order it took it.",
+        change = "The output script of the federation in force.",
+        fee_cap = "The most fee a release may pay.",
+        fee_floor = "The least it may pay a virtual byte.",
+        fee = "What it pays.",
+    },
+    returns = "The plan, or why a fee told cannot be paid.",
+    category = "Bridges",
+    see_also = "btc_propose_digest, check_btc_release",
+)]
+pub fn plan_btc_release(queued: &[NamedWithdrawal], held: &[(String, SpentOutput)], change: &[u8], fee_cap: u64, fee_floor: u64, fee: ReleaseFee) -> Result<ReleasePlan, String> {
+    use crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut};
+
+    let mut waiting = Vec::new();
+    let mut out: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    for withdrawal in queued {
+        if let Some(anchor) = withdrawal.anchor.as_deref().filter(|anchor| !held.iter().any(|(at, _)| at == anchor)) {
+            out.insert(withdrawal.id);
+            waiting.push((withdrawal.id, format!("the input it must spend, {anchor}, is in another release")));
+        }
+    }
+
+    // How many one release may pay: fewer once one this large is past the cap, and those left go in
+    // the next, so nothing is said of them.
+    let mut most = BTC_MOST_WITHDRAWALS;
+
+    loop {
+        let chosen: Vec<&NamedWithdrawal> = queued.iter().filter(|withdrawal| !out.contains(&withdrawal.id)).take(most).collect();
+
+        if chosen.is_empty() {
+            return Ok(ReleasePlan { tx: None, ids: Vec::new(), fee: 0, waiting });
+        }
+
+        let Some(inputs) = btc_inputs(&chosen, held) else {
+            let largest = chosen.iter().rev().max_by_key(|withdrawal| withdrawal.sats).expect("there is one").id;
+            out.insert(largest);
+            waiting.push((largest, "the gateway holds too little unspent to pay it and leave change of at least dust, for now".to_string()));
+
+            continue;
+        };
+        let burned: u64 = chosen.iter().map(|withdrawal| withdrawal.sats).sum();
+        let taken: u64 = inputs.iter().map(|(_, output)| output.sats).sum();
+        let spends = inputs
+            .iter()
+            .map(|(outpoint, _)| {
+                let (txid, vout) = outpoint.split_once(':').ok_or("an outpoint that does not read")?;
+                // The gateway keys what it holds by the id in Bitcoin's own byte order.
+                let txid: [u8; 32] = crate::structs::hex::from_hex(&format!("0x{txid}")).and_then(|bytes| bytes.try_into().ok()).ok_or("an outpoint that does not read")?;
+
+                Ok(TxIn { txid, vout: vout.parse().map_err(|_| "an outpoint that does not read")?, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() })
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
+        let mut outputs: Vec<TxOut> = chosen.iter().map(|withdrawal| TxOut { value: withdrawal.sats, script: withdrawal.script.clone() }).collect();
+
+        // Withdrawals pay their own fee, so all the rest of what it spends is change, and the fee
+        // comes off no backing.
+        if taken > burned {
+            outputs.push(TxOut { value: taken - burned, script: change.to_vec() });
+        }
+
+        let mut tx = Transaction { version: 2, inputs: spends, outputs, lock_time: 0 };
+        let sizes: Vec<(u32, usize)> = inputs.iter().map(|(_, output)| (output.threshold, output.script_len)).collect();
+        let vbytes = btc_release_vbytes(tx.base().len(), &sizes);
+        let paid = match fee {
+            ReleaseFee::Fixed(fee) if fee < vbytes.saturating_mul(fee_floor) => return Err(format!("a fee of {fee} is under the floor: this release pays at least {}", vbytes.saturating_mul(fee_floor))),
+            ReleaseFee::Fixed(fee) if fee > fee_cap => return Err(format!("a fee of {fee} is past the gateway's cap of {fee_cap}")),
+            ReleaseFee::Fixed(fee) => fee,
+            ReleaseFee::Rate(rate) => vbytes.saturating_mul(rate.max(fee_floor)),
+        };
+
+        if paid > fee_cap || vbytes > BTC_MOST_VBYTES {
+            most = chosen.len() - 1;
+
+            if most == 0 {
+                waiting.push((chosen[0].id, format!("a release of it alone comes to {vbytes} virtual bytes and a fee of {paid}, past the gateway's limits, until fees fall")));
+            }
+
+            continue;
+        }
+
+        let count = chosen.len() as u64;
+        let short = chosen
+            .iter()
+            .enumerate()
+            .filter(|(at, withdrawal)| btc_fee_share(paid, count, *at) > withdrawal.most_fee)
+            .min_by_key(|(at, withdrawal)| (withdrawal.most_fee, std::cmp::Reverse(*at)))
+            .map(|(_, withdrawal)| withdrawal);
+
+        if let Some(short) = short {
+            out.insert(short.id);
+            waiting.push((short.id, format!("it agreed to lose {}, less than its share of a fee of {paid}: its owner raises that with set-most-fee, or it waits for fees to fall", short.most_fee)));
+
+            continue;
+        }
+
+        for (at, output) in tx.outputs.iter_mut().take(chosen.len()).enumerate() {
+            output.value -= btc_fee_share(paid, count, at);
+        }
+
+        return Ok(ReleasePlan { tx: Some(tx), ids: chosen.iter().map(|withdrawal| withdrawal.id).collect(), fee: paid, waiting });
+    }
 }
 
 #[cfg(feature = "bitcoin")]

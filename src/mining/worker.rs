@@ -1,11 +1,14 @@
 //! A worker: mines for a node over its mining port, on this machine's CPU threads or GPUs, so a
 //! rig with no node of its own adds its hashrate to one that has. It takes whatever work the node
 //! hands it, in the range of nonces the node gives it, sends back each nonce it finds and, every
-//! few seconds, its devices' hashrates; it reconnects when the connection goes.
+//! few seconds, its devices' hashrates; it reconnects when the connection goes. It reaches an open
+//! port, whose token is public, over the node's wss://, and nothing starts over plain TCP to one that
+//! can be read on the way unless its operator says so.
 
 use {
     super::protocol::{self, PING, QUIET, Receiver, Sender},
     super::status::Work,
+    super::wss::{self, Target},
     crate::consensus::{DeviceReport, Rig},
     crate::structs::address::Address,
     crate::structs::block::Seal,
@@ -47,7 +50,7 @@ pub enum Devices {
 )]
 #[derive(Clone)]
 pub struct WorkerConfig {
-    #[document(summary = "The node's mining port, as host:port.")]
+    #[document(summary = "The node's mining port, as host:port; or its WebSocket, as wss://host/mining/ws, which carries the same protocol over TLS.")]
     pub node: String,
     #[document(summary = "The secret the node was given, which proves this worker may mine for it.")]
     pub token: Vec<u8>,
@@ -65,6 +68,10 @@ pub struct WorkerConfig {
     pub claims: Option<std::path::PathBuf>,
     #[document(summary = "Mine alone: each block found pays the payout in full, on a node started with --mining-solo, which refuses it otherwise. Needs a payout.")]
     pub solo: bool,
+    #[document(summary = "Go over plain TCP to an open port all the same, where anyone on the way could rewrite this worker's payout: --insecure-open-port.")]
+    pub insecure_open_port: bool,
+    #[document(summary = "A PEM file's text holding the certificates to trust for wss://, in place of the roots built in: a node's own. Its host's name is checked all the same.")]
+    pub ca_cert: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for WorkerConfig {
@@ -79,6 +86,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("payout", &self.payout)
             .field("claims", &self.claims)
             .field("solo", &self.solo)
+            .field("insecure_open_port", &self.insecure_open_port)
             .finish_non_exhaustive()
     }
 }
@@ -120,6 +128,12 @@ impl Worker {
 
         if config.solo && config.payout.is_none() {
             return Err("mining alone needs a payout address, for the blocks found to pay".to_string());
+        }
+
+        route(&config)?;
+
+        if config.insecure_open_port && config.token == protocol::OPEN_TOKEN && !config.node.contains("://") && !protocol::plain_cannot_be_read(&config.node, config.proxy.as_deref()) {
+            log::warn!("[worker] --insecure-open-port: anyone on the way to {} can rewrite where this worker's work pays", config.node);
         }
 
         let thread = {
@@ -227,13 +241,51 @@ fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStrea
     }
 }
 
-/// A connection to the node, past its handshake's TCP part: directly, or through the proxy.
-fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
-    if let Some(proxy) = &config.proxy {
-        return through(proxy, &config.node);
+/// How a worker reaches its node.
+enum Route {
+    Tcp,
+    Wss(Target),
+}
+
+/// How a worker goes as told, or why it may not. Everything that mines comes through here, so nothing
+/// can start over plain TCP to an open port someone could read on the way: its token is public, so
+/// they could make its MACs too, and rewrite where its work pays both ways, unseen.
+fn route(config: &WorkerConfig) -> Result<Route, String> {
+    if config.node.contains("://") {
+        return Target::parse(&config.node).map(Route::Wss);
     }
 
-    let addresses = config.node.to_socket_addrs().map_err(|err| format!("no address for it: {err}"))?;
+    if config.token != protocol::OPEN_TOKEN || protocol::plain_cannot_be_read(&config.node, config.proxy.as_deref()) {
+        return Ok(Route::Tcp);
+    }
+
+    if config.insecure_open_port {
+        return Ok(Route::Tcp);
+    }
+
+    Err(format!(
+        "{} is a port open to anyone, whose token is public, so anyone on the way could rewrite where this worker's work pays, both ways and unseen. Give the node's API, --node https://NODE, or its WebSocket, --node wss://NODE/mining/ws. --insecure-open-port goes over plain TCP all the same",
+        config.node
+    ))
+}
+
+/// A connection to the node, past its handshake's TCP part: directly, or through the proxy.
+fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
+    let at = match route(config)? {
+        Route::Tcp => config.node.clone(),
+        Route::Wss(target) => target.address(),
+    };
+
+    connect_to(&at, config.proxy.as_deref())
+}
+
+/// A connection to an address, directly or through the proxy.
+pub(crate) fn connect_to(at: &str, proxy: Option<&str>) -> Result<TcpStream, String> {
+    if let Some(proxy) = proxy {
+        return through(proxy, at);
+    }
+
+    let addresses = at.to_socket_addrs().map_err(|err| format!("no address for it: {err}"))?;
     let mut last = "no address for it".to_string();
 
     for address in addresses {
@@ -325,9 +377,19 @@ fn session(
     status: &Mutex<WorkerStatus>,
 ) -> Result<(), String> {
     stream.set_nodelay(true).map_err(|err| err.to_string())?;
-    stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
     let me = protocol::Hello { name: config.name.clone(), payout: config.payout, solo: config.solo };
-    let (sender, mut receiver) = protocol::connect_as(stream.try_clone().map_err(|err| err.to_string())?, &config.token, &config.protocol, &me)?;
+    let held = stream.try_clone().map_err(|err| err.to_string())?;
+    let (sender, mut receiver) = match route(config)? {
+        Route::Tcp => {
+            stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
+            protocol::connect_as(held, &config.token, &config.protocol, &me)?
+        }
+        // The thread keeping the WebSocket ends once this connection is shut, or its lines dropped.
+        Route::Wss(target) => {
+            let lines = wss::open(held, &target, config.ca_cert.as_deref())?;
+            protocol::connect_over(lines.out, lines.came, &config.token, &config.protocol, &me)?
+        }
+    };
     log::info!("[worker] mining for {} as {}{}", config.node, config.name, if config.solo { ", alone" } else { "" });
 
     {
@@ -713,6 +775,8 @@ mod tests {
             payout: Some(ours),
             claims: None,
             solo: false,
+            insecure_open_port: false,
+            ca_cert: None,
         })
         .unwrap();
 
@@ -723,6 +787,230 @@ mod tests {
         assert_eq!(status.jobs, 0, "it mined nothing for them");
         assert!(status.trouble.as_deref().is_some_and(|why| why.contains(&theirs.to_string()) && why.contains(&ours.to_string())), "{:?}", status.trouble);
         worker.wait();
+    }
+
+    /// A SOCKS5 proxy on this machine for one connection, which takes the mining port's handshake
+    /// itself, whatever name it was asked for: all a worker going over plain TCP can tell of a port
+    /// elsewhere. What the handshake said of the worker.
+    fn port_through_proxy(token: &'static [u8]) -> (String, std::thread::JoinHandle<protocol::Hello>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let at = format!("socks5h://{}", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            stream.write_all(&[5, 0]).unwrap();
+            let mut head = [0; 5];
+            stream.read_exact(&mut head).unwrap();
+            let mut asked = vec![0; usize::from(head[4]) + 2];
+            stream.read_exact(&mut asked).unwrap();
+            stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).unwrap();
+
+            protocol::accept(stream, token, "chainv4").map_err(|why| format!("the handshake: {why}")).unwrap().2
+        });
+
+        (at, served)
+    }
+
+    fn config(node: &str, token: &[u8], proxy: Option<String>) -> WorkerConfig {
+        WorkerConfig {
+            node: node.to_string(),
+            token: token.to_vec(),
+            name: "rig".to_string(),
+            protocol: "chainv4".to_string(),
+            devices: Devices::Cpu(1),
+            proxy,
+            payout: Some(Address::Ed25519([0xa; 32])),
+            claims: None,
+            solo: false,
+            insecure_open_port: false,
+            ca_cert: None,
+        }
+    }
+
+    #[test]
+    fn plain_tcp_to_an_open_port_is_refused_without_the_flag_and_goes_with_it() {
+        let (at, served) = port_through_proxy(protocol::OPEN_TOKEN);
+        let refused = Worker::start(config("pool.example:4002", protocol::OPEN_TOKEN, Some(at.clone()))).err().unwrap();
+
+        assert!(refused.contains("--insecure-open-port") && refused.contains("rewrite"), "{refused}");
+        // Nor by writing the token out as a private one's: it is what it is, not what it is called.
+        assert!(Worker::start(config("pool.example:4002", b"chainv4 open mining pool", Some(at.clone()))).is_err());
+
+        let worker = Worker::start(WorkerConfig { insecure_open_port: true, ..config("pool.example:4002", protocol::OPEN_TOKEN, Some(at)) }).unwrap();
+        assert_eq!(served.join().unwrap().payout, Some(Address::Ed25519([0xa; 32])), "told, it went over plain TCP");
+        drop(worker);
+    }
+
+    #[test]
+    fn a_port_on_this_machine_or_an_onion_through_tor_here_cannot_be_read_on_the_way() {
+        let (at, served) = port_through_proxy(protocol::OPEN_TOKEN);
+        let onion = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:4002";
+        let worker = Worker::start(config(onion, protocol::OPEN_TOKEN, Some(at))).unwrap();
+
+        assert_eq!(served.join().unwrap().name, "rig", "at an onion, through Tor on this machine");
+        drop(worker);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let served = std::thread::spawn(move || protocol::accept(listener.accept().unwrap().0, protocol::OPEN_TOKEN, "chainv4").map(|taken| taken.2.name));
+        let worker = Worker::start(config(&address, protocol::OPEN_TOKEN, None)).unwrap();
+
+        assert_eq!(served.join().unwrap().unwrap(), "rig", "on this machine");
+        drop(worker);
+
+        // Anything else can be: an onion with no Tor goes by the system's resolver, and a proxy
+        // elsewhere reads what it is sent.
+        let refused = |node: &str, proxy: Option<&str>| Worker::start(config(node, protocol::OPEN_TOKEN, proxy.map(str::to_string))).is_err();
+
+        assert!(refused(onion, None));
+        assert!(refused(onion, Some("socks5h://192.0.2.1:9050")));
+        assert!(refused("127.0.0.1:4002", Some("socks5h://192.0.2.1:9050")));
+        assert!(refused("203.0.113.7:4002", None));
+        assert!(refused("localhost.example:4002", None));
+    }
+
+    #[test]
+    fn a_private_tokens_port_is_unaffected_and_stays_on_plain_tcp() {
+        const TOKEN: &[u8] = b"a private port's token, 32 characters";
+        let (at, served) = port_through_proxy(TOKEN);
+        let worker = Worker::start(config("pool.example:4002", TOKEN, Some(at))).unwrap();
+
+        assert_eq!(served.join().unwrap().name, "rig");
+        drop(worker);
+    }
+
+    #[test]
+    fn a_websocket_without_tls_is_refused_as_it_protects_nothing() {
+        assert!(Worker::start(config("ws://pool.example/mining/ws", protocol::OPEN_TOKEN, None)).err().unwrap().contains("without TLS"));
+        assert!(Worker::start(config("https://pool.example", protocol::OPEN_TOKEN, None)).err().unwrap().contains("wss://"));
+    }
+
+    /// A node's port behind TLS and a WebSocket, as nginx is in front of it: each connection in turn
+    /// goes as what it is given says, with the port's own handshake.
+    fn behind_tls<F>(sessions: F) -> (String, std::thread::JoinHandle<()>)
+    where
+        F: FnOnce(&dyn Fn() -> Option<(tungstenite::WebSocket<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>, protocol::Sealer, protocol::Opener)>) + Send + 'static,
+    {
+        let (listener, tls) = wss::tests::tls_listener();
+        let at = format!("wss://localhost:{}/mining/ws", listener.local_addr().unwrap().port());
+        let served = std::thread::spawn(move || {
+            let next = || {
+                let stream = wss::tests::accept_one(&listener, &tls).ok()?;
+                let mut socket = tungstenite::accept(stream).ok()?;
+                let (greeting, challenge) = protocol::greeting("chainv4").unwrap();
+                socket.send(tungstenite::Message::text(greeting.to_string())).unwrap();
+                let hello: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                let (_, answer, sealer, opener) = protocol::welcome(protocol::OPEN_TOKEN, "chainv4", &challenge, &hello).unwrap();
+                socket.send(tungstenite::Message::text(answer.to_string())).unwrap();
+
+                Some((socket, sealer, opener))
+            };
+
+            sessions(&next);
+        });
+
+        (at, served)
+    }
+
+    fn until(worker: &Worker, what: impl Fn(&WorkerStatus) -> bool) -> WorkerStatus {
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        loop {
+            let status = worker.status();
+
+            if what(&status) {
+                return status;
+            }
+
+            assert!(Instant::now() < deadline, "never came to it: {status:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A proxy closing what it takes for idle, as nginx's proxy_read_timeout would, or going away: the
+    /// worker comes back, over TLS, by itself, and takes work again. What it sends says it is alive
+    /// well within any such timeout: its rates, every few seconds, whatever it finds.
+    #[test]
+    fn a_worker_over_wss_mines_keeps_talking_and_comes_back_from_a_proxy_closing_the_socket() {
+        let (at, served) = behind_tls(|next| {
+            let (mut socket, _, mut opener) = next().unwrap();
+            // Quiet, it still says it is there, sealed as the port wants.
+            let rate = opener.open(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(rate["type"], "rate");
+            // Hung up on, with no goodbye.
+            socket.get_ref().sock.shutdown(std::net::Shutdown::Both).unwrap();
+            drop(socket);
+
+            let (mut socket, mut sealer, mut opener) = next().unwrap();
+            let chain = HashType::default_chain();
+            let id = Hash::from_bytes(chain, &[7; 32]).unwrap();
+            let work = json!({ "type": "work", "job": 4, "chain": chain.name(), "id": crate::structs::hex::to_hex(&id.to_bytes()), "difficulty": "1", "hash": chain.name(), "start": 0 });
+            socket.send(tungstenite::Message::text(sealer.seal(&work))).unwrap();
+
+            let found = loop {
+                let message = opener.open(socket.read().unwrap().to_text().unwrap()).unwrap();
+
+                if message["type"] == "found" {
+                    break message;
+                }
+            };
+
+            assert_eq!(found["job"], 4);
+            socket.send(tungstenite::Message::text(sealer.seal(&json!({ "type": "verdict", "job": 4, "took": true, "kind": "block" })))).unwrap();
+
+            while socket.read().is_ok() {}
+        });
+        let worker = Worker::start(WorkerConfig { ca_cert: Some(wss::tests::CERT.to_vec()), ..config(&at, protocol::OPEN_TOKEN, None) }).unwrap();
+        let status = until(&worker, |status| status.blocks == 1);
+
+        assert!(status.connected && status.jobs == 1, "{status:?}");
+        drop(worker);
+        served.join().unwrap();
+    }
+
+    /// Over wss:// a port that says it pays another is believed no more than over TCP.
+    #[test]
+    fn a_worker_over_wss_told_it_pays_another_address_stops_and_says_so() {
+        let theirs = Address::Ed25519([0xe; 32]);
+        let (listener, tls) = wss::tests::tls_listener();
+        let at = format!("wss://localhost:{}/mining/ws", listener.local_addr().unwrap().port());
+        let served = std::thread::spawn(move || {
+            let stream = wss::tests::accept_one(&listener, &tls).unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let (greeting, challenge) = protocol::greeting("chainv4").unwrap();
+            socket.send(tungstenite::Message::text(greeting.to_string())).unwrap();
+            let hello: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            let answer = protocol::answer_paying_for_tests(protocol::OPEN_TOKEN, "chainv4", &challenge, &hello, &theirs);
+            socket.send(tungstenite::Message::text(answer.to_string())).unwrap();
+
+            while socket.read().is_ok() {}
+        });
+        let worker = Worker::start(WorkerConfig { ca_cert: Some(wss::tests::CERT.to_vec()), ..config(&at, protocol::OPEN_TOKEN, None) }).unwrap();
+        let status = until(&worker, |status| status.trouble.is_some());
+
+        assert!(status.trouble.as_deref().is_some_and(|why| why.starts_with(protocol::PAYOUT_DIFFERS)), "{status:?}");
+        worker.wait();
+        served.join().unwrap();
+    }
+
+    /// A certificate that does not check is never mined past, and never falls back: the worker says
+    /// why and keeps trying, as one may be put right.
+    #[test]
+    fn a_worker_refused_a_certificate_says_why_and_never_falls_back_to_plain_tcp() {
+        let (listener, tls) = wss::tests::tls_listener();
+        let at = format!("wss://localhost:{}/mining/ws", listener.local_addr().unwrap().port());
+        let served = std::thread::spawn(move || {
+            // Each try is TLS or nothing: a plain handshake would show up here as an error of another kind.
+            wss::tests::accept_one(&listener, &tls).err().unwrap()
+        });
+        let worker = Worker::start(config(&at, protocol::OPEN_TOKEN, None)).unwrap();
+        let status = until(&worker, |status| status.trouble.is_some());
+
+        assert!(status.trouble.as_deref().is_some_and(|why| why.contains("does not check") && why.contains("--ca-cert")), "{status:?}");
+        assert!(!status.connected);
+        assert!(!served.join().unwrap().is_empty());
+        drop(worker);
     }
 
     #[test]

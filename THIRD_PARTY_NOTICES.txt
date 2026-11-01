@@ -4568,7 +4568,7 @@ darling_macro 0.24.1
 
 data-encoding 2.11.1
   MIT
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2015-2020 Julien Cretin
   Copyright (c) 2017-2020 Google Inc.
 
@@ -5394,7 +5394,7 @@ hickory-resolver 0.26.3
 
 hkdf 0.13.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2015-2018 Vlad Filippov
   Copyright (c) 2018-2021 RustCrypto Developers
 
@@ -6848,7 +6848,7 @@ rand 0.8.8
 
 rand 0.9.5
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright 2018 Developers of the Rand project
   Copyright (c) 2014 The Rust Project Developers
 
@@ -6866,7 +6866,7 @@ rand_chacha 0.3.1
 
 rand_chacha 0.9.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright 2018 Developers of the Rand project
   Copyright (c) 2014 The Rust Project Developers
 
@@ -6878,7 +6878,7 @@ rand_core 0.6.4
 
 rand_core 0.9.5
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright 2018 Developers of the Rand project
   Copyright (c) 2014 The Rust Project Developers
 
@@ -7362,7 +7362,7 @@ serdect 0.4.3
 
 sha1 0.10.7
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2006-2009 Graydon Hoare
   Copyright (c) 2009-2013 Mozilla Foundation
   Copyright (c) 2016 Artyom Pavlov
@@ -7817,7 +7817,7 @@ try-lock 0.2.5
 
 tungstenite 0.29.0
   MIT OR Apache-2.0
-  Built into: node
+  Built into: node and wallet
   Copyright (c) 2017 Alexey Galakhov
   Copyright (c) 2016 Jason Housley
 

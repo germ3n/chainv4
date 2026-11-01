@@ -7,8 +7,9 @@
 //! payout to be and its own HMAC of all that, and the worker stops if that payout is not its own.
 //! The session key is a third HMAC of them, so it differs every connection. So nothing between them
 //! changes where a worker's work pays, while the token is a secret. An open port's token is public:
-//! anyone on the path can make these MACs too, so only the transport, wss:// or a private network,
-//! protects a worker's payout there.
+//! anyone on the path can make these MACs too, so only the transport protects a worker's payout
+//! there: a worker takes wss:// to an open port, and plain TCP only where it cannot be read on the way
+//! (plain_cannot_be_read) or when its operator says so.
 //!
 //! **Every message after** is `MAC JSON`: an HMAC under the session key of its direction, its
 //! number in that direction, and the JSON. A message changed, made up, replayed or dropped does not
@@ -59,6 +60,42 @@ pub fn pays_another(message: &Value, payout: Option<&crate::structs::address::Ad
 
 /// The longest line either side reads: a work or rate message is far shorter.
 pub const MOST_LINE: u64 = 64 * 1024;
+
+/// A host as a connection names it: an IPv6 address without its brackets, and no port or scheme.
+fn host_of(address: &str) -> &str {
+    let address = address.split_once("://").map_or(address, |(_, rest)| rest);
+
+    match address.strip_prefix('[') {
+        Some(inside) => inside.split_once(']').map_or(inside, |(host, _)| host),
+        None => address.rsplit_once(':').map_or(address, |(host, _)| host),
+    }
+}
+
+/// Whether a host is this machine: by its address, or the name every system gives it. A name in DNS
+/// could lead anywhere, whatever it looks like.
+pub fn is_loopback(address: &str) -> bool {
+    let host = host_of(address);
+
+    host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
+/// Whether a host is a Tor onion service, which Tor encrypts to the service itself.
+pub fn is_onion(address: &str) -> bool {
+    host_of(address).to_ascii_lowercase().trim_end_matches('.').ends_with(".onion")
+}
+
+#[document(
+    summary = "Whether no one can read a plain connection to a mining port on its way, the one reason a worker takes an open port's public token over plain TCP. This machine, with no proxy to send it elsewhere; or through a proxy on this machine, this machine or an onion, which Tor encrypts to the service itself. A proxy on another machine reads what it is sent, onion or not, and an onion with no proxy goes by whatever the system's resolver makes of it.",
+    params = { address = "The port, host:port.", proxy = "The SOCKS5 proxy it is reached through, if any." },
+    category = "Mining",
+    see_also = "OPEN_TOKEN",
+)]
+pub fn plain_cannot_be_read(address: &str, proxy: Option<&str>) -> bool {
+    match proxy {
+        None => is_loopback(address),
+        Some(proxy) => is_loopback(proxy) && (is_loopback(address) || is_onion(address)),
+    }
+}
 
 /// An HMAC-SHA256 of these parts, one after the other, under a key.
 fn mac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
@@ -291,10 +328,43 @@ impl Joining {
     }
 }
 
+/// Where a connection's lines go: a TCP connection, or the thread keeping a WebSocket for it.
+#[cfg(not(target_arch = "wasm32"))]
+enum Outgoing {
+    Tcp(TcpStream),
+    Lines(std::sync::mpsc::SyncSender<String>),
+}
+
+/// Where a connection's lines come from.
+#[cfg(not(target_arch = "wasm32"))]
+enum Incoming {
+    Tcp(BufReader<TcpStream>),
+    Lines(std::sync::mpsc::Receiver<Result<String, String>>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Incoming {
+    fn line(&mut self) -> Result<String, String> {
+        match self {
+            Incoming::Tcp(reader) => read_line(reader),
+            // A silent WebSocket is a silent node, gone as a TCP connection's read would time out.
+            Incoming::Lines(came) => match came.recv_timeout(QUIET) {
+                Ok(line) => line,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("the connection broke: nothing came for too long".to_string()),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("the connection closed".to_string()),
+            },
+        }
+    }
+
+    fn json(&mut self) -> Result<Value, String> {
+        serde_json::from_str(&self.line()?).map_err(|_| "a handshake that does not read".to_string())
+    }
+}
+
 /// The sending half of a connection.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Sender {
-    stream: TcpStream,
+    out: Outgoing,
     sealer: Sealer,
 }
 
@@ -303,17 +373,23 @@ impl Sender {
     /// Sends a message, with its MAC.
     pub fn send(&mut self, message: &Value) -> Result<(), String> {
         let mut line = self.sealer.seal(message);
-        line.push('\n');
 
-        // One write a message: the stream is unbuffered, and formatting writes each piece apart.
-        self.stream.write_all(line.as_bytes()).map_err(|err| format!("the connection broke: {err}"))
+        match &mut self.out {
+            Outgoing::Tcp(stream) => {
+                line.push('\n');
+
+                // One write a message: the stream is unbuffered, and formatting writes each piece apart.
+                stream.write_all(line.as_bytes()).map_err(|err| format!("the connection broke: {err}"))
+            }
+            Outgoing::Lines(out) => out.send(line).map_err(|_| "the connection closed".to_string()),
+        }
     }
 }
 
 /// The receiving half of a connection.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct Receiver {
-    reader: BufReader<TcpStream>,
+    incoming: Incoming,
     opener: Opener,
 }
 
@@ -322,7 +398,7 @@ impl Receiver {
     /// The next message, once its MAC checks; an error for one that does not, or a closed
     /// connection.
     pub fn receive(&mut self) -> Result<Value, String> {
-        let line = read_line(&mut self.reader)?;
+        let line = self.incoming.line()?;
 
         self.opener.open(&line)
     }
@@ -368,7 +444,7 @@ pub fn accept(stream: TcpStream, token: &[u8], protocol: &str) -> Result<(Sender
     let (said, answer, sealer, opener) = welcome(token, protocol, &challenge, &hello)?;
     write_line(&mut writer, &answer)?;
 
-    Ok((Sender { stream: writer, sealer }, Receiver { reader, opener }, said))
+    Ok((Sender { out: Outgoing::Tcp(writer), sealer }, Receiver { incoming: Incoming::Tcp(reader), opener }, said))
 }
 
 /// A node's handshake, had it taken another payout from the hello: for the worker's tests.
@@ -386,6 +462,16 @@ pub(super) fn accept_paying_for_tests(stream: TcpStream, token: &[u8], protocol:
     write_line(&mut writer, &json!({ "proof": hex(&proof), "payout": payout })).unwrap();
 }
 
+/// A node's answer to a hello, had it taken another payout from it: for the worker's tests.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn answer_paying_for_tests(token: &[u8], protocol: &str, challenge: &[u8; 32], hello: &Value, payout: &crate::structs::address::Address) -> Value {
+    let nonce: [u8; 32] = unhex(&hello["nonce"]).unwrap();
+    let fields = hello_fields(&version(protocol), hello["name"].as_str().unwrap_or_default(), hello["payout"].as_str().unwrap_or_default(), hello["solo"] == true);
+    let payout = payout.to_string();
+
+    json!({ "proof": hex(&mac(token, &[b"node", challenge, &nonce, &fields, payout.as_bytes()])), "payout": payout })
+}
+
 /// The worker's side of the handshake: the halves of the connection once the node proved it knows
 /// the token too.
 #[cfg(not(target_arch = "wasm32"))]
@@ -397,16 +483,31 @@ pub fn connect(stream: TcpStream, token: &[u8], protocol: &str, name: &str, payo
 #[cfg(not(target_arch = "wasm32"))]
 pub fn connect_as(stream: TcpStream, token: &[u8], protocol: &str, me: &Hello) -> Result<(Sender, Receiver), String> {
     let mut writer = stream.try_clone().map_err(|err| err.to_string())?;
-    let mut reader = BufReader::new(stream.try_clone().map_err(|err| err.to_string())?);
-    let greeting = read_json(&mut reader)?;
+    let mut incoming = Incoming::Tcp(BufReader::new(stream.try_clone().map_err(|err| err.to_string())?));
+    let greeting = incoming.json()?;
     let (hello, joining) = hello(&greeting, token, protocol, me)?;
     write_line(&mut writer, &hello)?;
 
     // A node that refuses the token closes the connection.
-    let answer = read_json(&mut reader).map_err(|_| "the node refused the token".to_string())?;
+    let answer = incoming.json().map_err(|_| "the node refused the token".to_string())?;
     let (sealer, opener) = joining.finish(token, &answer)?;
 
-    Ok((Sender { stream: writer, sealer }, Receiver { reader, opener }))
+    Ok((Sender { out: Outgoing::Tcp(writer), sealer }, Receiver { incoming, opener }))
+}
+
+/// The worker's side of the handshake over lines already carried for it, a WebSocket's messages: the
+/// same handshake, the same MACs.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn connect_over(out: std::sync::mpsc::SyncSender<String>, came: std::sync::mpsc::Receiver<Result<String, String>>, token: &[u8], protocol: &str, me: &Hello) -> Result<(Sender, Receiver), String> {
+    let mut incoming = Incoming::Lines(came);
+    let greeting = incoming.json()?;
+    let (hello, joining) = hello(&greeting, token, protocol, me)?;
+    out.send(hello.to_string()).map_err(|_| "the connection closed".to_string())?;
+
+    let answer = incoming.json().map_err(|_| "the node refused the token".to_string())?;
+    let (sealer, opener) = joining.finish(token, &answer)?;
+
+    Ok((Sender { out: Outgoing::Lines(out), sealer }, Receiver { incoming, opener }))
 }
 
 #[cfg(test)]

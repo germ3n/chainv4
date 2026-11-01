@@ -27,7 +27,8 @@
 #                  [--fund COINS]      from your key through the node at url (1000 coins unless
 #                                     said), for push to take there and up to run
 #   docker/pow.sh worker host         any rig: mine for the VPS's node over its mining port, with
-#      [--gpu [--gpus 0,2] | --cpu]    no chain of its own: every GPU, those picked, or threads
+#      [--gpu [--gpus 0,2] | --cpu]    no chain of its own: every GPU, those picked, or threads. An
+#                                     open pool goes over wss://: give it as https://host
 #   docker/pow.sh status [url]        either: the node's chain, height, peers and mining
 #   docker/pow.sh logs                on the VPS: follow the node's log
 #   docker/pow.sh onion               on the VPS: the node's onion address, with TOR=1 in .env
@@ -55,6 +56,8 @@
 #   TOKEN          worker's token file: POW_HOME's mining.token, else docker/config's
 #   PAYOUT         worker's address for a mining pool to pay its shares to, its claims kept in
 #                  POW_HOME's pool-claims.json; alone, without a token, for an open pool
+#   INSECURE_OPEN_PORT  1 for worker to mine on an open port over plain TCP all the same, though
+#                  anyone on the way could rewrite where its work pays
 #   PROTOCOL       the chain's protocol name, for join and worker, as the VPS's .env has it
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
@@ -651,7 +654,10 @@ worker() {
         *) if [ -n "${PROXY:-}" ]; then set -- "$@" --proxy "$PROXY"; fi ;;
     esac
 
+    if [ "${INSECURE_OPEN_PORT:-}" = 1 ]; then set -- "$@" --insecure-open-port; fi
+
     case "$host" in
+        http://* | https://*) node=$host ;;
         *:*:*) node="[$host]:$mining_port" ;;
         *) node="$host:$mining_port" ;;
     esac

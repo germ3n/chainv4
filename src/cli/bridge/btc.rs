@@ -1,12 +1,13 @@
 //! `chainv4 bridge btc`: Bitcoin's side of the bridges. The light client contract
 //! (contracts/examples/btc_relay) is started at a checkpoint and kept in sync from an Esplora API;
 //! the Bitcoin gateway (contracts/lua/btc_gateway.lua) mints wBTC for deposits shown with their
-//! proofs, burns it for withdrawals, and pays them out through releases proposed, signed by the
-//! federation input by input, assembled, broadcast and proven here.
+//! proofs, burns it for withdrawals, and pays them out through releases proposed and signed by the
+//! federation input by input, assembled, broadcast and proven here. A signer's pass does all of that
+//! by itself, every step standing alone, so withdrawals are paid with no one at a keyboard.
 
 use {
     super::Bridge,
-    crate::bridge::{BTC_DUST, NamedWithdrawal, ReleaseFacts, SpentOutput, btc_cancel_digest, btc_fee_share, btc_release_vbytes, check_btc_release, sign_digest},
+    crate::bridge::{BTC_DUST, NamedWithdrawal, ReleaseFacts, ReleaseFee, SpentOutput, btc_cancel_digest, btc_most_fee_rate, btc_propose_digest, btc_release_vbytes, check_btc_release, plan_btc_release, sign_digest},
     crate::cli::CliResult,
     crate::crypto::bitcoin::sha256d,
     crate::crypto::bitcoin::tx::{Network, Transaction, TxIn, TxOut, address, der, p2wsh},
@@ -17,8 +18,9 @@ use {
     serde_json::{Value, json},
 };
 
-/// The most withdrawals one release pays, as the gateway allows.
-const MOST_WITHDRAWALS: usize = 50;
+/// How soon a release proposed from the queue should be mined, in blocks: what its fee rate is the
+/// network's for. It cannot be replaced once signed, only bumped by a child paying for it.
+const SOON_BLOCKS: u32 = 3;
 
 #[derive(clap::Subcommand)]
 pub enum BtcAction {
@@ -74,20 +76,35 @@ pub enum BtcAction {
     },
     /// Changes the most a queued withdrawal of yours may lose to fees, as fees rise past it.
     SetMostFee { withdrawal: u64, most_fee: u64 },
-    /// Proposes a release paying the queued withdrawals from what the gateway holds, with this fee,
-    /// which comes off them evenly. One that agreed to lose less than its share waits.
+    /// A federation signer, with --evm-key, proposes a release paying the queued withdrawals from
+    /// what the gateway holds. Its fee comes off them evenly, and one that agreed to lose less than
+    /// its share waits. A pass does this by itself; this is for a fee told by hand.
     Propose {
+        /// The fee in satoshis: what Esplora says the network asks, for the release's size, unless
+        /// told.
         #[arg(long)]
-        fee: u64,
+        fee: Option<u64>,
     },
-    /// Proposes a sweep of everything older federations hold to the one in force, with this fee.
+    /// A federation signer, with --evm-key, proposes a sweep of everything older federations hold
+    /// to the one in force, with this fee.
     Sweep {
         #[arg(long)]
         fee: u64,
     },
-    /// A federation signer's pass, with --evm-key: goes over every open release against the
-    /// gateway's state, and signs every input of those that stand.
+    /// A federation signer's signing, with --evm-key: goes over every open release against the
+    /// gateway's state, and signs every input of those that stand, at no more than --max-fee-rate
+    /// allows.
     Sign,
+    /// One pass of what pays withdrawals: with a signer's --evm-key, proposes what is queued and
+    /// signs what stands; with or without one, broadcasts what has its signatures and shows what
+    /// Bitcoin mined. Each step stands alone, and what cannot go now waits for the next pass.
+    Pass,
+    /// A pass, then again after a pause, until stopped: what a signer leaves running.
+    Watch {
+        /// Seconds between passes.
+        #[arg(long, default_value_t = 60)]
+        every: u64,
+    },
     /// A federation signer's vote to cancel a release with an input under its threshold of
     /// signatures, with --evm-key; once enough voted, its inputs and withdrawals go back.
     Cancel { proposal: u64 },
@@ -170,8 +187,42 @@ fn asked_again(tries: u32, mut wait: impl FnMut(std::time::Duration), mut ask: i
     Err(format!("{last}; asked {} times", tries.max(1)))
 }
 
+fn whole_size(value: &Value) -> usize {
+    whole(value) as usize
+}
+
 fn whole(value: &Value) -> u64 {
     text(value).parse().unwrap_or(0)
+}
+
+/// What the network asks for a release to be mined, as Esplora says it, in satoshis a virtual byte.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct FeeRates {
+    /// For the next block: what a signer's limit is reckoned from.
+    fastest: f64,
+    /// For within SOON_BLOCKS: what a release proposed from the queue pays.
+    soon: f64,
+}
+
+/// Esplora's /fee-estimates, a rate by how many blocks it is for: None for no rate at all, as a
+/// regtest one answers, and an error for an answer that is no such thing.
+fn fee_rates_from(answer: &str) -> Result<Option<FeeRates>, String> {
+    let estimates: std::collections::BTreeMap<String, f64> = serde_json::from_str(answer).map_err(|_| "Esplora gave fee estimates that do not read".to_string())?;
+    let rates: std::collections::BTreeMap<u32, f64> = estimates.into_iter().filter_map(|(blocks, rate)| Some((blocks.parse().ok()?, rate))).filter(|(_, rate)| rate.is_finite() && *rate > 0.0).collect();
+    let Some(fastest) = rates.values().next().copied() else {
+        return Ok(None);
+    };
+
+    Ok(Some(FeeRates { fastest, soon: rates.range(SOON_BLOCKS..).next().map_or(fastest, |(_, rate)| *rate) }))
+}
+
+/// How far a pass has found nothing left to do: what is paid, spent or released stays so, so a
+/// signer running for months does not read its whole history every pass.
+#[derive(Clone, Copy, Default)]
+pub(super) struct BtcDone {
+    withdrawals: u64,
+    outputs: u64,
+    releases: u64,
 }
 
 /// The path in Esplora's Merkle proof, each sibling in Bitcoin's own byte order.
@@ -321,32 +372,294 @@ impl Bridge {
                 };
                 self.call(self.btc_gateway()?, "withdraw", u256::ZERO, vec![bytes(script), number(*sats), most_fee.map_or(TxCallArgumentType::Nil, number)])
             }
-            BtcAction::Propose { fee } => self.propose(*fee, false),
-            BtcAction::Sweep { fee } => self.propose(*fee, true),
-            BtcAction::Sign => self.sign_releases(),
+            BtcAction::Propose { fee } => self.propose(*fee),
+            BtcAction::Sweep { fee } => self.sweep(*fee),
+            BtcAction::Sign => self.sign_releases(&self.fee_rates()),
+            BtcAction::Pass => self.btc_pass(),
+            BtcAction::Watch { every } => loop {
+                if let Err(why) = self.btc_pass() {
+                    eprintln!("the Bitcoin pass: {why}");
+                }
+
+                std::thread::sleep(std::time::Duration::from_secs(*every));
+            },
             BtcAction::Cancel { proposal } => self.vote_cancel(*proposal),
             BtcAction::Finish { proposal } => self.finish(*proposal),
             BtcAction::Released { proposal } => {
                 let found = self.read(&self.btc_gateway()?, "proposal", json!([{ "type": "u64", "value": proposal.to_string() }]))?;
-                let txid = shown(&raw(found.get(1).ok_or("no such release")?));
-                let Proof { tx, block, index, path, coinbase, coinbase_path } = self.proof(&txid)?;
-                self.call(self.btc_gateway()?, "released", u256::ZERO, vec![number(*proposal), bytes(block.to_vec()), bytes(tx), number(index), bytes(path), bytes(coinbase), bytes(coinbase_path)])
+                self.show_released(*proposal, &found)
             }
         }
     }
 
-    /// What the gateway holds unspent: each outpoint, its satoshis and federation version.
-    fn unspent(&self, gateway: &Address) -> CliResult<Vec<(String, u64, u64)>> {
-        let count = whole(self.read(gateway, "utxo_count", json!([]))?.first().ok_or("no count")?);
-        let mut found = Vec::new();
+    /// Shows a release Bitcoin mined, by Esplora's proof of it.
+    fn show_released(&self, proposal: u64, found: &[Value]) -> CliResult<()> {
+        let (bytes, number) = (TxCallArgumentType::Bytes, TxCallArgumentType::U64);
+        let txid = shown(&raw(found.get(1).ok_or("no such release")?));
+        let Proof { tx, block, index, path, coinbase, coinbase_path } = self.proof(&txid)?;
 
-        for n in 0..count {
-            let utxo = self.read(gateway, "utxo", json!([{ "type": "u64", "value": n.to_string() }]))?;
+        self.call(self.btc_gateway()?, "released", u256::ZERO, vec![number(proposal), bytes(block.to_vec()), bytes(tx), number(index), bytes(path), bytes(coinbase), bytes(coinbase_path)])
+    }
 
-            if utxo.get(4).map(text).as_deref() == Some("unspent") {
-                found.push((text(&utxo[0]), whole(&utxo[1]), whole(&utxo[2])));
+    /// What the network asks now, from Esplora: None for an Esplora that has no estimates to give,
+    /// and an error for one out of reach or throttling. Asked once a pass, and again only once: fees
+    /// going unread must not hold up a pass for long.
+    fn fee_rates(&self) -> Result<Option<FeeRates>, String> {
+        let base = self.args.esplora.as_deref().ok_or("no --esplora given")?;
+        let url = format!("{}/fee-estimates", base.trim_end_matches('/'));
+        let answer = asked_again(2, std::thread::sleep, || {
+            let mut answer = self.agent.get(&url).call().map_err(|err| format!("Esplora /fee-estimates: {err}"))?;
+
+            match answer.status().as_u16() {
+                404 => Ok("{}".to_string()),
+                200 => answer.body_mut().read_to_string().map_err(|err| format!("Esplora /fee-estimates: {err}")),
+                status => Err(format!("Esplora /fee-estimates: it answered {status}")),
+            }
+        })?;
+
+        fee_rates_from(&answer)
+    }
+
+    /// Whether this key is a signer of the federation in force.
+    fn is_signer(&self, secret: &[u8; 32]) -> CliResult<bool> {
+        let key = to_hex(&crate::crypto::secp256k1::public_key(secret).ok_or("--evm-key is no key")?);
+
+        Ok(self.status()?["federation"]["signers"].as_array().into_iter().flatten().any(|signer| signer.as_str() == Some(&key)))
+    }
+
+    /// The federation signer's key, for what only it may propose.
+    fn proposer(&self) -> CliResult<[u8; 32]> {
+        let secret = self.evm_secret().map_err(|why| format!("only a signer of the federation in force proposes: {why}"))?;
+
+        match self.is_signer(&secret)? {
+            true => Ok(secret),
+            false => Err("--evm-key is not a signer of the federation in force, which alone proposes".into()),
+        }
+    }
+
+    /// One pass of all that pays withdrawals. Each step stands alone, so one going wrong stops no
+    /// other, and what cannot go now waits for the next pass.
+    pub(super) fn btc_pass(&self) -> CliResult<()> {
+        let gateway = self.btc_gateway()?;
+        let rates = self.fee_rates();
+
+        if let Err(why) = &rates {
+            eprintln!("what Bitcoin's network asks: {why}");
+        }
+
+        match self.args.evm_key.as_ref().map(|_| self.evm_secret()).transpose()? {
+            Some(secret) if self.is_signer(&secret)? => {
+                if let Err(why) = self.propose_by_itself(&gateway, &secret, &rates) {
+                    eprintln!("proposing: {why}");
+                }
+
+                if let Err(why) = self.sign_releases(&rates) {
+                    eprintln!("signing releases: {why}");
+                }
+            }
+            Some(_) => eprintln!("--evm-key is not a signer of the federation in force: proposing and signing nothing"),
+            None => {}
+        }
+
+        // Without Esplora nothing can be broadcast or proven, and each try would wait to be asked again.
+        if rates.is_ok()
+            && let Err(why) = self.carry_on_releases(&gateway)
+        {
+            eprintln!("finishing releases: {why}");
+        }
+
+        Ok(())
+    }
+
+    /// Proposes what is queued at the rate the network asks, if anything can go. What cannot goes
+    /// said and stays queued. Signers doing this at once work out one release, and the first to land
+    /// wins: the others find that before they send, or at worst one transaction later.
+    fn propose_by_itself(&self, gateway: &Address, secret: &[u8; 32], rates: &Result<Option<FeeRates>, String>) -> CliResult<()> {
+        let rate = match rates {
+            Ok(Some(rates)) => rates.soon.ceil() as u64,
+            // A rate of nothing pays the gateway's floor, all that is known to ask.
+            Ok(None) => 0,
+            Err(_) if self.queued(gateway)?.is_empty() => return Ok(()),
+            Err(why) => {
+                eprintln!("what is queued stays queued, as no fee rate could be read: {why}");
+
+                return Ok(());
+            }
+        };
+        let Some(plan) = self.plan_queue(gateway, ReleaseFee::Rate(rate))? else {
+            return Ok(());
+        };
+
+        for (id, why) in &plan.waiting {
+            println!("withdrawal {id} waits: {why}");
+        }
+
+        let Some(tx) = plan.tx else {
+            return Ok(());
+        };
+        let before = self.proposal_count(gateway)?;
+        println!("proposing a release paying {} withdrawals with a fee of {}, txid {}", plan.ids.len(), plan.fee, shown(&sha256d(&tx.base())));
+
+        if !self.post_unless_beaten(gateway, secret, &tx, &plan.ids, before)? {
+            println!("another signer proposed first");
+        }
+
+        Ok(())
+    }
+
+    /// Posts a release worked out when this many were proposed: false if another came first, which
+    /// is how signers at it together are meant to end, and no failure. By the dry run that costs
+    /// nothing, or at worst the one transaction that lost; the next pass works from what stands then.
+    pub(crate) fn post_unless_beaten(&self, gateway: &Address, secret: &[u8; 32], tx: &Transaction, ids: &[u64], before: u64) -> CliResult<bool> {
+        match self.post_proposal(gateway, secret, tx, ids, before + 1) {
+            Ok(()) => Ok(true),
+            Err(_) if self.proposal_count(gateway)? > before => Ok(false),
+            Err(why) => Err(why),
+        }
+    }
+
+    fn proposal_count(&self, gateway: &Address) -> CliResult<u64> {
+        Ok(whole(self.read(gateway, "proposal_count", json!([]))?.first().ok_or("no count")?))
+    }
+
+    /// Posts a release under this signer's signature over it, for the number it will take.
+    fn post_proposal(&self, gateway: &Address, secret: &[u8; 32], tx: &Transaction, ids: &[u64], number: u64) -> CliResult<()> {
+        let raw = tx.base();
+        let signature = sign_digest(secret, &btc_propose_digest(self.here()?, gateway, number, &raw, ids));
+        let mut args = vec![TxCallArgumentType::Bytes(raw), TxCallArgumentType::Bytes(signature.to_vec())];
+        args.extend(ids.iter().map(|id| TxCallArgumentType::U64(*id)));
+
+        self.call(*gateway, "propose", u256::ZERO, args)
+    }
+
+    /// For each release still open, or cancelled and yet mined: broadcasts one with all its
+    /// signatures that Bitcoin has not heard of, and shows one deep enough. One going wrong is said
+    /// and passed over, for the next.
+    fn carry_on_releases(&self, gateway: &Address) -> CliResult<()> {
+        let count = self.proposal_count(gateway)?;
+        let depth = self.status()?["federation"]["bitcoin_depth"].as_u64().unwrap_or(6);
+        let mut done = self.btc_done.get();
+        let tip: u64 = self.esplora("/blocks/tip/height")?.trim().parse().map_err(|_| "Esplora gave a height that is not a number")?;
+
+        if done.releases > count {
+            done.releases = 0;
+        }
+
+        for id in done.releases + 1..=count {
+            let found = self.read(gateway, "proposal", json!([{ "type": "u64", "value": id.to_string() }]))?;
+            let state = found.get(4).map(text).unwrap_or_default();
+
+            if state == "released" && id == done.releases + 1 {
+                done.releases = id;
+            }
+
+            if state != "open" && state != "cancelled" {
+                continue;
+            }
+
+            if let Err(why) = self.carry_on_release(gateway, id, &found, &state, tip, depth) {
+                eprintln!("release {id}: {why}");
             }
         }
+
+        self.btc_done.set(done);
+
+        Ok(())
+    }
+
+    fn carry_on_release(&self, gateway: &Address, id: u64, found: &[Value], state: &str, tip: u64, depth: u64) -> CliResult<()> {
+        let txid = shown(&raw(found.get(1).ok_or("no such release")?));
+        let status: Value = serde_json::from_str(&self.esplora(&format!("/tx/{txid}/status"))?).unwrap_or(Value::Null);
+
+        if status["confirmed"] == true {
+            let height = status["block_height"].as_u64().unwrap_or(u64::MAX);
+
+            return match (tip + 1).saturating_sub(height) >= depth {
+                true => self.show_released(id, found),
+                false => Ok(()),
+            };
+        }
+
+        // Asked apart from its status, as Esplora says a transaction it never heard of is unconfirmed.
+        if state == "open" && self.signed_enough(gateway, id, found)? && !self.bitcoin_knows(&txid)? {
+            return self.finish(id);
+        }
+
+        Ok(())
+    }
+
+    /// Whether every input of a release holds its threshold of signatures.
+    fn signed_enough(&self, gateway: &Address, id: u64, found: &[Value]) -> CliResult<bool> {
+        let (tx, _) = Transaction::read(&raw(found.first().ok_or("no such release")?))?;
+
+        for index in 0..tx.inputs.len() {
+            let posted = self.read(gateway, "input_signatures", json!([{ "type": "u64", "value": id.to_string() }, { "type": "u64", "value": index.to_string() }]))?;
+
+            if (posted.len().saturating_sub(2) / 2) < posted.get(1).map_or(usize::MAX, whole_size) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Whether Esplora knows a transaction, mined or in its mempool: one more question, once.
+    fn bitcoin_knows(&self, txid: &str) -> CliResult<bool> {
+        let base = self.args.esplora.as_deref().ok_or("give --esplora")?;
+        let answer = self.agent.get(format!("{}/tx/{txid}/hex", base.trim_end_matches('/'))).call().map_err(|err| format!("Esplora /tx: {err}"))?;
+
+        Ok(answer.status().is_success())
+    }
+
+    /// What the gateway holds unspent, in the order it took it, each with what it says of it.
+    fn unspent(&self, gateway: &Address) -> CliResult<Vec<(String, SpentOutput)>> {
+        let count = whole(self.read(gateway, "utxo_count", json!([]))?.first().ok_or("no count")?);
+        let mut done = self.btc_done.get();
+        let mut found = Vec::new();
+
+        if done.outputs > count {
+            done.outputs = 0;
+        }
+
+        for n in done.outputs..count {
+            let utxo = self.read(gateway, "utxo", json!([{ "type": "u64", "value": n.to_string() }]))?;
+
+            match utxo.get(4).map(text).as_deref() {
+                Some("unspent") => found.push((text(&utxo[0]), self.spent_output(gateway, &text(&utxo[0]))?)),
+                Some("spent") if n == done.outputs => done.outputs = n + 1,
+                _ => {}
+            }
+        }
+
+        self.btc_done.set(done);
+
+        Ok(found)
+    }
+
+    /// What is queued, oldest first, each with what the gateway says of it.
+    fn queued(&self, gateway: &Address) -> CliResult<Vec<NamedWithdrawal>> {
+        let count = whole(self.read(gateway, "withdrawal_count", json!([]))?.first().ok_or("no count")?);
+        let mut done = self.btc_done.get();
+        let mut found = Vec::new();
+
+        if done.withdrawals > count {
+            done.withdrawals = 0;
+        }
+
+        for id in done.withdrawals + 1..=count {
+            let withdrawal = self.read(gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
+            let state = withdrawal.get(2).map(text).unwrap_or_default();
+
+            if state == "paid" && id == done.withdrawals + 1 {
+                done.withdrawals = id;
+            }
+
+            if state == "queued" {
+                found.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), most_fee: whole(&withdrawal[4]), state, anchor: self.anchor(gateway, id)? });
+            }
+        }
+
+        self.btc_done.set(done);
 
         Ok(found)
     }
@@ -374,78 +687,67 @@ impl Bridge {
         Ok((limits.first().map_or(0, whole), limits.get(1).map_or(0, whole)))
     }
 
-    /// Proposes a release of the queued withdrawals, or a sweep of older federations' outputs. A
-    /// withdrawal from a cancelled release brings the input it must spend; one whose input is in
-    /// another release waits for that one. A sweep takes as much as the fee pays at the floor, for
-    /// another sweep to take the rest.
-    fn propose(&self, fee: u64, sweep: bool) -> CliResult<()> {
-        let gateway = self.btc_gateway()?;
+    /// What of the queue can be proposed at this fee: None with nothing queued.
+    pub(crate) fn plan_queue(&self, gateway: &Address, fee: ReleaseFee) -> CliResult<Option<crate::bridge::ReleasePlan>> {
+        let queued = self.queued(gateway)?;
+
+        if queued.is_empty() {
+            return Ok(None);
+        }
+
+        let change = p2wsh(&raw(self.read(gateway, "change_script", json!([]))?.first().ok_or("no change script")?));
+        let (cap, floor) = self.fee_limits(gateway)?;
+
+        Ok(Some(plan_btc_release(&queued, &self.unspent(gateway)?, &change, cap, floor, fee)?))
+    }
+
+    /// A signer proposes a release of the queued withdrawals by hand: what it pays told, or what the
+    /// network asks. A withdrawal from a cancelled release brings the input it must spend; what cannot
+    /// go now is said and waits, and with nothing left to pay that is the answer.
+    fn propose(&self, fee: Option<u64>) -> CliResult<()> {
+        let (gateway, secret) = (self.btc_gateway()?, self.proposer()?);
+        let fee = match fee {
+            Some(fee) => ReleaseFee::Fixed(fee),
+            None => ReleaseFee::Rate(match self.fee_rates().map_err(|why| format!("{why}: give --fee"))? {
+                Some(rates) => rates.soon.ceil() as u64,
+                None => 0,
+            }),
+        };
+        let Some(plan) = self.plan_queue(&gateway, fee)? else {
+            return Err("no withdrawals are queued".into());
+        };
+
+        for (id, why) in &plan.waiting {
+            println!("withdrawal {id} waits: {why}");
+        }
+
+        let Some(tx) = plan.tx else {
+            let why = plan.waiting.iter().map(|(id, why)| format!("withdrawal {id}: {why}")).collect::<Vec<_>>().join("; ");
+
+            return Err(format!("nothing queued can go now: {why}").into());
+        };
+        println!("proposing a release paying {} withdrawals with a fee of {}, txid {}", plan.ids.len(), plan.fee, shown(&sha256d(&tx.base())));
+        let number = self.proposal_count(&gateway)? + 1;
+
+        self.post_proposal(&gateway, &secret, &tx, &plan.ids, number)
+    }
+
+    /// A signer proposes a sweep of older federations' outputs: as much as the fee pays at the floor,
+    /// for another sweep to take the rest.
+    fn sweep(&self, fee: u64) -> CliResult<()> {
+        let (gateway, secret) = (self.btc_gateway()?, self.proposer()?);
         let version = self.status()?["federation"]["version"].as_u64().ok_or("this chain has no federation")?;
         let change = p2wsh(&raw(self.read(&gateway, "change_script", json!([]))?.first().ok_or("no change script")?));
         let (_, floor) = self.fee_limits(&gateway)?;
-        let held = self.unspent(&gateway)?;
-        let mut anchors = std::collections::HashSet::new();
-        // Each withdrawal it takes: its id, script, what it burned and the most it may lose.
-        let mut ids: Vec<(u64, Vec<u8>, u64, u64)> = Vec::new();
-
-        if !sweep {
-            let count = whole(self.read(&gateway, "withdrawal_count", json!([]))?.first().ok_or("no count")?);
-
-            for id in 1..=count {
-                let withdrawal = self.read(&gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
-
-                if withdrawal.get(2).map(text).as_deref() == Some("queued") && ids.len() < MOST_WITHDRAWALS {
-                    if let Some(anchor) = self.anchor(&gateway, id)? {
-                        if !held.iter().any(|(outpoint, ..)| *outpoint == anchor) {
-                            println!("withdrawal {id} waits: the input it must spend, {anchor}, is in another release");
-
-                            continue;
-                        }
-
-                        anchors.insert(anchor);
-                    }
-
-                    ids.push((id, raw(&withdrawal[0]), whole(&withdrawal[1]), whole(&withdrawal[4])));
-                }
-            }
-
-            if ids.is_empty() {
-                return Err("no withdrawals are queued".into());
-            }
-
-            // One that agreed to lose less than its share waits, and the others each pay more for
-            // it: until the shares stand.
-            while let Some(at) = ids.iter().enumerate().position(|(at, (_, _, _, most))| btc_fee_share(fee, ids.len() as u64, at) > *most) {
-                println!("withdrawal {} waits: its share of a fee of {fee} is past the {} it agreed to lose", ids[at].0, ids[at].3);
-                ids.remove(at);
-
-                if ids.is_empty() {
-                    return Err(format!("every queued withdrawal agreed to lose less than its share of a fee of {fee}").into());
-                }
-            }
-        }
-
-        let mut outputs: Vec<TxOut> = ids.iter().enumerate().map(|(at, (_, script, sats, _))| TxOut { value: sats - btc_fee_share(fee, ids.len() as u64, at), script: script.clone() }).collect();
-        // Withdrawals pay their own fee, so a release spends just what they burned; a sweep's fee
-        // is the federation's.
-        let burned = ids.iter().map(|(_, _, sats, _)| *sats).sum::<u64>();
-        let wanted = if sweep { fee } else { burned + BTC_DUST };
         let mut inputs = Vec::new();
         let mut sizes = Vec::new();
         let mut taken = 0;
-        // What must be spent comes first.
-        let (needed, others): (Vec<_>, Vec<_>) = held.into_iter().partition(|(outpoint, ..)| anchors.contains(outpoint));
 
-        for (outpoint, sats, at) in needed.into_iter().chain(others) {
-            if (sweep && at >= version) || (!sweep && (taken >= wanted || taken == burned) && !anchors.contains(&outpoint)) {
-                continue;
-            }
-
-            let spent = self.spent_output(&gateway, &outpoint)?;
-            sizes.push((spent.threshold, spent.script_len));
+        for (outpoint, held) in self.unspent(&gateway)?.into_iter().filter(|(_, held)| held.version < version) {
+            sizes.push((held.threshold, held.script_len));
 
             // Each input and its one output, and the fixed parts around them.
-            if sweep && !inputs.is_empty() && btc_release_vbytes(10 + (inputs.len() + 1) * 41 + 43, &sizes) * floor > fee {
+            if !inputs.is_empty() && btc_release_vbytes(10 + (inputs.len() + 1) * 41 + 43, &sizes) * floor > fee {
                 sizes.pop();
                 break;
             }
@@ -454,37 +756,28 @@ impl Bridge {
             // The gateway keys what it holds by the id in Bitcoin's own byte order.
             let id: [u8; 32] = from_hex(&format!("0x{txid}")).and_then(|bytes| bytes.try_into().ok()).ok_or("an outpoint that does not read")?;
             inputs.push(TxIn { txid: id, vout: vout.parse()?, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() });
-            taken += sats;
+            taken += held.sats;
         }
 
-        // Spending just what was burned leaves no change; anything else leaves change of at least
-        // dust, and it never goes to the fee, as that would come off the backing.
-        if inputs.is_empty() || (taken < wanted && (sweep || taken != burned)) {
-            return Err(format!("the gateway holds {taken} satoshis to spend, short of {wanted}").into());
+        if inputs.is_empty() || taken < fee + BTC_DUST {
+            return Err(format!("the older federations hold {taken} satoshis to sweep, short of a fee of {fee} and dust").into());
         }
 
-        if sweep {
-            outputs.push(TxOut { value: taken - fee, script: change });
-        } else if taken > burned {
-            outputs.push(TxOut { value: taken - burned, script: change });
-        }
-
-        let tx = Transaction { version: 2, inputs, outputs, lock_time: 0 };
+        let tx = Transaction { version: 2, inputs, outputs: vec![TxOut { value: taken - fee, script: change }], lock_time: 0 };
         let least = btc_release_vbytes(tx.base().len(), &sizes) * floor;
 
         if fee < least {
             return Err(format!("a fee of {fee} is under the floor: this release pays at least {least}").into());
         }
 
-        let mut args = vec![TxCallArgumentType::Bytes(tx.base())];
-        args.extend(ids.iter().map(|(id, ..)| TxCallArgumentType::U64(*id)));
-        println!("proposing {} paying {} withdrawals, txid {}", if sweep { "a sweep" } else { "a release" }, ids.len(), shown(&sha256d(&tx.base())));
+        println!("proposing a sweep, txid {}", shown(&sha256d(&tx.base())));
+        let number = self.proposal_count(&gateway)? + 1;
 
-        self.call(gateway, "propose", u256::ZERO, args)
+        self.post_proposal(&gateway, &secret, &tx, &[], number)
     }
 
     /// What a release is, from the gateway's state alone: what the signer goes over.
-    fn release_facts(&self, gateway: &Address, found: &[Value]) -> CliResult<ReleaseFacts> {
+    fn release_facts(&self, gateway: &Address, found: &[Value], most_rate: u64) -> CliResult<ReleaseFacts> {
         let release = raw(found.first().ok_or("no such release")?);
         let (tx, _) = Transaction::read(&release)?;
         let version = found.get(3).map_or(0, whole);
@@ -505,28 +798,37 @@ impl Bridge {
         let change_script = raw(self.read(gateway, "change_script", json!([{ "type": "u64", "value": version.to_string() }]))?.first().ok_or("no change script")?);
         let (fee_cap, fee_floor) = self.fee_limits(gateway)?;
 
-        Ok(ReleaseFacts { raw: release, txid: raw(found.get(1).ok_or("no transaction id")?), version, withdrawals, inputs, change_script, fee_cap, fee_floor })
+        Ok(ReleaseFacts { raw: release, txid: raw(found.get(1).ok_or("no transaction id")?), version, withdrawals, inputs, change_script, fee_cap, fee_floor, most_rate })
     }
 
     /// Goes over every open release against the gateway's state, and signs each input of those
     /// that stand and that this signer has not signed, nor voted to cancel. One refused is said and
     /// passed over, for the next one.
-    fn sign_releases(&self) -> CliResult<()> {
+    fn sign_releases(&self, rates: &Result<Option<FeeRates>, String>) -> CliResult<()> {
         let (gateway, secret) = (self.btc_gateway()?, self.evm_secret()?);
         let count = whole(self.read(&gateway, "proposal_count", json!([]))?.first().ok_or("no count")?);
         let my_key = crate::crypto::secp256k1::public_key(&secret).ok_or("--evm-key is no key")?;
+        let (_, floor) = self.fee_limits(&gateway)?;
+        let fastest = rates.as_ref().ok().copied().flatten().map(|rates| rates.fastest);
+        let most_rate = btc_most_fee_rate(self.args.max_fee_rate, fastest, floor);
+        let mut told = self.args.max_fee_rate.is_some() || fastest.is_some();
         // Two open releases naming one withdrawal would pay it twice, should the gateway ever let
         // them: the first keeps it.
         let mut paying = std::collections::HashSet::new();
 
-        for id in 1..=count {
+        for id in (self.btc_done.get().releases + 1).min(count + 1)..=count {
             let found = self.read(&gateway, "proposal", json!([{ "type": "u64", "value": id.to_string() }]))?;
 
             if found.get(4).map(text).as_deref() != Some("open") {
                 continue;
             }
 
-            if let Err(why) = self.sign_release(&gateway, id, &found, &my_key, &secret, &mut paying) {
+            // Fees going unread should not stop withdrawals, so it goes on, but no further than this.
+            if !std::mem::replace(&mut told, true) {
+                eprintln!("no fee rate to go by: signing for at most the fixed {most_rate} satoshis a virtual byte");
+            }
+
+            if let Err(why) = self.sign_release(&gateway, id, &found, &my_key, &secret, &mut paying, most_rate) {
                 eprintln!("not signing release {id}: {why}");
             }
         }
@@ -534,12 +836,13 @@ impl Bridge {
         Ok(())
     }
 
-    fn sign_release(&self, gateway: &Address, id: u64, found: &[Value], my_key: &[u8; 33], secret: &[u8; 32], paying: &mut std::collections::HashSet<u64>) -> CliResult<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn sign_release(&self, gateway: &Address, id: u64, found: &[Value], my_key: &[u8; 33], secret: &[u8; 32], paying: &mut std::collections::HashSet<u64>, most_rate: u64) -> CliResult<()> {
         if self.read(gateway, "voted", json!([{ "type": "u64", "value": id.to_string() }, { "type": "bytes", "value": to_hex(my_key) }]))?.first().is_some_and(|value| value["value"] == true) {
             return Err("this signer voted to cancel it".into());
         }
 
-        let facts = self.release_facts(gateway, found)?;
+        let facts = self.release_facts(gateway, found, most_rate)?;
         check_btc_release(&facts)?;
 
         for withdrawal in &facts.withdrawals {
@@ -608,7 +911,14 @@ impl Bridge {
 
         let base = self.args.esplora.as_deref().ok_or("give --esplora")?;
         let mut answer = self.agent.post(format!("{}/tx", base.trim_end_matches('/'))).send(to_hex(&tx.encode()).trim_start_matches("0x").to_string()).map_err(|err| format!("Esplora would not take it: {err}"))?;
-        println!("broadcast {}", answer.body_mut().read_to_string()?.trim());
+        let accepted = answer.status().is_success();
+        let said = answer.body_mut().read_to_string()?;
+
+        if !accepted {
+            return Err(format!("Esplora would not take it: {}", said.trim()).into());
+        }
+
+        println!("broadcast {}", said.trim());
 
         Ok(())
     }
@@ -617,6 +927,19 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use {super::*, std::time::Duration};
+
+    #[test]
+    fn what_the_network_asks_is_read_from_esplora_s_estimates() {
+        let rates = fee_rates_from(r#"{"1":87.5,"2":40.1,"3":20.3,"6":9.0,"144":1.0,"1008":1.0}"#).unwrap().unwrap();
+
+        assert_eq!(rates, FeeRates { fastest: 87.5, soon: 20.3 });
+        // Without an estimate for that many blocks, the next there is; without any later, the fastest.
+        assert_eq!(fee_rates_from(r#"{"1":8,"6":2}"#).unwrap().unwrap(), FeeRates { fastest: 8.0, soon: 2.0 });
+        assert_eq!(fee_rates_from(r#"{"1":8}"#).unwrap().unwrap(), FeeRates { fastest: 8.0, soon: 8.0 });
+        assert_eq!(fee_rates_from("{}").unwrap(), None, "regtest's: no rate at all");
+        assert_eq!(fee_rates_from(r#"{"1":0,"2":-3}"#).unwrap(), None, "nothing that is a rate");
+        assert!(fee_rates_from("<html>slow down</html>").is_err(), "an answer that is no such thing is no answer");
+    }
 
     #[test]
     fn a_throttled_esplora_is_asked_again_waiting_longer_each_time() {
