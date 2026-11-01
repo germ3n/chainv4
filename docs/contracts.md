@@ -373,6 +373,7 @@ what its storage or calls cost (`vm::cost`).
 | RIPEMD-160, HASH160 or double SHA-256 | As a hash: 20, plus 1 per 64 bytes |
 | Checking a state proof or a Merkle path | 200, plus 60 per 32 bytes of it |
 | Reading the federation | 200 |
+| Reading the chain's id | 20 |
 
 **Loading code** is paid for by the deploy or upgrade, and shows in its receipt's `fuel_used`:
 - **Compiling:** every byte costs 1 fuel (`cost::LOAD_BYTE`), as compiling and checking the code
@@ -444,6 +445,7 @@ and `debug` are not there at all.
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
 | `crypto` | See [Crypto](#crypto). |
 | `federation` | `federation.get()`: the bridges' federation in force, `{ version, threshold, signers }`, or `nil`. See [Bridges](bridges.md). |
+| `chain` | `chain.id()`: the chain's id, what its EVM answers `CHAINID` with and the [bridges](bridges.md) name it by. Six bytes of its genesis id, so nothing an owner sets: bind to it whatever must hold on this chain alone. |
 
 ### Crypto
 
@@ -643,6 +645,7 @@ into its exported memory.
 | `abi_encode`, `abi_decode` | Solidity's ABI, on the node: `abi_encode(signature, len, values, values_len)` writes calldata or arguments from a list of values, `abi_decode(types, len, data, data_len)` reads them back into one. |
 | `verify`, `recover`, `key_address`, `crypto_hash`, `check_state`, `check_merkle` | [Crypto](#crypto): a signature checked, 1 or 0; the key a secp256k1 signature recovers, 33 bytes at `out`, 1 or 0; a key's address at `out`; `ripemd160`, `hash160` or `sha256d` at `out`, returning its length; a state proof or a Merkle path checked, 1 or 0. |
 | `federation` | The federation in force into the result buffer, its length, or -1 for none: its version (u64), threshold and signer count (u32s), then 33-byte keys. |
+| `chain_id` | The chain's id, as an `i64`: what `chain.id()` gives in Lua, the SDK's `chain_id()`. |
 | `abort` | Stops the call with an error. Only the first 1,024 bytes of the message are kept. |
 
 **The encoding:** arguments and return values travel as the chain's encoding of a list of
@@ -688,7 +691,7 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
   `refresh_token`, `resolve_name` and `name_of`, `evm_call`, `abi_encode` and `abi_decode`,
   `verify`, `recover`, `key_address`, `ripemd160`, `hash160`, `sha256d`, `check_state`,
-  `check_merkle` and `federation`, and
+  `check_merkle`, `federation` and `chain_id`, and
   `storage`, with `storage::namespace(name)`
   and `storage::own()`;
 - `namespace!` and `retired!`, which declare the storage layout, and typed methods on a

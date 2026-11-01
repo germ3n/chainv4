@@ -69,9 +69,23 @@ body   = keccak256(abi.encode(bytes asset, uint256 id, uint256 amount, bytes rec
 digest = keccak256(abi.encode("chainv4-gateway", head, body))
 ```
 
-Chains are named by their EVM chain ids, this one by its own (`GET /status`, `chain_id`).
-Addresses here are written as their 33 bytes, an EVM chain's as their 20, and the coin as no
-bytes.
+Chains are named by their EVM chain ids, this one by its own (`GET /status`, `chain_id`), which
+the gateway here reads from the chain, `chain.id()`, and no owner sets. Addresses here are written
+as their 33 bytes, an EVM chain's as their 20, and the coin as no bytes.
+
+**The gateway here is named by its identity,** `identity()`: its 33 bytes and the time it was set
+up. That is what `from` or `to` says in a transfer, and what Gateway.sol holds as its peer. A chain
+restarted from the identical `genesis.json` has the same id, the same gateway address and nothing
+marked done, while Gateway.sol's logs and the old chain's signature board stay readable: anyone
+could post those signatures again. Set up at another time, the gateway computes another digest
+for them, and they recover to no one. Gateway.sol marks what it delivered by the source gateway
+too, so the new one's nonces can start from 1. The time is what the chain says when `setup` runs,
+not anything its owner gives; someone who produces every block of a restart could give it the old
+time, but such a chain is the old chain.
+
+**A recipient is checked as it is sent,** on both gateways: 20 bytes and not zero for an EVM chain;
+for chainv4, 33 bytes of a known kind, a shorter kind followed by zeros, and not zero. Names, symbols
+and URIs that are not UTF-8 cross as empty, as no signer's tools could hold them.
 
 ## The signature board
 
@@ -123,10 +137,17 @@ chainv4 bridge watch --eth-rpc URL --evm-key signer.key --key payer.key
 - **sign** reads what left here (`Sent` events, so the node keeps `--index-events`) and what left
   each EVM chain given (Gateway.sol's `Sent` logs), and once each is final, finalized here or
   `chain_depth` deep, at the RPC's finalized block or `evm_depth` deep there, posts its signature
-  to the board. One it posted already, it skips.
+  to the board. One it posted already, it skips, and it passes over quietly what is not for this
+  chain's gateway from its peer, as Gateway.sol's old logs are after a reset.
 - **relay** delivers what left here to each EVM chain once the board holds enough signatures,
   paying the gas with `--evm-key`. Anyone may relay.
-- **watch** does both every `--every` seconds.
+- **watch** does both every `--every` seconds, relaying whatever became of signing.
+
+**Each transfer stands alone.** A transfer the gateway or Gateway.sol refuses, as one a recipient
+will not take, or with more than a gateway here holds, is said with its nonce, chains and why, and
+the pass goes on to the next. Under `watch` it sits out 1, 2, 4 and so on up to 64 passes between
+tries, since a dry run or a failed delivery costs something every time, and each pass still lists
+it, `still refused: …`, until it goes through. One EVM chain out of reach stops no other.
 
 ## Bitcoin
 
@@ -160,24 +181,35 @@ Bitcoin light client contract rather than vouched for, and the federation signs 
 federation's deposit addresses stay open.
 
 **Depositing.** Every address here has its own deposit address on Bitcoin, under the federation in
-force, a P2WSH any wallet pays:
+force, for this chain and this gateway, a P2WSH any wallet pays:
 
 ```
-<its 33 bytes> OP_DROP <threshold> <signer keys…> <count> OP_CHECKMULTISIG
+<its 33 bytes> OP_DROP <chain id, 8 bytes little-endian><the gateway's 33 bytes> OP_DROP
+<threshold> <signer keys…> <count> OP_CHECKMULTISIG
 ```
 
 Once a payment to it is `bitcoin_depth` deep in the relay, anyone shows it, `deposit(block, tx,
 index, path, vout, recipient)`, and its value is minted as wBTC to that address, once. The gateway
 holds the output, by its transaction and place, for a later release.
 
-**Withdrawing** burns wBTC for a Bitcoin output script (P2WPKH, P2WSH, P2TR or any other, 80 bytes
-at most) and an amount, 1,000 satoshis or more, and queues it.
+A proof of a payment outlives a chain, and a gateway on a new one holds nothing yet, under the same
+address if the same keys deployed it. So the chain's id is in the script: an old payment pays
+another address, and mints nothing. A chain restarted from the identical genesis has the same id;
+there the gateway refuses what was mined at or under the relay's tip when it was set up, so **sync
+the relay before you deploy the gateway**, or that tip protects nothing. The gateway's `setup`
+refuses a relay that has not started.
+
+**Withdrawing** burns wBTC for a Bitcoin output script and an amount, 1,000 satoshis or more, and
+queues it. The script is one Bitcoin's nodes relay: P2PKH, P2SH, or a witness program (P2WPKH,
+P2WSH, P2TR or a later version), as a release with any other output would never be mined.
 
 **Releasing** pays queued withdrawals:
 1. **Proposed:** anyone proposes a release, an unsigned Bitcoin transaction, with the
-   withdrawals it pays, at most 50. The gateway checks its inputs are outputs it holds unspent, it
-   pays each withdrawal exactly, its one other output is change to the federation in force, and
-   its fee is above nothing and under the cap. Its inputs are then pending.
+   withdrawals it pays, at most 50, each once. The gateway checks its inputs are outputs it holds
+   unspent, each once, it pays each withdrawal exactly, its one other output is change to the
+   federation in force, 546 satoshis or more, and its fee is between the floor and the cap. It is
+   version 2, with sequence `0xffffffff` and no lock time, so nothing delays it, and at most
+   100,000 virtual bytes, what Bitcoin's nodes relay. Its inputs are then pending.
 2. **Signed:** each signer signs each input as BIP143 has it, SIGHASH_ALL, and posts the 64-byte
    signature, `sign(proposal, input, signature)`; the gateway checks it against that input's
    script and amount.
@@ -186,13 +218,39 @@ at most) and an amount, 1,000 satoshis or more, and queues it.
 4. **Shown:** once it is `bitcoin_depth` deep, anyone shows it, `released(proposal, block, tx,
    index, path)`: its inputs are spent, its change held, and its withdrawals paid.
 
+**The fee** of a release is held between two limits set once, at setup: `fee_cap`, the most it may
+pay in satoshis, and `fee_floor`, the least per virtual byte, so a release cannot hold its inputs
+for ever at next to nothing. Its size is reckoned as if signed, each signature at its largest:
+`btc_release_vbytes` does the same for the tools. A cap under 710 virtual bytes at the floor, the
+largest release one input can be, is refused at setup, as it could leave no release allowed; a
+larger release past the cap is split. Read them with `fee_limits()`.
+
+**Cancelling** frees what a release holds when it cannot be finished: one stuck on an old
+federation no one can reach, or one signers refuse.
+- **Who:** the threshold of the federation in force, each signing `btc_cancel_digest` (double
+  SHA-256 of a domain, the chain's id, the gateway, the release and its transaction's id), posted
+  by anyone with `cancel(proposal, signature)`.
+- **When:** only while an input is under its threshold of signatures. One with every input at its
+  threshold can be finished by anyone, so a vote is refused. The exception is one Bitcoin can no
+  longer mine, as another release spending one of its inputs was shown.
+- **What:** its inputs go back to unspent and its withdrawals to queued, and signatures and votes
+  for it count for nothing: `sign` is refused and `input_signatures` gives none.
+- **Why it pays no one twice:** Bitcoin does not know of a cancel, and a signature in a `sign`
+  that lands too late is public all the same, so a release under its threshold here may still be
+  finished there. Each withdrawal it paid is therefore **anchored** to one of its inputs, `anchor(id)`,
+  the newest federation's. Every release paying that withdrawal must spend that input as well, so
+  they all conflict, and Bitcoin mines one. The anchor lapses once it is shown spent, as nothing
+  holding it can be mined after that. A cancelled release that was finished anyway may still be
+  shown with `released`: what it spent and paid is then spent and paid.
+
 **A new federation** takes over the deposit addresses: new ones are made under it, and the old
 ones stay open for the grace period. A **sweep** is a release with no withdrawals, paying what
 older federations hold to the one in force.
 
 **Reading it:** `wbtc()`, `deposit_script(address)` (the witness script, the output script and
-the federation's version), `utxo(n)` and `utxo_count()`, `withdrawal(id)` and
-`withdrawal_count()`, `proposal(id)` and `proposal_count()`, `change_script()`.
+the federation's version), `utxo(n)`, `utxo_of(outpoint)` and `utxo_count()`, `withdrawal(id)`,
+`anchor(id)` and `withdrawal_count()`, `proposal(id)`, `voted(id, key)` and `proposal_count()`,
+`change_script()` or `change_script(version)`, `fee_limits()`.
 
 ### The commands
 
@@ -204,23 +262,36 @@ as `btc_gateway`, or `--btc-gateway` before it does:
 chainv4 send deploy --wasm btc_relay.wasm                      # the relay
 chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint
 chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since, 25 a tx; run it often
-chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --grace-hours 168
+chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --fee-floor 2 --grace-hours 168
 chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…
 chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL
 chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
 chainv4 bridge btc propose --fee 1000 --btc-gateway 0x… --esplora URL
 chainv4 bridge btc sign --btc-gateway 0x… --evm-key signer.key  # each signer
+chainv4 bridge btc cancel 1 --btc-gateway 0x… --evm-key signer.key  # each signer's vote
 chainv4 bridge btc finish 1 --btc-gateway 0x… --esplora URL     # assembled and broadcast
 chainv4 bridge btc released 1 --btc-gateway 0x… --esplora URL
 chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
 ```
 
-- **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or any other output script as `0x…`
-  (a Taproot output as its `5120…` script).
+- **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told. Sync the relay first.
+- **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or another output script Bitcoin's nodes
+  relay as `0x…` (a Taproot output as its `5120…` script).
 - **propose** pays the queued withdrawals, oldest first, up to 50, from what the gateway holds
-  unspent, in the order it took it; change under dust (546 satoshis) goes to the fee.
-- **sweep** pays everything older federations hold to the one in force.
-- **sign** signs every input of every open release with the signer's key, skipping what it signed.
+  unspent, in the order it took it, starting with what a withdrawal's anchor requires; one whose
+  anchor is in another release waits for it. Change under dust (546 satoshis) goes to the fee. A
+  fee under the floor for that size is refused here, naming what it takes.
+- **sweep** pays what older federations hold to the one in force, as much as the fee pays at the
+  floor; sweep again for the rest.
+- **sign** goes over every open release against the gateway's state before signing it: each
+  withdrawal named once, still proposed, paid exactly, and with its anchor among the inputs; each
+  input once, pending and held; only change besides, to the federation it was proposed under; the
+  fee within its limits; the version, sequence and lock time fixed; and the transaction written as
+  Bitcoin writes it, with the id the gateway keeps. One that fails is logged and left unsigned, for
+  the next one, as is one this signer voted to cancel. The check is `check_btc_release`: a fault
+  in the gateway alone should not be enough to take real bitcoin. It then signs each input it has
+  not signed.
+- **cancel** is a signer's vote, signed with `--evm-key`.
 
 ## Caveats
 
@@ -234,8 +305,11 @@ chainv4 bridge btc sweep --fee 1000 --btc-gateway 0x… --esplora URL
   headers, a branch mined in secret with more work than what was submitted could prove a deposit
   that never was: keep it synced, and keep `bitcoin_depth` above what an attacker could mine.
 - **A release that never confirms holds its inputs:** once proposed, they are pending until it is
-  shown released, so one stuck at too low a fee is bumped by a child that pays for it, spending
-  one of its outputs; replacing a release is in the todo.
+  shown released or cancelled. One stuck with every signature, as fees rose past what it pays, can
+  no longer be cancelled: it is bumped by a child that pays for it, spending one of its outputs.
+- **What was in flight at a reset stays there.** Whatever left Gateway.sol for a gateway before it
+  was set up anew is signed by no one and arrives nowhere, and whatever left before `chainv4 bridge
+  peer` named the new one the same: join them before anyone sends.
 - **The gateway's owner sets its peers.** A signer vouches for what the peer gateway says left it,
   so an owner who repointed a peer could have fake deposits signed. `chainv4 bridge` refuses to
   sign or relay through a peer other than the Gateway.sol the directory names on that chain;

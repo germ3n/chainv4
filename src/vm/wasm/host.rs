@@ -56,6 +56,7 @@ pub(super) const NAMES: &[&str] = &[
     "check_state",
     "check_merkle",
     "federation",
+    "chain_id",
     "abort",
 ];
 
@@ -525,6 +526,16 @@ fn chain_federation() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "chain_id",
+    summary = "The chain's id: what its EVM answers CHAINID with and the bridges name it by, six bytes of its genesis id, and nothing a contract's owner sets. Costs 20 fuel.",
+    returns = { ty = "i64", desc = "A whole number under 2^48, at least 1." },
+    see_also = "rust/Host::chain_id",
+)]
+fn chain_chain_id() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "resolve_name",
     summary = "The address a name resolves to at the block's time, such as alice.dev, with or without the chain's suffix, in any case. Costs 500 fuel, plus 1 per 64 bytes of name. Traps on a chain without names.",
     params = {
@@ -686,6 +697,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "check_state", check_state).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "check_merkle", check_merkle).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "federation", federation).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "chain_id", chain_id).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
     linker
@@ -1023,6 +1035,13 @@ fn federation(mut caller: Caller<'_, Run>) -> Result<i32> {
         Ok(None) => Ok(-1),
         Err(err) => Err(stop(&mut caller, err)),
     }
+}
+
+fn chain_id(mut caller: Caller<'_, Run>) -> Result<u64> {
+    let host = host(&mut caller)?;
+    charge(&mut caller, cost::CHAIN_ID)?;
+
+    Ok(host.chain_id())
 }
 
 fn resolve_name(mut caller: Caller<'_, Run>, name: u32, len: u32, out: u32) -> Result<u32> {

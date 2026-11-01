@@ -39,13 +39,209 @@ pub fn btc_multisig(threshold: u32, keys: &[[u8; 33]]) -> Vec<u8> {
 
 #[cfg(feature = "bitcoin")]
 #[document(
-    summary = "An address's deposit script under a federation, as the Bitcoin gateway writes it: its 33 bytes, dropped, then the multisig. Paid as its P2WSH, the gateway mints wBTC to the address for it; computed here, so a wallet never takes the address to pay from a node.",
+    summary = "An address's deposit script under a federation, as the Bitcoin gateway writes it: its 33 bytes, dropped; the chain's id and the gateway, dropped; then the multisig. Paid as its P2WSH, the gateway mints wBTC to the address for it, on this chain alone, as a proof of a payment outlives a chain; computed here, so a wallet never takes the address to pay from a node.",
+    params = {
+        recipient = "Who the deposit is for.",
+        chain_id = "The chain's id, crypto::ethereum::chain_id of its genesis.",
+        gateway = "The Bitcoin gateway.",
+        threshold = "How many of the federation must sign.",
+        keys = "The federation's keys.",
+    },
     category = "Bridges",
     see_also = "btc_multisig",
 )]
-pub fn btc_deposit_script(recipient: &Address, threshold: u32, keys: &[[u8; 33]]) -> Vec<u8> {
-    [&[33][..], &recipient.to_abi(), &[0x75], &btc_multisig(threshold, keys)].concat()
+pub fn btc_deposit_script(recipient: &Address, chain_id: u64, gateway: &Address, threshold: u32, keys: &[[u8; 33]]) -> Vec<u8> {
+    [&[33][..], &recipient.to_abi(), &[0x75, 41], &chain_id.to_le_bytes(), &gateway.to_abi(), &[0x75], &btc_multisig(threshold, keys)].concat()
 }
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "What a federation signer signs to vote to cancel a release on the Bitcoin gateway: double SHA-256 of a domain, the chain's id, the gateway, the release and its transaction's id, as the gateway makes it.",
+    category = "Bridges",
+    see_also = "sign_digest",
+)]
+pub fn btc_cancel_digest(chain_id: u64, gateway: &Address, proposal: u64, txid: &[u8; 32]) -> [u8; 32] {
+    crate::crypto::bitcoin::sha256d(&[b"chainv4-btc-cancel".as_slice(), &chain_id.to_le_bytes(), &gateway.to_abi(), &proposal.to_le_bytes(), txid].concat())
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "The most virtual bytes a release can be once signed, as the Bitcoin gateway reckons it to hold its fee to the floor: its bytes without witnesses, and for each input, a threshold of signatures of at most 73 bytes and its witness script.",
+    params = {
+        base = "The length of the transaction without its witnesses.",
+        inputs = "Each input's threshold, and the length of its witness script.",
+    },
+    category = "Bridges",
+)]
+pub fn btc_release_vbytes(base: usize, inputs: &[(u32, usize)]) -> u64 {
+    let witness = |(threshold, script): &(u32, usize)| 2 + *threshold as usize * 74 + if *script < 0xfd { 1 } else { 3 } + *script;
+    let weight = 4 * base + 2 + inputs.iter().map(witness).sum::<usize>();
+
+    weight.div_ceil(4) as u64
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "A withdrawal a release names, as the Bitcoin gateway says it stands.",
+    category = "Bridges",
+    see_also = "check_btc_release",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedWithdrawal {
+    pub id: u64,
+    #[document(summary = "The output script it asked to be paid to.")]
+    pub script: Vec<u8>,
+    pub sats: u64,
+    #[document(summary = "queued, proposed or paid.")]
+    pub state: String,
+    #[document(summary = "The outpoint its release must spend, after one paying it was cancelled.")]
+    pub anchor: Option<String>,
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "An output the Bitcoin gateway holds that a release spends, as it says it stands.",
+    category = "Bridges",
+    see_also = "check_btc_release",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpentOutput {
+    pub sats: u64,
+    #[document(summary = "The federation it was paid to.")]
+    pub version: u64,
+    #[document(summary = "unspent, pending or spent.")]
+    pub state: String,
+    #[document(summary = "How many of that federation must sign.")]
+    pub threshold: u32,
+    #[document(summary = "The length of the witness script that spends it.")]
+    pub script_len: usize,
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "Everything a federation signer checks a release against, each read from the Bitcoin gateway's state rather than taken from what proposed it.",
+    category = "Bridges",
+    see_also = "check_btc_release",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseFacts {
+    #[document(summary = "The transaction as the gateway keeps it, without witnesses.")]
+    pub raw: Vec<u8>,
+    #[document(summary = "The transaction's id the gateway keeps.")]
+    pub txid: Vec<u8>,
+    #[document(summary = "The federation it was proposed under.")]
+    pub version: u64,
+    #[document(summary = "The withdrawals it names, in order.")]
+    pub withdrawals: Vec<NamedWithdrawal>,
+    #[document(summary = "What each input spends, in order, with its outpoint as the gateway writes it.")]
+    pub inputs: Vec<(String, SpentOutput)>,
+    #[document(summary = "The bare multisig of the federation it was proposed under.")]
+    pub change_script: Vec<u8>,
+    #[document(summary = "The most fee a release may pay, in satoshis.")]
+    pub fee_cap: u64,
+    #[document(summary = "The least it may pay a virtual byte.")]
+    pub fee_floor: u64,
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "Whether a federation signer should sign a release. The gateway checks all of this when it is proposed; a signer goes over it again, as what it signs pays real bitcoin and a fault in the contract should not be enough to take it: each withdrawal named once, paid as asked, and still waiting; each input once, held, pending; only change besides, of the size and to the federation it should be; a fee between the floor and the cap; and nothing Bitcoin would refuse or delay.",
+    returns = "Why not, or nothing when it may sign.",
+    category = "Bridges",
+)]
+pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
+    use crate::crypto::bitcoin::tx::{Transaction, p2wsh};
+
+    let (tx, witnessed) = Transaction::read(&facts.raw)?;
+
+    if witnessed || tx.base() != facts.raw {
+        return Err("its transaction is not written as Bitcoin writes it".to_string());
+    }
+
+    if crate::crypto::bitcoin::sha256d(&facts.raw).as_slice() != facts.txid.as_slice() {
+        return Err("its transaction is not the id the gateway keeps".to_string());
+    }
+
+    if tx.version != 2 || tx.lock_time != 0 {
+        return Err("it is not version 2 with no lock time".to_string());
+    }
+
+    if tx.inputs.len() != facts.inputs.len() {
+        return Err("the gateway's account of its inputs does not match it".to_string());
+    }
+
+    let mut spends = std::collections::HashSet::new();
+    let mut spent = 0;
+
+    for (input, (outpoint, held)) in tx.inputs.iter().zip(&facts.inputs) {
+        if !spends.insert(outpoint) {
+            return Err(format!("it spends {outpoint} twice"));
+        }
+
+        if input.sequence != 0xffff_ffff || !input.script_sig.is_empty() {
+            return Err(format!("its input {outpoint} has a delay or a script"));
+        }
+
+        if held.state != "pending" {
+            return Err(format!("the gateway says its input {outpoint} is {}", held.state));
+        }
+
+        if facts.withdrawals.is_empty() && held.version >= facts.version {
+            return Err("a sweep of what is no older federation's".to_string());
+        }
+
+        spent += held.sats;
+    }
+
+    let mut paid = 0;
+    let mut named = std::collections::HashSet::new();
+
+    for (at, withdrawal) in facts.withdrawals.iter().enumerate() {
+        if !named.insert(withdrawal.id) {
+            return Err(format!("it names withdrawal {} twice", withdrawal.id));
+        }
+
+        if withdrawal.state != "proposed" {
+            return Err(format!("withdrawal {} is {}", withdrawal.id, withdrawal.state));
+        }
+
+        let output = tx.outputs.get(at).ok_or_else(|| format!("it does not pay withdrawal {}", withdrawal.id))?;
+
+        if output.script != withdrawal.script || output.value != withdrawal.sats {
+            return Err(format!("it does not pay withdrawal {} as asked", withdrawal.id));
+        }
+
+        if let Some(anchor) = &withdrawal.anchor
+            && !spends.contains(anchor)
+        {
+            return Err(format!("withdrawal {} was in a cancelled release this does not conflict with", withdrawal.id));
+        }
+
+        paid += output.value;
+    }
+
+    match &tx.outputs[facts.withdrawals.len().min(tx.outputs.len())..] {
+        [] if facts.withdrawals.is_empty() => return Err("it pays nothing".to_string()),
+        [] => {}
+        [change] if change.script == p2wsh(&facts.change_script) && change.value >= BTC_DUST => paid += change.value,
+        [_] => return Err("its last output is not change to its federation".to_string()),
+        _ => return Err("it pays more than its withdrawals and change".to_string()),
+    }
+
+    let fee = spent.checked_sub(paid).ok_or("it pays more than it spends")?;
+    let sizes: Vec<(u32, usize)> = facts.inputs.iter().map(|(_, held)| (held.threshold, held.script_len)).collect();
+    let least = btc_release_vbytes(facts.raw.len(), &sizes) * facts.fee_floor;
+
+    if fee == 0 || fee > facts.fee_cap || fee < least {
+        return Err(format!("its fee of {fee} is not from {least}, the floor for its size, to the cap of {}", facts.fee_cap));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "What change is at least, in satoshis: Bitcoin's nodes relay nothing with an output under its dust.", category = "Bridges")]
+pub const BTC_DUST: u64 = 546;
 
 #[document(summary = "What both gateways hash a transfer's digest under.", category = "Bridges")]
 pub const DOMAIN: &str = "chainv4-gateway";
@@ -93,15 +289,15 @@ impl AssetKind {
 }
 
 #[document(
-    summary = "A transfer between two gateways, as each writes it and the federation signs it. Chains are named by their EVM chain ids, chainv4's included; addresses on chainv4 as their 33 bytes (Address::to_abi), an EVM chain's as their 20.",
+    summary = "A transfer between two gateways, as each writes it and the federation signs it. Chains are named by their EVM chain ids, chainv4's included; addresses on chainv4 as their 33 bytes (Address::to_abi), an EVM chain's as their 20, and a gateway on chainv4 as its identity().",
     category = "Bridges",
     see_also = "Transfer::digest",
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transfer {
-    #[document(summary = "The gateway it leaves from, on the source chain.")]
+    #[document(summary = "The gateway it leaves from, on the source chain: 20 bytes on an EVM chain, a gateway here as its identity(), its 33 bytes and when it was set up.")]
     pub from: Vec<u8>,
-    #[document(summary = "The gateway it arrives at, on the target chain.")]
+    #[document(summary = "The gateway it arrives at, on the target chain, written as from is.")]
     pub to: Vec<u8>,
     pub source: u64,
     pub target: u64,
@@ -130,6 +326,25 @@ fn keccak(bytes: &[u8]) -> [u8; 32] {
 }
 
 impl Transfer {
+    #[document(
+        parent = "Transfer",
+        summary = "Whether it is for this gateway on this chain, from its peer: what Gateway.sol's logs still hold after a chain's reset is for another, and no signer's business.",
+        params = { here = "This chain's id.", identity = "The gateway here, as its identity() writes it.", peer = "The gateway it left, on its chain." },
+    )]
+    pub fn arrives_at(&self, here: u64, identity: &[u8], peer: &[u8]) -> bool {
+        self.target == here && self.to == identity && self.from == peer
+    }
+
+    #[document(
+        parent = "Transfer",
+        summary = "The key Gateway.sol marks it delivered by: keccak256 of its source chain, its source gateway's hash and its nonce.",
+    )]
+    pub fn delivered_key(&self) -> Vec<u8> {
+        let values = [AbiValue::Uint(u256::from(self.source)), AbiValue::FixedBytes(keccak(&self.from).to_vec()), AbiValue::Uint(u256::from(self.nonce))];
+
+        keccak(&encode_values(&[AbiType::Uint(64), AbiType::FixedBytes(32), AbiType::Uint(64)], &values).expect("a key encodes")).to_vec()
+    }
+
     #[document(
         parent = "Transfer",
         summary = "What the federation signs: keccak256 of the domain, the head (gateways, chains, nonce, kind and origin, hashed) and the body (asset, id, amount, recipient and names, hashed), ABI-encoded, as both gateways compute it.",

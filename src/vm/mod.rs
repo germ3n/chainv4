@@ -179,6 +179,8 @@ pub mod cost {
     pub const PROOF_SIBLING: u64 = 60;
     /// Reading the federation in force: one record.
     pub const FEDERATION: u64 = 200;
+    /// Reading the chain's id: a number every node holds, no record read.
+    pub const CHAIN_ID: u64 = 20;
     /// A storage scan's seek, plus STORAGE_SCAN_ENTRY for each entry it gives and 1 for every
     /// STORAGE_BYTES_PER_FUEL bytes of key and value: cheaper an entry than a read, as the scan
     /// reads them in order.

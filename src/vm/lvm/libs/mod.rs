@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod address;
+pub mod chain;
 pub mod contracts;
 pub mod crypto;
 pub mod ctx;
@@ -15,6 +16,7 @@ pub mod values;
 
 pub use accounts::register_accounts_lib;
 pub use address::register_address_lib;
+pub use chain::register_chain_lib;
 pub use contracts::register_contracts_lib;
 pub use crypto::register_crypto_lib;
 pub use ctx::register_ctx_lib;

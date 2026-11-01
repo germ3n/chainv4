@@ -1064,7 +1064,8 @@ light client:
   and signed as the Swaps page signs there.
 - **From an EVM chain:** letting Gateway.sol take it, then sending, signed there with the
   account's Ethereum key, or by the offline signer. It arrives as the federation signs it.
-- **Bitcoin:** the account's deposit address, with its QR code, computed here from the federation.
+- **Bitcoin:** the account's deposit address, with its QR code, computed here from the federation,
+  the chain's id and the gateway the directory names, so it holds on this chain alone.
   A payment to it, found by the wallet's own [Bitcoin light client](#bitcoin-followed-by-the-wallet-itself)
   and deep enough, is minted as wBTC by its proof from the block it came in; without the light
   client, by Esplora's proof of a transaction typed in. wBTC is withdrawn to a `bc1q…` address or

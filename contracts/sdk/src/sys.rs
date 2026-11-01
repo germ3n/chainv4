@@ -99,5 +99,7 @@ unsafe extern "C" {
     pub fn check_merkle(root: *const u8, root_len: u32, data: *const u8, data_len: u32, index: u64, count: u64, path: *const u8, path_len: u32) -> u32;
     /// The federation's length in the result buffer, encoded, or -1 for none.
     pub fn federation() -> i32;
+    /// The chain's id: what its EVM answers CHAINID with.
+    pub fn chain_id() -> u64;
     pub fn abort(message: *const u8, len: u32) -> !;
 }

@@ -145,8 +145,15 @@ cargo build --manifest-path contracts/Cargo.toml --target wasm32-unknown-unknown
 $B send --node $N --key $K deploy --wasm contracts/target/wasm32-unknown-unknown/release/btc_relay.wasm
 $B bridge --node $N --key $K --esplora https://mempool.space/testnet4/api \
   btc relay-start <relay> <testnet4 tip rounded down to 2016> --network test
-$B bridge --node $N --key $K btc deploy <relay>                           # Bitcoin gateway
+$B bridge --node $N --key $K --esplora https://mempool.space/testnet4/api \
+  btc relay-sync <relay>                                                  # to the tip, before its gateway
+$B bridge --node $N --key $K btc deploy <relay> --fee-floor 2             # Bitcoin gateway
 ```
+
+The gateway mints only what was mined past the relay's tip when it was set up, and every deposit
+address depends on the chain's id and the gateway, so each new chain gives everyone new ones: see
+[Bridges](bridges.md#the-gateway). After a reset, `bridge peer` joins Gateway.sol to the new gateway
+before anyone sends through it.
 
 Samples: tokens are `contracts/lua/token.lua` with `NAME` and `SYMBOL` changed (GLD, SLV, TUSD);
 `nft create nft "Test Pixels" PIX --factory …` and `nft create multi "Test Items" ITEM`, then

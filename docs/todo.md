@@ -789,6 +789,37 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **One Bitcoin withdrawal could be paid up to 50 times.** `propose` checked each withdrawal was queued but marked
+  them only after the loop, so a release naming one id 50 times paid one burn 50 times. A repeated id is refused, and
+  `bridge btc sign` goes over each release against the gateway's state before signing, rather than signing every open
+  one.
+- [x] **An invalid release could freeze BTC for good.** Duplicate inputs, a BIP68 delay, a 1-satoshi fee, change under
+  dust, an output no node relays or a count written longer than it needs all made a release that holds its inputs and
+  never confirms. All are refused, with a fee floor per virtual byte beside the cap. The federation in force can
+  cancel a release with an input under its threshold; each withdrawal it paid stays anchored to one of its inputs, so
+  it cannot be paid twice even if the cancelled one is finished with signatures that came too late.
+- [x] **Bitcoin deposits replayed across chain resets.** A deposit script named only the recipient and federation, so
+  the same proof minted again on a new chain. It commits to the chain's id and the gateway now, in Lua, Rust and the
+  wallet, and a gateway refuses what was mined before it was set up. Contracts read the id with `chain.id()` and
+  `chain_id`, a host function in both engines.
+- [x] **Signers would re-mint old transfers on a chain restarted from an identical genesis.** The gateway here took its
+  chain id from its owner, and the old chain's signatures are public. It reads the real id now, and is named in every
+  transfer by its address and the time it was set up, so neither old signatures nor Gateway.sol's old logs mean
+  anything to one set up anew.
+- [x] **1 wei halted bridge signing.** A transfer refused at the threshold made that signer's pass stop there, every
+  time, and `watch` then skipped relaying; a name that was not UTF-8 did the same, either way. Both gateways refuse a
+  recipient that cannot arrive and drop a name that is not text, and each transfer now stands alone: one refused is
+  logged with why, tried less and less often, and stays listed, and old logs after a reset pass quietly.
+- [ ] **One gateway-owner key can drain coins through a fake peer where the directory omits that chain.** The owner
+  sets the gateway's peers, and a signer only refuses a peer the directory contradicts, so on a chain the directory
+  does not name it signs what the owner's fake peer says left.
+- [ ] **The relay's SPV proofs have the inner-node weakness, CVE-2017-12842.** `includes`
+  (`contracts/examples/btc_relay/src/lib.rs:402-430`) takes a 64-byte inner node of the Merkle tree as a transaction.
+- [ ] **A mining hello's `payout` and `solo` are unauthenticated.** `src/mining/protocol.rs:190-200`.
+- [ ] **`multisig bitcoin sign` signs a PSBT blind.** `src/cli/multisig.rs:449,483`.
+- [ ] **Bitcoin withdrawal fees come from the pool.** A release's fee is taken from what the gateway holds, not from what
+  was burned (`contracts/lua/btc_gateway.lua`, where `propose` reckons the fee), so wBTC slowly stops being backed.
+- [ ] **Release manifests have no expiry, and only the node orders them by `issued`.**
 - [ ] **A chain's own signature on a transaction is not bound to its chain.** `signing_bytes` covers the transaction,
   nonce, fee offer and signer, while votes, EIP-155 and EIP-712 name the genesis. So a transaction signed on one
   chain is valid on another where its account has that nonce: with the keys reused, as across the devnet's

@@ -1431,7 +1431,7 @@ mod gateway {
         assert_eq!(read(&mut chain, wrapped, "symbol()", &[], "(string)"), [AbiValue::String("wEXT".into())]);
 
         // Back: burned here, and the transfer names the token on chainv4, digest as Rust makes it.
-        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &[0x05; 33], AssetKind::Token, wrapped, u256::ZERO, u256::from(200u64))).result.is_ok());
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &[0x01; 33], AssetKind::Token, wrapped, u256::ZERO, u256::from(200u64))).result.is_ok());
         assert_eq!(read(&mut chain, wrapped, "balanceOf(address)", &[AbiValue::Address(me)], "(uint256)"), [AbiValue::Uint(u256::from(300u64))]);
         let back = sent(&mut chain, gateway, 1);
 
@@ -1448,19 +1448,19 @@ mod gateway {
         let gateway = gateway(&mut chain);
 
         // ETH, here DEV, leaves held, as the coin.
-        assert!(run(&mut chain, gateway, 1_000, send_input(OTHER, &[0x05; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1_000u64))).result.is_ok());
+        assert!(run(&mut chain, gateway, 1_000, send_input(OTHER, &[0x01; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1_000u64))).result.is_ok());
         let left = sent(&mut chain, gateway, 1);
 
         assert_eq!((left.kind, left.origin, left.asset.len(), left.symbol.as_str()), (AssetKind::Coin, here, 0, "DEV"));
-        refused(&run(&mut chain, gateway, 5, send_input(OTHER, &[0x05; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(6u64))), "as much as amount says");
-        refused(&run(&mut chain, gateway, 0, send_input(99, &[0x05; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1u64))), "no gateway on that chain");
+        refused(&run(&mut chain, gateway, 5, send_input(OTHER, &[0x01; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(6u64))), "as much as amount says");
+        refused(&run(&mut chain, gateway, 0, send_input(99, &[0x01; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1u64))), "no gateway on that chain");
 
         // An ERC-20 leaves held, with its name, after its approval.
         let supply = encode_values(&[AbiType::String, AbiType::String, AbiType::Uint(256)], &[AbiValue::String("Test".into()), AbiValue::String("TST".into()), AbiValue::Uint(u256::new(1_000_000))]).unwrap();
         let token = create(&mut chain, [from_hex(include_str!("../../../contracts/evm/Token.bin").trim()).unwrap(), supply].concat());
         let approve = [keccak256(b"approve(address,uint256)")[..4].to_vec(), encode_values(&[AbiType::Address, AbiType::Uint(256)], &[AbiValue::Address(gateway), AbiValue::Uint(u256::new(70))]).unwrap()].concat();
         assert!(run(&mut chain, token, 0, approve).result.is_ok());
-        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &[0x05; 33], AssetKind::Token, token, u256::ZERO, u256::from(70u64))).result.is_ok());
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &[0x01; 33], AssetKind::Token, token, u256::ZERO, u256::from(70u64))).result.is_ok());
         let held = sent(&mut chain, gateway, 2);
 
         assert_eq!((held.kind, held.asset.as_slice(), held.name.as_str(), held.decimals), (AssetKind::Token, token.as_slice(), "Test", 18));

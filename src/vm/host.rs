@@ -353,6 +353,14 @@ impl Host {
         Ok(decided.or_else(|| self.vm.federation().map(|federation| crate::registry::federation::DecidedFederation { version: 0, federation: federation.clone() })))
     }
 
+    #[document(
+        parent = "Host",
+        summary = "The chain's id, as the gateways name it and the EVM's CHAINID answers: six bytes of its genesis id. Nothing a contract's owner sets, so a contract may bind what it signs or pays to this one chain. Engines charge cost::CHAIN_ID.",
+    )]
+    pub fn chain_id(&self) -> u64 {
+        self.vm.chain_id()
+    }
+
     #[document(parent = "Host", summary = "The chain's hash: what its roots, and so the proofs contracts check, are made with.")]
     pub fn chain_hash(&self) -> crate::structs::hash::HashType {
         self.vm.hash()

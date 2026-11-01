@@ -992,8 +992,18 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Bridges
 
-- **The gateway's setup takes the chain id:** `setup(chain_id, …)`, the id the chain's EVM answers
-  CHAINID with, as `GET /status` says it. A wrong one makes every digest a stranger's.
+- **The gateway's setup takes no chain id:** it reads `chain.id()`, the id the chain's EVM answers
+  `CHAINID` with, so no owner can give it another. `setup` takes the three templates alone.
+- **`Transfer::from` or `to` for a gateway here is its `identity()`,** not its address: its 33 bytes
+  and the time it was set up. Read it with `identity()`; Gateway.sol's peer is that, 40-odd bytes,
+  and `chainv4 bridge peer` sends it. A gateway set up anew needs `peer` again.
+- **Gateway.sol's `delivered` key takes the source gateway too:** `Transfer::delivered_key`. A chain
+  restarted from the identical genesis counts from nonce 1 again, and would otherwise find every
+  nonce taken.
+- **A pass of `sign`, `relay` or `watch` gives no error for a refused transfer.** It logs it, and
+  under `watch` lists it each pass, `still refused: …`: watch stderr, not the exit code.
+- **A signer relaying pays gas with `--evm-key`:** under `watch` too, so fund it on each EVM chain,
+  or every delivery stays listed.
 - **Signers need the event index:** `chainv4 bridge sign` reads what left here from `Sent` events.
 - **Wrapped coins go back as the coin:** a wrapped ETH token sent back says kind 0, so its gateway
   releases ETH.
@@ -1011,9 +1021,25 @@ voting finality it now goes back to the checkpoint and follows the node from the
   relay, `bitcoin_depth` deep; run `relay-sync` before `deposit` and `released`.
 - **Start main at a retarget:** the relay needs the period's first block to check the next
   difficulty, so `relay-start` on `main` takes a height divisible by 2016.
-- **A deposit address is per address and per federation:** a new federation makes new ones; pay
+- **A deposit address is per address, federation, chain and gateway:** `btc_deposit_script` takes
+  all of them, in Lua and Rust alike. A new chain or a new gateway makes new ones, so one given out
+  before a reset pays what nobody will mint: tell people. Sync the relay before `btc deploy`: a
+  gateway mints only what was mined past the relay's tip when it was set up.
+- **A new federation makes new deposit addresses:** pay
   an old one only within the grace period, after which its deposits do not mint.
 - **Withdrawals start at 1,000 satoshis,** and a release pays at most 50.
+- **`setup` takes a fee floor:** `setup(relay, template, fee_cap, fee_floor, grace_ms)`, the floor in
+  satoshis a virtual byte, at least 1, and the cap at least 710 virtual bytes of it, or it is
+  refused. A release paying less for its size than the floor is refused too: `--fee` is checked
+  against it before anything is sent.
+- **A withdrawal's script is one nodes relay:** P2PKH, P2SH or a witness program, not any 80 bytes.
+- **A cancelled release can still be mined.** Its signatures are public, the board only stops
+  counting them. So the withdrawals it paid must spend one of its inputs, `anchor(id)`, in their next
+  release, until that input is shown spent; `bridge btc propose` does this itself, and one whose
+  anchor is in another release waits for it. Show a cancelled release that was mined with
+  `released` all the same, so the gateway knows.
+- **A signer that voted to cancel stops signing that release,** as its signature would take it to
+  the threshold, where no vote stands.
 - **Releases are given without their witnesses:** the gateway reads and checks the base
   transaction, as its txid hashes it; the witnesses are assembled after, from the board.
 
@@ -1032,7 +1058,7 @@ voting finality it now goes back to the checkpoint and follows the node from the
 ## Bridges in the apps
 
 - **Deposit addresses are computed, not asked:** the wallet builds the account's deposit address
-  from the proven federation, so a node cannot hand it one of its own; the gateway's
+  from the proven federation and directory, and the chain's id from its genesis, so a node cannot hand it one of its own; the gateway's
   `deposit_script` says the same, for the CLI.
 - **The light client keeps a deposit's proof as it finds it:** its block, the transaction
   without its witness, its place and Merkle path, for Mint wBTC. Coins found before an update

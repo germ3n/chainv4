@@ -304,7 +304,8 @@ contract Gateway {
         setSet(signers_, threshold_, version_);
     }
 
-    /// The gateway on another chain, by its chain id: chainv4's as its 33 bytes.
+    /// The gateway on another chain, by its chain id: chainv4's as its identity(), its 33 bytes and
+    /// when it was set up, so what left for one set up before it is not for this one.
     function setPeer(uint64 chain, bytes calldata gateway) external {
         require(msg.sender == owner, "only the owner");
         peers[chain] = gateway;
@@ -335,6 +336,7 @@ contract Gateway {
     /// A wrapped one goes back, burned here; a native one is held here until it comes back.
     function send(uint64 target, bytes calldata recipient, uint8 kind, address asset, uint256 id, uint256 amount) external payable returns (uint64) {
         require(peers[target].length > 0, "no gateway on that chain is this one's peer");
+        require(reachable(recipient, peers[target].length), "a recipient that is no address on that chain");
         Transfer memory t;
         (t.from, t.to, t.source, t.target, t.recipient) = (abi.encodePacked(address(this)), peers[target], uint64(block.chainid), target, recipient);
         Origin storage wrapped = origins[asset];
@@ -373,7 +375,9 @@ contract Gateway {
     function deliver(Transfer calldata t, bytes[] calldata signatures) external {
         require(t.target == block.chainid && keccak256(t.to) == keccak256(abi.encodePacked(address(this))), "not for this gateway");
         require(peers[t.source].length > 0 && keccak256(t.from) == keccak256(peers[t.source]), "not from this gateway's peer");
-        bytes32 key = keccak256(abi.encode(t.source, t.nonce));
+        // By the gateway it came from too: a chain restarted from the identical genesis counts its
+        // nonces from 1 again, under a gateway with the same address but set up anew.
+        bytes32 key = keccak256(abi.encode(t.source, keccak256(t.from), t.nonce));
         require(!delivered[key], "delivered already");
         bytes32 digest = digestOf(t);
         check(digest, signatures);
@@ -496,6 +500,22 @@ contract Gateway {
         }
     }
 
+    /// Whether a recipient is an address on the chain of a peer gateway: on another EVM chain, 20
+    /// bytes and not nobody; on chainv4, its 33, its kind's tag first, a shorter kind followed by
+    /// zeros, as its gateway reads them, and not nobody. Anything else can never arrive, and once
+    /// signed could only be refused there.
+    function reachable(bytes calldata recipient, uint256 peerLength) private pure returns (bool) {
+        if (peerLength == 20) {
+            return recipient.length == 20 && bytes20(recipient) != bytes20(0);
+        }
+
+        if (recipient.length != 33 || uint8(recipient[0]) > 5 || bytes32(recipient[1:33]) == bytes32(0)) {
+            return false;
+        }
+
+        return uint8(recipient[0]) < 3 || bytes12(recipient[21:33]) == bytes12(0);
+    }
+
     /// A minimal proxy of a template (EIP-1167), at an address fixed by the salt.
     function clone(address template, bytes32 salt) private returns (address made) {
         bytes memory code = abi.encodePacked(hex"3d602d80600a3d3981f3363d3d373d3d3d363d73", template, hex"5af43d82803e903d91602b57fd5bf3");
@@ -569,9 +589,41 @@ contract Gateway {
         emit SignersChanged(nextVersion, nextThreshold);
     }
 
+    /// Text as a transfer may carry it: chainv4's gateway and tools hold names and URIs as UTF-8,
+    /// and one that is not could never be signed, so a token with such a name crosses without it.
+    function readable(string memory text) private pure returns (string memory) {
+        bytes memory found = bytes(text);
+        uint256 index = 0;
+
+        while (index < found.length) {
+            uint8 first = uint8(found[index]);
+            uint256 size = first < 0x80 ? 1 : first < 0xc2 ? 0 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : first < 0xf5 ? 4 : 0;
+
+            if (size == 0 || index + size > found.length) {
+                return "";
+            }
+
+            for (uint256 next = 1; next < size; next++) {
+                uint8 byte_ = uint8(found[index + next]);
+                // The second byte has narrower bounds after these: none overlong, none a
+                // surrogate, none past U+10FFFF.
+                uint8 least = next == 1 && first == 0xe0 ? 0xa0 : next == 1 && first == 0xf0 ? 0x90 : 0x80;
+                uint8 most = next == 1 && first == 0xed ? 0x9f : next == 1 && first == 0xf4 ? 0x8f : 0xbf;
+
+                if (byte_ < least || byte_ > most) {
+                    return "";
+                }
+            }
+
+            index += size;
+        }
+
+        return text;
+    }
+
     function nameOf(address asset) private view returns (string memory) {
         try IERC20(asset).name() returns (string memory found) {
-            return found;
+            return readable(found);
         } catch {
             return "";
         }
@@ -579,7 +631,7 @@ contract Gateway {
 
     function symbolOf(address asset) private view returns (string memory) {
         try IERC20(asset).symbol() returns (string memory found) {
-            return found;
+            return readable(found);
         } catch {
             return "";
         }
@@ -595,7 +647,7 @@ contract Gateway {
 
     function tokenUriOf(address asset, uint256 id) private view returns (string memory) {
         try IERC721(asset).tokenURI(id) returns (string memory found) {
-            return found;
+            return readable(found);
         } catch {
             return "";
         }
@@ -603,7 +655,7 @@ contract Gateway {
 
     function multiUriOf(address asset, uint256 id) private view returns (string memory) {
         try IERC1155(asset).uri(id) returns (string memory found) {
-            return found;
+            return readable(found);
         } catch {
             return "";
         }

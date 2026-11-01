@@ -6,6 +6,7 @@
 
 use {
     super::Bridge,
+    crate::bridge::{BTC_DUST, NamedWithdrawal, ReleaseFacts, SpentOutput, btc_cancel_digest, btc_release_vbytes, check_btc_release, sign_digest},
     crate::cli::CliResult,
     crate::crypto::bitcoin::sha256d,
     crate::crypto::bitcoin::tx::{Network, Transaction, TxIn, TxOut, address, der, p2wsh},
@@ -16,8 +17,6 @@ use {
     serde_json::{Value, json},
 };
 
-/// An output smaller than this goes to the fee rather than to change: Bitcoin's dust, about.
-const DUST: u64 = 546;
 /// The most withdrawals one release pays, as the gateway allows.
 const MOST_WITHDRAWALS: usize = 50;
 
@@ -47,6 +46,10 @@ pub enum BtcAction {
         /// The most fee a release may pay, in satoshis.
         #[arg(long, default_value_t = 50_000)]
         fee_cap: u64,
+        /// The least fee a release may pay, in satoshis a virtual byte: a release proposed for less
+        /// would hold what it spends without being mined. The cap must pay 710 virtual bytes of it.
+        #[arg(long, default_value_t = 2)]
+        fee_floor: u64,
         /// How long an old federation's deposit addresses stay open, in hours.
         #[arg(long, default_value_t = 168)]
         grace_hours: u64,
@@ -72,8 +75,12 @@ pub enum BtcAction {
         #[arg(long)]
         fee: u64,
     },
-    /// A federation signer's pass: signs every input of every open release, with --evm-key.
+    /// A federation signer's pass, with --evm-key: goes over every open release against the
+    /// gateway's state, and signs every input of those that stand.
     Sign,
+    /// A federation signer's vote to cancel a release with an input under its threshold of
+    /// signatures, with --evm-key; once enough voted, its inputs and withdrawals go back.
+    Cancel { proposal: u64 },
     /// Assembles an open release's witnesses from the signatures posted, and broadcasts it.
     Finish { proposal: u64 },
     /// Shows a release confirmed on Bitcoin, spending its inputs and holding its change.
@@ -256,11 +263,11 @@ impl Bridge {
 
                 Ok(())
             }
-            BtcAction::Deploy { relay, fee_cap, grace_hours } => {
+            BtcAction::Deploy { relay, fee_cap, fee_floor, grace_hours } => {
                 let me = crate::cli::signer(self.args.key.as_deref())?.public().address();
                 let template = self.deploy_lua(&me, "wrapped.lua", super::WRAPPED_LUA)?;
                 let gateway = self.deploy_lua(&me, "btc_gateway.lua", include_str!("../../../contracts/lua/btc_gateway.lua"))?;
-                self.call(gateway, "setup", u256::ZERO, vec![TxCallArgumentType::Address(*relay), TxCallArgumentType::Address(template), number(*fee_cap), number(grace_hours * 3_600_000)])?;
+                self.call(gateway, "setup", u256::ZERO, vec![TxCallArgumentType::Address(*relay), TxCallArgumentType::Address(template), number(*fee_cap), number(*fee_floor), number(grace_hours * 3_600_000)])?;
                 println!("btc gateway {gateway}");
 
                 Ok(())
@@ -289,6 +296,7 @@ impl Bridge {
             BtcAction::Propose { fee } => self.propose(*fee, false),
             BtcAction::Sweep { fee } => self.propose(*fee, true),
             BtcAction::Sign => self.sign_releases(),
+            BtcAction::Cancel { proposal } => self.vote_cancel(*proposal),
             BtcAction::Finish { proposal } => self.finish(*proposal),
             BtcAction::Released { proposal } => {
                 let found = self.read(&self.btc_gateway()?, "proposal", json!([{ "type": "u64", "value": proposal.to_string() }]))?;
@@ -315,11 +323,40 @@ impl Bridge {
         Ok(found)
     }
 
-    /// Proposes a release of the queued withdrawals, or a sweep of older federations' outputs.
+    /// What the gateway says of an output it holds, by its outpoint.
+    fn spent_output(&self, gateway: &Address, outpoint: &str) -> CliResult<SpentOutput> {
+        let found = self.read(gateway, "utxo_of", json!([{ "type": "string", "value": outpoint }]))?;
+
+        match found.get(5) {
+            Some(threshold) => Ok(SpentOutput { sats: whole(&found[0]), version: whole(&found[1]), state: text(&found[3]), threshold: whole(threshold) as u32, script_len: raw(&found[4]).len() }),
+            None => Err(format!("the gateway does not hold {outpoint}").into()),
+        }
+    }
+
+    /// The input a withdrawal's next release must spend, after a cancel, if any.
+    fn anchor(&self, gateway: &Address, id: u64) -> CliResult<Option<String>> {
+        let found = self.read(gateway, "anchor", json!([{ "type": "u64", "value": id.to_string() }]))?;
+
+        Ok(found.first().filter(|value| !value["value"].is_null()).map(text))
+    }
+
+    fn fee_limits(&self, gateway: &Address) -> CliResult<(u64, u64)> {
+        let limits = self.read(gateway, "fee_limits", json!([]))?;
+
+        Ok((limits.first().map_or(0, whole), limits.get(1).map_or(0, whole)))
+    }
+
+    /// Proposes a release of the queued withdrawals, or a sweep of older federations' outputs. A
+    /// withdrawal from a cancelled release brings the input it must spend; one whose input is in
+    /// another release waits for that one. A sweep takes as much as the fee pays at the floor, for
+    /// another sweep to take the rest.
     fn propose(&self, fee: u64, sweep: bool) -> CliResult<()> {
         let gateway = self.btc_gateway()?;
         let version = self.status()?["federation"]["version"].as_u64().ok_or("this chain has no federation")?;
         let change = p2wsh(&raw(self.read(&gateway, "change_script", json!([]))?.first().ok_or("no change script")?));
+        let (_, floor) = self.fee_limits(&gateway)?;
+        let held = self.unspent(&gateway)?;
+        let mut anchors = std::collections::HashSet::new();
         let mut ids = Vec::new();
         let mut outputs = Vec::new();
 
@@ -330,6 +367,16 @@ impl Bridge {
                 let withdrawal = self.read(&gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
 
                 if withdrawal.get(2).map(text).as_deref() == Some("queued") && ids.len() < MOST_WITHDRAWALS {
+                    if let Some(anchor) = self.anchor(&gateway, id)? {
+                        if !held.iter().any(|(outpoint, ..)| *outpoint == anchor) {
+                            println!("withdrawal {id} waits: the input it must spend, {anchor}, is in another release");
+
+                            continue;
+                        }
+
+                        anchors.insert(anchor);
+                    }
+
                     ids.push(id);
                     outputs.push(TxOut { value: whole(&withdrawal[1]), script: raw(&withdrawal[0]) });
                 }
@@ -342,30 +389,48 @@ impl Bridge {
 
         let wanted = outputs.iter().map(|output| output.value).sum::<u64>() + fee;
         let mut inputs = Vec::new();
-        let mut held = 0;
+        let mut sizes = Vec::new();
+        let mut taken = 0;
+        // What must be spent comes first.
+        let (needed, others): (Vec<_>, Vec<_>) = held.into_iter().partition(|(outpoint, ..)| anchors.contains(outpoint));
 
-        for (outpoint, sats, at) in self.unspent(&gateway)? {
-            if (sweep && at >= version) || (!sweep && held >= wanted) {
+        for (outpoint, sats, at) in needed.into_iter().chain(others) {
+            if (sweep && at >= version) || (!sweep && taken >= wanted && !anchors.contains(&outpoint)) {
                 continue;
+            }
+
+            let spent = self.spent_output(&gateway, &outpoint)?;
+            sizes.push((spent.threshold, spent.script_len));
+
+            // Each input and its one output, and the fixed parts around them.
+            if sweep && !inputs.is_empty() && btc_release_vbytes(10 + (inputs.len() + 1) * 41 + 43, &sizes) * floor > fee {
+                sizes.pop();
+                break;
             }
 
             let (txid, vout) = outpoint.split_once(':').ok_or("an outpoint that does not read")?;
             // The gateway keys what it holds by the id in Bitcoin's own byte order.
             let id: [u8; 32] = from_hex(&format!("0x{txid}")).and_then(|bytes| bytes.try_into().ok()).ok_or("an outpoint that does not read")?;
             inputs.push(TxIn { txid: id, vout: vout.parse()?, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() });
-            held += sats;
+            taken += sats;
         }
 
-        if inputs.is_empty() || held < wanted {
-            return Err(format!("the gateway holds {held} satoshis to spend, short of {wanted}").into());
+        if inputs.is_empty() || taken < wanted {
+            return Err(format!("the gateway holds {taken} satoshis to spend, short of {wanted}").into());
         }
 
         // Change back to the federation, or to the fee when it is dust.
-        if held - wanted > DUST || sweep {
-            outputs.push(TxOut { value: held - wanted, script: change });
+        if taken - wanted >= BTC_DUST || sweep {
+            outputs.push(TxOut { value: taken - wanted, script: change });
         }
 
         let tx = Transaction { version: 2, inputs, outputs, lock_time: 0 };
+        let least = btc_release_vbytes(tx.base().len(), &sizes) * floor;
+
+        if fee < least {
+            return Err(format!("a fee of {fee} is under the floor: this release pays at least {least}").into());
+        }
+
         let mut args = vec![TxCallArgumentType::Bytes(tx.base())];
         args.extend(ids.iter().map(|id| TxCallArgumentType::U64(*id)));
         println!("proposing {} paying {} withdrawals, txid {}", if sweep { "a sweep" } else { "a release" }, ids.len(), shown(&sha256d(&tx.base())));
@@ -373,23 +438,41 @@ impl Bridge {
         self.call(gateway, "propose", u256::ZERO, args)
     }
 
-    /// Signs every input of every open release that this signer has not signed.
+    /// What a release is, from the gateway's state alone: what the signer goes over.
+    fn release_facts(&self, gateway: &Address, found: &[Value]) -> CliResult<ReleaseFacts> {
+        let release = raw(found.first().ok_or("no such release")?);
+        let (tx, _) = Transaction::read(&release)?;
+        let version = found.get(3).map_or(0, whole);
+        let mut withdrawals = Vec::new();
+
+        for id in found.get(2).map(text).unwrap_or_default().split(',').filter(|id| !id.is_empty()) {
+            let id: u64 = id.parse().map_err(|_| "a release names what is no withdrawal")?;
+            let withdrawal = self.read(gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
+            withdrawals.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), state: text(&withdrawal[2]), anchor: self.anchor(gateway, id)? });
+        }
+
+        let inputs = tx.inputs.iter().map(|input| {
+            let outpoint = format!("{}:{}", to_hex(&input.txid).trim_start_matches("0x"), input.vout);
+            let held = self.spent_output(gateway, &outpoint)?;
+
+            Ok((outpoint, held))
+        }).collect::<CliResult<Vec<_>>>()?;
+        let change_script = raw(self.read(gateway, "change_script", json!([{ "type": "u64", "value": version.to_string() }]))?.first().ok_or("no change script")?);
+        let (fee_cap, fee_floor) = self.fee_limits(gateway)?;
+
+        Ok(ReleaseFacts { raw: release, txid: raw(found.get(1).ok_or("no transaction id")?), version, withdrawals, inputs, change_script, fee_cap, fee_floor })
+    }
+
+    /// Goes over every open release against the gateway's state, and signs each input of those
+    /// that stand and that this signer has not signed, nor voted to cancel. One refused is said and
+    /// passed over, for the next one.
     fn sign_releases(&self) -> CliResult<()> {
         let (gateway, secret) = (self.btc_gateway()?, self.evm_secret()?);
         let count = whole(self.read(&gateway, "proposal_count", json!([]))?.first().ok_or("no count")?);
-        let unspent_or_pending = |outpoint: &str| -> CliResult<u64> {
-            let total = whole(self.read(&gateway, "utxo_count", json!([]))?.first().ok_or("no count")?);
-
-            for n in 0..total {
-                let utxo = self.read(&gateway, "utxo", json!([{ "type": "u64", "value": n.to_string() }]))?;
-
-                if text(&utxo[0]) == outpoint {
-                    return Ok(whole(&utxo[1]));
-                }
-            }
-
-            Err(format!("the gateway does not hold {outpoint}").into())
-        };
+        let my_key = crate::crypto::secp256k1::public_key(&secret).ok_or("--evm-key is no key")?;
+        // Two open releases naming one withdrawal would pay it twice, should the gateway ever let
+        // them: the first keeps it.
+        let mut paying = std::collections::HashSet::new();
 
         for id in 1..=count {
             let found = self.read(&gateway, "proposal", json!([{ "type": "u64", "value": id.to_string() }]))?;
@@ -398,24 +481,54 @@ impl Bridge {
                 continue;
             }
 
-            let (tx, _) = Transaction::read(&raw(&found[0]))?;
-
-            for (index, input) in tx.inputs.iter().enumerate() {
-                let posted = self.read(&gateway, "input_signatures", json!([{ "type": "u64", "value": id.to_string() }, { "type": "u64", "value": index.to_string() }]))?;
-                let script = raw(posted.first().ok_or("no witness script")?);
-                let sats = unspent_or_pending(&format!("{}:{}", to_hex(&input.txid).trim_start_matches("0x"), input.vout))?;
-                let signature = crate::crypto::secp256k1::sign_hash(&secret, &sha256d(&tx.script_preimage(index, &script, sats)));
-
-                if posted.iter().skip(2).any(|value| raw(value) == signature) {
-                    continue;
-                }
-
-                println!("signing release {id}, input {index}");
-                self.call(gateway, "sign", u256::ZERO, vec![TxCallArgumentType::U64(id), TxCallArgumentType::U64(index as u64), TxCallArgumentType::Bytes(signature.to_vec())])?;
+            if let Err(why) = self.sign_release(&gateway, id, &found, &my_key, &secret, &mut paying) {
+                eprintln!("not signing release {id}: {why}");
             }
         }
 
         Ok(())
+    }
+
+    fn sign_release(&self, gateway: &Address, id: u64, found: &[Value], my_key: &[u8; 33], secret: &[u8; 32], paying: &mut std::collections::HashSet<u64>) -> CliResult<()> {
+        if self.read(gateway, "voted", json!([{ "type": "u64", "value": id.to_string() }, { "type": "bytes", "value": to_hex(my_key) }]))?.first().is_some_and(|value| value["value"] == true) {
+            return Err("this signer voted to cancel it".into());
+        }
+
+        let facts = self.release_facts(gateway, found)?;
+        check_btc_release(&facts)?;
+
+        for withdrawal in &facts.withdrawals {
+            if !paying.insert(withdrawal.id) {
+                return Err(format!("another open release pays withdrawal {}", withdrawal.id).into());
+            }
+        }
+
+        let (tx, _) = Transaction::read(&facts.raw)?;
+
+        for (index, (_, held)) in facts.inputs.iter().enumerate() {
+            let posted = self.read(gateway, "input_signatures", json!([{ "type": "u64", "value": id.to_string() }, { "type": "u64", "value": index.to_string() }]))?;
+            let script = raw(posted.first().ok_or("no witness script")?);
+            let signature = crate::crypto::secp256k1::sign_hash(secret, &sha256d(&tx.script_preimage(index, &script, held.sats)));
+
+            if posted.iter().skip(2).any(|value| raw(value) == signature) {
+                continue;
+            }
+
+            println!("signing release {id}, input {index}");
+            self.call(*gateway, "sign", u256::ZERO, vec![TxCallArgumentType::U64(id), TxCallArgumentType::U64(index as u64), TxCallArgumentType::Bytes(signature.to_vec())])?;
+        }
+
+        Ok(())
+    }
+
+    /// A signer's vote to cancel a release, with --evm-key, posted with --key.
+    fn vote_cancel(&self, proposal: u64) -> CliResult<()> {
+        let (gateway, secret, here) = (self.btc_gateway()?, self.evm_secret()?, self.here()?);
+        let found = self.read(&gateway, "proposal", json!([{ "type": "u64", "value": proposal.to_string() }]))?;
+        let txid: [u8; 32] = raw(found.get(1).ok_or("no such release")?).try_into().map_err(|_| "no such release")?;
+        let signature = sign_digest(&secret, &btc_cancel_digest(here, &gateway, proposal, &txid));
+
+        self.call(gateway, "cancel", u256::ZERO, vec![TxCallArgumentType::U64(proposal), TxCallArgumentType::Bytes(signature.to_vec())])
     }
 
     /// Assembles a release's witnesses, each its threshold of signatures in the keys' order and
@@ -424,6 +537,10 @@ impl Bridge {
         let gateway = self.btc_gateway()?;
         let found = self.read(&gateway, "proposal", json!([{ "type": "u64", "value": proposal.to_string() }]))?;
         let (mut tx, _) = Transaction::read(&raw(found.first().ok_or("no such release")?))?;
+
+        if found.get(4).map(text).as_deref() != Some("open") {
+            return Err(format!("release {proposal} is {}", found.get(4).map(text).unwrap_or_default()).into());
+        }
 
         for index in 0..tx.inputs.len() {
             let posted = self.read(&gateway, "input_signatures", json!([{ "type": "u64", "value": proposal.to_string() }, { "type": "u64", "value": index.to_string() }]))?;

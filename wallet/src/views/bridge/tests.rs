@@ -7,9 +7,9 @@ fn typed(kind: &str, value: Value) -> Value {
 
 #[test]
 fn a_transfer_out_is_read_back_only_as_the_gateway_signed_it() {
-    let gateway = Address::Contract([7; 32]);
+    let identity = [&Address::Contract([7; 32]).to_abi()[..], b"1800000000000"].concat();
     let transfer = Transfer {
-        from: gateway.to_abi().to_vec(),
+        from: identity.clone(),
         to: vec![0xee; 20],
         source: 1337,
         target: 11155111,
@@ -43,11 +43,17 @@ fn a_transfer_out_is_read_back_only_as_the_gateway_signed_it() {
         ]
     };
 
-    assert_eq!(left(&values(&transfer.digest()), &gateway, [0xee; 20], 1337, 4), Some(transfer.clone()));
+    assert_eq!(left(&values(&transfer.digest()), &identity, [0xee; 20], 1337, 4), Some(transfer.clone()));
     // A node that changed any field, or the digest, is caught: the signers signed another.
-    assert_eq!(left(&values(&[0; 32]), &gateway, [0xee; 20], 1337, 4), None);
-    assert_eq!(left(&values(&transfer.digest()), &gateway, [0xee; 20], 1337, 5), None, "another nonce");
-    assert_eq!(left(&values(&transfer.digest()), &gateway, [0xdd; 20], 1337, 4), None, "another Gateway.sol");
+    assert_eq!(left(&values(&[0; 32]), &identity, [0xee; 20], 1337, 4), None);
+    assert_eq!(left(&values(&transfer.digest()), &identity, [0xee; 20], 1337, 5), None, "another nonce");
+    assert_eq!(left(&values(&transfer.digest()), &identity, [0xdd; 20], 1337, 4), None, "another Gateway.sol");
+    assert_eq!(left(&values(&transfer.digest()), &Address::Contract([7; 32]).to_abi(), [0xee; 20], 1337, 4), None, "the gateway as it was set up another time");
+
+    // Gateway.sol's delivered key differs by nonce, and by the gateway it came from: a chain
+    // restarted from the identical genesis counts its nonces from 1 again.
+    assert_ne!(transfer.delivered_key(), Transfer { nonce: 5, ..transfer.clone() }.delivered_key());
+    assert_ne!(transfer.delivered_key(), Transfer { from: Address::Contract([7; 32]).to_abi().to_vec(), ..transfer.clone() }.delivered_key());
 }
 
 #[test]
@@ -58,8 +64,6 @@ fn approvals_name_what_each_kind_lets_the_gateway_move() {
     assert_eq!(evm_approval(AssetKind::Token, spender, u256::ZERO, u256::from(5u64)).unwrap()[..4], [0x09, 0x5e, 0xa7, 0xb3], "approve(address,uint256)");
     assert_eq!(evm_approval(AssetKind::Nft, spender, u256::from(7u64), u256::from(1u64)).unwrap()[4 + 32..], encode_values(&[AbiType::Uint(256)], &[AbiValue::Uint(u256::from(7u64))]).unwrap()[..], "the id, not the amount");
     assert_eq!(evm_approval(AssetKind::Multi, spender, u256::ZERO, u256::ZERO).unwrap()[..4], [0xa2, 0x2c, 0xb4, 0x65], "setApprovalForAll(address,bool)");
-    // Gateway.sol's delivered key: keccak256 of the source chain and nonce, as the CLI reckons it.
-    assert_ne!(delivered_key(1337, 4), delivered_key(1337, 5));
 }
 
 #[test]
@@ -110,9 +114,12 @@ fn the_deposit_address_is_the_federation_s_under_the_account() {
         },
     };
     let alice = Address::Ed25519([0xa; 32]);
-    let output = deposit_output(&alice, &federation(&[21, 22, 23]));
+    let gateway = Address::Contract([7; 32]);
+    let output = deposit_output(&alice, 1337, &gateway, &federation(&[21, 22, 23]));
 
     assert_eq!(output[..2], [0, 32], "a P2WSH");
-    assert_ne!(output, deposit_output(&Address::Ed25519([0xb; 32]), &federation(&[21, 22, 23])), "each account its own");
-    assert_ne!(output, deposit_output(&alice, &federation(&[31, 32, 33])), "each federation its own");
+    assert_ne!(output, deposit_output(&Address::Ed25519([0xb; 32]), 1337, &gateway, &federation(&[21, 22, 23])), "each account its own");
+    assert_ne!(output, deposit_output(&alice, 1337, &gateway, &federation(&[31, 32, 33])), "each federation its own");
+    assert_ne!(output, deposit_output(&alice, 1338, &gateway, &federation(&[21, 22, 23])), "each chain its own");
+    assert_ne!(output, deposit_output(&alice, 1337, &Address::Contract([8; 32]), &federation(&[21, 22, 23])), "each gateway its own");
 }

@@ -1844,13 +1844,18 @@ mod send {
         run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None, None).unwrap();
 
         // The gateway, after its wBTC template, on that relay.
-        run(BtcAction::Deploy { relay, fee_cap: 10_000, grace_hours: 1 }, None, None).unwrap();
+        run(BtcAction::Deploy { relay, fee_cap: 10_000, fee_floor: 2, grace_hours: 1 }, None, None).unwrap();
         let gateway = deployed_at(&me, start + 2, hash);
         assert_eq!(gateway, announced);
         run(BtcAction::Address { recipient: me, network: "main".into() }, None, None).unwrap();
 
         // 50,000 satoshis to the dev key's deposit address, buried two deep, shown, minted.
         let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
+
+        // What the wallet works out alone is what a real chain's gateway says, under the id it says.
+        let chain_id = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/status")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["chain_id"].as_u64().unwrap();
+        assert_eq!(output, crate::crypto::bitcoin::tx::p2wsh(&crate::bridge::btc_deposit_script(&me, chain_id, &gateway, federation.threshold, &federation.signers)));
+
         let deposit = Transaction {
             version: 2,
             inputs: vec![TxIn { txid: [0x5e; 32], vout: 0, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }],
@@ -1900,6 +1905,46 @@ mod send {
         assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "1" }]))[2]["value"], "paid");
         assert_eq!(read(&gateway, "utxo_count", serde_json::json!([]))[0]["value"], "2");
         assert!(run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap_err().to_string().contains("no withdrawals are queued"));
+
+        // Another withdrawal, proposed from the change, signed by one, then cancelled by two: a
+        // signer that voted does not sign it, and the next one spends the same input.
+        run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]), sats: 5_000 }, None, None).unwrap();
+        run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
+        let state = |proposal: &str| read(&gateway, "proposal", serde_json::json!([{ "type": "u64", "value": proposal }]))[4]["value"].as_str().unwrap().to_string();
+        let posted = |proposal: &str| read(&gateway, "input_signatures", serde_json::json!([{ "type": "u64", "value": proposal }, { "type": "u64", "value": "0" }])).as_array().unwrap().len();
+        let signer = |secret: u8| dir.0.join(format!("signer-{secret}.key"));
+        fs::write(signer(23), Keypair::from_private(PrivateKey::Secp256k1([23; 32])).to_key_file()).unwrap();
+        run(BtcAction::Cancel { proposal: 2 }, None, Some(signer(21))).unwrap();
+        run(BtcAction::Sign, None, Some(signer(21))).unwrap();
+        assert_eq!(posted("2"), 2, "the script and threshold, no signature: it voted to cancel");
+        run(BtcAction::Sign, None, Some(signer(22))).unwrap();
+        assert_eq!(posted("2"), 4, "one of the two it takes");
+        assert!(run(BtcAction::Finish { proposal: 2 }, None, None).unwrap_err().to_string().contains("of the 2 signatures"));
+        run(BtcAction::Cancel { proposal: 2 }, None, Some(signer(22))).unwrap();
+        assert_eq!(state("2"), "cancelled");
+        assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "2" }]))[2]["value"], "queued");
+        assert!(run(BtcAction::Finish { proposal: 2 }, None, None).unwrap_err().to_string().contains("is cancelled"));
+        // Too little for its size, the tools say so before the gateway has to.
+        assert!(run(BtcAction::Propose { fee: 1 }, None, None).unwrap_err().to_string().contains("under the floor"));
+        run(BtcAction::Propose { fee: 1_000 }, None, None).unwrap();
+        assert_eq!(state("3"), "open");
+
+        // The cancelled one was finished anyway, with a signature that came too late for the board:
+        // Bitcoin mined it, and the gateway is shown. What was proposed since conflicts with it, so
+        // its withdrawal is paid once, and a signer going over the new one finds that from the
+        // gateway's state, though the gateway would still take its signature.
+        let cancelled = read(&gateway, "proposal", serde_json::json!([{ "type": "u64", "value": "2" }]))[0]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
+        bitcoin.block(std::slice::from_ref(&cancelled), false);
+        bitcoin.block(&[], false);
+        run(BtcAction::RelaySync { relay, batch: 10 }, None, None).unwrap();
+        run(BtcAction::Released { proposal: 2 }, None, None).unwrap();
+        assert_eq!(state("2"), "released");
+        assert_eq!(read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": "2" }]))[2]["value"], "paid");
+        run(BtcAction::Sign, None, Some(signer(23))).unwrap();
+        assert_eq!(posted("3"), 2, "not signed: its withdrawal is paid");
+        run(BtcAction::Cancel { proposal: 3 }, None, Some(signer(21))).unwrap();
+        run(BtcAction::Cancel { proposal: 3 }, None, Some(signer(22))).unwrap();
+        assert_eq!(state("3"), "cancelled");
         running.stop();
     }
 
@@ -2012,6 +2057,182 @@ mod send {
         // Someone outside the federation signs nothing.
         let stranger = key_file("stranger.key", [0x77; 32]);
         assert!(with_gateway(BridgeAction::Sign { from_block: 0 }, Some(stranger)).unwrap_err().to_string().contains("not a signer"));
+        a.stop();
+        b.stop();
+    }
+
+    /// Everything between the gateways going wrong as it may in the field: a recipient that could
+    /// never arrive, a token whose name is not text, a gateway set up anew with Gateway.sol's logs
+    /// still naming the last one, and a transfer that gateway must refuse, each passed over for what
+    /// comes next, signing and relaying alike.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "ethereum", feature = "finality-ffg"))]
+    #[test]
+    fn a_transfer_refused_stops_neither_the_next_one_nor_the_relay_and_old_logs_are_passed_over() {
+        use crate::abi::{AbiType, AbiValue, decode_values, encode_values};
+        use crate::bridge::{AssetKind, send_input};
+        use crate::chain::{IndexKind, KeepFrom};
+        use crate::cli::bridge::{Bridge, BridgeAction, BridgeArgs, bridge};
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::registry::federation::Federation;
+        use crate::structs::hex::{from_hex, to_hex};
+        use crate::swap::evm::Call;
+
+        let federation = Federation {
+            signers: [11u8, 12].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 6,
+        };
+        let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
+        let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();
+        let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), finality: finality.clone(), ..genesis }, indexed, Default::default());
+        let b = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), ..genesis }, |node| node, Default::default());
+        let (node_a, rpc_b) = (format!("http://{}", a.api), format!("http://{}/rpc", b.api));
+        let dir = TempDir::new("bridge-refused");
+        let key_file = |name: &str, secret: [u8; 32]| {
+            let path = dir.0.join(name);
+            fs::write(&path, Keypair::from_private(PrivateKey::Secp256k1(secret)).to_key_file()).unwrap();
+            path
+        };
+        let relayer = key_file("relayer.key", [0x42; 32]);
+        let (signer_one, signer_two) = (key_file("eleven.key", [11; 32]), key_file("twelve.key", [12; 32]));
+        let relayer_address = from_key(&[0x42; 32]).unwrap();
+
+        // Each signer relays too, as watch does, and pays the gas with its key.
+        for secret in [[0x42; 32], [11; 32], [12; 32]] {
+            send(b.args(TxArgs::Transfer { to: Address::Secp256k1(from_key(&secret).unwrap()).into(), amount: u256::from(10u64).pow(20) })).unwrap();
+        }
+
+        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None };
+        let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &rpc_b);
+        let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
+            let started = std::time::Instant::now();
+
+            while !done() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(60), "{what} never happened");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        let status = |node: &str| serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/status")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+        let here = status(&node_a)["chain_id"].as_u64().unwrap();
+        let me = DevAuthority::dev_keypair().public().address();
+        let hash = crate::structs::hash::HashType::default_chain();
+        let nonce_of = || serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
+        let read = |contract: &Address, function: &str, values: serde_json::Value| -> serde_json::Value {
+            let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": values });
+            serde_json::from_str::<serde_json::Value>(&ureq::post(format!("{node_a}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()["values"].clone()
+        };
+        let evm_read = |to: &[u8; 20], signature: &str, values: &[AbiValue], returns: &[AbiType]| {
+            let (_, types) = crate::abi::parse_signature(signature).unwrap();
+            let input = [crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::Keccak256, signature.as_bytes()).to_bytes()[..4].to_vec(), encode_values(&types, values).unwrap()].concat();
+            decode_values(returns, &rpc.call(to, &input).unwrap()).unwrap()
+        };
+
+        // The gateway here, Gateway.sol there, each the other's peer, as its identity.
+        let gateway = deployed_at(&me, nonce_of() + 3, hash);
+        bridge(args(BridgeAction::Deploy, None, None)).unwrap();
+        bridge(args(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(gateway), Some(relayer.clone()))).unwrap();
+        let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
+        bridge(args(BridgeAction::Peer { evm_gateway: to_hex(&evm_gateway) }, Some(gateway), Some(relayer.clone()))).unwrap();
+
+        // One wei for a recipient that could never arrive: Gateway.sol takes it no more, whichever
+        // way it is wrong, and takes an address that is one.
+        let send_wei = |recipient: &[u8]| rpc.send(&Call { to: evm_gateway, value: u256::new(1), input: send_input(here, recipient, AssetKind::Coin, [0; 20], u256::ZERO, u256::new(1)), what: "Send one wei" }, false, &[0x42; 32]);
+        let bob = Address::Ed25519([0xb0; 32]);
+        let mut unknown = bob.to_abi();
+        unknown[0] = 6;
+        let mut unpadded = Address::Evm([1; 20]).to_abi();
+        unpadded[32] = 1;
+
+        for wrong in [&[0xde; 5][..], &[0xde; 20], &[0xde; 34], &unknown, &unpadded, &[0; 33]] {
+            let refused = send_wei(wrong).unwrap_err().to_string();
+            assert!(refused.contains("no address on that chain"), "{refused}");
+        }
+
+        // A token whose name and symbol are not text crosses without them, and is signed.
+        let token_abi = |name: &[u8], supply: u64| encode_values(&[AbiType::Bytes, AbiType::Bytes, AbiType::Uint(256)], &[AbiValue::Bytes(name.to_vec()), AbiValue::Bytes(name.to_vec()), AbiValue::Uint(u256::from(supply))]).unwrap();
+        let token_code = from_hex(include_str!("../../contracts/evm/Token.bin").trim()).unwrap();
+        let deploy_token = |name: &[u8]| {
+            let init = [token_code.clone(), token_abi(name, 1_000)].concat();
+            let receipt = rpc.send(&Call { to: [0; 20], value: u256::ZERO, input: init, what: "Deploy a token" }, true, &[0x42; 32]).unwrap();
+            <[u8; 20]>::try_from(from_hex(receipt["contractAddress"].as_str().unwrap()).unwrap()).unwrap()
+        };
+        let unreadable = deploy_token(&[0xff, 0xfe, 0x41]);
+        let send_token = |token: [u8; 20], amount: u64, gateway: Address| {
+            bridge(args(BridgeAction::Send { kind: "token".into(), recipient: bob.to_string(), amount: u256::from(amount), asset: Some(to_hex(&token)), id: u256::ZERO, from_evm: true }, Some(gateway), Some(relayer.clone()))).unwrap();
+        };
+        send_token(unreadable, 10, gateway);
+
+        // Signers that keep what they were refused, pass after pass, as watch does.
+        let one = Bridge::new(args(BridgeAction::Relay, Some(gateway), Some(signer_one.clone()))).unwrap();
+        let two = Bridge::new(args(BridgeAction::Relay, Some(gateway), Some(signer_two.clone()))).unwrap();
+        let wrapped_here = |gateway: &Address, token: &[u8; 20]| -> Option<Address> {
+            read(gateway, "wrapped_of", serde_json::json!([{ "type": "u64", "value": rpc.chain_id().unwrap().to_string() }, { "type": "u64", "value": "1" }, { "type": "bytes", "value": to_hex(token) }]))[0]["value"].as_str().and_then(|text| text.parse().ok())
+        };
+        wait("a token named in bytes that are not text", &mut || {
+            one.pass(0);
+            two.pass(0);
+            wrapped_here(&gateway, &unreadable).is_some()
+        });
+        let held_here = |token: &Address, holder: &Address| read(token, "balance_of", serde_json::json!([{ "type": "address", "value": holder.to_string() }]))[0]["value"].as_str().unwrap().to_string();
+        assert_eq!(held_here(&wrapped_here(&gateway, &unreadable).unwrap(), &bob), "10");
+
+        // 1,000 of the coin to Gateway.sol's chain, delivered by the same passes.
+        bridge(args(BridgeAction::Send { kind: "coin".into(), recipient: to_hex(&relayer_address), amount: u256::new(1_000), asset: None, id: u256::ZERO, from_evm: false }, Some(gateway), None)).unwrap();
+        let salt = crate::crypto::hasher::Hasher::digest(
+            crate::structs::hash::HashType::Keccak256,
+            &encode_values(&[AbiType::Uint(64), AbiType::Uint(8), AbiType::Bytes], &[AbiValue::Uint(u256::from(here)), AbiValue::Uint(u256::from(1u64)), AbiValue::Bytes(Vec::new())]).unwrap(),
+        )
+        .to_bytes();
+        let wrapped_dev = || match evm_read(&evm_gateway, "wrappedOf(bytes32)", &[AbiValue::FixedBytes(salt.clone())], &[AbiType::Address])[..] {
+            [AbiValue::Address(address)] => address,
+            _ => unreachable!(),
+        };
+        wait("the coin reaching the other chain", &mut || {
+            one.pass(0);
+            two.pass(0);
+            wrapped_dev() != [0; 20]
+        });
+        one.pass(0);
+        two.pass(0);
+        assert!(one.refused_now().is_empty(), "the key the relay asks by is Gateway.sol's: {:?}", one.refused_now());
+        let dev = wrapped_dev();
+
+        // The gateway set up anew, as after a reset; Gateway.sol's logs still name the last one, and
+        // reading them neither stops a pass nor signs anything for the new one.
+        let renewed = deployed_at(&me, nonce_of() + 3, hash);
+        bridge(args(BridgeAction::Deploy, None, None)).unwrap();
+        bridge(args(BridgeAction::Peer { evm_gateway: to_hex(&evm_gateway) }, Some(renewed), Some(relayer.clone()))).unwrap();
+        let one = Bridge::new(args(BridgeAction::Relay, Some(renewed), Some(signer_one.clone()))).unwrap();
+        let two = Bridge::new(args(BridgeAction::Relay, Some(renewed), Some(signer_two.clone()))).unwrap();
+        one.pass(0);
+        two.pass(0);
+        assert!(one.refused_now().is_empty() && two.refused_now().is_empty(), "old logs are nothing refused: {:?}", one.refused_now());
+        assert_eq!(read(&renewed, "received", serde_json::json!([{ "type": "u64", "value": rpc.chain_id().unwrap().to_string() }, { "type": "u64", "value": "1" }]))[0]["value"], false);
+        assert!(wrapped_here(&renewed, &unreadable).is_none(), "not minted again");
+
+        // Wrapped coin sent back: the new gateway holds none to release, so it refuses this at the
+        // threshold, every time. The token sent after it arrives anyway.
+        bridge(args(BridgeAction::Send { kind: "token".into(), recipient: bob.to_string(), amount: u256::new(100), asset: Some(to_hex(&dev)), id: u256::ZERO, from_evm: true }, Some(renewed), Some(relayer.clone()))).unwrap();
+        let plain = deploy_token(b"Plain");
+        send_token(plain, 25, renewed);
+        // And what leaves here counts from 1 again, under this gateway's own key at Gateway.sol.
+        bridge(args(BridgeAction::Send { kind: "coin".into(), recipient: to_hex(&relayer_address), amount: u256::new(7), asset: None, id: u256::ZERO, from_evm: false }, Some(renewed), None)).unwrap();
+        let dev_balance = |holder: [u8; 20]| evm_read(&dev, "balanceOf(address)", &[AbiValue::Address(holder)], &[AbiType::Uint(256)]);
+        let before = dev_balance(relayer_address);
+        wait("the token after the refused transfer, and the relay", &mut || {
+            one.pass(0);
+            two.pass(0);
+            wrapped_here(&renewed, &plain).is_some() && dev_balance(relayer_address) != before
+        });
+        assert_eq!(held_here(&wrapped_here(&renewed, &plain).unwrap(), &bob), "25");
+        assert_eq!(dev_balance(relayer_address), [AbiValue::Uint(u256::from(1_000u64 - 100 + 7))], "the delivery, past what was refused");
+        let refused = two.refused_now();
+        assert!(refused.iter().any(|line| line.contains("signing transfer") && line.contains("would fail")), "listed, with its reason: {refused:?}");
+        assert_eq!(read(&renewed, "received", serde_json::json!([{ "type": "u64", "value": rpc.chain_id().unwrap().to_string() }, { "type": "u64", "value": "2" }]))[0]["value"], false);
+
         a.stop();
         b.stop();
     }

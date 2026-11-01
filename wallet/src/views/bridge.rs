@@ -188,10 +188,11 @@ impl BridgeState {
 }
 
 /// A transfer that left the gateway here, as its sent(nonce) gives it, checked against the digest
-/// the gateway keeps, so it is the one the signers signed.
-pub fn left(values: &[Value], gateway: &Address, evm_gateway: [u8; 20], here: u64, nonce: u64) -> Option<Transfer> {
+/// the gateway keeps, so it is the one the signers signed. identity is the gateway as transfers
+/// write it: its address and when it was set up.
+pub fn left(values: &[Value], identity: &[u8], evm_gateway: [u8; 20], here: u64, nonce: u64) -> Option<Transfer> {
     let transfer = Transfer {
-        from: gateway.to_abi().to_vec(),
+        from: identity.to_vec(),
         to: evm_gateway.to_vec(),
         source: here,
         target: whole(values.first()?)?,
@@ -209,13 +210,6 @@ pub fn left(values: &[Value], gateway: &Address, evm_gateway: [u8; 20], here: u6
     };
 
     (raw(values.get(11)?) == transfer.digest()).then_some(transfer)
-}
-
-/// The key Gateway.sol marks a delivered transfer by: keccak256 of its source chain and nonce.
-pub fn delivered_key(source: u64, nonce: u64) -> Vec<u8> {
-    let encoded = encode_values(&[AbiType::Uint(64), AbiType::Uint(64)], &[AbiValue::Uint(u256::from(source)), AbiValue::Uint(u256::from(nonce))]).expect("two numbers encode");
-
-    Hasher::digest(HashType::Keccak256, &encoded).to_bytes()
 }
 
 /// A Solidity call's input: its selector, then its arguments.
@@ -270,20 +264,22 @@ pub fn esplora_proof(tx_hex: &str, merkle: &Value, block_hash: &str) -> Result<P
     Ok(Proof { block: internal(block_hash).ok_or("Esplora gave a block hash that does not read")?, raw: tx.base(), index: merkle["pos"].as_u64().ok_or("Esplora gave no place")?, path: path.concat() })
 }
 
-/// The account's deposit address's script on Bitcoin, under the federation in force: its P2WSH.
-pub fn deposit_output(recipient: &Address, federation: &DecidedFederation) -> Vec<u8> {
-    p2wsh(&btc_deposit_script(recipient, federation.federation.threshold, &federation.federation.signers))
+/// The account's deposit address's script on Bitcoin, under the federation in force, for this
+/// chain and this gateway: its P2WSH.
+pub fn deposit_output(recipient: &Address, chain_id: u64, gateway: &Address, federation: &DecidedFederation) -> Vec<u8> {
+    p2wsh(&btc_deposit_script(recipient, chain_id, gateway, federation.federation.threshold, &federation.federation.signers))
 }
 
 /// Every account's deposit output, for the light client to watch, once the chain proves its
 /// directory names a Bitcoin gateway and its federation.
 #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
 pub fn deposit_outputs(chain: &crate::chain::Chain, holders: &[crate::keys::Holder]) -> Vec<Vec<u8>> {
-    let (Some(_), Some(federation)) = (chain.announced().and_then(|directory| directory.btc_gateway), chain.federation_in_force()) else {
+    let (Some(gateway), Some(federation), Some(genesis)) = (chain.announced().and_then(|directory| directory.btc_gateway), chain.federation_in_force(), chain.genesis.as_ref()) else {
         return Vec::new();
     };
+    let chain_id = chainv4::crypto::ethereum::chain_id(genesis);
 
-    holders.iter().filter_map(|holder| holder.addresses().first().map(|address| deposit_output(address, federation))).collect()
+    holders.iter().filter_map(|holder| holder.addresses().first().map(|address| deposit_output(address, chain_id, &gateway, federation))).collect()
 }
 
 /// A call to a contract here, for the Send page.
@@ -567,6 +563,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
         return;
     };
     let count = state.read(ctx, &gateway, "sent_count", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).unwrap_or(0);
+    let identity = state.read(ctx, &gateway, "identity", json!([])).and_then(|answer| answer.ok()?.first().map(raw)).unwrap_or_default();
     let mut mine = Vec::new();
 
     for nonce in (count.saturating_sub(RECENT) + 1..=count).rev() {
@@ -581,7 +578,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
         let target = values.first().and_then(whole).unwrap_or(0);
 
         if let Some(evm) = directory.evm_gateway(target)
-            && let Some(transfer) = left(&values, &gateway, evm, here, nonce)
+            && let Some(transfer) = left(&values, &identity, evm, here, nonce)
         {
             mine.push(transfer);
         }
@@ -606,7 +603,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
                 && state.delivered_asked.get(&key).is_none_or(|when| ui.input(|input| input.time) - when > ASK_EVERY)
             {
                 state.delivered_asked.insert(key.clone(), ui.input(|input| input.time));
-                let input = calldata("delivered(bytes32)", &[AbiType::FixedBytes(32)], &[AbiValue::FixedBytes(delivered_key(here, transfer.nonce))]);
+                let input = calldata("delivered(bytes32)", &[AbiType::FixedBytes(32)], &[AbiValue::FixedBytes(transfer.delivered_key())]);
                 let (chain_id, digest) = key.clone();
                 let to: [u8; 20] = transfer.to.clone().try_into().unwrap_or([0; 20]);
                 state.evm.call(ctx, url, &to, &input, move |answer| Read::Delivered { chain_id, digest, delivered: answer.map(|output| output.last() == Some(&1)) });
@@ -719,10 +716,11 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
         return None;
     };
     let me = ctx.holder().and_then(|holder| holder.addresses().first().copied())?;
+    let chain_id = here(ctx)?;
     let relay = state.read(ctx, &gateway, "relay", json!([])).and_then(|answer| answer.ok()?.first().map(text)).and_then(|text| text.parse::<Address>().ok());
     let network_name = relay.and_then(|relay| state.read(ctx, &relay, "network_name", json!([]))).and_then(|answer| answer.ok()?.first().map(text));
     let network = if network_name.as_deref() == Some("main") { Network::Main } else { Network::Test };
-    let output = deposit_output(&me, federation);
+    let output = deposit_output(&me, chain_id, &gateway, federation);
     let deposit_address = address(&output, network);
     let mut prepared = None;
     let mint = |proof: &Proof, vout: u32| {

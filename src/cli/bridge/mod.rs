@@ -127,11 +127,63 @@ pub enum BridgeAction {
     },
 }
 
+/// The most passes a transfer refused sits out before it is tried again.
+const MOST_SAT_OUT: u64 = 64;
+
+/// A transfer a pass could not sign or deliver.
+struct Refusal {
+    why: String,
+    /// How many passes it sits out after this try: twice as many each time.
+    sits: u64,
+    /// The pass it is tried again in.
+    next: u64,
+}
+
+/// What a signer or relayer running over and over remembers of what was refused. A transfer may be
+/// refused for good, and one that is must not stop what comes after it, nor be tried at full cost
+/// every pass forever; it may also be refused for now, by a node that was away or a recipient that
+/// later takes it, so it is tried less and less often rather than never, and stays listed.
+#[derive(Default)]
+pub(crate) struct Refusals {
+    pass: u64,
+    held: std::collections::BTreeMap<String, Refusal>,
+    /// Transfers in Gateway.sol's logs for another gateway than this one, as a chain's reset leaves
+    /// them: by chain and nonce. They never come to be for this one.
+    others: std::collections::HashSet<(u64, u64)>,
+}
+
+impl Refusals {
+    fn due(&self, what: &str) -> bool {
+        self.held.get(what).is_none_or(|refusal| refusal.next <= self.pass)
+    }
+
+    fn settle(&mut self, what: String, result: CliResult<()>) {
+        let Err(why) = result else {
+            self.held.remove(&what);
+
+            return;
+        };
+        let sits = self.held.get(&what).map_or(1, |refusal| (refusal.sits * 2).min(MOST_SAT_OUT));
+        eprintln!("{what}: {why}; trying it again in {sits} passes");
+        self.held.insert(what, Refusal { why: why.to_string(), sits, next: self.pass + sits + 1 });
+    }
+
+    /// What is refused for now, for the end of a pass.
+    fn listed(&self) -> Vec<String> {
+        self.held.iter().map(|(what, refusal)| format!("{what}: {}", refusal.why)).collect()
+    }
+
+    fn next_pass(&mut self) {
+        self.pass += 1;
+    }
+}
+
 /// What a command reaches the node with.
-struct Bridge {
+pub(crate) struct Bridge {
     agent: ureq::Agent,
     node: String,
     args: BridgeArgs,
+    refused: std::cell::RefCell<Refusals>,
 }
 
 fn kind_of(text: &str) -> CliResult<AssetKind> {
@@ -155,7 +207,7 @@ fn calldata(signature: &str, values: &[AbiValue]) -> CliResult<Vec<u8>> {
 }
 
 pub fn bridge(args: BridgeArgs) -> CliResult<()> {
-    let bridge = Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args };
+    let bridge = Bridge::new(args)?;
 
     match &bridge.args.action {
         BridgeAction::Deploy => bridge.deploy(),
@@ -166,16 +218,43 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Relay => bridge.relay(),
         BridgeAction::Btc { action } => bridge.btc(action),
         BridgeAction::Watch { from_block, every } => loop {
-            if let Err(err) = bridge.sign(*from_block).and_then(|()| bridge.relay()) {
-                eprintln!("{err}");
-            }
-
+            bridge.pass(*from_block);
             std::thread::sleep(std::time::Duration::from_secs(*every));
         },
     }
 }
 
 impl Bridge {
+    pub(crate) fn new(args: BridgeArgs) -> CliResult<Bridge> {
+        Ok(Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default() })
+    }
+
+    /// What this signer or relayer holds refused, each with why.
+    #[cfg(test)]
+    pub(crate) fn refused_now(&self) -> Vec<String> {
+        self.refused.borrow().listed()
+    }
+
+    /// One of watch's passes: sign, and relay whatever became of signing, as what is ready to
+    /// deliver has nothing to do with what could not be signed. What is refused stays listed.
+    pub(crate) fn pass(&self, from_block: u64) {
+        if let Err(err) = self.sign(from_block) {
+            eprintln!("signing: {err}");
+        }
+
+        if let Err(err) = self.relay() {
+            eprintln!("relaying: {err}");
+        }
+
+        let mut refused = self.refused.borrow_mut();
+
+        for line in refused.listed() {
+            eprintln!("still refused: {line}");
+        }
+
+        refused.next_pass();
+    }
+
     fn tx(&self, tx: TxArgs) -> CliResult<()> {
         send(SendArgs {
             node: self.node.clone(),
@@ -272,7 +351,7 @@ impl Bridge {
         let multi = self.deploy_lua(&me, "multi.lua", MULTI_LUA)?;
         let gateway = self.deploy_lua(&me, "gateway.lua", GATEWAY_LUA)?;
         let address = TxCallArgumentType::Address;
-        self.call(gateway, "setup", u256::ZERO, vec![TxCallArgumentType::U64(self.here()?), address(token), address(nft), address(multi)])?;
+        self.call(gateway, "setup", u256::ZERO, vec![address(token), address(nft), address(multi)])?;
         // The coin has a symbol, such as DEV, which names it too.
         let symbol = TxCallArgumentType::String(status["coin"]["symbol"].as_str().unwrap_or("COIN").to_string());
         self.call(gateway, "set_coin", u256::ZERO, vec![symbol.clone(), symbol])?;
@@ -319,10 +398,21 @@ impl Bridge {
         let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
         let (gateway, here, there) = (self.gateway()?, self.here()?, rpc.chain_id()?);
         self.call(gateway, "set_peer", u256::ZERO, vec![TxCallArgumentType::U64(there), TxCallArgumentType::Bytes(evm_gateway.to_vec())])?;
-        let input = calldata("setPeer(uint64,bytes)", &[AbiValue::Uint(u256::from(here)), AbiValue::Bytes(gateway.to_abi().to_vec())])?;
+        let input = calldata("setPeer(uint64,bytes)", &[AbiValue::Uint(u256::from(here)), AbiValue::Bytes(self.identity(&gateway)?)])?;
         rpc.send(&Call { to: *evm_gateway, value: u256::ZERO, input, what: "Set the gateway's peer" }, false, &secret)?;
 
         Ok(())
+    }
+
+    /// The gateway here as transfers write it, and a peer must name it: not only its address.
+    fn identity(&self, gateway: &Address) -> CliResult<Vec<u8>> {
+        let values = self.read(gateway, "identity", json!([]))?;
+        let value = values.first().ok_or("the gateway gave no identity")?;
+
+        Ok(match value["type"].as_str() {
+            Some("bytes") => value["value"].as_str().and_then(from_hex).ok_or("the gateway gave an identity that is not hex")?,
+            _ => value["value"].as_str().unwrap_or_default().as_bytes().to_vec(),
+        })
     }
 
     /// The gateway on an EVM chain, as the one here knows it: refused when the chain announces
@@ -403,13 +493,16 @@ impl Bridge {
         }
     }
 
-    /// What left here and what left each EVM chain given, signed and posted once final.
+    /// What left here and what left each EVM chain given, signed and posted once final. Each
+    /// transfer stands alone: one refused is said and passed over, for the next one, and one chain
+    /// away stops no other.
     fn sign(&self, from_block: u64) -> CliResult<()> {
         let secret = self.evm_secret()?;
         let gateway = self.gateway()?;
         let status = self.status()?;
         let here = self.here()?;
         let federation = &status["federation"];
+        let identity = self.identity(&gateway)?;
         let my_key = crate::crypto::secp256k1::public_key(&secret).ok_or("--evm-key is no key")?;
 
         if !federation["signers"].as_array().into_iter().flatten().any(|key| key.as_str() == Some(&to_hex(&my_key))) {
@@ -430,49 +523,95 @@ impl Bridge {
                 continue;
             }
 
-            let nonce = event["data"][0]["value"].as_str().and_then(|text| text.parse::<u64>().ok()).ok_or("a Sent event without its nonce")?;
-            let transfer = self.left_here(&gateway, here, nonce)?;
-            self.post(&gateway, &transfer, &secret)?;
+            let Some(nonce) = event["data"][0]["value"].as_str().and_then(|text| text.parse::<u64>().ok()) else {
+                eprintln!("a Sent event without its nonce, at height {}", event["height"]);
+
+                continue;
+            };
+            let what = format!("signing transfer {nonce} from here");
+
+            if self.refused.borrow().due(&what) {
+                let result = self.left_here(&gateway, &identity, here, nonce).and_then(|transfer| self.post(&gateway, &transfer, &secret));
+                self.refused.borrow_mut().settle(what, result);
+            }
         }
 
         // What left each EVM chain, final there, and not yet arrived here.
         for url in &self.args.eth_rpc {
-            let rpc = Rpc::new(self.agent.clone(), url);
-            let chain = rpc.chain_id()?;
-            let Ok(evm_gateway) = self.evm_gateway(&gateway, chain) else {
-                continue;
-            };
-            let (tip, finalized) = rpc.heads()?;
-            let safe = finalized.unwrap_or_else(|| tip.saturating_sub(federation["evm_depth"].as_u64().unwrap_or(12)));
-            let topic: [u8; 32] = Hasher::digest(HashType::Keccak256, b"Sent(uint64,uint64,bytes32)").to_bytes().try_into().expect("32 bytes");
-            let mut from = from_block;
-
-            while from <= safe {
-                let to = (from + LOG_WINDOW - 1).min(safe);
-
-                for log in rpc.logs(&evm_gateway, &topic, from, to)? {
-                    let nonce = log["topics"][1].as_str().and_then(from_hex).and_then(|word| u64::try_from(u256::from_be_bytes(word.try_into().ok()?)).ok()).ok_or("a Sent log without its nonce")?;
-                    let arrived = self.read(&gateway, "received", json!([{ "type": "u64", "value": chain.to_string() }, { "type": "u64", "value": nonce.to_string() }]))?;
-
-                    if arrived.first().is_some_and(|value| value["value"] == true) {
-                        continue;
-                    }
-
-                    let values = rpc.call(&evm_gateway, &calldata("sent(uint64)", &[AbiValue::Uint(u256::from(nonce))])?)?;
-                    let (_, types) = crate::abi::parse_signature(&format!("({})", crate::bridge::TRANSFER_TUPLE))?;
-                    let transfer = decode_values(&types, &values).ok().and_then(|values| Transfer::from_evm(&values[0])).ok_or("Gateway.sol's sent answered what is no transfer")?;
-                    self.post(&gateway, &transfer, &secret)?;
-                }
-
-                from = to + 1;
+            if let Err(err) = self.sign_from_evm(url, &gateway, &identity, here, federation, from_block, &secret) {
+                eprintln!("signing what left {url}: {err}");
             }
         }
 
         Ok(())
     }
 
+    /// What left one EVM chain, final there, and not yet arrived here.
+    #[allow(clippy::too_many_arguments)]
+    fn sign_from_evm(&self, url: &str, gateway: &Address, identity: &[u8], here: u64, federation: &Value, from_block: u64, secret: &[u8; 32]) -> CliResult<()> {
+        let rpc = Rpc::new(self.agent.clone(), url);
+        let chain = rpc.chain_id()?;
+        let Ok(evm_gateway) = self.evm_gateway(gateway, chain) else {
+            return Ok(());
+        };
+        let (tip, finalized) = rpc.heads()?;
+        let safe = finalized.unwrap_or_else(|| tip.saturating_sub(federation["evm_depth"].as_u64().unwrap_or(12)));
+        let topic: [u8; 32] = Hasher::digest(HashType::Keccak256, b"Sent(uint64,uint64,bytes32)").to_bytes().try_into().expect("32 bytes");
+        let mut from = from_block;
+
+        while from <= safe {
+            let to = (from + LOG_WINDOW - 1).min(safe);
+
+            for log in rpc.logs(&evm_gateway, &topic, from, to)? {
+                let Some(nonce) = log["topics"][1].as_str().and_then(from_hex).and_then(|word| u64::try_from(u256::from_be_bytes(word.try_into().ok()?)).ok()) else {
+                    eprintln!("a Sent log without its nonce, from chain {chain}");
+
+                    continue;
+                };
+                let what = format!("signing transfer {nonce} from chain {chain}");
+
+                if self.refused.borrow().others.contains(&(chain, nonce)) || !self.refused.borrow().due(&what) {
+                    continue;
+                }
+
+                let result = self.sign_one_from_evm(&rpc, gateway, identity, &evm_gateway, here, chain, nonce, secret);
+                self.refused.borrow_mut().settle(what, result);
+            }
+
+            from = to + 1;
+        }
+
+        Ok(())
+    }
+
+    /// One transfer in an EVM chain's logs, signed if it is for this gateway and has not arrived.
+    #[allow(clippy::too_many_arguments)]
+    fn sign_one_from_evm(&self, rpc: &Rpc, gateway: &Address, identity: &[u8], evm_gateway: &[u8; 20], here: u64, chain: u64, nonce: u64, secret: &[u8; 32]) -> CliResult<()> {
+        let arrived = self.read(gateway, "received", json!([{ "type": "u64", "value": chain.to_string() }, { "type": "u64", "value": nonce.to_string() }]))?;
+
+        if arrived.first().is_some_and(|value| value["value"] == true) {
+            return Ok(());
+        }
+
+        let values = rpc.call(evm_gateway, &calldata("sent(uint64)", &[AbiValue::Uint(u256::from(nonce))])?)?;
+        let (_, types) = crate::abi::parse_signature(&format!("({})", crate::bridge::TRANSFER_TUPLE))?;
+        // A name or URI that is not UTF-8 ends up here, from a gateway from before it dropped them.
+        let transfer = decode_values(&types, &values).map_err(|err| format!("Gateway.sol's sent answered what does not read: {err}"))?;
+        let transfer = Transfer::from_evm(&transfer[0]).ok_or("Gateway.sol's sent answered what is no transfer")?;
+
+        // What the logs still hold from before a reset was for a chain or a gateway that is gone:
+        // signing it could only be refused, or worse.
+        if !transfer.arrives_at(here, identity, evm_gateway) {
+            self.refused.borrow_mut().others.insert((chain, nonce));
+
+            return Ok(());
+        }
+
+        self.post(gateway, &transfer, secret)
+    }
+
     /// A transfer that left the gateway here, as its sent(nonce) gives it.
-    fn left_here(&self, gateway: &Address, here: u64, nonce: u64) -> CliResult<Transfer> {
+    fn left_here(&self, gateway: &Address, identity: &[u8], here: u64, nonce: u64) -> CliResult<Transfer> {
         let values = self.read(gateway, "sent", json!([{ "type": "u64", "value": nonce.to_string() }]))?;
         let text = |index: usize| values.get(index).and_then(|value| value["value"].as_str()).unwrap_or_default().to_string();
         let whole = |index: usize| text(index).parse::<u64>().map_err(|_| format!("sent({nonce}) gave no number at {index}"));
@@ -488,7 +627,7 @@ impl Bridge {
         let target = whole(0)?;
 
         Ok(Transfer {
-            from: gateway.to_abi().to_vec(),
+            from: identity.to_vec(),
             to: self.evm_gateway(gateway, target)?.to_vec(),
             source: here,
             target,
@@ -521,46 +660,102 @@ impl Bridge {
     }
 
     /// What left here for each EVM chain given, delivered once the board has enough signatures.
+    /// As with signing, each transfer stands alone, and each chain.
     fn relay(&self) -> CliResult<()> {
         let secret = self.evm_secret()?;
         let gateway = self.gateway()?;
         let here = self.here()?;
+        let identity = self.identity(&gateway)?;
         let count = self.read(&gateway, "sent_count", json!([]))?.first().and_then(|value| value["value"].as_str()?.parse::<u64>().ok()).unwrap_or(0);
 
         for url in &self.args.eth_rpc {
             let rpc = Rpc::new(self.agent.clone(), url);
-            let chain = rpc.chain_id()?;
+            let chain = match rpc.chain_id() {
+                Ok(chain) => chain,
+                Err(err) => {
+                    eprintln!("relaying to {url}: {err}");
+
+                    continue;
+                }
+            };
             let Ok(evm_gateway) = self.evm_gateway(&gateway, chain) else {
                 continue;
             };
 
             for nonce in 1..=count {
-                let transfer = self.left_here(&gateway, here, nonce)?;
+                let what = format!("delivering transfer {nonce} to chain {chain}");
 
-                if transfer.target != chain {
-                    continue;
+                if self.refused.borrow().due(&what) {
+                    let result = self.deliver_one(&rpc, &gateway, &identity, &evm_gateway, here, chain, nonce, &secret);
+                    self.refused.borrow_mut().settle(what, result);
                 }
-
-                let key = Hasher::digest(HashType::Keccak256, &encode_values(&[AbiType::Uint(64), AbiType::Uint(64)], &[AbiValue::Uint(u256::from(here)), AbiValue::Uint(u256::from(nonce))])?).to_bytes();
-                let delivered = rpc.call(&evm_gateway, &calldata("delivered(bytes32)", &[AbiValue::FixedBytes(key)])?)?;
-
-                if delivered.last() == Some(&1) {
-                    continue;
-                }
-
-                let posted = self.read(&gateway, "signatures", json!([{ "type": "bytes", "value": to_hex(&transfer.digest()) }]))?;
-                let threshold = posted.first().and_then(|value| value["value"].as_str()?.parse::<usize>().ok()).unwrap_or(usize::MAX);
-                let signatures: Vec<[u8; 65]> = posted.iter().skip(1).filter_map(|value| value["value"].as_str().and_then(from_hex)?.try_into().ok()).collect();
-
-                if signatures.len() < threshold {
-                    continue;
-                }
-
-                println!("delivering transfer {nonce} to chain {chain}, from {}", to_hex(&from_key(&secret)?));
-                rpc.send(&Call { to: evm_gateway, value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" }, false, &secret)?;
             }
         }
 
         Ok(())
+    }
+
+    /// One transfer delivered, if it is for this chain, not yet there, and signed enough.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_one(&self, rpc: &Rpc, gateway: &Address, identity: &[u8], evm_gateway: &[u8; 20], here: u64, chain: u64, nonce: u64, secret: &[u8; 32]) -> CliResult<()> {
+        let transfer = self.left_here(gateway, identity, here, nonce)?;
+
+        if transfer.target != chain {
+            return Ok(());
+        }
+
+        let delivered = rpc.call(evm_gateway, &calldata("delivered(bytes32)", &[AbiValue::FixedBytes(transfer.delivered_key())])?)?;
+
+        if delivered.last() == Some(&1) {
+            return Ok(());
+        }
+
+        let posted = self.read(gateway, "signatures", json!([{ "type": "bytes", "value": to_hex(&transfer.digest()) }]))?;
+        let threshold = posted.first().and_then(|value| value["value"].as_str()?.parse::<usize>().ok()).unwrap_or(usize::MAX);
+        let signatures: Vec<[u8; 65]> = posted.iter().skip(1).filter_map(|value| value["value"].as_str().and_then(from_hex)?.try_into().ok()).collect();
+
+        if signatures.len() < threshold {
+            return Ok(());
+        }
+
+        println!("delivering transfer {nonce} to chain {chain}, from {}", to_hex(&from_key(secret)?));
+        rpc.send(&Call { to: *evm_gateway, value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" }, false, secret)?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_transfer_sits_out_more_passes_each_time_and_stays_listed_until_it_goes_through() {
+        let mut refusals = Refusals::default();
+        let what = "signing transfer 1 from chain 5".to_string();
+        let tried = |refusals: &mut Refusals, passes: u64| (0..passes).filter(|_| {
+            let due = refusals.due("signing transfer 1 from chain 5");
+
+            if due {
+                refusals.settle("signing transfer 1 from chain 5".to_string(), Err("refused".into()));
+            }
+
+            refusals.next_pass();
+            due
+        }).count();
+
+        assert!(refusals.due(&what), "nothing is held against it yet");
+        // Tried in passes 0, 2, 5, 10, 19, 36, then every 65 passes at most.
+        assert_eq!(tried(&mut refusals, 37), 6);
+        assert_eq!(tried(&mut refusals, 65), 1, "at most one try in a long while");
+        assert_eq!(refusals.listed(), ["signing transfer 1 from chain 5: refused"]);
+        assert!(refusals.due("signing transfer 2 from chain 5"), "it holds up nothing else");
+
+        // A try that goes through is forgotten, and the next refusal starts over.
+        refusals.pass += 65;
+        refusals.settle(what.clone(), Ok(()));
+        assert!(refusals.listed().is_empty());
+        refusals.settle(what.clone(), Err("refused".into()));
+        assert_eq!(refusals.held[&what].sits, 1);
     }
 }

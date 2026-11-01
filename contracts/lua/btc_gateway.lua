@@ -3,10 +3,13 @@
 -- BTC by the federation, through releases proposed and signed on this contract.
 --
 -- Deposits: each address here has its own deposit address on Bitcoin, a P2WSH of
---   <its 33 bytes> OP_DROP <threshold> <signer keys…> <count> OP_CHECKMULTISIG
+--   <its 33 bytes> OP_DROP <chain id, 8 bytes><this gateway's 33 bytes> OP_DROP
+--   <threshold> <signer keys…> <count> OP_CHECKMULTISIG
 -- so any Bitcoin wallet pays it, and only the federation's threshold spends it. Once the payment
 -- is bitcoin_depth deep in the Bitcoin light client contract (contracts/examples/btc_relay),
--- anyone shows it, and its value is minted to the address it was for.
+-- anyone shows it, and its value is minted to the address it was for. Bitcoin outlives a chain,
+-- and a gateway deployed by the same keys on a new one has the same address and holds nothing yet,
+-- so without the chain's id in the script the same proof would mint again there.
 --
 -- Releases: a withdrawal burns wBTC for a Bitcoin script and amount. Anyone proposes a release:
 -- an unsigned Bitcoin transaction this contract checks pays exactly queued withdrawals from the
@@ -14,10 +17,12 @@
 -- input as BIP143 does, and post their signatures here, each checked; anyone assembles the
 -- witnesses and broadcasts it; and once it is deep enough, anyone shows it, and its inputs are
 -- spent and its change held. A sweep is a release that pays everything an old federation holds
--- to the one in force.
+-- to the one in force. A release that cannot be finished is cancelled by the federation in force:
+-- see M.cancel for why that cannot pay anyone twice.
 --
 -- Events: DepositedBtc(txid, vout, sats, recipient), WithdrawRequested(id, script, sats, sender),
--- Proposed(proposal, txid), SignedBtc(proposal, input, signer), Released(proposal, txid).
+-- Proposed(proposal, txid), SignedBtc(proposal, input, signer), Released(proposal, txid),
+-- CancelVoted(proposal, signer), Cancelled(proposal, txid).
 
 local M = {}
 
@@ -25,12 +30,25 @@ local SIGHASH_ALL = 1
 local MOST_WITHDRAWALS = 50
 -- What a withdrawal pays at least, in satoshis: above Bitcoin's dust for any output.
 local LEAST = 1000
+-- What change is at least: Bitcoin's nodes relay nothing with an output under its dust.
+local LEAST_CHANGE = 546
+-- What a release's transaction is, and each of its inputs' sequence: fixed, so none of them can
+-- carry a BIP68 delay that keeps it out of a block while it holds what it spends.
+local VERSION = "\2\0\0\0"
+local SEQUENCE = "\255\255\255\255"
+-- The most virtual bytes a release may be: past 100,000 Bitcoin's nodes do not relay it.
+local MOST_VBYTES = 100000
+-- The most a release spending one input can be, under the largest federation there is, 20 of 20,
+-- paying a withdrawal and change. The fee cap has to pay this at the floor, or a floor could leave
+-- no release at all it allows.
+local ONE_INPUT_VBYTES = 710
 
 local feds = storage.namespace("feds")
 local utxos = storage.namespace("utxos")
 local withdrawals = storage.namespace("withdrawals")
 local proposals = storage.namespace("proposals")
 local signatures = storage.namespace("signatures")
+local votes = storage.namespace("votes")
 
 local function owner_only()
     if ctx.sender:text() ~= storage.get("owner") then
@@ -108,10 +126,24 @@ local function reader(bytes)
     function r.compact()
         local first = r.number(1)
 
+        -- Written longer than it needs, Bitcoin's nodes refuse it, and rewritten shorter it is
+        -- another transaction than the one whose id a release was proposed with.
         if first == 0xfd then
-            return r.number(2)
+            local size = r.number(2)
+
+            if size < 0xfd then
+                error("a size written longer than it needs")
+            end
+
+            return size
         elseif first == 0xfe then
-            return r.number(4)
+            local size = r.number(4)
+
+            if size <= 0xffff then
+                error("a size written longer than it needs")
+            end
+
+            return size
         elseif first == 0xff then
             error("a size no transaction needs")
         end
@@ -184,11 +216,27 @@ local function multisig(threshold, keys)
 end
 
 local function deposit_script(recipient, threshold, keys)
-    return push(recipient) .. "\117" .. multisig(threshold, keys)
+    return push(recipient) .. "\117" .. push(le(chain.id(), 8) .. ctx.contract:encode()) .. "\117" .. multisig(threshold, keys)
 end
 
 local function p2wsh(script)
     return "\0\32" .. hash.sha256(script):bytes()
+end
+
+-- Whether Bitcoin's nodes relay an output to a script: P2PKH, P2SH or a witness program. A release
+-- with any other output could be signed and never mined, holding all it spends.
+local function relayed(script)
+    local size, first = #script, string.byte(script, 1)
+
+    if size == 25 and script:sub(1, 3) == "\118\169\20" and script:sub(24, 25) == "\136\172" then
+        return true
+    elseif size == 23 and script:sub(1, 2) == "\169\20" and script:sub(23, 23) == "\135" then
+        return true
+    elseif first == 0 then
+        return (size == 22 or size == 34) and string.byte(script, 2) == size - 2
+    end
+
+    return first ~= nil and first >= 0x51 and first <= 0x60 and size >= 4 and size <= 42 and string.byte(script, 2) == size - 2
 end
 
 -- The federations this gateway has seen, by version: their threshold and keys, and when the next
@@ -267,6 +315,24 @@ local function wbtc()
     return address.parse(storage.get("wbtc"))
 end
 
+-- The height of the relay's tip.
+local function relay_height(at)
+    local _, height = contracts.call(at, "tip")
+
+    return tonumber(tostring(height))
+end
+
+-- What an input spends, as the gateway keeps it: its transaction's id in hex and its output.
+local function outpoint(input)
+    return hex(input.outpoint:sub(1, 32)) .. ":" .. reader(input.outpoint:sub(33, 36)).number(4)
+end
+
+-- What a release's input weighs in its witness at most: the count of its items, CHECKMULTISIG's
+-- extra pop, the threshold of signatures, each at most 73 bytes and a size, and the script.
+local function witness_weight(threshold, script)
+    return 2 + threshold * 74 + #compact(#script) + #script
+end
+
 -- Keeps an output this gateway holds, and lists it.
 local function hold(key, sats, version, recipient)
     utxos:set(key .. ":sats", tostring(sats))
@@ -283,18 +349,33 @@ function M.init()
     storage.set("owner", ctx.sender:text())
 end
 
--- The relay, the wBTC token's template (contracts/lua/wrapped.lua), the most fee a release may
--- pay, in satoshis, and how long an old federation's deposit addresses stay open, in
--- milliseconds; set once.
-function M.setup(relay_address, template, fee_cap, grace_ms)
+-- The relay, started and synced to Bitcoin's tip, the wBTC token's template
+-- (contracts/lua/wrapped.lua), the most fee a release may pay, in satoshis, the least it may pay a
+-- virtual byte, and how long an old federation's deposit addresses stay open, in milliseconds; set
+-- once. A chain restarted from the identical genesis has the same id and this gateway the same
+-- address, so what is at or under the relay's tip now, before this gateway existed, is never a
+-- deposit to it.
+function M.setup(relay_address, template, fee_cap, fee_floor, grace_ms)
     owner_only()
 
     if storage.get("relay") then
         error("the gateway is set up already")
     end
 
+    fee_cap, fee_floor = whole(fee_cap, "the fee cap"), whole(fee_floor, "the fee floor")
+
+    if fee_floor < 1 then
+        error("the fee floor is at least 1 satoshi a virtual byte")
+    end
+
+    if fee_cap < fee_floor * ONE_INPUT_VBYTES then
+        error("a fee cap under what the floor asks of the smallest release: it would allow none")
+    end
+
     storage.set("relay", relay_address:text())
-    storage.set("fee_cap", tostring(whole(fee_cap, "the fee cap")))
+    storage.set("first_height", tostring(relay_height(relay_address) + 1))
+    storage.set("fee_cap", tostring(fee_cap))
+    storage.set("fee_floor", tostring(fee_floor))
     storage.set("grace", tostring(whole(grace_ms, "the grace period")))
     local token = contracts.clone(template, "wbtc", "Wrapped Bitcoin", "wBTC", 8, ctx.contract)
     storage.set("wbtc", token:text())
@@ -334,6 +415,12 @@ function M.deposit(block, raw, index, path, vout, recipient, version)
     end
 
     local txid = proven(block, raw, index, path, fed.bitcoin_depth)
+    local depth = tonumber(tostring(contracts.call(relay(), "confirmations", block)))
+
+    if relay_height(relay()) - depth + 1 < tonumber(storage.get("first_height")) then
+        error("mined before this gateway was set up")
+    end
+
     vout = whole(vout, "the output")
     local output = parse(raw).outputs[vout + 1] or error("no such output")
 
@@ -361,8 +448,8 @@ function M.withdraw(script, sats)
         error("a withdrawal pays at least " .. LEAST .. " satoshis")
     end
 
-    if #script < 1 or #script > 80 then
-        error("an output script is 1 to 80 bytes")
+    if not relayed(script) then
+        error("an output script Bitcoin's nodes relay: P2PKH, P2SH or a witness program")
     end
 
     contracts.call(wbtc(), "burn", ctx.sender, u256(sats))
@@ -379,13 +466,22 @@ end
 -- Proposes a release: raw, an unsigned transaction without witnesses, spending deposits and
 -- change this gateway holds, whose first outputs pay the given withdrawals in order, and whose
 -- one more output, if any, is change to the federation in force. With no withdrawals it is a
--- sweep: everything it spends an old federation's, all of it to the one in force.
+-- sweep: everything it spends an old federation's, all of it to the one in force. Whatever it
+-- proposes Bitcoin must be able to mine, as its inputs and withdrawals wait on it until it is
+-- shown mined or cancelled.
 function M.propose(raw, ...)
     local fed = remember()
-    local ids = {}
+    local ids, named = {}, {}
 
     for _, id in ipairs({ ... }) do
-        table.insert(ids, whole(id, "a withdrawal"))
+        local number = whole(id, "a withdrawal")
+
+        if named[number] then
+            error("a withdrawal named twice")
+        end
+
+        named[number] = true
+        table.insert(ids, number)
     end
 
     local tx = parse(raw)
@@ -394,14 +490,24 @@ function M.propose(raw, ...)
         error("at most " .. MOST_WITHDRAWALS .. " withdrawals a release")
     end
 
+    if tx.version ~= VERSION then
+        error("a release is a version 2 transaction")
+    end
+
     if tx.locktime ~= "\0\0\0\0" then
         error("a release has no lock time")
     end
 
-    local spent = 0
+    local spent, weight, spends = 0, 4 * #raw + 2, {}
 
     for _, input in ipairs(tx.inputs) do
-        local key = hex(input.outpoint:sub(1, 32)) .. ":" .. reader(input.outpoint:sub(33, 36)).number(4)
+        local key = outpoint(input)
+
+        if spends[key] then
+            error("an input spent twice")
+        end
+
+        spends[key] = true
 
         if utxos:get(key .. ":state") ~= "unspent" then
             error("an input that is not an output the gateway holds unspent")
@@ -411,11 +517,18 @@ function M.propose(raw, ...)
             error("an input with a script: a release spends witness outputs alone")
         end
 
-        if #ids == 0 and tonumber(utxos:get(key .. ":version")) >= fed.version then
+        if input.sequence ~= SEQUENCE then
+            error("an input with another sequence than a release's")
+        end
+
+        local version = utxos:get(key .. ":version")
+
+        if #ids == 0 and tonumber(version) >= fed.version then
             error("a sweep spends only what older federations hold")
         end
 
         spent = spent + tonumber(utxos:get(key .. ":sats"))
+        weight = weight + witness_weight(fed_at(version), witness_script(version, utxos:get(key .. ":recipient")))
     end
 
     local paid = 0
@@ -429,6 +542,14 @@ function M.propose(raw, ...)
 
         if output.script ~= withdrawals:get(id .. ":script") or output.sats ~= tonumber(withdrawals:get(id .. ":sats")) then
             error("an output that does not pay its withdrawal as asked")
+        end
+
+        -- See M.cancel: every release paying it must conflict with the ones cancelled before,
+        -- until Bitcoin showed they can no longer be mined.
+        local anchor = withdrawals:get(id .. ":anchor")
+
+        if anchor and utxos:get(anchor .. ":state") ~= "spent" and not spends[anchor] then
+            error("a withdrawal from a cancelled release, which must spend " .. anchor)
         end
 
         paid = paid + output.sats
@@ -445,6 +566,10 @@ function M.propose(raw, ...)
             error("change goes to the federation in force alone")
         end
 
+        if change.sats < LEAST_CHANGE then
+            error("change under Bitcoin's dust: leave it to the fee")
+        end
+
         paid = paid + change.sats
     end
 
@@ -452,6 +577,16 @@ function M.propose(raw, ...)
 
     if fee <= 0 or fee > tonumber(storage.get("fee_cap")) then
         error("a fee of nothing, or past the cap")
+    end
+
+    local vbytes = math.ceil(weight / 4)
+
+    if vbytes > MOST_VBYTES then
+        error("a release larger than Bitcoin's nodes relay: pay fewer, from fewer")
+    end
+
+    if fee < vbytes * tonumber(storage.get("fee_floor")) then
+        error("a fee under the floor: this release pays at least " .. (vbytes * tonumber(storage.get("fee_floor"))))
     end
 
     local id = count("proposal_count") + 1
@@ -464,7 +599,7 @@ function M.propose(raw, ...)
     proposals:set(id .. ":state", "open")
 
     for _, input in ipairs(tx.inputs) do
-        utxos:set(hex(input.outpoint:sub(1, 32)) .. ":" .. reader(input.outpoint:sub(33, 36)).number(4) .. ":state", "pending")
+        utxos:set(outpoint(input) .. ":state", "pending")
     end
 
     for _, withdrawal in ipairs(ids) do
@@ -513,7 +648,7 @@ function M.sign(id, index, signature)
 
     local tx = parse(proposals:get(id .. ":raw"))
     local input = tx.inputs[index + 1] or error("no such input")
-    local key = hex(input.outpoint:sub(1, 32)) .. ":" .. reader(input.outpoint:sub(33, 36)).number(4)
+    local key = outpoint(input)
     local version = utxos:get(key .. ":version")
     local script = witness_script(version, utxos:get(key .. ":recipient"))
     local message = preimage(tx, index, script, tonumber(utxos:get(key .. ":sats")))
@@ -530,8 +665,143 @@ function M.sign(id, index, signature)
     error("not a signature of that input by its federation")
 end
 
+-- What a signer of the federation in force signs to vote to cancel a release: this chain, this
+-- gateway, the release and its transaction, so a vote says nothing anywhere else.
+local function cancel_digest(id)
+    return crypto.sha256d("chainv4-btc-cancel" .. le(chain.id(), 8) .. ctx.contract:encode() .. le(id, 8) .. proposals:get(id .. ":txid"))
+end
+
+-- Whether a release is short of what finishing it takes: an input under its threshold of
+-- signatures here, or one Bitcoin already spent in another release, shown here, so it can never be
+-- mined however many signed.
+local function unfinished(id, tx)
+    for index, input in ipairs(tx.inputs) do
+        local key = outpoint(input)
+
+        if utxos:get(key .. ":state") == "spent" then
+            return true
+        end
+
+        local threshold, keys = fed_at(utxos:get(key .. ":version"))
+        local count = 0
+
+        for at = 0, #keys - 1 do
+            if signatures:get(id .. ":" .. (index - 1) .. ":" .. at) then
+                count = count + 1
+            end
+        end
+
+        if count < threshold then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- A signer's vote to cancel a release that cannot be finished, as btc_cancel_digest has it, posted
+-- by anyone; once the threshold of the federation in force voted, its inputs are unspent again, its
+-- withdrawals queued, and what was signed for it counts for nothing here. A release with every
+-- input at its threshold is refused: anyone can still finish it.
+--
+-- Bitcoin does not know a release was cancelled, and what a signer signed is public from the moment
+-- it is sent, even in a transaction that lands too late, so a release under its threshold here may
+-- still be finished there. So each withdrawal it paid is anchored to one of its inputs: every release
+-- paying that withdrawal from now on must spend that input as well, and conflicting, only one of
+-- them can ever be mined. The anchor lapses once it is shown spent, as nothing that spends it can
+-- be mined after that. It is the input of the newest federation, as a release stuck on an old
+-- federation no one can reach anymore is why a cancel is needed at all.
+function M.cancel(id, signature)
+    id = whole(id, "the proposal")
+    local fed = remember()
+
+    if proposals:get(id .. ":state") ~= "open" then
+        error("no open release by that number")
+    end
+
+    local tx = parse(proposals:get(id .. ":raw"))
+
+    if not unfinished(id, tx) then
+        error("every input of it holds its threshold of signatures: anyone can still finish it")
+    end
+
+    local key = crypto.recover(cancel_digest(id), signature)
+    local known = false
+
+    for _, signer in ipairs(fed.signers) do
+        known = known or signer == key
+    end
+
+    if not known then
+        error("not signed by a signer of the federation in force")
+    end
+
+    votes:set(id .. ":" .. hex(key), "1")
+    events.emit("CancelVoted", id, key)
+    local count = 0
+
+    for _, signer in ipairs(fed.signers) do
+        if votes:get(id .. ":" .. hex(signer)) then
+            count = count + 1
+        end
+    end
+
+    if count < fed.threshold then
+        return false
+    end
+
+    local anchor, newest = nil, -1
+
+    for _, input in ipairs(tx.inputs) do
+        local spends = outpoint(input)
+        local version = tonumber(utxos:get(spends .. ":version"))
+
+        if version > newest then
+            anchor, newest = spends, version
+        end
+
+        -- One shown spent since stays so.
+        if utxos:get(spends .. ":state") == "pending" then
+            utxos:set(spends .. ":state", "unspent")
+        end
+    end
+
+    for withdrawal in proposals:get(id .. ":ids"):gmatch("%d+") do
+        -- One shown paid by a release cancelled before stays so.
+        if withdrawals:get(withdrawal .. ":state") == "proposed" then
+            withdrawals:set(withdrawal .. ":state", "queued")
+            local held = withdrawals:get(withdrawal .. ":anchor")
+
+            if held == nil or utxos:get(held .. ":state") == "spent" then
+                withdrawals:set(withdrawal .. ":anchor", anchor)
+            end
+        end
+    end
+
+    proposals:set(id .. ":state", "cancelled")
+    events.emit("Cancelled", id, proposals:get(id .. ":txid"))
+    return true
+end
+
+-- Whether a signer of the federation voted to cancel a release, by its key.
+function M.voted(id, key)
+    return votes:get(whole(id, "the proposal") .. ":" .. hex(key)) ~= nil
+end
+
+-- The input a withdrawal's next release must spend, after a cancel; nil once Bitcoin showed it
+-- spent, or if none was ever cancelled.
+function M.anchor(id)
+    local anchor = withdrawals:get(whole(id, "the withdrawal") .. ":anchor")
+
+    if anchor == nil or utxos:get(anchor .. ":state") == "spent" then
+        return nil
+    end
+
+    return anchor
+end
+
 -- A release: its unsigned transaction, its id, its withdrawals, the federation it was proposed
--- under, and its state, open or released.
+-- under, and its state, open, released or cancelled.
 function M.proposal(id)
     id = whole(id, "the proposal")
 
@@ -539,12 +809,13 @@ function M.proposal(id)
 end
 
 -- The signatures posted for one input, as signer number and signature, in the keys' order, and
--- the witness script and threshold: what assembling its witness takes.
+-- the witness script and threshold: what assembling its witness takes. A cancelled release's
+-- count for nothing, so none are given.
 function M.input_signatures(id, index)
     id, index = whole(id, "the proposal"), whole(index, "the input")
     local tx = parse(proposals:get(id .. ":raw") or error("no release by that number"))
     local input = tx.inputs[index + 1] or error("no such input")
-    local key = hex(input.outpoint:sub(1, 32)) .. ":" .. reader(input.outpoint:sub(33, 36)).number(4)
+    local key = outpoint(input)
     local version = utxos:get(key .. ":version")
     local threshold, keys = fed_at(version)
     local found = {}
@@ -552,7 +823,7 @@ function M.input_signatures(id, index)
     for at = 0, #keys - 1 do
         local signature = signatures:get(id .. ":" .. index .. ":" .. at)
 
-        if signature then
+        if signature and proposals:get(id .. ":state") ~= "cancelled" then
             table.insert(found, at)
             table.insert(found, signature)
         end
@@ -562,12 +833,14 @@ function M.input_signatures(id, index)
 end
 
 -- Shows a release, bitcoin_depth deep: its inputs are spent, its withdrawals paid, and its change,
--- if any, held for the federation it was proposed under.
+-- if any, held for the federation it was proposed under. One cancelled may still be shown, if it
+-- was finished anyway: Bitcoin mined it, so what it spent and paid is what the gateway must know.
 function M.released(id, block, raw, index, path)
     id = whole(id, "the proposal")
     local fed = remember()
+    local state = proposals:get(id .. ":state")
 
-    if proposals:get(id .. ":state") ~= "open" then
+    if state ~= "open" and state ~= "cancelled" then
         error("no open release by that number")
     end
 
@@ -579,8 +852,15 @@ function M.released(id, block, raw, index, path)
 
     local tx = parse(proposals:get(id .. ":raw"))
 
+    -- Cancelled and proposed again as it was, it has the same id: shown once is enough.
     for _, input in ipairs(tx.inputs) do
-        utxos:set(hex(input.outpoint:sub(1, 32)) .. ":" .. reader(input.outpoint:sub(33, 36)).number(4) .. ":state", "spent")
+        if utxos:get(outpoint(input) .. ":state") == "spent" then
+            error("an input of it was shown spent already")
+        end
+    end
+
+    for _, input in ipairs(tx.inputs) do
+        utxos:set(outpoint(input) .. ":state", "spent")
     end
 
     local ids = proposals:get(id .. ":ids")
@@ -618,6 +898,27 @@ function M.utxo_count()
     return count("utxo_count")
 end
 
+-- What the gateway holds at an outpoint, as utxo names it: satoshis, federation version, what it is
+-- for and its state, then the witness script spending it and its threshold: what checking or
+-- sizing a release takes. nil for anything else.
+function M.utxo_of(key)
+    local sats = utxos:get(key .. ":sats")
+
+    if sats == nil then
+        return nil
+    end
+
+    local version, recipient = utxos:get(key .. ":version"), utxos:get(key .. ":recipient")
+    local threshold = fed_at(version)
+
+    return tonumber(sats), tonumber(version), recipient, utxos:get(key .. ":state"), witness_script(version, recipient), threshold
+end
+
+-- The most fee a release may pay, in satoshis, and the least it may pay a virtual byte.
+function M.fee_limits()
+    return tonumber(storage.get("fee_cap")), tonumber(storage.get("fee_floor"))
+end
+
 -- A withdrawal: its output script, satoshis and state: queued, proposed or paid.
 function M.withdrawal(id)
     id = whole(id, "the withdrawal")
@@ -635,8 +936,13 @@ function M.proposal_count()
     return count("proposal_count")
 end
 
--- The change script of the federation in force: the bare multisig its change goes to.
-function M.change_script()
+-- The change script of the federation in force, or of an earlier one by its version: the bare
+-- multisig its change goes to.
+function M.change_script(version)
+    if version ~= nil then
+        return witness_script(tostring(whole(version, "the version")), "")
+    end
+
     local fed = remember()
 
     return multisig(fed.threshold, fed.signers)

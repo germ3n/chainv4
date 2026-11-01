@@ -277,6 +277,12 @@ pub fn federation() -> Option<Federation> {
     Some(Federation { version, threshold, signers })
 }
 
+/// The chain's id: what its EVM answers CHAINID with and the bridges name it by, six bytes of its
+/// genesis id, and nothing a contract's owner sets.
+pub fn chain_id() -> u64 {
+    unsafe { sys::chain_id() }
+}
+
 /// Runs another contract's function as this contract's own: on this contract's storage and
 /// balance, under this call's sender and value, with events in this contract's name. The EVM's
 /// delegatecall, for proxies. Only functions the target exports; never its fallback or a hook.

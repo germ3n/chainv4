@@ -13,11 +13,15 @@
 --   body = keccak256(abi.encode(bytes asset, uint256 id, uint256 amount, bytes recipient,
 --                               string name, string symbol, uint8 decimals, string uri))
 --   digest = keccak256(abi.encode("chainv4-gateway", head, body))
--- Chains are named by their EVM chain ids; this one's is given at setup, the id its own EVM
--- answers CHAINID with (crypto::ethereum::chain_id of its genesis). Addresses here
--- are written as Address:encode writes them, 33 bytes, an EVM chain's as its 20; the coin, as no
--- bytes. kind is 0 the coin, 1 a fungible token, 2 an NFT, 3 an amount of a multi-token id; origin
--- is the chain the asset is native to, and asset its address there.
+-- Chains are named by their EVM chain ids; this one's is chain.id(), the id its own EVM answers
+-- CHAINID with (crypto::ethereum::chain_id of its genesis), which no owner sets. An address here
+-- is written as Address:encode writes it, 33 bytes, an EVM chain's as its 20, and the coin as no
+-- bytes. This gateway is written as its identity(): its 33 bytes and the time it was set up. A chain
+-- restarted from the identical genesis has the same id and this gateway the same address and nothing
+-- marked done, and the old chain's signatures are public; with the time in the digest, they, and
+-- what Gateway.sol's logs still say left for the old gateway, mean nothing to the new one. kind is
+-- 0 the coin, 1 a fungible token, 2 an NFT, 3 an amount of a multi-token id; origin is the chain the
+-- asset is native to, and asset its address there.
 --
 -- Events: Sent(nonce, target, digest, sender), Attested(digest, signer), Received(source, nonce, digest),
 -- Wrapped(origin, kind, asset, here).
@@ -53,7 +57,32 @@ local function owner_only()
 end
 
 local function here()
-    return tonumber(storage.get("chain_id"))
+    return chain.id()
+end
+
+-- This gateway as a transfer writes it, and its peers hold it: its address, then when it was set up.
+local function identity()
+    return ctx.contract:encode() .. (storage.get("instance") or error("the gateway is not set up"))
+end
+
+-- Whether a recipient is an address on the chain of a peer gateway: on an EVM chain, 20 bytes and
+-- not nobody; on another chainv4, what address.decode reads, and not nobody. Anything else can
+-- never arrive, and once signed could only be refused there, every time.
+local function reachable(recipient, peer)
+    if type(recipient) ~= "string" then
+        return false
+    elseif #peer == 20 then
+        return #recipient == 20 and recipient ~= string.rep("\0", 20)
+    end
+
+    return recipient:sub(2) ~= string.rep("\0", 32) and (pcall(address.decode, recipient))
+end
+
+-- Text a transfer may carry: the bridges' tools hold names and URIs as UTF-8, and one that is not
+-- could never be signed, so a token with such a name crosses without it. utf8.len lets surrogates
+-- by, which are not UTF-8 to anyone else.
+local function readable(text)
+    return type(text) == "string" and utf8.len(text) and not text:find("\237[\160-\191]") and text or ""
 end
 
 local function whole(value, what)
@@ -178,9 +207,9 @@ local function transfer(source, target, nonce, kind, origin, asset, id, amount, 
     end
 
     if t.target == here() then
-        t.from, t.to = peers:get(tostring(t.source)), ctx.contract:encode()
+        t.from, t.to = peers:get(tostring(t.source)), identity()
     elseif t.source == here() then
-        t.from, t.to = ctx.contract:encode(), peers:get(tostring(t.target))
+        t.from, t.to = identity(), peers:get(tostring(t.target))
     else
         error("a transfer to or from another pair of chains")
     end
@@ -197,16 +226,16 @@ function M.init()
     storage.set("owner", ctx.sender:text())
 end
 
--- This chain's id, and the templates wrapped assets are cloned from: a token
--- (contracts/lua/wrapped.lua), an NFT collection and a multi-token one; set once.
-function M.setup(chain_id, token, nft, multi)
+-- The templates wrapped assets are cloned from: a token (contracts/lua/wrapped.lua), an NFT
+-- collection and a multi-token one; set once, and with them the time that makes up identity().
+function M.setup(token, nft, multi)
     owner_only()
 
     if storage.get("token") then
         error("the gateway is set up already")
     end
 
-    storage.set("chain_id", tostring(whole(chain_id, "the chain id")))
+    storage.set("instance", tostring(ctx.time))
     storage.set("token", token:text())
     storage.set("nft", nft:text())
     storage.set("multi", multi:text())
@@ -224,12 +253,23 @@ function M.peer(chain_id)
     return peers:get(tostring(whole(chain_id, "the chain id")))
 end
 
+-- This gateway as transfers write it, and as a peer on another chain must name it.
+function M.identity()
+    return identity()
+end
+
 -- Sends something to recipient on another chain: the coin the call carries; a token, NFT or
 -- multi-token amount, which this gateway takes with transfer_from, so approve it first. A wrapped
 -- one goes back, burned here; a native one is held here until it comes back.
 function M.send(target, recipient, kind, asset, id, amount)
     kind = whole(kind, "the kind")
     id, amount = u256(id or 0), u256(amount or 0)
+    local peer = peers:get(tostring(whole(target, "the target"))) or error("no gateway on that chain is this one's peer")
+
+    if not reachable(recipient, peer) then
+        error("a recipient that is no address on that chain")
+    end
+
     local origin, asset_bytes, name, symbol, decimals, uri = here(), "", "", "", 0, ""
 
     if kind == COIN then
@@ -285,19 +325,19 @@ function M.send(target, recipient, kind, asset, id, amount)
             -- Native here: held until it comes back.
             asset_bytes = asset:encode()
             local ok, answer = pcall(contracts.call, asset, "name")
-            name = ok and type(answer) == "string" and answer or ""
+            name = ok and readable(answer) or ""
             ok, answer = pcall(contracts.call, asset, "symbol")
-            symbol = ok and type(answer) == "string" and answer or ""
+            symbol = ok and readable(answer) or ""
 
             if kind == TOKEN then
                 ok, answer = pcall(contracts.call, asset, "decimals")
                 decimals = ok and tonumber(tostring(answer)) or 0
                 contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, amount)
             elseif kind == NFT then
-                uri = contracts.call(asset, "token_uri", id)
+                uri = readable(contracts.call(asset, "token_uri", id))
                 contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, id)
             else
-                uri = contracts.call(asset, "token_uri", id)
+                uri = readable(contracts.call(asset, "token_uri", id))
                 contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, id, amount)
             end
         end
@@ -436,8 +476,8 @@ end
 -- What the coin is called, for the message that carries it: set by the owner.
 function M.set_coin(name, symbol)
     owner_only()
-    storage.set("coin_name", name)
-    storage.set("coin_symbol", symbol)
+    storage.set("coin_name", readable(name))
+    storage.set("coin_symbol", readable(symbol))
     return true
 end
 

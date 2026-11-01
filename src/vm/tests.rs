@@ -2156,6 +2156,67 @@ mod crypto;
 #[cfg(feature = "bridge")]
 mod gateway;
 
+const LUA_CHAIN_ID: &str = r#"
+local M = {}
+
+function M.read() return chain.id() end
+function M.twice() local _ = chain.id() return chain.id() end
+function M.forge() chain.id = function() return 1 end end
+function M.forge_lib() chain = { id = function() return 1 end } end
+
+return M
+"#;
+
+/// `read` gives the chain's id as an i64, encoded: a count of 1, the i64 tag 6, then 8 bytes.
+const WASM_CHAIN_ID: &str = r#"
+(module
+  (import "chain" "chain_id" (func $chain_id (result i64)))
+  (import "chain" "output" (func $output (param i32 i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "\01\00\00\00\00\00\00\00\06")
+  (func (export "read")
+    (i64.store (i32.const 9) (call $chain_id))
+    (call $output (i32.const 0) (i32.const 17)))
+  (func (export "twice")
+    (drop (call $chain_id))
+    (i64.store (i32.const 9) (call $chain_id))
+    (call $output (i32.const 0) (i32.const 17))))
+"#;
+
+#[test]
+fn contracts_read_the_chain_s_id_for_the_same_fuel_in_either_engine_and_cannot_change_it() {
+    const ID: u64 = 0xabcd_ef01_2345;
+    let mut world = World {
+        vm: Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_chain_id(ID)),
+        ..World::new()
+    };
+    let lua = world.lua_code(LUA_CHAIN_ID);
+    let wasm = world.wasm(WASM_CHAIN_ID);
+
+    assert_eq!(world.call(lua, "read", &[]).result.unwrap(), [TxCallArgumentType::I64(ID as i64)]);
+    assert_eq!(world.call(wasm, "read", &[]).result.unwrap(), [TxCallArgumentType::I64(ID as i64)]);
+
+    // A second read costs what the host charges, and the few instructions around it.
+    for contract in [lua, wasm] {
+        let (once, twice) = (world.call(contract, "read", &[]).fuel_used, world.call(contract, "twice", &[]).fuel_used);
+        assert!((cost::CHAIN_ID..cost::CHAIN_ID + 15).contains(&(twice - once)), "{}", twice - once);
+
+        // Out of fuel at the host call: a budget short of the charge fails, and the budget does not.
+        let run = |fuel: u64| {
+            let context = CallContext { sender: DEPLOYER, contract, value: u256::ZERO, block: crate::vm::BlockAt::at(0) };
+
+            Contracts::new(&world.state).call(&world.vm, &context, &Hash::Xxh3_64(selector("read")), &[], Limits { fuel, ..LIMITS }).unwrap().result
+        };
+        assert!(run(once).is_ok());
+        assert!(run(once - cost::CHAIN_ID).is_err());
+    }
+
+    // The sandbox keeps it what the chain says.
+    assert!(world.call(lua, "forge", &[]).result.is_err());
+    assert!(world.call(lua, "forge_lib", &[]).result.is_err());
+    assert_eq!(world.call(lua, "read", &[]).result.unwrap(), [TxCallArgumentType::I64(ID as i64)]);
+}
+
 #[cfg(feature = "bitcoin")]
 mod btc_relay;
 
