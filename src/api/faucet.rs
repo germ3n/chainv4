@@ -243,16 +243,17 @@ mod tests {
         let other: SocketAddr = "172.18.0.4:40000".parse().unwrap();
         let outside: SocketAddr = "198.51.100.7:40000".parse().unwrap();
         let added = "203.0.113.9".parse::<std::net::IpAddr>().unwrap();
-        let trusted = [proxy.ip()];
+        let trusted = super::super::proxies::TrustedProxies::new(vec![proxy.ip().to_string()]);
+        let none = super::super::proxies::TrustedProxies::default();
 
         // Loopback is always believed, as the proxy on the same host connects from it.
-        assert_eq!(asker(loopback, &headers, &[]), added, "the one the proxy added, not the one the caller wrote");
+        assert_eq!(asker(loopback, &headers, &none), added, "the one the proxy added, not the one the caller wrote");
         // A private address is believed only when --trusted-proxy named it.
         assert_eq!(asker(proxy, &headers, &trusted), added, "a named proxy is believed");
         assert_eq!(asker(other, &headers, &trusted), other.ip(), "another box on the private network is not, so it cannot spoof");
-        assert_eq!(asker(proxy, &headers, &[]), proxy.ip(), "with none named, even a private peer is not believed");
+        assert_eq!(asker(proxy, &headers, &none), proxy.ip(), "with none named, even a private peer is not believed");
         assert_eq!(asker(outside, &headers, &trusted), outside.ip(), "a caller from outside cannot name another IP");
-        assert_eq!(asker(loopback, &HeaderMap::new(), &[]), loopback.ip());
+        assert_eq!(asker(loopback, &HeaderMap::new(), &none), loopback.ip());
         assert_eq!((span(86_340_000), span(300_000), span(400)), ("23h 59m".to_string(), "5m".to_string(), "1s".to_string()));
     }
 }

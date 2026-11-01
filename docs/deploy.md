@@ -1,6 +1,6 @@
 # Deploying a fresh test chain
 
-How the test chain was last started from nothing (2026-10-31, commit `74be29d`), step by
+How the test chain was last started from nothing (2026-11-01, on commit `4c4b0e5` and the `--trusted-proxy` fix), step by
 step, with everything enabled: a runbook for the next one. [Docker](docker.md) explains the
 pieces; this is the order they go in, and what bit along the way.
 
@@ -218,7 +218,7 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0x366bfdddf940c06e…`, named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; a block mints 10, halving every 2,000,000 blocks, about 116 days, and a vote 0.01; names under `cv4` |
+| Genesis | `0x59f2773a4dccae07…`, 2026-11-01, named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; a block mints 10, halving every 2,000,000 blocks, about 116 days, and a vote 0.01; names under `cv4` |
 | Machines | Public node `66.78.40.94`, others `66.78.40.57` and `65.87.7.168`: 2 cores, 4 GB and 50 GB each, with 4 GB of swap and the [firewall](docker.md#firewall) |
 | Swap contract, `swap.cv4` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.cv4` | `contract:0x6c1df38c…90a4` |

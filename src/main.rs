@@ -272,14 +272,15 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long)]
     report_token: Option<std::path::PathBuf>,
-    /// A reverse proxy's address whose X-Forwarded-For header the API believes, so it counts the
-    /// client it names against the per-IP limits rather than the proxy. Loopback is always
-    /// believed, which covers a proxy on the same host; name a proxy here only when it runs on
-    /// another box on a private network the node shares, as any unlisted host there could otherwise
-    /// spoof a client's address. Repeat for several.
+    /// A reverse proxy whose X-Forwarded-For header the API believes, so it counts the client it
+    /// names against the per-IP limits rather than the proxy: its address, or a host's name, which
+    /// is looked up again every few seconds, for a container whose address may change. Loopback is
+    /// always believed, which covers a proxy on the same host. Without this, a proxy anywhere else
+    /// makes every visitor one client. Name only what you run, as whatever is named can claim to
+    /// be anyone. Repeat for several.
     #[cfg(feature = "http")]
-    #[arg(long, value_name = "IP")]
-    trusted_proxy: Vec<std::net::IpAddr>,
+    #[arg(long, value_name = "IP_OR_HOST")]
+    trusted_proxy: Vec<String>,
     /// Where workers reach the mining port from outside, such as 203.0.113.7:4002 or
     /// ADDRESS.onion:4002, as GET /status and GET /pool tell the apps; by default they take the
     /// API's host and the port --mining listens on.

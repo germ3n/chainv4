@@ -789,6 +789,9 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **In the Docker stack, every visitor would have counted as nginx.** `--trusted-proxy` took only an address, which
+  a container's can change, and the stack passed none. It takes a host's name now, looked up again every few
+  seconds, and the stack names `nginx`.
 - [x] **The whole of CI on this machine.** `scripts/ci.sh` runs what `test.yml` does with no runner minutes and no
   GPU kernel. Its first run found node builds without `client` that no longer compiled, and tests assuming the
   default hash, scheme or finality.

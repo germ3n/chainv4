@@ -51,6 +51,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use crate::chain::stored_decisions;
 
 #[cfg(feature = "faucet")]
+mod proxies;
 mod faucet;
 mod filters;
 mod json;
@@ -180,9 +181,9 @@ struct Api {
     /// What it shares of itself, and the token that shows everything.
     sharing: sharing::Sharing,
     report_token: Option<Arc<Vec<u8>>>,
-    /// Besides loopback, the addresses whose X-Forwarded-For the API believes: the reverse proxies
-    /// in front of it. Empty trusts loopback alone.
-    trusted_proxies: Arc<[IpAddr]>,
+    /// Besides loopback, those whose X-Forwarded-For the API believes: the reverse proxies in front
+    /// of it. None named trusts loopback alone.
+    trusted_proxies: proxies::TrustedProxies,
     /// Mining WebSocket relays open now, by client, so one cannot open a flood of them into the
     /// mining port, which sees them all as loopback.
     mining_relays: Arc<InFlight>,
@@ -235,7 +236,7 @@ impl Drop for Counted {
 /// trusted, as the proxy on the same host connects from it; any other private address is trusted
 /// only when --trusted-proxy named it, so that a second container or box on a shared private
 /// network cannot spoof a client's address and slip past the per-IP limits.
-fn asker(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &[IpAddr]) -> IpAddr {
+fn asker(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &proxies::TrustedProxies) -> IpAddr {
     let trusted = peer.ip().is_loopback() || trusted_proxies.contains(&peer.ip());
     let forwarded = headers
         .get("x-forwarded-for")
@@ -441,8 +442,8 @@ pub struct ApiOptions {
     pub sharing: sharing::Sharing,
     #[document(summary = "The token that shows everything to whoever bears it, --report-token; None for nobody off this machine to see it.")]
     pub report_token: Option<Vec<u8>>,
-    #[document(summary = "Besides loopback, the addresses of reverse proxies whose X-Forwarded-For the API believes, --trusted-proxy. Empty trusts loopback alone, so no other host on a shared private network can spoof a client's address past the per-IP limits.")]
-    pub trusted_proxies: Vec<IpAddr>,
+    #[document(summary = "Besides loopback, the reverse proxies whose X-Forwarded-For the API believes, --trusted-proxy, each an address or a host's name looked up again every few seconds. Empty trusts loopback alone, so no other host on a shared private network can spoof a client's address past the per-IP limits.")]
+    pub trusted_proxies: Vec<String>,
 }
 
 #[document(
@@ -506,6 +507,12 @@ pub fn start(
                     Err(err) => return log::error!("[http] {err}"),
                 };
 
+                let trusted_proxies = proxies::TrustedProxies::new(options.trusted_proxies);
+
+                if trusted_proxies.named() {
+                    tokio::spawn(trusted_proxies.clone().keep_looking());
+                }
+
                 if let Err(err) = axum::serve(listener, router(Api {
                     db: db.clone(),
                     live: db,
@@ -547,7 +554,7 @@ pub fn start(
                     mining_onion: options.mining_onion.map(Arc::new),
                     sharing: options.sharing,
                     report_token: options.report_token.map(Arc::new),
-                    trusted_proxies: options.trusted_proxies.into(),
+                    trusted_proxies,
                     mining_relays: Arc::new(InFlight { per_ip: MINING_RELAYS_PER_IP, counts: Default::default() }),
                 })
                 // Who connects, for the faucet's limits by IP.

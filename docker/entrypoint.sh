@@ -54,6 +54,7 @@
 #                    for GET /status to name to the wallet and chainv4 swap
 #   DEX_CONTRACT     the DEX deployed on this chain, contracts/lua/dex.lua, for GET /status
 #   DEX_ROUTER       the EVM DEX's router, DexRouter from contracts/evm/Dex.sol, 0x and 40 hex
+#   TRUSTED_PROXY    the proxies whose X-Forwarded-For the API believes: their names or addresses
 #   EXTRA_ARGS       anything else, passed on to chainv4
 set -eu
 
@@ -256,6 +257,12 @@ if [ "${TOR:-0}" = 1 ]; then
     set -- "$@" --listen "/ip4/0.0.0.0/tcp/${P2P_PORT:-4001}" --tor-proxy socks5h://tor:9050 --onion-file /onion/p2p
     echo "[docker] peer-to-peer over Tor too: TCP ${P2P_PORT:-4001} for the onion, onions dialed through tor"
 fi
+
+# The proxies whose X-Forwarded-For the API believes, by name, as a container's address can change:
+# nginx in this stack, without which every visitor counts as one against the per-IP limits.
+for proxy in ${TRUSTED_PROXY:-}; do
+    set -- "$@" --trusted-proxy "$proxy"
+done
 
 # Word-split on purpose: EXTRA_ARGS holds several arguments.
 # shellcheck disable=SC2086

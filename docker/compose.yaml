@@ -59,6 +59,8 @@ services:
       DEX_CONTRACT: ${DEX_CONTRACT:-}
       DEX_ROUTER: ${DEX_ROUTER:-}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
+      # Who says who is asking: nginx, or every visitor counts as one against the per-IP limits.
+      TRUSTED_PROXY: ${TRUSTED_PROXY:-nginx}
     volumes:
       - chain:/data
       # The node's onion, as tor writes it, with TOR=1.

@@ -263,6 +263,11 @@ What is hidden keeps its place in the answer, empty, so apps from before still r
   with `Authorization: Bearer TOKEN`, from anywhere. Send it over HTTPS or Tor alone. A token the
   node does not take shares no more than none, and `GET /node` says `token_refused`.
 
+**A proxy off this machine** needs `--trusted-proxy IP_OR_HOST`, or every visitor through it counts as
+one client against the per-IP limits: the faucet's wait, requests under way and block ranges. A name is
+looked up again every few seconds, for a container whose address may change. The Docker stack names
+`nginx` by itself (`TRUSTED_PROXY`).
+
 This is loopback alone: unlike the per-IP rate limits, report privacy does not honor
 `--trusted-proxy`, so naming a proxy there never lets it see what the operator sees.
 
