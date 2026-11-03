@@ -1450,13 +1450,6 @@ maybe have to check the event log not indexing properly in explorer? maybe setti
 add fuzzing
 make consensus switchable (pow -> pos, etc)
 adjust fuel costs
-if we have something like hashable bytes in block header, for light node, we mmight be able to do a macro to auto-error if field was omitted? make fields ignorable, rest has to be used in code
-
-maybe make adjustable?/// come off in a reorg, yet recent enough for peers to serve: they keep undo records for the last
-/// max_reorg_depth blocks.
-pub(super) const PIVOT_DEPTH: u64 = 16;
-/// A chain shorter than this is synced by running its blocks: a snapshot would save nothing.
-pub(super) const MIN_SNAPSHOT_HEIGHT: u64 = 2 * PIVOT_DEPTH;
 
 - A light wallet: build chainv4 wallet, combining keys and send with light-client checks of your balance and receipts.
 
@@ -1470,17 +1463,6 @@ Close, but not quite. A wallet does two jobs, and the light client only does one
 So a light client is what a trustless wallet uses for reading, like old SPV Bitcoin wallets or Helios under an Ethereum wallet. The explorer is now the closest thing to a light wallet here: it signs and sends on its Send page, and its account pages show balances the light client proved.
 
 That also matters for what you asked earlier. There's no separate light process an explorer can point at, because each explorer runs its own light client against the node it's connected to.
-
-
-
-these hardcoded?
-   Ask::Receipt(id) => format!("/proofs/receipts/{id}"),
-            Ask::Tokens => "/tokens?limit=100".to_string(),
-            Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
-            Ask::Events(address) => format!("/events?address={address}&limit=50")
-
-maybe add ability to use u128 for amounts if not too mcuh effort
-evm
 
 tighten lua sandbox
 add a thing to storage (At least lua), where we dont have to save addresses as text but can just save it directly
