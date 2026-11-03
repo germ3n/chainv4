@@ -1399,3 +1399,12 @@ What I'd prioritize next, over new features:
 
 
 evm cant interact with lua/wasm yet
+pentest reentrancy
+transfer from ed25519 to btc wallet just shows transfer in activity, without amounts, noly fee
+
+sending nfts says sending x units, but no selection how many. maybe unclear?
+do some pages not show assets of all accounts? ed25519 shows nfts but sending to btc for example doesnt show it anymore
+cant add bitcoin/ethereum address to multisig when creating
+can only propose a payment, no other tx
+when approving on chain, cant sign with another key
+doesnt show multisig address when in multisig tab and having it list every single one one is part of
