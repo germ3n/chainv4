@@ -789,6 +789,21 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **The explorer shows voided and refunded transfers.** Done 2026-11-03. Apps only: no new genesis, no
+  contract redeployed.
+  - Its Bridge page reads `Voided` and `Refunded` as well as `Sent`, `Attested` and `Received`, in any
+    order, and says each transfer's standing as the wallet does, from `chainv4_ui::bridge::Standing`:
+    signing, signed, arrived, voiding, voided with its refund to come, refunded, or stuck. Tiles count the
+    refunds and the stuck; a transfer's page says where it was voided or paid back and to whom.
+  - Signatures to void or refund a transfer go with it, not shown as a transfer arriving: worked out from
+    `sent(nonce)` for one that left, asked of `void_digest` for one voided coming here.
+  - Stuck is one that left for a Gateway.sol the directory no longer names there: its peer is gone, as in
+    the item on a refund across a replaced gateway, which this only shows.
+  - The transaction and account pages say the gateway's events in words, each linking to its transfer.
+  - Left: a refund of one voided here is paid on the EVM chain and its signatures here need Gateway.sol's
+    `leftBy`, so the explorer keeps it at "voided, refund to come" and shows those signatures as one
+    arriving; neither event says why it was refused.
+
 - [x] **Four CLI bugs from the testnet run.** Done 2026-11-03. CLI only: no new genesis, no
   consensus change, no contract redeployed.
   - `dex add` takes at most the amounts given, as Uniswap V2's router does: it reads the reserves,
@@ -940,9 +955,6 @@ offline; these would make that hold up as a treasury.
 - [ ] **Fee bumping a stuck Bitcoin release, before real funds.** A pass only warns of a release with all its
   signatures that is not mined: someone must build the child that pays for it by hand. A federation output
   to spend for it, or a small anchor output, and signers to agree its fee, are all undecided.
-- [ ] **The explorer shows voided and refunded transfers.** Its Bridge page lists `Sent`, `Attested` and
-  `Received`; `Voided` and `Refunded` are not read yet, so one voided stays "signed, to relay" there. The
-  wallet's own list says so already.
 - [ ] **A refund across a replaced gateway.** What left for a gateway since replaced can be neither delivered
   nor voided, so it stays where it left unless its peer is put back. A chain's reset leaves that for good.
 - [x] **Only federation signers propose a Bitcoin release, and they do it by themselves.** Done 2026-11-01. Anyone could

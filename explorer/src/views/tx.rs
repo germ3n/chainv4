@@ -483,11 +483,17 @@ pub fn event_name(ctx: &Ctx, contract: &str, name: &str, data: &[Argument]) -> S
 
 /// An event's data in a row. A token's Transfer reads as who sent how much to whom, and its
 /// Approval as who let whom spend how much, in the token's units. An EVM log reads by its ABI, an
-/// ERC-20's and an NFT's Transfer the same way, and says which ABI that was.
+/// ERC-20's and an NFT's Transfer the same way, and says which ABI that was. The bridge gateway's
+/// transfer events read as what each did, sent, signed, done, voided or paid back, with a link to
+/// the transfer.
 pub fn event_data(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) {
     if let Some(read) = decoded::log_of(ctx, contract, name, data) {
         decoded::log(ui, ctx, contract, &read, data);
 
+        return;
+    }
+
+    if super::bridge::said(ui, ctx, contract, name, data) {
         return;
     }
 

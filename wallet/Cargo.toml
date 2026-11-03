@@ -73,7 +73,7 @@ dex = ["chainv4/dex"]
 nft = ["chainv4/nft"]
 # The Bridge page: the coin, tokens and NFTs to and from EVM chains through the gateways, and BTC
 # in and out as wBTC, deposits shown by the light client's proofs.
-bridge = ["swap", "chainv4/bridge"]
+bridge = ["swap", "chainv4/bridge", "chainv4-ui/bridge"]
 # A Bitcoin light client on the desktop and Android: BIP157/158 compact block filters from Bitcoin's
 # own peers, through Kyoto (the bip157 crate), for swaps' HTLCs and the accounts' Bitcoin
 # addresses. The browser, which opens no raw connections, goes without.

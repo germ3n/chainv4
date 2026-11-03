@@ -8,12 +8,14 @@
 //! phone, whether it is on its charger. And finding a ballot among many, as both Governance pages
 //! do, and drawing their votes: tallies, voters, what a change moves and what was decided when;
 //! what became of what was asked of a node, and asking it again; pulling a page down to reload it;
-//! and filtering an address's transactions. And reading blocks a node sends, each checked, and
-//! keeping what an app makes of them where it can be rebuilt from.
+//! and filtering an address's transactions; and where a transfer through the bridges stands. And
+//! reading blocks a node sends, each checked, and keeping what an app makes of them where it can be
+//! rebuilt from.
 
 pub mod asks;
 pub mod ballots;
 pub mod biometric;
+pub mod bridge;
 #[cfg(feature = "blocks")]
 pub mod blocks;
 #[cfg(feature = "camera")]

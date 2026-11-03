@@ -1,7 +1,10 @@
 //! The bridges (docs/bridges.md): the federation that vouches for what crosses, and the contracts
 //! the chain's directory names. The gateway here, contracts/lua/gateway.lua, is read by its events:
-//! what left for an EVM chain and how many signers signed it, what arrived and was done, and the
-//! wrapped assets it made, each with what it stands for. The Bitcoin gateway,
+//! what left for an EVM chain and how many signers signed it, what arrived and was done, what was
+//! refused for good and voided, or paid back, and the wrapped assets it made, each with what it
+//! stands for. What its events cannot say it is asked: which signatures are to void or refund a
+//! transfer rather than to deliver one, and which transfers left for a peer since replaced, stuck
+//! unless it is named again. The Bitcoin gateway,
 //! contracts/lua/btc_gateway.lua, is read by its calls and events: its relay's tip, wBTC minted
 //! against the coins it holds, deposits, withdrawals, and the releases that pay them, each input
 //! with the signatures posted for it. What happens on the other chains is theirs to show: a
@@ -16,10 +19,11 @@ use {
     chainv4::crypto::bitcoin::tx::{Network, Transaction, address as bitcoin_address},
     chainv4::structs::address::Address,
     chainv4::structs::hex::{from_hex, to_hex},
+    chainv4_ui::bridge::{Known, Standing, left},
     chainv4_ui::widgets,
     egui::{RichText, Ui},
     serde_json::{Value, json},
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
 };
 
 /// How long an answer stands before it is asked for again, in milliseconds.
@@ -28,6 +32,9 @@ const REFRESH: u64 = 15_000;
 const EVENTS: u32 = 300;
 /// The most withdrawals, releases and held outputs asked after, newest first.
 const MOST: u64 = 30;
+/// The most transfers read back, newest first, to tell what signatures to void or refund them are
+/// for and whether they are stuck.
+const CHECKED: usize = 50;
 
 #[derive(Default)]
 pub struct BridgeState {
@@ -48,11 +55,13 @@ impl BridgeState {
 /// Which way a transfer went, as the gateway's events tell it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Way {
-    /// Left through this gateway, by its nonce, for a chain.
-    Out { nonce: u64, target: u64 },
-    /// Arrived and was done, from a chain, by its nonce there.
+    /// Left through this gateway, by its nonce, for a chain: none known for one whose Sent is
+    /// older than the events read, of which a Refunded names only the nonce.
+    Out { nonce: u64, target: Option<u64> },
+    /// Came here from a chain, by its nonce there: done, or voided.
     In { source: u64, nonce: u64 },
-    /// Signed here but never sent from here, nor done yet: one arriving, as its signers vouch.
+    /// Signed here but never sent from here, nor done or voided yet: one arriving, as its signers
+    /// vouch.
     Arriving,
 }
 
@@ -63,24 +72,41 @@ struct Crossing {
     way: Way,
     /// Who signed it, by key, with the transaction each signature came in, oldest first.
     signers: Vec<(String, String)>,
-    /// Where it first showed: its Sent event, or its first signature.
+    /// Who signed to void it, and to refund it, as signers posted those here.
+    void_signers: Vec<(String, String)>,
+    refund_signers: Vec<(String, String)>,
+    /// Where it first showed: its Sent event, or else its first event of the rest.
     height: u64,
     tx: String,
     /// The transaction it was done in, for one that arrived.
     done_in: Option<String>,
+    /// The transaction it was voided in here, for one refused for good on its way here.
+    voided_in: Option<String>,
+    /// The transaction it was paid back in here, and to whom, for one that left.
+    refunded: Option<(String, String)>,
+    /// Left for a gateway the directory no longer names there.
+    stuck: bool,
 }
 
 impl Crossing {
-    /// Where it stands, against the federation's threshold.
-    fn state(&self, threshold: Option<u64>) -> String {
-        let signed = self.signers.len() as u64;
+    /// Where it stands, against the federation's threshold, as the wallet says it too.
+    fn standing(&self, threshold: Option<u64>) -> Standing {
+        Standing::of(Known {
+            leaving: matches!(self.way, Way::Out { .. }),
+            signed: self.signers.len() as u64,
+            threshold,
+            arrived: self.done_in.is_some(),
+            stuck: self.stuck,
+            void_signed: self.void_signers.len() as u64,
+            // Its signers refund one only once they read it voided where it was going.
+            voided: self.voided_in.is_some() || !self.refund_signers.is_empty(),
+            refunded: self.refunded.is_some(),
+        })
+    }
 
-        match (&self.way, threshold) {
-            (Way::In { .. }, _) => "received".to_string(),
-            (Way::Out { .. }, Some(threshold)) if signed >= threshold => "signed, to relay".to_string(),
-            (_, Some(threshold)) => format!("signing, {signed} of {threshold}"),
-            (_, None) => format!("{signed} signed"),
-        }
+    /// The transaction its latest step was done in: paid back, voided, done, or where it showed.
+    fn latest_tx(&self) -> &str {
+        self.refunded.as_ref().map(|(tx, _)| tx.as_str()).or(self.voided_in.as_deref()).or(self.done_in.as_deref()).unwrap_or(&self.tx)
     }
 }
 
@@ -109,41 +135,121 @@ fn number(argument: Option<&Argument>) -> u64 {
 }
 
 /// The gateway's transfers, newest first, from its events: Sent(nonce, target, digest, sender),
-/// Attested(digest, signer) and Received(source, nonce, digest).
+/// Attested(digest, signer), Received(source, nonce, digest), Voided(source, nonce, digest) and
+/// Refunded(nonce, digest, recipient). Each event adds what it says and takes nothing away, so they
+/// come to the same in any order: a Refunded before its Sent, as a page of them might hold it,
+/// still leaves one that left and was paid back.
 fn crossings(events: &[FoundEvent]) -> Vec<Crossing> {
     let mut by_digest: HashMap<String, Crossing> = HashMap::new();
-    let first = |event: &FoundEvent, digest: &str, way: Way| Crossing { digest: digest.to_string(), way, signers: Vec::new(), height: event.height, tx: event.tx.clone(), done_in: None };
+    let mut sent: HashSet<String> = HashSet::new();
 
-    // Oldest first, so a signature or a receipt lands on what it is for.
+    // Oldest first, so the signatures on each come in the order they were posted.
     for event in events.iter().rev() {
+        let at = match event.name.as_str() {
+            "Sent" | "Received" | "Voided" => 2,
+            "Attested" => 0,
+            "Refunded" => 1,
+            _ => continue,
+        };
+        let digest = event.data.get(at).map(bytes_hex).unwrap_or_default();
+        let crossing = by_digest.entry(digest.clone()).or_insert_with(|| Crossing {
+            digest: digest.clone(),
+            way: Way::Arriving,
+            signers: Vec::new(),
+            void_signers: Vec::new(),
+            refund_signers: Vec::new(),
+            height: event.height,
+            tx: event.tx.clone(),
+            done_in: None,
+            voided_in: None,
+            refunded: None,
+            stuck: false,
+        });
+
+        // Where it showed is its Sent, or else the first of the rest.
+        if event.name == "Sent" || (!sent.contains(&digest) && event.height < crossing.height) {
+            (crossing.height, crossing.tx) = (event.height, event.tx.clone());
+        }
+
         match event.name.as_str() {
             "Sent" => {
-                let digest = event.data.get(2).map(bytes_hex).unwrap_or_default();
-                let way = Way::Out { nonce: number(event.data.first()), target: number(event.data.get(1)) };
-                let crossing = by_digest.entry(digest.clone()).or_insert_with(|| first(event, &digest, way.clone()));
-                (crossing.way, crossing.height, crossing.tx) = (way, event.height, event.tx.clone());
+                crossing.way = Way::Out { nonce: number(event.data.first()), target: Some(number(event.data.get(1))) };
+                sent.insert(digest);
             }
             "Attested" => {
-                let digest = event.data.first().map(bytes_hex).unwrap_or_default();
                 let signer = event.data.get(1).map(bytes_hex).unwrap_or_default();
-                let crossing = by_digest.entry(digest.clone()).or_insert_with(|| first(event, &digest, Way::Arriving));
 
                 if !crossing.signers.iter().any(|(key, _)| *key == signer) {
                     crossing.signers.push((signer, event.tx.clone()));
                 }
             }
-            "Received" => {
-                let digest = event.data.get(2).map(bytes_hex).unwrap_or_default();
-                let way = Way::In { source: number(event.data.first()), nonce: number(event.data.get(1)) };
-                let crossing = by_digest.entry(digest.clone()).or_insert_with(|| first(event, &digest, way.clone()));
-                (crossing.way, crossing.done_in) = (way, Some(event.tx.clone()));
+            "Received" | "Voided" => {
+                crossing.way = Way::In { source: number(event.data.first()), nonce: number(event.data.get(1)) };
+
+                match event.name.as_str() {
+                    "Received" => crossing.done_in = Some(event.tx.clone()),
+                    _ => crossing.voided_in = Some(event.tx.clone()),
+                }
             }
-            _ => {}
+            _ => {
+                if crossing.way == Way::Arriving {
+                    crossing.way = Way::Out { nonce: number(event.data.first()), target: None };
+                }
+
+                crossing.refunded = Some((event.tx.clone(), event.data.get(2).map(Argument::text).unwrap_or_default()));
+            }
         }
     }
 
     let mut list: Vec<Crossing> = by_digest.into_values().collect();
     list.sort_by(|one, two| (two.height, &two.digest).cmp(&(one.height, &one.digest)));
+
+    list
+}
+
+/// What a signature over a digest other than a transfer's is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Over {
+    Void,
+    Refund,
+}
+
+/// Signatures to void or refund a transfer put with it, rather than shown as a transfer of their
+/// own, as each event says only the digest it signs: over maps each such digest to the transfer's
+/// and what it is for. And the transfers in stuck marked so.
+fn place(mut list: Vec<Crossing>, over: &HashMap<String, (String, Over)>, stuck: &HashSet<String>) -> Vec<Crossing> {
+    let at: HashMap<String, usize> = list.iter().enumerate().map(|(at, crossing)| (crossing.digest.clone(), at)).collect();
+    let moving: Vec<(usize, usize, Over)> = list
+        .iter()
+        .enumerate()
+        .filter(|(_, crossing)| crossing.way == Way::Arriving)
+        .filter_map(|(from, crossing)| {
+            let (of, what) = over.get(&crossing.digest)?;
+
+            Some((from, *at.get(of)?, *what))
+        })
+        .collect();
+
+    for &(from, to, what) in &moving {
+        let signers = std::mem::take(&mut list[from].signers);
+        let onto = match what {
+            Over::Void => &mut list[to].void_signers,
+            Over::Refund => &mut list[to].refund_signers,
+        };
+
+        for (key, tx) in signers {
+            if !onto.iter().any(|(signer, _)| *signer == key) {
+                onto.push((key, tx));
+            }
+        }
+    }
+
+    let moved: HashSet<usize> = moving.iter().map(|(from, _, _)| *from).collect();
+    let mut list: Vec<Crossing> = list.into_iter().enumerate().filter(|(at, _)| !moved.contains(at)).map(|(_, crossing)| crossing).collect();
+
+    for crossing in &mut list {
+        crossing.stuck = stuck.contains(&crossing.digest);
+    }
 
     list
 }
@@ -268,6 +374,101 @@ fn whole(value: u64) -> Value {
     json!({ "type": "u64", "value": value.to_string() })
 }
 
+/// What a read-only call returned that does not change once it did, such as what left: asked until
+/// it answers, then kept, each value as the node writes it. None until then, and for a refusal.
+fn kept(ctx: &mut Ctx, state: &mut BridgeState, contract: &str, function: &str, args: Value) -> Option<Vec<Value>> {
+    let asked = Ask::Call { contract: contract.to_string(), function: function.to_string(), args: args.to_string() };
+
+    if !ctx.store.calls.contains_key(&asked) {
+        ask(ctx, state, asked.clone());
+    }
+
+    let answer = ctx.store.calls.get(&asked)?;
+
+    (answer["status"] == "returned").then(|| answer["values"].as_array().cloned().unwrap_or_default())
+}
+
+/// The Gateway.sol the directory names on each EVM chain, by its chain id.
+fn peers(ctx: &Ctx) -> HashMap<u64, [u8; 20]> {
+    let directory = ctx.store.status.as_ref().and_then(|status| status.directory.as_ref());
+
+    directory
+        .and_then(|directory| directory["evm_gateways"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|evm| Some((evm["chain_id"].as_u64()?, from_hex(evm["gateway"].as_str()?)?.try_into().ok()?)))
+        .collect()
+}
+
+/// What the gateway's events alone cannot say of its transfers, read back from it: which digests
+/// its signers signed to void or refund each, and which are stuck. One that left is read back by
+/// its sent(nonce) as the signers sign it, toward the Gateway.sol the directory names there, so
+/// one whose digest is not that is stuck: it left for a peer since replaced, which no signer
+/// signs or voids. One voided on its way here asks the gateway its void digest; what refunding it
+/// takes is signed by whom Gateway.sol says sent it, which only that chain knows.
+fn lookups(ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, crossings: &[Crossing]) -> (HashMap<String, (String, Over)>, HashSet<String>) {
+    let (mut over, mut stuck) = (HashMap::new(), HashSet::new());
+    let Some(here) = ctx.store.status.as_ref().and_then(|status| status.chain_id) else {
+        return (over, stuck);
+    };
+    let peers = peers(ctx);
+    let identity = kept(ctx, state, gateway, "identity", json!([])).and_then(|values| from_hex(&bytes_hex(&serde_json::from_value::<Argument>(values.first()?.clone()).ok()?)));
+
+    for crossing in crossings.iter().filter(|crossing| matches!(crossing.way, Way::Out { .. }) || crossing.voided_in.is_some()).take(CHECKED) {
+        let digest = crossing.digest.clone();
+
+        match crossing.way {
+            Way::Out { nonce, .. } => {
+                let Some(identity) = &identity else {
+                    continue;
+                };
+                let Some(values) = kept(ctx, state, gateway, "sent", json!([whole(nonce)])) else {
+                    continue;
+                };
+                let arguments: Vec<Argument> = values.iter().filter_map(|value| serde_json::from_value(value.clone()).ok()).collect();
+
+                // The gateway's own record of the one its Sent named, or nothing to go by.
+                if arguments.get(11).map(bytes_hex) != Some(digest.clone()) {
+                    continue;
+                }
+
+                let target = number(arguments.first());
+
+                match peers.get(&target).and_then(|peer| left(&values, identity, *peer, here, nonce)) {
+                    Some(transfer) => {
+                        over.insert(to_hex(&transfer.void_digest()), (digest.clone(), Over::Void));
+
+                        if let Some(sender) = arguments.get(12).and_then(|sender| sender.text().parse::<Address>().ok()) {
+                            over.insert(to_hex(&transfer.refund_digest(&sender.to_abi())), (digest, Over::Refund));
+                        }
+                    }
+                    None => {
+                        stuck.insert(digest);
+                    }
+                }
+            }
+            Way::In { source, nonce } => {
+                let args = json!([whole(source), whole(here), whole(nonce), { "type": "bytes", "value": digest }]);
+
+                if let Some(void) = kept(ctx, state, gateway, "void_digest", args).and_then(|values| serde_json::from_value::<Argument>(values.first()?.clone()).ok()) {
+                    over.insert(bytes_hex(&void), (digest, Over::Void));
+                }
+            }
+            Way::Arriving => {}
+        }
+    }
+
+    (over, stuck)
+}
+
+/// The gateway's transfers, with what its events alone cannot say put in.
+fn transfers(ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, events: &[FoundEvent]) -> (Vec<Crossing>, HashMap<String, (String, Over)>) {
+    let found = crossings(events);
+    let (over, stuck) = lookups(ctx, state, gateway, &found);
+
+    (place(found, &over, &stuck), over)
+}
+
 /// A contract's events, newest first, from the event index, asked for again once old; None,
 /// having said why, while there are none to show.
 fn indexed(ui: &mut Ui, ctx: &mut Ctx, contract: &str) -> Option<Vec<FoundEvent>> {
@@ -306,6 +507,49 @@ fn threshold(ctx: &Ctx) -> Option<u64> {
     ctx.store.status.as_ref()?.federation.as_ref()?.get("threshold")?.as_u64()
 }
 
+/// What one of the gateway's transfer events says, in words: what happened, whom it names if
+/// anyone, and the digest of the transfer, or of the void or refund signed. None for another
+/// event: Wrapped reads well enough as it is.
+fn event_words(name: &str, data: &[Argument], chain: impl Fn(u64) -> String) -> Option<(String, Option<String>, String)> {
+    let digest = |at: usize| data.get(at).map(bytes_hex).unwrap_or_default();
+    let nonce = |at: usize| number(data.get(at));
+    let party = |at: usize| data.get(at).map(Argument::text);
+
+    Some(match name {
+        "Sent" => (format!("transfer #{} left for {}, sent by", nonce(0), chain(nonce(1))), party(3), digest(2)),
+        "Attested" => (format!("signed by {}, over", format::short(&digest(1))), None, digest(0)),
+        "Received" => (format!("transfer #{} from {} arrived and was done", nonce(1), chain(nonce(0))), None, digest(2)),
+        "Voided" => (format!("transfer #{} from {} voided, refused here for good: it is refunded where it left", nonce(1), chain(nonce(0))), None, digest(2)),
+        "Refunded" => (format!("transfer #{} paid back, to", nonce(0)), party(2), digest(1)),
+        _ => return None,
+    })
+}
+
+/// One of the gateway's transfer events in words, for the pages that list events as they come,
+/// each with a link to the transfer: false for any other contract's or event, which they show as
+/// they are.
+pub fn said(ui: &mut Ui, ctx: &mut Ctx, contract: &str, name: &str, data: &[Argument]) -> bool {
+    if ctx.store.status.as_ref().and_then(|status| status.announced("gateway")).as_deref() != Some(contract) {
+        return false;
+    }
+
+    let Some((words, who, digest)) = event_words(name, data, |id| chain(ctx, id)) else {
+        return false;
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(words);
+
+        if let Some(who) = who.filter(|who| !who.is_empty() && who != "null") {
+            super::address(ui, ctx, &who);
+        }
+
+        crossing_link(ui, ctx, &digest);
+    });
+
+    true
+}
+
 /// A link to a transfer's page, by its digest.
 fn crossing_link(ui: &mut Ui, ctx: &mut Ctx, digest: &str) {
     let text = RichText::new(format::short(digest)).monospace().color(ctx.look.palette.accent);
@@ -329,7 +573,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState) {
     }
 
     if let Some(gateway) = gateway {
-        evm_bridge(ui, ctx, &gateway);
+        evm_bridge(ui, ctx, state, &gateway);
     }
 
     if let Some(btc_gateway) = btc_gateway {
@@ -391,19 +635,22 @@ fn federation(ui: &mut Ui, ctx: &mut Ctx) {
 }
 
 /// The gateway with EVM chains: what crossed it, and the wrapped assets it made.
-fn evm_bridge(ui: &mut Ui, ctx: &mut Ctx, gateway: &str) {
+fn evm_bridge(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) {
     let look = ctx.look;
 
     super::section(ui, look, "EVM chains", |ui| {
         let Some(events) = indexed(ui, ctx, gateway) else {
             return;
         };
-        let (crossings, made) = (crossings(&events), wrapped(&events));
-        let count = |matches: &dyn Fn(&Way) -> bool| crossings.iter().filter(|crossing| matches(&crossing.way)).count().to_string();
+        let ((crossings, _), made) = (transfers(ctx, state, gateway, &events), wrapped(&events));
+        let threshold = threshold(ctx);
+        let count = |matches: &dyn Fn(&Crossing) -> bool| crossings.iter().filter(|crossing| matches(crossing)).count().to_string();
         super::stats(ui, look, &[
-            ("left".to_string(), count(&|way| matches!(way, Way::Out { .. })), "sent from here".to_string()),
-            ("arrived".to_string(), count(&|way| matches!(way, Way::In { .. })), "done here".to_string()),
-            ("arriving".to_string(), count(&|way| *way == Way::Arriving), "being signed".to_string()),
+            ("left".to_string(), count(&|crossing| matches!(crossing.way, Way::Out { .. })), "sent from here".to_string()),
+            ("arrived".to_string(), count(&|crossing| crossing.done_in.is_some()), "done here".to_string()),
+            ("arriving".to_string(), count(&|crossing| crossing.way == Way::Arriving), "being signed".to_string()),
+            ("refunds".to_string(), count(&|crossing| crossing.standing(threshold).refunding()), "voided or paid back".to_string()),
+            ("stuck".to_string(), count(&|crossing| crossing.stuck), "peer gone".to_string()),
             ("wrapped".to_string(), made.len().to_string(), "assets made here".to_string()),
         ]);
 
@@ -463,35 +710,29 @@ fn transfers_table(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, crossings: &[Cross
     let look = ctx.look;
     let threshold = threshold(ctx);
 
-    // Each crossing's way, chain, nonce, and state in its color.
+    // Each crossing's way, chain, nonce, and standing in its color.
     let shown = |ctx: &Ctx, crossing: &Crossing| {
         let (way, chain_id, nonce) = match crossing.way {
-            Way::Out { nonce, target } => ("out", Some(target), Some(nonce)),
+            Way::Out { nonce, target } => ("out", target, Some(nonce)),
             Way::In { source, nonce } => ("in", Some(source), Some(nonce)),
             Way::Arriving => ("in", None, None),
         };
-        let state = crossing.state(threshold);
-        let color = match crossing.way {
-            Way::In { .. } => look.palette.good,
-            _ if state.starts_with("signed") => look.palette.accent,
-            _ => look.palette.warn,
-        };
+        let standing = crossing.standing(threshold);
 
-        (way, chain_id.map_or_else(|| "—".to_string(), |id| chain(ctx, id)), nonce.map_or_else(|| "—".to_string(), |nonce| nonce.to_string()), state, color)
+        (way, chain_id.map_or_else(|| "—".to_string(), |id| chain(ctx, id)), nonce.map_or_else(|| "—".to_string(), |nonce| nonce.to_string()), standing.word(), standing.color(&look.palette))
     };
 
     if look.narrow {
         for crossing in crossings.iter().take(50) {
             let (way, chain, nonce, state, color) = shown(ctx, crossing);
             super::list_row(ui, look, |ui| {
-                ui.horizontal(|ui| {
+                widgets::end_row(ui, |ui| {
                     ui.label(widgets::strong(way, 13.5).color(look.palette.ink));
                     crossing_link(ui, ctx, &crossing.digest);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.colored_label(color, &state));
-                });
+                }, |ui| ui.colored_label(color, &state));
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(format!("{chain} · nonce {nonce} · in")).small().color(look.palette.muted));
-                    super::tx(ui, ctx, crossing.done_in.as_deref().unwrap_or(&crossing.tx));
+                    super::tx(ui, ctx, crossing.latest_tx());
                 });
             });
         }
@@ -507,7 +748,7 @@ fn transfers_table(ui: &mut Ui, ctx: &mut Ctx, gateway: &str, crossings: &[Cross
             ui.label(chain);
             ui.monospace(nonce);
             ui.colored_label(color, state);
-            super::tx(ui, ctx, crossing.done_in.as_deref().unwrap_or(&crossing.tx));
+            super::tx(ui, ctx, crossing.latest_tx());
             super::row_end(ui);
         }
     });
@@ -525,34 +766,56 @@ pub fn transfer(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, digest: &st
     let Some(events) = indexed(ui, ctx, &gateway) else {
         return;
     };
-    let Some(crossing) = crossings(&events).into_iter().find(|crossing| crossing.digest == digest.to_ascii_lowercase()) else {
+    let (crossings, over) = transfers(ctx, state, &gateway, &events);
+    // A digest signed to void or refund one opens the transfer it is for.
+    let digest = digest.to_ascii_lowercase();
+    let digest = over.get(&digest).map_or(digest, |(of, _)| of.clone());
+    let Some(crossing) = crossings.into_iter().find(|crossing| crossing.digest == digest) else {
         super::note(ui, look, "The gateway's latest events hold no transfer with that digest.");
 
         return;
     };
     let threshold = threshold(ctx);
+    let standing = crossing.standing(threshold);
 
     super::section(ui, look, "Transfer", |ui| {
         super::facts(ui, look, "bridge transfer", |facts| {
             facts.row("digest", |ui| super::copyable(ui, &crossing.digest));
 
             match crossing.way {
-                Way::Out { nonce, target } => facts.text("way", format!("out to {}, nonce {nonce}", chain(ctx, target))),
+                Way::Out { nonce, target: Some(target) } => facts.text("way", format!("out to {}, nonce {nonce}", chain(ctx, target))),
+                Way::Out { nonce, target: None } => facts.text("way", format!("out, nonce {nonce}")),
                 Way::In { source, nonce } => facts.text("way", format!("in from {}, nonce {nonce}", chain(ctx, source))),
                 Way::Arriving => facts.text("way", "in, being signed"),
             }
 
-            facts.text("state", crossing.state(threshold));
+            facts.row("state", |ui| {
+                ui.colored_label(standing.color(&look.palette), standing.word());
+            });
             facts.row("first seen", |ui| super::tx(ui, ctx, &crossing.tx));
 
             if let Some(done_in) = &crossing.done_in {
                 facts.row("done in", |ui| super::tx(ui, ctx, done_in));
             }
+
+            if let Some(voided_in) = &crossing.voided_in {
+                facts.row("voided in", |ui| super::tx(ui, ctx, voided_in));
+            }
+
+            if let Some((refunded_in, to)) = &crossing.refunded {
+                facts.row("refunded in", |ui| super::tx(ui, ctx, refunded_in));
+                facts.row("refunded to", |ui| super::address(ui, ctx, to));
+            }
         });
+
+        if let Some(why) = standing_note(&crossing, standing, |id| chain(ctx, id)) {
+            ui.add_space(6.0);
+            super::note(ui, look, why);
+        }
     });
 
-    if let Way::Out { nonce, target } = crossing.way {
-        sent(ui, ctx, state, &gateway, nonce, target);
+    if let Way::Out { nonce, .. } = crossing.way {
+        sent(ui, ctx, state, &gateway, nonce);
     }
 
     super::section(ui, look, "Signatures", |ui| {
@@ -568,26 +831,62 @@ pub fn transfer(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, digest: &st
             super::note(ui, look, "No signer has signed it yet.");
         }
 
-        for (signer, tx) in &crossing.signers {
-            ui.horizontal(|ui| {
-                ui.monospace(format::short(signer)).on_hover_text(signer);
-                super::tx(ui, ctx, tx);
-            });
+        signer_list(ui, ctx, &crossing.signers);
+
+        if standing == Standing::Signed {
+            super::note(ui, look, "Signed enough: anyone may relay the signatures to Gateway.sol there, whose delivered(digest) says whether it arrived.");
         }
 
-        if matches!(crossing.way, Way::Out { .. }) && threshold.is_some_and(|threshold| crossing.signers.len() as u64 >= threshold) {
-            super::note(ui, look, "Signed enough: anyone may relay the signatures to Gateway.sol there, whose delivered(digest) says whether it arrived.");
+        for (title, signers) in [("To void it", &crossing.void_signers), ("To refund it", &crossing.refund_signers)] {
+            if !signers.is_empty() {
+                ui.add_space(8.0);
+                let count = threshold.map_or_else(|| format!("{} signed", signers.len()), |threshold| format!("{} of {threshold}", signers.len()));
+                widgets::caps(ui, &look.palette, &format!("{title} · {count}"));
+                signer_list(ui, ctx, signers);
+            }
         }
     });
 }
 
+/// Who signed, by key, each with the transaction their signature came in.
+fn signer_list(ui: &mut Ui, ctx: &mut Ctx, signers: &[(String, String)]) {
+    for (signer, tx) in signers {
+        ui.horizontal(|ui| {
+            ui.monospace(format::short(signer)).on_hover_text(signer);
+            super::tx(ui, ctx, tx);
+        });
+    }
+}
+
+/// What a transfer's standing means for it, where the words alone leave something out: who pays
+/// a refund back, and why a stuck one goes nowhere.
+fn standing_note(crossing: &Crossing, standing: Standing, chain: impl Fn(u64) -> String) -> Option<String> {
+    let there = |id: Option<u64>| id.map_or_else(|| "the chain it went to".to_string(), &chain);
+
+    match (standing, &crossing.way) {
+        (Standing::Stuck, Way::Out { target, .. }) => Some(format!(
+            "It left for a gateway on {} other than the one the directory names there now: no signer signs it, or signs to void it, so it stays where it left unless that peer is named again.",
+            there(*target)
+        )),
+        (Standing::Voided, Way::In { source, .. }) => Some(format!(
+            "Refused for good here: Gateway.sol on {} pays it back, once the federation's signatures to refund it are relayed there. That chain shows the refund, not this one.",
+            chain(*source)
+        )),
+        (Standing::Voided, Way::Out { target, .. }) => Some(format!("Voided on {}: the gateway here pays it back once enough sign to refund it.", there(*target))),
+        (Standing::Voiding { .. }, Way::Out { target, .. }) => Some(format!("Once enough signed, anyone may relay the signatures to Gateway.sol on {}, which then refuses its delivery for good.", there(*target))),
+        (Standing::Refunded, _) => Some("Paid back here: what the gateway held is released, and what it burned minted again, to who sent it or where they said.".to_string()),
+        _ => None,
+    }
+}
+
 /// What a transfer that left carries, as the gateway's sent(nonce) keeps it.
-fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, nonce: u64, target: u64) {
+fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, nonce: u64) {
     let look = ctx.look;
     let Some(Ok(values)) = called(ctx, state, gateway, "sent", json!([whole(nonce)])) else {
         return;
     };
     let text = |at: usize| values.get(at).map(Argument::text).unwrap_or_default();
+    let target = number(values.first());
     let (kind, origin, id, amount) = (number(values.get(1)), number(values.get(2)), text(4), text(5));
     let (name, symbol, decimals) = (text(7), text(8), number(values.get(9)).min(u64::from(u8::MAX)) as u8);
     let symbol = match (kind, symbol.is_empty()) {

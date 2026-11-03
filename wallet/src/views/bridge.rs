@@ -23,7 +23,7 @@ use {
     crate::theme,
     crate::views::evm::Link,
     chainv4::abi::{AbiType, AbiValue, encode_values},
-    chainv4::bridge::{AssetKind, Transfer, btc_deposit_script, send_input},
+    chainv4::bridge::{AssetKind, btc_deposit_script, send_input},
     chainv4::crypto::bitcoin::tx::{Network, Transaction, address, p2wsh},
     chainv4::crypto::hasher::Hasher,
     chainv4::registry::directory::Directory,
@@ -35,6 +35,7 @@ use {
     chainv4::structs::tx::{Tx, TxCallArgumentType},
     chainv4::structs::u256::u256,
     chainv4::swap::evm::{Call, chain_name},
+    chainv4_ui::bridge::{Known, Standing, left},
     egui::{RichText, Ui},
     serde_json::{Value, json},
     std::collections::HashMap,
@@ -149,10 +150,6 @@ fn whole(value: &Value) -> Option<u64> {
     text(value).parse().ok()
 }
 
-fn wide(value: &Value) -> Option<u256> {
-    u256::from_str_radix(&text(value), 10).ok()
-}
-
 impl BridgeState {
     /// Takes the gateways' answers; false for anyone else's.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, crate::node::Failure>) -> bool {
@@ -195,31 +192,6 @@ impl BridgeState {
     fn forget(&mut self) {
         self.asked.clear();
     }
-}
-
-/// A transfer that left the gateway here, as its sent(nonce) gives it, checked against the digest
-/// the gateway keeps, so it is the one the signers signed. identity is the gateway as transfers
-/// write it: its address and when it was set up.
-pub fn left(values: &[Value], identity: &[u8], evm_gateway: [u8; 20], here: u64, nonce: u64) -> Option<Transfer> {
-    let transfer = Transfer {
-        from: identity.to_vec(),
-        to: evm_gateway.to_vec(),
-        source: here,
-        target: whole(values.first()?)?,
-        nonce,
-        kind: AssetKind::from_number(whole(values.get(1)?)?)?,
-        origin: whole(values.get(2)?)?,
-        asset: raw(values.get(3)?),
-        id: wide(values.get(4)?)?,
-        amount: wide(values.get(5)?)?,
-        recipient: raw(values.get(6)?),
-        name: text(values.get(7)?),
-        symbol: text(values.get(8)?),
-        decimals: u8::try_from(whole(values.get(9)?)?).ok()?,
-        uri: text(values.get(10)?),
-    };
-
-    (raw(values.get(11)?) == transfer.digest()).then_some(transfer)
 }
 
 /// A Solidity call's input: its selector, then its arguments.
@@ -647,7 +619,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
         for transfer in mine {
             let digest = to_hex(&transfer.digest());
             let posted = state.read(ctx, &gateway, "signatures", json!([{ "type": "bytes", "value": digest }])).and_then(Result::ok).unwrap_or_default();
-            let threshold = posted.first().and_then(whole).unwrap_or(u64::MAX) as usize;
+            let threshold = posted.first().and_then(whole);
             let signatures: Vec<[u8; 65]> = posted.iter().skip(1).filter_map(|value| raw(value).try_into().ok()).collect();
             let url = state.evm.url_for(ctx, transfer.target);
             let key = (transfer.target, digest.clone());
@@ -666,49 +638,41 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
             }
 
             let refunded = state.read(ctx, &gateway, "refund_of", json!([{ "type": "u64", "value": transfer.nonce.to_string() }])).and_then(Result::ok).is_some_and(|values| values.get(1).is_some_and(|value| value["value"] == true));
-            let voided = state.voided.get(&key).copied().unwrap_or(false);
+            // Where it stands as the explorer says it too: a voided one is never offered for delivery.
+            let standing = Standing::of(Known {
+                leaving: true,
+                signed: signatures.len() as u64,
+                threshold,
+                arrived: state.delivered.get(&key) == Some(&Ok(true)),
+                voided: state.voided.get(&key).copied().unwrap_or(false),
+                refunded,
+                ..Known::default()
+            });
 
             theme::end_row(ui, |ui| {
                 ui.label(theme::mono(format!("#{}", transfer.nonce)).color(palette.muted));
                 ui.add(egui::Label::new(format!("{} · {} to {}", transfer.symbol, format::units(&transfer.amount.to_string(), transfer.decimals), chain_name(transfer.target))).wrap());
-            }, |ui| {
-                match state.delivered.get(&key) {
-                    _ if refunded || voided => {
-                        ui.colored_label(palette.soft, refund_state(refunded));
-                    }
-                    Some(Ok(true)) => {
-                        ui.colored_label(palette.good, "arrived");
-                    }
-                    _ if signatures.len() < threshold => {
-                        ui.colored_label(palette.warn, format!("signing, {} of {}", signatures.len(), if threshold == usize::MAX { 0 } else { threshold }));
-                    }
-                    _ => match (&url, evm_address(ctx)) {
-                        (Some(url), Some(from)) if state.evm.pending.is_none() => {
-                            if theme::quiet(ui, &palette, &format!("Deliver on {}", chain_name(transfer.target))).clicked() {
-                                let call = Call { to: transfer.to.clone().try_into().unwrap_or([0; 20]), value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" };
-                                state.evm.start(ctx, digest.clone(), call, transfer.target, url.clone(), from);
-                            }
+            }, |ui| match standing {
+                Standing::Signed => match (&url, evm_address(ctx)) {
+                    (Some(url), Some(from)) if state.evm.pending.is_none() => {
+                        if theme::quiet(ui, &palette, &format!("Deliver on {}", chain_name(transfer.target))).clicked() {
+                            let call = Call { to: transfer.to.clone().try_into().unwrap_or([0; 20]), value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" };
+                            state.evm.start(ctx, digest.clone(), call, transfer.target, url.clone(), from);
                         }
-                        (None, _) => {
-                            ui.colored_label(palette.soft, "signed: to deliver, give its RPC in Settings");
-                        }
-                        _ => {
-                            ui.colored_label(palette.soft, "signed, to deliver");
-                        }
-                    },
+                    }
+                    (None, _) => {
+                        ui.colored_label(palette.soft, "signed: to deliver, give its RPC in Settings");
+                    }
+                    _ => {
+                        ui.colored_label(palette.soft, standing.word());
+                    }
+                },
+                standing => {
+                    ui.colored_label(standing.color(&palette), standing.word());
                 }
             });
         }
     });
-}
-
-/// What a transfer that left and was voided says, as nothing can then deliver it: paid back to who
-/// sent it, or waiting for the federation to do so.
-fn refund_state(refunded: bool) -> &'static str {
-    match refunded {
-        true => "refunded",
-        false => "voided, refund to come",
-    }
 }
 
 /// Sending from an EVM chain to here, signed there with the account's Ethereum key.

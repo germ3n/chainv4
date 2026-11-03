@@ -18,15 +18,16 @@ path = "src/main.rs"
 [dependencies]
 # The wallet's codes, ur:chainv4-multisig/... and ur:chainv4-signed/..., which the Decode tool reads.
 ur = "0.5.2"
-# Only the parts that build for the browser too: transactions, keys and hashes, and releases, which
-# it checks against the release keys built in and, on the desktop, puts in place of itself.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "abi", "swap", "dex", "release"] }
+# Only the parts that build for the browser too: transactions, keys and hashes; transfers through the
+# bridges, to tell what signatures over one are for; and releases, which it checks against the
+# release keys built in and, on the desktop, puts in place of itself.
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "abi", "swap", "dex", "bridge", "release"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 zeroize = "1.9.1"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
 # wallet.
-chainv4-ui = { path = "../ui", features = ["blocks"] }
+chainv4-ui = { path = "../ui", features = ["blocks", "bridge"] }
 log = "0.4.34"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

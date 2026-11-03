@@ -1210,6 +1210,19 @@ voting finality it now goes back to the checkpoint and follows the node from the
   `withdrawal`'s 4th).
 - **From an EVM chain, a token's amount is in its smallest units,** as the wallet does not ask
   the token there its decimals.
+- **Both apps say where a transfer stands alike:** `chainv4_ui::bridge::Standing`, the furthest along
+  first, refunded, voided, arrived, stuck, so the same whatever order its events came in. A transfer
+  read back from `sent(nonce)`, `chainv4_ui::bridge::left`, stands only if its fields hash to the
+  digest the gateway keeps.
+- **An `Attested` event names only the digest signed:** a signature to void or refund a transfer
+  looks like one more transfer arriving. The explorer works the void and refund digests out for
+  what left, and asks `void_digest` for what was voided coming here; a refund of that is signed
+  over who Gateway.sol says sent it, `leftBy`, so those signatures still show as one arriving.
+- **Stuck goes by the directory, as the signers do:** a transfer whose recorded digest is not the
+  one worked out toward the Gateway.sol the directory names there now left for a peer since
+  replaced. The wallet leaves such a one out of its list rather than say so.
+- **Neither `Voided` nor `Refunded` says why:** `chainv4 bridge refund --why` is shown to its own
+  operator alone, so no app can show the reason.
 
 ## Crypto and the federation
 

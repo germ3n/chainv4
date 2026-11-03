@@ -35,6 +35,9 @@ tls = ["ureq/rustls"]
 # explorer read a chain by when told to rest on nothing else. Off by default, as chainv4 is C by way of
 # blake3 on Android, which the ui workflow has no sysroot for.
 blocks = ["dep:chainv4", "dep:serde", "dep:wincode", "web-sys/IdbFactory", "web-sys/IdbDatabase", "web-sys/IdbOpenDbRequest", "web-sys/IdbRequest", "web-sys/IdbObjectStore", "web-sys/IdbTransaction", "web-sys/IdbTransactionMode", "web-sys/DomException", "web-sys/DomStringList", "web-sys/Event", "web-sys/EventTarget"]
+# Reading a transfer that left a bridge's gateway back as the signers signed it (src/bridge.rs),
+# as both apps' Bridge pages do. Off by default, for blocks' reason.
+bridge = ["dep:chainv4", "chainv4/bridge"]
 # A live camera, for reading QR codes as they are shown (src/camera.rs): nokhwa on the desktop,
 # getUserMedia in the browser, the APK's Camera2 class on Android. The wallet has it; the explorer
 # reads no codes.
