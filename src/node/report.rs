@@ -3,7 +3,7 @@
 //! current, and keeps nothing for it but a few counters.
 
 use {
-    super::{MEMPOOL_CAPACITY, Node},
+    super::Node,
     crate::net::BacklogLimits,
     crate::structs::tx::SignedTx,
     crate::structs::u256::u256,
@@ -173,7 +173,7 @@ impl Node {
             peers,
             syncing: self.sync.asking(),
             waiting,
-            capacity: MEMPOOL_CAPACITY,
+            capacity: self.gate.limits().capacity,
             txs: waiting_txs,
             counters: Counters {
                 gossip_dropped: self.backlog.dropped(),

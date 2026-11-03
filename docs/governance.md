@@ -199,7 +199,10 @@ chainv4 send --key member.key approve-change --directory '{"gateway":"contract:0
   genesis's from the first block or the last decided, so the wallet's light client proves it as
   it proves a balance. `GET /status` shows it as `directory`.
 - **What clients take,** in order: what they are given (a flag, or Settings), the directory, then
-  what the node's operator names (`--swap-contract`, `--dex-contract`, `--dex-router`).
+  what the node's operator names (`--swap-contract`, `--dex-contract`, `--dex-router`). The node
+  keeps to the same order: `GET /status`'s `swap` and `dex` are the directory's, a flag filling
+  only what it leaves unset, and the flags show apart as `operator`, so no operator can point the
+  apps somewhere other than what governance announced.
 - **It never moves the federation's version,** and nothing on chain reads it: it is for the apps,
   the CLI and the federation's signers, who refuse to vouch for a gateway peer the directory does
   not name.

@@ -418,13 +418,13 @@ pub struct ApiOptions {
     #[document(summary = "A faucet to run at POST /faucet, for a dev or test chain; None for none.")]
     #[cfg(feature = "faucet")]
     pub faucet: Option<FaucetConfig>,
-    #[document(summary = "The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here, which GET /status names for the wallet and the CLI; None for none.")]
+    #[document(summary = "The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here, which GET /status names for the wallet and the CLI when the directory names none, and shows under operator either way; None for none.")]
     #[cfg(feature = "swap")]
     pub swap_contract: Option<Address>,
-    #[document(summary = "The DEX on this chain, contracts/lua/dex.lua as deployed here, which GET /status names for the wallet; None for none.")]
+    #[document(summary = "The DEX on this chain, contracts/lua/dex.lua as deployed here, which GET /status names for the wallet when the directory names none, and shows under operator either way; None for none.")]
     #[cfg(feature = "dex")]
     pub dex_contract: Option<Address>,
-    #[document(summary = "The EVM DEX's router on this chain, by its 20 bytes, which GET /status names; None for none.")]
+    #[document(summary = "The EVM DEX's router on this chain, by its 20 bytes, which GET /status names when the directory names none, and shows under operator either way; None for none.")]
     #[cfg(feature = "dex")]
     pub dex_router: Option<[u8; 20]>,
     #[document(summary = "The threads the API answers on: as many as the machine has cores when 0.")]
@@ -457,7 +457,7 @@ pub struct ApiOptions {
         options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /blocks/range?from=height&entry=n&count=n, blocks with what checks them and proofs of the state entries they changed, in binary, a BlockRange; GET /accounts/{address}; GET /accounts/{address}/multisigs, the multisigs its key is a member of, on a node started with --index-multisigs; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /blocks/range?from=height&entry=n&count=n, blocks with what checks them and proofs of the state entries they changed, in binary, a BlockRange; GET /accounts/{address}; GET /accounts/{address}/multisigs, the multisigs its key is a member of, on a node started with --index-multisigs; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, or a replacement that does not raise its prices enough, 429 for a faucet asked again too soon or a sender with as many transactions waiting as the node keeps, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
@@ -720,10 +720,10 @@ fn app_file(root: &std::path::Path, wanted: &str) -> Result<Response, ApiError> 
 enum ApiError {
     BadRequest(String),
     NotFound(String),
-    /// Asked again too soon.
-    #[cfg_attr(not(feature = "faucet"), allow(dead_code))]
+    /// Asked again too soon, or a sender with as many transactions waiting as the node keeps.
     TooMany(String),
-    /// The transaction's nonce is used or already waiting.
+    /// The transaction's nonce is used or already waiting, and it does not pay enough more to
+    /// replace the one waiting.
     Conflict(String),
     /// The node cannot take transactions right now.
     Unavailable(String),
@@ -797,6 +797,9 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         None => Value::Null,
     };
 
+    // What governance, or the directory's admin, announced: it wins over the operator's flags.
+    let directory = crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?;
+
     // Where vote rewards come from, and what the pool holds when they come from it.
     let vote_rewards = match api.vote_rewards {
         VoteRewardSource::Mint => json!({ "source": "mint" }),
@@ -819,7 +822,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "coin": crate::cli::genesis::coin_json(&api.coin),
         "token_functions": &*api.token_functions,
         "federation": federation_json(&api, &State::new(db.clone()))?,
-        "directory": crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?.as_ref().map(crate::cli::genesis::directory_json),
+        "directory": directory.as_ref().map(crate::cli::genesis::directory_json),
         "directory_admin": crate::registry::directory::directory_admin(&State::new(db.clone()))?.map(|admin| admin.to_string()),
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
         "version": crate::structs::version::Version::ours().to_string(),
@@ -831,8 +834,9 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "max_block_bytes": api.max_block_bytes,
         "bootnodes": api.bootnodes(&State::new(db.clone()))?,
         "faucet": faucet_json(&api),
-        "swap": swap_json(&api),
-        "dex": dex_json(&api),
+        "swap": swap_json(&api, directory.as_ref()),
+        "dex": dex_json(&api, directory.as_ref()),
+        "operator": operator_json(&api),
     })))
 }
 
@@ -876,32 +880,64 @@ async fn release(Shared(api): Shared<Api>) -> Answer {
     })))
 }
 
-/// The DEXes clients use: { contract, router }, each null when the node names none; null for a
-/// node that names neither.
-fn dex_json(api: &Api) -> Value {
+/// The DEXes clients use: { contract, router }, each the directory's, or what the node's
+/// operator named where the directory names none, and null when neither does; null when neither
+/// names either.
+fn dex_json(api: &Api, directory: Option<&crate::registry::directory::Directory>) -> Value {
+    let (contract, router) = (directory.and_then(|directory| directory.dex), directory.and_then(|directory| directory.dex_router));
     #[cfg(feature = "dex")]
-    if api.dex_contract.is_some() || api.dex_router.is_some() {
-        return json!({
-            "contract": api.dex_contract.map(|contract| contract.to_string()),
-            "router": api.dex_router.map(|router| to_hex(&router)),
-        });
-    }
-
+    let (contract, router) = (contract.or(api.dex_contract), router.or(api.dex_router));
     let _ = api;
 
-    Value::Null
+    match (contract, router) {
+        (None, None) => Value::Null,
+        (contract, router) => json!({
+            "contract": contract.map(|contract| contract.to_string()),
+            "router": router.map(|router| to_hex(&router)),
+        }),
+    }
 }
 
-/// The swap contract clients use: { contract }, or null on a node that names none.
-fn swap_json(api: &Api) -> Value {
+/// The swap contract clients use: { contract }, the directory's, or what the node's operator
+/// named when the directory names none; null when neither does.
+fn swap_json(api: &Api, directory: Option<&crate::registry::directory::Directory>) -> Value {
+    let contract = directory.and_then(|directory| directory.swap);
+    #[cfg(feature = "swap")]
+    let contract = contract.or(api.swap_contract);
+    let _ = api;
+
+    contract.map_or(Value::Null, |contract| json!({ "contract": contract.to_string() }))
+}
+
+/// What the node's operator named with --swap-contract, --dex-contract and --dex-router, as given,
+/// each null when not: a suggestion that fills only what the directory leaves unset, shown apart so
+/// a client sees where its contracts came from. Null for a node given none.
+fn operator_json(api: &Api) -> Value {
+    #[allow(unused_mut)]
+    let mut named = serde_json::Map::new();
+
     #[cfg(feature = "swap")]
     if let Some(contract) = api.swap_contract {
-        return json!({ "contract": contract.to_string() });
+        named.insert("swap".to_string(), contract.to_string().into());
+    }
+
+    #[cfg(feature = "dex")]
+    {
+        if let Some(contract) = api.dex_contract {
+            named.insert("dex".to_string(), contract.to_string().into());
+        }
+
+        if let Some(router) = api.dex_router {
+            named.insert("dex_router".to_string(), to_hex(&router).into());
+        }
     }
 
     let _ = api;
 
-    Value::Null
+    match named.is_empty() {
+        true => Value::Null,
+        false => Value::Object(named),
+    }
 }
 
 /// The faucet's settings, for clients to show it by; null on a node that runs none.
@@ -2360,8 +2396,10 @@ async fn submit(Shared(api): Shared<Api>, body: Bytes) -> Result<(StatusCode, Js
             | MempoolError::BadGasLimit
             | MempoolError::PriceTooLow
             | MempoolError::CannotPay
+            | MempoolError::TooFarAhead { .. }
             | MempoolError::Multisig(_) => ApiError::BadRequest(err.to_string()),
-            MempoolError::Stale | MempoolError::Duplicate => ApiError::Conflict(err.to_string()),
+            MempoolError::Stale | MempoolError::Duplicate | MempoolError::ReplacementTooLow { .. } => ApiError::Conflict(err.to_string()),
+            MempoolError::TooMany { .. } => ApiError::TooMany(err.to_string()),
             MempoolError::Full | MempoolError::Syncing => ApiError::Unavailable(err.to_string()),
             MempoolError::Db(err) => ApiError::Db(err),
         }),

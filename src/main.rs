@@ -187,6 +187,27 @@ struct NodeArgs {
     /// whatever they take to run.
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     max_build_ms: Option<u64>,
+    /// The most transactions the mempool holds at once. Full, a transaction that can run and pays
+    /// more pushes out the least paid one that is not its sender's next; one that pays no more is
+    /// refused.
+    #[arg(long, default_value_t = chainv4::mempool::MempoolLimits::DEFAULT.capacity as u32, value_parser = clap::value_parser!(u32).range(1..))]
+    mempool_size: u32,
+    /// The most transactions one sender may have waiting in the mempool, so no one key fills it.
+    /// Raise it for a key of this node's own that sends many a block, such as a busy faucet's.
+    #[arg(long, default_value_t = chainv4::mempool::MempoolLimits::DEFAULT.per_sender as u32, value_parser = clap::value_parser!(u32).range(1..))]
+    mempool_per_sender: u32,
+    /// How far past its sender's nonce at the tip a transaction's nonce may be, for the mempool to
+    /// take it: 0 takes only the next.
+    #[arg(long, default_value_t = chainv4::mempool::MempoolLimits::DEFAULT.nonce_gap)]
+    max_nonce_gap: u64,
+    /// How much, in percent, a transaction must raise both its max price and its tip to replace
+    /// one of its sender's waiting at its nonce.
+    #[arg(long, default_value_t = chainv4::mempool::MempoolLimits::DEFAULT.replace_bump, value_parser = clap::value_parser!(u32).range(0..=1_000))]
+    replace_bump_percent: u32,
+    /// The most bytes of blocks this node answers a syncing peer's request with, past its first
+    /// block: it sends fewer blocks, and the peer asks again from there. 1 MiB to 32 MiB.
+    #[arg(long, default_value_t = chainv4::net::SYNC_BATCH_BYTES, value_parser = clap::value_parser!(u64).range(1024 * 1024..=chainv4::net::MOST_SYNC_BATCH_BYTES))]
+    sync_batch_bytes: u64,
     /// Which development chain to run: pow, mined by anyone; authority, where the built-in
     /// development key produces every block; rotating, where the authority finality signers
     /// produce in turn, the development key being the one signer; or staked, where the FFG
@@ -361,18 +382,21 @@ struct NodeArgs {
     #[cfg(feature = "faucet")]
     #[arg(long, requires = "faucet_key", default_value_t = 20, value_parser = clap::value_parser!(u32).range(0..=40))]
     faucet_work: u32,
-    /// The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here: GET /status
-    /// names it, for the wallet's Swaps page and chainv4 swap to use unless told another.
+    /// The atomic swap contract on this chain, contracts/lua/swap.lua as deployed here, when the
+    /// chain's directory names none: GET /status names the directory's first, for the wallet's
+    /// Swaps page and chainv4 swap, and shows this apart under operator.
     #[cfg(feature = "swap")]
     #[arg(long, requires = "http")]
     swap_contract: Option<structs::address::Address>,
-    /// The DEX on this chain, contracts/lua/dex.lua as deployed here: GET /status names it, for
-    /// the wallet's Trade page to use when the name dex does not resolve.
+    /// The DEX on this chain, contracts/lua/dex.lua as deployed here, when the chain's directory
+    /// names none: GET /status names the directory's first, for the wallet's Trade page, and shows
+    /// this apart under operator.
     #[cfg(feature = "dex")]
     #[arg(long, requires = "http")]
     dex_contract: Option<structs::address::Address>,
     /// The EVM DEX's router on this chain, DexRouter from contracts/evm/Dex.sol, by its 20 bytes
-    /// as 0x and 40 hex digits: GET /status names it, for the Trade page's EVM pools.
+    /// as 0x and 40 hex digits, when the chain's directory names none: GET /status names the
+    /// directory's first, for the Trade page's EVM pools, and shows this apart under operator.
     #[cfg(feature = "dex")]
     #[arg(long, requires = "http")]
     dex_router: Option<String>,
@@ -644,7 +668,14 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     let producing = (mine.is_some() || sign.is_some()).then_some(Producing { mine, sign });
     let mut node = Node::new(db.clone(), &genesis, None, net)?
         .max_block_txs(args.max_block_txs.map(|most| most as usize))
-        .max_build_ms(args.max_build_ms);
+        .max_build_ms(args.max_build_ms)
+        .mempool_limits(chainv4::mempool::MempoolLimits {
+            capacity: args.mempool_size as usize,
+            per_sender: args.mempool_per_sender as usize,
+            nonce_gap: args.max_nonce_gap,
+            replace_bump: args.replace_bump_percent,
+        })
+        .sync_batch_bytes(args.sync_batch_bytes);
 
     #[cfg(feature = "updates")]
     {

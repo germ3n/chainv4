@@ -32,8 +32,32 @@ pub use key::{NET_KEY_FILE, net_key};
 
 pub use swarm::{NetError, TX_BATCH, TX_BATCH_WAIT, spawn};
 
-/// The most blocks one sync response carries.
+/// The most blocks one sync response carries, fewer when SYNC_BATCH_BYTES binds first.
 pub const MAX_SYNC_BLOCKS: u32 = 128;
+#[document(
+    summary = "The most bytes one sync response may take: 64 MiB, past which the codec refuses it. Every answer is built to fit well within it.",
+    category = "Node",
+    see_also = "SYNC_BATCH_BYTES",
+)]
+pub const MAX_SYNC_RESPONSE: u64 = 64 * 1024 * 1024;
+#[document(
+    summary = "The most bytes of blocks a node answers one SyncRequest::Blocks with by default, past its first block: 8 MiB, what GET /blocks/range serves, a full 6 MiB block and its proofs. It keeps the answer far under MAX_SYNC_RESPONSE however big the blocks, and within the 30-second request timeout on a link down to about 2.5 Mbit/s. Set with --sync-batch-bytes.",
+    category = "Node",
+    see_also = "MAX_SYNC_RESPONSE, MOST_SYNC_BATCH_BYTES",
+)]
+pub const SYNC_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+#[document(
+    summary = "The most --sync-batch-bytes may be: 32 MiB, half of MAX_SYNC_RESPONSE. An answer stops before the block that would pass the cap, so it never passes it but for a first block bigger than the cap alone, and a block holds at most MAX_BLOCK_BYTES of transactions.",
+    category = "Node",
+    see_also = "SYNC_BATCH_BYTES",
+)]
+pub const MOST_SYNC_BATCH_BYTES: u64 = 32 * 1024 * 1024;
+
+// An answer passes its cap only by a first block bigger than the cap alone, and a block's
+// transactions take at most MAX_BLOCK_BYTES: whichever is bigger, a response holds it with half
+// as much again to spare for headers, proofs and framing. By default a full block goes whole.
+const _: () = assert!(MOST_SYNC_BATCH_BYTES * 3 / 2 <= MAX_SYNC_RESPONSE && crate::chain::MAX_BLOCK_BYTES * 3 / 2 <= MAX_SYNC_RESPONSE);
+const _: () = assert!(SYNC_BATCH_BYTES >= crate::chain::MAX_BLOCK_BYTES);
 /// The most justifications one sync response carries.
 pub const MAX_SYNC_JUSTIFICATIONS: u32 = 64;
 /// The most headers one sync response carries.

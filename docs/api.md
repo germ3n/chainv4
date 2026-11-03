@@ -19,12 +19,12 @@ Start a node with `--http ADDR`, such as `127.0.0.1:8080`, to serve the API (`sr
 
 | Status | When |
 | --- | --- |
-| 400 | A malformed request, or a transaction the mempool refuses for what it is: invalid, or an offer that cannot pay. |
+| 400 | A malformed request, or a transaction the mempool refuses for what it is: invalid, an offer that cannot pay, or a nonce too far past the account's. |
 | 404 | Nothing there, such as a transaction not on the main chain yet. |
-| 409 | A nonce already used, or the same sender and nonce already waiting. |
-| 429 | A faucet asked again too soon, or a client with too many requests in flight already. |
+| 409 | A nonce already used, the same transaction already waiting, or one at its sender's nonce that does not raise both prices enough to replace the one waiting. |
+| 429 | A faucet asked again too soon, a client with too many requests in flight already, or a sender with as many transactions waiting as the node keeps of one. |
 | 500 | The database failed. |
-| 503 | No node behind the API, a full mempool, or a node that stopped. |
+| 503 | No node behind the API, a full mempool that this offer could not make room in, or a node that stopped. |
 
 ## Routes
 
@@ -47,8 +47,9 @@ Where the chain stands:
 | `upgrade` | `null`, or the [upgrade](updates.md#upgrades) governance decided last: nodes older than `least` stop before block `from`. |
 | `version` | The node's own chainv4 version, such as `0.1.0`. |
 | `name` | The chain's name, genesis's or the one governance decided last, such as `chainv4 testnet`, or `null` for a chain that has none: what the apps call the network. |
-| `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
-| `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router a node started with `--dex-contract` and `--dex-router` names. |
+| `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) the `directory` names, else the one a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
+| `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router the `directory` names, each else the one a node started with `--dex-contract` and `--dex-router` names. |
+| `operator` | `null`, or what the node's operator named with `--swap-contract`, `--dex-contract` and `--dex-router`, as `swap`, `dex` and `dex_router`, each only when given: a suggestion, shown apart, that fills only what the directory leaves unset. |
 
 ### `GET /blocks?before=H&limit=N`
 
@@ -423,6 +424,20 @@ past the transaction is refused.
 `id`, or 503 when the node's [backlog](node.md#the-gossip-backlog) has no room: try again
 shortly. One signed for another chain is refused with 400: a signature names its chain by the
 genesis id `GET /status` says.
+
+**What the mempool's limits refuse,** each with an error a wallet can act on (see
+[the mempool](node.md#the-mempool)):
+
+| Status | Error | What to do |
+| --- | --- | --- |
+| 400 | `nonce too far ahead: the account's next is N, …` | Send the nonces before it first. |
+| 409 | `a transaction with this nonce is already waiting: to replace it, raise both its max price and its tip by at least 10%` | Raise both, or wait for the one waiting. |
+| 429 | `this sender has 64 transactions waiting already, …` | Wait for some to land. |
+| 503 | `mempool full: offer a higher tip …` | Offer more, or try again after a block. |
+
+`eth_sendRawTransaction` says the same in the words Ethereum's nodes use, which wallets know:
+`replacement transaction underpriced`, `nonce too high`, `account limit exceeded` and
+`txpool is full`.
 
 `chainv4 send` is a client of this route.
 

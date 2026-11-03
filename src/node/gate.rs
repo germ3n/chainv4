@@ -11,7 +11,7 @@ use {
     crate::chain::Fees,
     crate::crypto::verifiable::VerifyError,
     crate::db::{Database, State},
-    crate::mempool::{Mempool, MempoolError},
+    crate::mempool::{Mempool, MempoolError, MempoolLimits},
     crate::net::{Backlog, Fault, NetCommand, NetEvent, Origin, Verdict},
     crate::structs::hash::{Hash, HashType},
     crate::structs::tx::SignedTx,
@@ -26,6 +26,9 @@ pub(super) struct Gate {
     db: Arc<dyn Database>,
     /// The fees the next block charges, as the tip's state decides: what governance changes.
     fees: Mutex<Option<Arc<Fees>>>,
+    /// The mempool's limits, kept here too so the gap is checked before a verify without locking
+    /// the mempool, which a producer may hold while it picks a block.
+    limits: Mutex<MempoolLimits>,
     hash: HashType,
     /// The chain's genesis id, which EIP-712 signatures are bound to.
     genesis: Hash,
@@ -79,6 +82,7 @@ impl Gate {
         backlog: Arc<Backlog>,
     ) -> Gate {
         Gate {
+            limits: Mutex::new(mempool.limits()),
             mempool: Mutex::new(mempool),
             db,
             fees: Mutex::new(fees),
@@ -89,6 +93,17 @@ impl Gate {
             events: OnceLock::new(),
             backlog,
         }
+    }
+
+    /// Holds the mempool to these limits from now on.
+    pub(super) fn set_limits(&self, limits: MempoolLimits) {
+        *self.limits.lock().unwrap_or_else(PoisonError::into_inner) = limits;
+        self.mempool().set_limits(limits);
+    }
+
+    /// The mempool's limits, read without locking it.
+    pub(super) fn limits(&self) -> MempoolLimits {
+        *self.limits.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The chain's genesis id, which a transaction's signature is checked on.
@@ -193,15 +208,16 @@ impl Gate {
         let state = State::new(self.db.clone());
         let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
-        // The cheap checks first: a transaction that cannot pay or whose nonce is used is turned
-        // away before any signature is verified. The verifier skips the verify for such a one too,
-        // so checked is None and the fallback here never runs for it.
-        Mempool::affordable(&tx, &state, fees.as_deref())?;
+        // The cheap checks first: a transaction that cannot pay, whose nonce is used or is too far
+        // ahead is turned away before any signature is verified. The verifier skips the verify for
+        // such a one too, so checked is None and the fallback here never runs for it.
+        let next = Mempool::affordable(&tx, &state, fees.as_deref())?;
+        self.limits().reaches(tx.nonce, next)?;
 
         let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
         Mempool::backed(&tx, checked, &self.genesis, &state)?;
 
-        self.mempool().insert(tx)
+        self.mempool().insert(tx, next, fees.as_deref())
     }
 
     /// Whether a transaction could be admitted on the tip's state as it stands, signatures aside:
@@ -214,7 +230,7 @@ impl Gate {
 
         let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
-        Mempool::affordable(tx, &State::new(self.db.clone()), fees.as_deref()).is_ok()
+        Mempool::affordable(tx, &State::new(self.db.clone()), fees.as_deref()).is_ok_and(|next| self.limits().reaches(tx.nonce, next).is_ok())
     }
 
     fn publish(&self, event: impl FnOnce() -> NodeEvent) {

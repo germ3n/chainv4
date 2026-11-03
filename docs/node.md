@@ -98,10 +98,55 @@ sender's go in order.
 **Admission** checks:
 - the signature, which the verifier checked already for anything gossiped or submitted
   (`Mempool::add_checked`), after the [backlog](#the-gossip-backlog) had room for it;
-- that the nonce is not used yet;
-- that the same sender and nonce are not waiting already;
+- that the nonce is not used yet, and is at most `--max-nonce-gap` past the account's at the tip;
 - on a chain with fees, that the gas limit could fit a block, the price could be taken and the
-  sender can pay (see [Fees](fees.md)).
+  sender can pay (see [Fees](fees.md));
+- that the sender is under its share, and that there is room, or a worse offer to push out.
+
+The cheap ones, the nonce, its gap and whether the sender can pay, come before the signature, so a
+flood of transactions that would be refused anyway costs no verifies.
+
+**Its limits** (`MempoolLimits`), so no one key can fill it:
+
+| Flag | Default | What it bounds |
+| --- | --- | --- |
+| `--mempool-size N` | 50,000 | Transactions waiting at once: a few seconds of the most blocks hold, and some 20 MB of plain transfers. |
+| `--mempool-per-sender N` | 64 | What one sender may have waiting: more than a wallet or a bridge signer sends between blocks, under a thousandth of the mempool. |
+| `--max-nonce-gap N` | 64 | How far past the account's nonce at the tip a nonce may be, so a sender's full share fits in a row with one to spare. 0 takes only the next. |
+| `--replace-bump-percent N` | 10 | How much a replacement must raise both its max price and its tip, as Ethereum's nodes ask. |
+
+Every sender counts, `Tx::Ethereum`'s too: its nonce is its sender's account nonce, as any
+other's.
+
+**At a nonce already waiting** from the same sender, a transaction replaces the one waiting if
+it raises both its max price and its tip by the bump. Its max price must rise at least 1 whatever
+the bump, so a replacement always costs more and cannot be sent round for free. It keeps its
+place in its sender's run, so what follows it still runs after it, and a producer picks the
+replacement as any other. The very same transaction again is `already waiting`; on a chain
+without fees there is no price to raise, so nothing is replaced.
+
+**At its share,** a sender's transaction with a nonce below all it has waiting takes the place of
+its highest, which could not go before it anyway: a sender whose share is spent behind a gap can
+still send the nonce they all wait on. One after them all is refused.
+
+**When it is full,** a newcomer that can run in turn, its nonce the account's next or right after
+one of its sender's that can, pushes out the transaction lowest in this order, with the rest of
+its sender's after it, which could not run without it:
+1. one that waits behind a gap before one that can run;
+2. then the least paid, at the base price the last block left;
+3. then a sender's highest nonce, so a run loses its end before its middle.
+
+It never pushes out any sender's next transaction, which its whole run waits on, nor one of its
+own sender's below it. A newcomer that pays no more than the lowest, or that waits behind a gap
+itself, is refused: one behind a gap could otherwise empty the mempool of transactions that run,
+for some that never do.
+
+**What each refusal says,** for a wallet to act on: `POST /txs` answers 400 for a nonce too far
+ahead, 409 for a replacement that raises too little, 429 for a sender at its share and 503 for a
+full mempool (see [the API](api.md#post-txs)). Gossip refused for any of these is nobody's fault:
+the peer that passed it on is not struck, and the transaction goes no further than here. A
+gossiped batch carries up to 256 transactions, which may hold more of one sender's than its
+share; each is admitted or refused alone, as ever.
 
 **Selection** for a block takes, for each sender, the waiting transactions in nonce order from
 its current nonce, up to the first gap, or the first one the next block cannot take because its
@@ -131,7 +176,14 @@ they take to run.
   since they were admitted;
 - those that have offered less than the base price for `MAX_UNDERPRICED_BLOCKS` (32) blocks in a
   row. An offer under the base price is kept until then, since the base price moves a step a
-  block and may come back down; a block it can go in resets the count.
+  block and may come back down; a block it can go in resets the count;
+- those that have waited behind a missing nonce for `MAX_GAPPED_BLOCKS` (64) blocks in a row:
+  about two minutes of 2-second blocks, five of the devnet's 5-second ones. A gap gossip opened by
+  delivering out of order fills within a block or two; one open that long is a nonce nobody sent.
+
+What follows a transaction pruned for paying is kept, behind a gap, so its sender need only send
+that one again; if it does not, the rest go after `MAX_GAPPED_BLOCKS`. Eviction drops what follows
+at once instead, since the point there is room.
 
 ## Networking
 
@@ -383,6 +435,7 @@ counts them, so a flood is turned away at the door instead of queueing without e
 | `--max-block-txs N` | none | The transactions in each block this node produces; without it, blocks fill to the chain's bytes and gas limits. |
 | `--max-build-ms N` | none | How long this node runs transactions for each block it produces; what ran by then is sealed, the rest wait. |
 | `--max-gossip-per-peer N` | 1,000 | What any one peer's may be. |
+| `--mempool-size N`, `--mempool-per-sender N` | 50,000, 64 | What waits once admitted: see [the mempool](#the-mempool). |
 
 **Over a limit:**
 - **Gossip is dropped.** It is best effort: honest peers gossip it again, and the transaction is
@@ -425,6 +478,7 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
    them all: a node that mined a heavier branch on its own while cut off from the validators
    fetches the branch they justified, as side blocks, for the justifications to move it to.
    - it asks for at most 128, from just past what both chains share;
+   - an answer may hold fewer, cut short by bytes, and it asks again from where that one ended;
    - it imports them in order, side blocks and reorgs included;
    - when a batch does not connect, the chains split earlier, so it asks again a batch further
      back;
@@ -438,13 +492,23 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
 | Request | Answer |
 | --- | --- |
 | `Status` | Its genesis, tip, height, work and justified epoch. |
-| `Blocks { from, count }` | Up to 128 consecutive main-chain blocks. |
+| `Blocks { from, count }` | Up to 128 consecutive main-chain blocks, stopping before the one that would take the answer past `--sync-batch-bytes`, but never before the first. |
 | `Justifications { from, count }` | Up to 64 justifications for main-chain checkpoints, oldest first. |
 | `Headers { from, count }` | Up to 1,024 consecutive main-chain headers with their seals. |
 | `State { block, depth, prefix }` | One position of the state tree at a recent main-chain block: its entries, at most 512, or its two halves' hashes. `None` for a block it cannot serve. |
 | `Checkpoint { block }` | What a node starting at that checkpoint needs: the `CheckpointStart` a light client would get at `GET /light/checkpoint`, and the checkpoint's total work. `None` for a block that is no checkpoint on its main chain, or whose headers it lacks. |
 
 Kinds of finality that take no votes never ask for justifications.
+
+**Big blocks.** A response may be at most 64 MiB (`MAX_SYNC_RESPONSE`), past which the asker's
+codec refuses it, and a block may hold up to 6 MiB of transactions, so 128 full ones would never
+arrive: the asker would ask the same peer for the same run again and again. So an answer of
+blocks stops at `--sync-batch-bytes`, 8 MiB by default (`SYNC_BATCH_BYTES`): the same as
+`GET /blocks/range`, a full block and its proofs, and within the 30-second request timeout on a
+link down to about 2.5 Mbit/s. The asker treats a short answer as any other, and asks again from
+the block after its last. The first block always goes, however big, or one bigger than the cap
+could never be fetched. The flag takes 1 MiB to 32 MiB, half of a response, so an answer always
+fits with room to spare; a compile-time check holds the constants to that.
 
 ## Serving blocks with proofs
 

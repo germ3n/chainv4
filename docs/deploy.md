@@ -98,7 +98,9 @@ In `docker/.env`: `EXTRA_ARGS=--no-mdns --archive` (every height's state kept),
 `INDEX_EVENTS=genesis` and `INDEX_ADDRESSES=genesis` (events and addresses indexed from the
 start), `INDEX_MULTISIGS=on` (multisigs by their members, built from the registry at once on a
 chain already running), and no `SWAP_CONTRACT`, `DEX_CONTRACT` or `DEX_ROUTER` left from the old chain: the
-directory names them now.
+directory names them now. Left set, they would no longer win over it: `GET /status` takes the
+directory's and shows the flags apart as `operator`, which only fills what the directory leaves
+unset.
 
 ```sh
 docker/pow.sh push $VPS -i ~/.ssh/id_kyun

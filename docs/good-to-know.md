@@ -355,6 +355,23 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   keeps the files it reads on disk until it ends.
 - **`--db-cache` sizes the database's block cache,** 256 MiB by default, shared by every column:
   give it more on a node whose state outgrows memory.
+- **One key keeps at most 64 transactions waiting** (`--mempool-per-sender`), each at most 64
+  nonces past its account's (`--max-nonce-gap`). A faucet, pool or relayer key of the node's own
+  that sends more a block needs them raised; `chainv4 bench load` funds its senders 32 at a time,
+  each lot waited on, for the same reason. A 65th is refused with 429, `too far ahead` with 400.
+- **A transaction at a nonce already waiting replaces it** when it raises both its max price and
+  its tip by 10% (`--replace-bump-percent`); less is 409, which wallets read as Ethereum's
+  `replacement transaction underpriced`. A chain without fees replaces nothing.
+- **A full mempool makes room for a better offer:** it pushes out the least paid transaction that
+  is not its sender's next, with the rest of that sender's after it, what waits behind a gap
+  first. Its sender sees nothing: the transaction is simply gone, and is sent again or not.
+- **A nonce nobody sends drops what waits behind it** after 64 blocks (`MAX_GAPPED_BLOCKS`), five
+  minutes of the devnet's 5-second blocks.
+- **Sync answers stop at 8 MiB of blocks** (`--sync-batch-bytes`), past their first block, and the
+  asker asks again from where one ended. Before, a run of big blocks could pass the 64 MiB a
+  response may be, and a node asking for them never got them. Nodes old and new sync from each
+  other: an older asker takes a shorter answer as it always did. Only an older node still answers
+  with 128 however big, so big blocks asked of one can still fail.
 
 ## How the chain behaves
 
@@ -1150,7 +1167,10 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **Genesis writes its directory and federation into the state,** so their state roots, and so
   their genesis ids, differ from a chain with none: one entry each, proven like a balance.
 - **The node's own word comes last:** `--swap-contract`, `--dex-contract` and `--dex-router`
-  still answer when the directory names none.
+  still answer when the directory names none, and only for what it leaves unset. `GET /status`'s
+  `swap` and `dex` were the flags' until 2026-11-03, whatever the directory said; now they are the
+  directory's, and the flags show apart as `operator`. The apps and the CLI took the directory
+  first already, so none of them changed.
 - **A signer checks the directory first:** `chainv4 bridge sign` and `relay` refuse a gateway
   peer on an EVM chain other than the one the directory names there.
 

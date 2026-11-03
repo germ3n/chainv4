@@ -2,6 +2,10 @@
 
 This was a read-only audit. Nothing was built or run. Line numbers are from the working tree on 2026-11-03.
 
+**Fixed since:** #2 (the mempool's limits), #15 (sync answers capped by bytes) and section 2's
+first (the directory wins over `--swap-contract`, `--dex-contract` and `--dex-router`). See
+`docs/todo.md`, under Node, API and tooling, for what changed and what is still open.
+
 **Classes:** A = governance (votable), B = genesis only, C = node operator flag or config, D = app setting, E = leave it.
 
 **Columns:**

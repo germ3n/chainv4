@@ -116,7 +116,8 @@ A new offer's leg on chainv4 takes, in this order:
 2. else the one the chain's [directory](governance.md#directory) names, which the wallet's
    light client proves. A name is never used: anyone could register `swap` first;
 3. else the one the node advertises, started with `--swap-contract` (in Docker, `SWAP_CONTRACT`
-   in `.env`), which `GET /status` shows as `swap.contract`.
+   in `.env`), which `GET /status` shows as `swap.contract` while the directory names none, and
+   as `operator.swap` either way.
 
 | Function | What it does |
 | --- | --- |

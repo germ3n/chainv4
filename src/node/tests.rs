@@ -95,13 +95,18 @@ fn published_block(fake: &mut FakeNet) -> Block {
         .expect("a block was published")
 }
 
-/// A producing node on a chain of this genesis.
+/// Limits under which the development key alone may fill a block: its share, and how far ahead it
+/// sends, as big as the mempool.
+const ONE_KEY: MempoolLimits = MempoolLimits { per_sender: 50_000, nonce_gap: 50_000, ..MempoolLimits::DEFAULT };
+
+/// A producing node on a chain of this genesis, whose mempool takes the development key's
+/// transactions however many.
 fn producing_on(genesis: &Genesis) -> (Node, FakeNet) {
     let authority = DevAuthority::dev_keypair();
     let producer = Box::new(AuthorityProducer::new(authority, SLOT)) as Box<dyn Producer>;
     let (link, fake) = NetLink::pair();
 
-    (Node::new(Arc::new(MemoryDb::default()), genesis, Some(producer), link).unwrap(), fake)
+    (Node::new(Arc::new(MemoryDb::default()), genesis, Some(producer), link).unwrap().mempool_limits(ONE_KEY), fake)
 }
 
 /// The development key's transfers, from this nonce on.
@@ -1952,4 +1957,102 @@ fn a_node_keeps_the_newest_release_across_restarts_and_never_an_older_one() {
     assert_eq!(lapsing.known().standing(1_500), None);
     assert_eq!(lapsing.offer(issued(19), 2_000), Ok(false), "still nothing older");
     assert!(!lapsing.known().expired(1_000));
+}
+
+#[test]
+fn a_flood_gossiped_from_one_key_keeps_to_its_share_is_nobodys_fault_and_leaves_room_for_others() {
+    let (node, mut net) = node(false);
+    let mut node = node.mempool_limits(MempoolLimits { capacity: 100, ..MempoolLimits::DEFAULT });
+    let genesis = node.chain().genesis();
+    let peer = PeerId::random();
+    let others: Vec<Keypair> = (0..36).map(|_| Keypair::generate(DevAuthority::dev_keypair().public().key_type()).unwrap()).collect();
+
+    for tx in transfers(genesis, 200) {
+        net.events.send(NetEvent::Tx { from: peer, tx, gossip: None }).unwrap();
+    }
+
+    node.step(1).unwrap();
+
+    assert_eq!(node.mempool().len(), MempoolLimits::DEFAULT.per_sender);
+    assert!(verdicts(&mut net).iter().all(|(_, verdict)| !matches!(verdict, Verdict::Reject(_))), "a refusal past a share is not the relaying peer's fault");
+
+    for key in &others {
+        node.submit(SignedTx::sign(Tx::Burn { from: key.public().address(), amount: Amount::U128(1) }, 0, FeeOffer::NONE, key, &genesis)).unwrap();
+    }
+
+    assert_eq!(node.mempool().len(), 100);
+}
+
+#[test]
+fn a_nonce_too_far_ahead_is_refused_before_its_signature_is_checked() {
+    let (mut node, _net) = node(false);
+    let mut forged = transfers(node.chain().genesis(), 1).next().unwrap();
+    forged.nonce = MempoolLimits::DEFAULT.nonce_gap + 1;
+
+    // A bad signature would say Invalid, had it been checked.
+    assert_eq!(node.submit(forged), Err(MempoolError::TooFarAhead { next: 0, most: MempoolLimits::DEFAULT.nonce_gap }));
+}
+
+/// A producer whose first blocks each hold this many transfers, and the size of its first block,
+/// encoded.
+fn producer_of_full_blocks(blocks: u64, each: u64) -> (Node, FakeNet, u64) {
+    let authority = DevAuthority::dev_keypair();
+    let (mut producer, mut net) = producing_on(&Genesis { fees: None, ..Genesis::dev_authority(authority.public()) });
+    let mut all = transfers(producer.chain().genesis(), blocks * each);
+
+    for slot in 1..=blocks {
+        all.by_ref().take(each as usize).for_each(|tx| producer.submit(tx).unwrap());
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut net);
+    let size = wincode::serialized_size(&producer.chain().block_at(1).unwrap().unwrap()).unwrap();
+
+    (producer, net, size)
+}
+
+#[test]
+fn a_sync_answer_stops_short_at_its_byte_cap_but_never_before_its_first_block() {
+    let (producer, mut net, size) = producer_of_full_blocks(6, 40);
+    let ask = |producer: &mut Node, net: &mut FakeNet, from: u64| {
+        net.events.send(NetEvent::Request { peer: PeerId::random(), id: 1, request: SyncRequest::Blocks { from, count: 10 } }).unwrap();
+        producer.step(SLOT * 6).unwrap();
+
+        sent(net)
+            .into_iter()
+            .find_map(|command| match command {
+                NetCommand::Respond { response: SyncResponse::Blocks(blocks), .. } => Some(blocks.iter().map(|block| block.header.height).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    let mut producer = producer.sync_batch_bytes(size * 5 / 2);
+    assert!(size > 5_000, "blocks big enough to bind: {size} bytes");
+    assert_eq!(ask(&mut producer, &mut net, 1), [1, 2], "two blocks fit the cap, a third would pass it");
+    assert_eq!(ask(&mut producer, &mut net, 5), [5, 6], "and the chain ends");
+
+    let mut producer = producer.sync_batch_bytes(1);
+    assert_eq!(ask(&mut producer, &mut net, 3), [3], "a block bigger than the cap alone still goes");
+
+    let mut producer = producer.sync_batch_bytes(crate::net::SYNC_BATCH_BYTES);
+    assert_eq!(ask(&mut producer, &mut net, 1), [1, 2, 3, 4, 5, 6], "by default, small blocks go as many as asked for");
+}
+
+#[test]
+fn a_late_node_catches_up_from_answers_cut_short_by_bytes() {
+    let (producer, mut producer_net, size) = producer_of_full_blocks(7, 40);
+    let mut producer = producer.sync_batch_bytes(size * 5 / 2);
+    let (mut late, mut late_net) = node(false);
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
+    late.step(SLOT * 7).unwrap();
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * 7,
+    );
+
+    assert_eq!(late.chain().tip().height, 7, "four answers of at most two blocks each");
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
 }

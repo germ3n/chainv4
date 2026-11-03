@@ -111,9 +111,10 @@ chainv4 dex deploy --evm --node … --key owner.key    # WDEV, the factory, the 
 Then tell clients:
 - start the node with `--dex-contract contract:0x…` and `--dex-router 0x…` (in Docker,
   `DEX_CONTRACT` and `DEX_ROUTER` in `.env`), which `GET /status` names as `dex.contract` and
-  `dex.router`;
+  `dex.router` while the directory names none, and shows as `operator` either way;
 - or, better, have governance name them in the chain's [directory](governance.md#directory),
-  `dex` and `dex_router`, which the apps take first and the wallet proves.
+  `dex` and `dex_router`, which the apps take first and the wallet proves, and which win over
+  the flags in `GET /status` too.
 
 ## From the command line
 

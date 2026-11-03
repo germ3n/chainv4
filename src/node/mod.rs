@@ -10,8 +10,8 @@ use {
     crate::consensus::{ConsensusConfig, Producer},
     crate::crypto::keypair::Keypair,
     crate::db::{Database, DbError},
-    crate::mempool::{Budget, Mempool, MempoolError},
-    crate::net::{Admission, Backlog, Fault, Gossip, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, MAX_SYNC_FINALITY, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse, Verdict},
+    crate::mempool::{Budget, Mempool, MempoolError, MempoolLimits},
+    crate::net::{Admission, Backlog, Fault, Gossip, MAX_SYNC_BLOCKS, MAX_SYNC_ENTRIES, SYNC_BATCH_BYTES, MAX_SYNC_FINALITY, MAX_SYNC_HEADERS, MAX_SYNC_JUSTIFICATIONS, NetCommand, NetEvent, NetLink, Origin, SyncRequest, SyncResponse, Verdict},
     crate::structs::address::Address,
     crate::structs::block::Block,
     crate::structs::hash::Hash,
@@ -59,8 +59,6 @@ const EVENT_BUDGET: usize = 256;
 /// The most transactions a block carries on a chain that bounds blocks by neither bytes nor gas,
 /// so its producer never tries to run the whole mempool at once.
 const UNBOUNDED_CHAIN_TXS: usize = 1_000;
-/// The most transactions waiting at once.
-const MEMPOOL_CAPACITY: usize = 50_000;
 /// The longest the loop sleeps with nothing scheduled, so it still notices a dead network.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How often the node logs where it stands, in milliseconds.
@@ -135,6 +133,8 @@ pub struct Node {
     /// How long this node runs transactions for a block it builds before it seals what it has, if
     /// it bounds that.
     max_build_ms: Option<u64>,
+    /// The most bytes of blocks it answers one SyncRequest::Blocks with, past its first block.
+    sync_batch_bytes: u64,
     /// The releases it fetches, which may announce an upgrade of its chain.
     #[cfg(feature = "updates")]
     releases: Option<Arc<Releases>>,
@@ -508,7 +508,7 @@ impl Node {
             check_inline,
             backlog,
         } = net;
-        let gate = Arc::new(Gate::new(Mempool::new(MEMPOOL_CAPACITY), db, chain.shared_fees(), chain.hash(), chain.genesis(), commands.clone(), backlog.clone()));
+        let gate = Arc::new(Gate::new(Mempool::with_limits(MempoolLimits::DEFAULT), db, chain.shared_fees(), chain.hash(), chain.genesis(), commands.clone(), backlog.clone()));
         // The verifier takes the network's events, has the gate admit transactions, and the node
         // reads the rest and what came of them.
         let arrivals = match check_inline {
@@ -518,7 +518,7 @@ impl Node {
             ),
         };
 
-        Ok(Node {
+        let node = Node {
             chain,
             gate,
             producer,
@@ -549,13 +549,18 @@ impl Node {
             catching_up: HashSet::new(),
             max_block_txs: None,
             max_build_ms: None,
+            sync_batch_bytes: SYNC_BATCH_BYTES,
             #[cfg(feature = "updates")]
             releases: None,
             decided_upgrade: None,
             upgrade_at: None,
             upgrade: None,
             upgrade_warned: 0,
-        })
+        };
+        // So the mempool weighs offers at the tip's base price from the first one.
+        node.prune_mempool()?;
+
+        Ok(node)
     }
 
     #[document(
@@ -619,6 +624,27 @@ impl Node {
     )]
     pub fn max_build_ms(mut self, most: Option<u64>) -> Node {
         self.max_build_ms = most;
+        self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Sets what the mempool holds: how many in all and per sender, how far ahead a nonce may be, and what bump replaces a waiting transaction. MempoolLimits::DEFAULT unless set.",
+        see_also = "MempoolLimits",
+    )]
+    pub fn mempool_limits(self, limits: MempoolLimits) -> Node {
+        self.gate.set_limits(limits);
+        self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Caps the bytes of blocks this node answers one SyncRequest::Blocks with: it stops before the block that would pass them, and the asker asks again from there. Its first block always goes, however big, as a block a chain holds always fits a response. SYNC_BATCH_BYTES unless set.",
+        params = { bytes = "The most bytes, encoded." },
+        see_also = "SYNC_BATCH_BYTES",
+    )]
+    pub fn sync_batch_bytes(mut self, bytes: u64) -> Node {
+        self.sync_batch_bytes = bytes;
         self
     }
 
@@ -1089,13 +1115,23 @@ impl Node {
                 justified: self.chain.justified().map_or(0, |justified| justified.epoch),
             },
             SyncRequest::Blocks { from, count } => {
-                let mut blocks = Vec::new();
+                let (mut blocks, mut bytes) = (Vec::new(), 0u64);
 
                 for height in from..from.saturating_add(u64::from(count.min(MAX_SYNC_BLOCKS))) {
-                    match self.chain.block_at(height)? {
-                        Some(block) => blocks.push(block),
-                        None => break,
+                    let Some(block) = self.chain.block_at(height)? else {
+                        break;
+                    };
+                    let size = wincode::serialized_size(&block).expect("a block always encodes");
+
+                    // Cut short by bytes, so a run of big blocks never makes an answer the codec
+                    // refuses: the asker asks again from where it ends. Never before the first
+                    // block, or a big one could never be fetched.
+                    if !blocks.is_empty() && bytes.saturating_add(size) > self.sync_batch_bytes {
+                        break;
                     }
+
+                    bytes = bytes.saturating_add(size);
+                    blocks.push(block);
                 }
 
                 SyncResponse::Blocks(blocks)
@@ -1178,7 +1214,7 @@ impl Node {
         let dropped = self.gate.mempool().prune(&self.chain.state(), self.chain.fees(), self.chain.next_base_price())?;
 
         if dropped > 0 {
-            log::debug!("[node] dropped {dropped} transactions that cannot pay or offer too little");
+            log::debug!("[node] dropped {dropped} transactions that cannot pay, offer too little or wait behind a nonce nobody sent");
         }
 
         Ok(())

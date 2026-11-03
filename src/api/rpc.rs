@@ -235,6 +235,11 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
                     MempoolError::PriceTooLow => "max fee per gas less than block base fee".to_string(),
                     MempoolError::CannotPay => "insufficient funds for gas * price + value".to_string(),
                     MempoolError::BadGasLimit => "intrinsic gas too low, or past the block gas limit".to_string(),
+                    // As Ethereum's nodes word them, which wallets know to act on.
+                    MempoolError::ReplacementTooLow { bump } => format!("replacement transaction underpriced: raise both the max fee per gas and the priority fee by at least {bump}%"),
+                    MempoolError::TooFarAhead { next, most } => format!("nonce too high: the account's next is {next}, and this node takes nonces at most {most} past it"),
+                    MempoolError::TooMany { most } => format!("account limit exceeded: {most} transactions from this account wait already"),
+                    MempoolError::Full => "txpool is full".to_string(),
                     other => other.to_string(),
                 })),
                 Err(err) => Err(RpcError::server(err.to_string())),

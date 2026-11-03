@@ -95,7 +95,15 @@ fn fake_node_holding(limits: BacklogLimits, waiting: Option<Vec<SignedTx>>) -> N
             match event {
                 NetEvent::Submitted { tx, reply } => {
                     handled.release(crate::net::Origin::Local);
-                    let verdict = if tx.nonce == 99 { Err(MempoolError::Stale) } else { Ok(tx.id(HashType::default_chain())) };
+                    // Nonces from 95 up stand for each refusal the mempool's limits make.
+                    let verdict = match tx.nonce {
+                        99 => Err(MempoolError::Stale),
+                        98 => Err(MempoolError::TooMany { most: 64 }),
+                        97 => Err(MempoolError::ReplacementTooLow { bump: 10 }),
+                        96 => Err(MempoolError::TooFarAhead { next: 3, most: 64 }),
+                        95 => Err(MempoolError::Full),
+                        _ => Ok(tx.id(HashType::default_chain())),
+                    };
                     let _ = reply.send(verdict);
                 }
                 NetEvent::Report { txs, reply } => {
@@ -414,6 +422,31 @@ fn a_node_with_no_room_says_it_is_busy() {
 
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"], "the node is busy; try again shortly");
+}
+
+#[test]
+fn each_refusal_of_the_mempools_limits_tells_a_wallet_what_to_do() {
+    let fixture = serve();
+    let refused = |nonce: u64| post_tx(fixture.address, &wincode::serialize(&signed(nonce)).unwrap());
+    let (status, body) = refused(98);
+
+    assert_eq!(status, 429, "slow down: {body}");
+    assert!(body["error"].as_str().unwrap().contains("64 transactions waiting already"), "{body}");
+
+    let (status, body) = refused(97);
+
+    assert_eq!(status, 409, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("raise both its max price and its tip by at least 10%"), "{body}");
+
+    let (status, body) = refused(96);
+
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("the account's next is 3"), "{body}");
+
+    let (status, body) = refused(95);
+
+    assert_eq!(status, 503, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("offer a higher tip"), "{body}");
 }
 
 #[test]
@@ -2863,6 +2896,34 @@ fn status_names_the_swap_contract_when_the_node_was_given_one() {
 
         assert_eq!(ok(address, "/status")["swap"], expected);
     }
+}
+
+#[cfg(all(feature = "swap", feature = "dex"))]
+#[test]
+fn the_directory_wins_over_the_operators_flags_which_fill_only_what_it_leaves_unset() {
+    use crate::registry::directory::Directory;
+
+    let (governed, flagged) = (Address::Contract([0x11; 32]), Address::Contract([0x22; 32]));
+    let options = || ApiOptions { swap_contract: Some(flagged), dex_contract: Some(flagged), dex_router: Some([0xab; 20]), ..ApiOptions::default() };
+    // The directory names the swap contract and the DEX, but no router.
+    let genesis = Genesis { directory: Some(Directory { swap: Some(governed), dex: Some(governed), ..Directory::default() }), ..free() };
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &genesis).unwrap();
+    let status = ok(start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), options()).unwrap(), "/status");
+
+    assert_eq!(status["swap"], json!({ "contract": governed.to_string() }));
+    assert_eq!(status["dex"], json!({ "contract": governed.to_string(), "router": format!("0x{}", "ab".repeat(20)) }), "the router the directory leaves unset comes from the flag");
+    assert_eq!(status["operator"], json!({ "swap": flagged.to_string(), "dex": flagged.to_string(), "dex_router": format!("0x{}", "ab".repeat(20)) }), "the flags, shown apart");
+    assert_eq!(status["directory"]["swap"], governed.to_string());
+
+    // Given no flags, the directory's alone, and no operator's.
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &genesis).unwrap();
+    let status = ok(start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap(), "/status");
+
+    assert_eq!(status["swap"], json!({ "contract": governed.to_string() }));
+    assert_eq!(status["dex"], json!({ "contract": governed.to_string(), "router": null }));
+    assert_eq!(status["operator"], Value::Null);
 }
 
 #[cfg(feature = "dex")]

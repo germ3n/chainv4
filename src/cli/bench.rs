@@ -21,6 +21,10 @@ use {
     std::time::{Duration, Instant},
 };
 
+/// How many senders `bench load` funds before it waits for them to land: half of what a node keeps
+/// waiting from one key by default, so a funder that is also sending elsewhere still fits.
+const FUNDING_CHUNK: usize = crate::mempool::MempoolLimits::DEFAULT.per_sender / 2;
+
 #[derive(clap::Args)]
 pub struct BenchArgs {
     #[command(subcommand)]
@@ -230,25 +234,28 @@ pub fn load(nodes: &[String], tls: &TlsArgs, key: Option<&std::path::Path>, send
     let fee = FeeOffer { gas_limit: 4_000, max_price: (base * u256::new(4)).max(u256::ONE), tip: u256::ZERO };
     let keys: Vec<Keypair> = (0..senders).map(|_| Keypair::generate(KeyType::ALL[0])).collect::<Result<_, _>>()?;
 
-    // Funding: one transfer each from the funder, then wait for the last to land.
+    // Funding: one transfer each from the funder, a share of the mempool's per-sender limit at a
+    // time, each waited on to land, as a node keeps only so many of one key's waiting.
     println!("funding {senders} senders from {}", funder.public().address());
     let mut nonce = nonce_of(&agent, &nodes[0], &funder)?;
     let each = u256::new(10u128.pow(18));
 
-    for key in &keys {
-        let tx = SignedTx::sign(Tx::Transfer { from: funder.public().address(), to: key.public().address(), amount: Amount::U256(each) }, nonce, fee, &funder, &genesis);
-        submit(&agent, &nodes[0], &tx).map_err(|why| format!("funding refused: {why}"))?;
-        nonce += 1;
-    }
-
-    let funded = Instant::now();
-
-    while nonce_of(&agent, &nodes[0], &funder)? < nonce {
-        if funded.elapsed() > Duration::from_secs(120) {
-            return Err("the funding did not land within two minutes".into());
+    for chunk in keys.chunks(FUNDING_CHUNK) {
+        for key in chunk {
+            let tx = SignedTx::sign(Tx::Transfer { from: funder.public().address(), to: key.public().address(), amount: Amount::U256(each) }, nonce, fee, &funder, &genesis);
+            submit(&agent, &nodes[0], &tx).map_err(|why| format!("funding refused: {why}"))?;
+            nonce += 1;
         }
 
-        std::thread::sleep(Duration::from_millis(500));
+        let funded = Instant::now();
+
+        while nonce_of(&agent, &nodes[0], &funder)? < nonce {
+            if funded.elapsed() > Duration::from_secs(120) {
+                return Err("the funding did not land within two minutes".into());
+            }
+
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     let mut nonces = vec![0u64; keys.len()];

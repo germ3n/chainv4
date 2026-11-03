@@ -1,5 +1,5 @@
 use {
-    super::{SyncRequest, SyncResponse},
+    super::{MAX_SYNC_RESPONSE as MAX_RESPONSE, SyncRequest, SyncResponse},
     libp2p::StreamProtocol,
     libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     libp2p::request_response::Codec,
@@ -8,8 +8,6 @@ use {
 
 /// The most bytes read for one request. Requests are tiny; anything bigger is hostile.
 const MAX_REQUEST: u64 = 1024;
-/// The most bytes read for one response: a full batch of blocks.
-const MAX_RESPONSE: u64 = 64 * 1024 * 1024;
 
 /// Sync messages as wincode, one per stream, read up to a size limit so a peer cannot make this
 /// node buffer without end.

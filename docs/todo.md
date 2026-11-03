@@ -789,6 +789,43 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **One key can no longer fill the mempool, sync takes big blocks, and the directory wins
+  over the operator's flags.** Done 2026-11-03, from the audit in `docs/hardcoded-values.md`
+  (#2, #15 and section 2's first). Node only: a redeploy, no new genesis, no consensus change.
+  - The mempool (`MempoolLimits`): `--mempool-size` (50,000), `--mempool-per-sender` (64),
+    `--max-nonce-gap` (64, from the account's nonce at the tip, checked before any verify) and
+    `--replace-bump-percent` (10: both the max price and the tip, and the max price at least 1).
+    A replacement keeps its place in its sender's run. At its share, a sender's lower nonce takes
+    the place of its highest. Full, a newcomer that can run pushes out the lowest of what waits
+    behind a gap, then the least paid, a sender's highest nonce first, never a sender's next, and
+    with the rest of the victim's run; it is refused if it pays no more or waits behind a gap
+    itself. What waits behind a gap for `MAX_GAPPED_BLOCKS` (64) is pruned. Each refusal has its
+    own error: 400, 409, 429 and 503 at `POST /txs`, Ethereum's words at
+    `eth_sendRawTransaction`; gossip refused for them strikes no one. `chainv4 bench load` funds
+    its senders 32 at a time to stay under the share.
+  - Sync: `SyncRequest::Blocks` is answered with up to `--sync-batch-bytes` of blocks (8 MiB, 1 to
+    32 MiB), past the first block, which always goes; the asker asks again from where the answer
+    ended, as it did for a peer that ran out. `MAX_SYNC_RESPONSE` is public, and a compile-time
+    check holds the cap and `MAX_BLOCK_BYTES` well inside it.
+  - `GET /status`: `swap` and `dex` are the directory's, a flag filling only what it leaves
+    unset, and `operator` shows the flags as given. The wallet, explorer and CLI already took the
+    directory first, so the apps are unchanged; Docker's `SWAP_CONTRACT`, `DEX_CONTRACT` and
+    `DEX_ROUTER` still pass the flags.
+- [ ] **The mempool, still open.**
+  - The fee reserve is checked per transaction, not summed over a sender's waiting ones: a key
+    with enough for one can hold its share of 64, each needing all of its balance. Summing them,
+    as the audit suggests, would refuse a 65th's worth sooner.
+  - It is bounded by count, not bytes: 50,000 transactions of up to a block each could take far
+    more memory than 50,000 transfers. A byte cap, or a per-transaction byte limit
+    (`Change::Limits`'s `max_tx_bytes`), would bound it.
+  - A sender's next transaction is never pushed out, so 50,000 senders with one each, offering
+    under the base price, hold the mempool for `MAX_UNDERPRICED_BLOCKS` blocks.
+  - Pushed-out and pruned transactions are not told to anyone: `GET /stream` shows what joined,
+    not what left.
+  - `MAX_GAPPED_BLOCKS` and `MAX_UNDERPRICED_BLOCKS` count blocks, not time.
+  - `--sync-batch-bytes` and the mempool's flags are not in the Docker image's `.env`; give them
+    through `EXTRA_ARGS`.
+
 - [x] **Multisigs in the wallet: every one you are in, anything to propose, any key to sign with.**
   Done 2026-11-03, from the user's reports and a testnet run. In the node: a member index,
   `--index-multisigs` (`Column::Members`, `src/chain/members.rs`), each multisig under the address
