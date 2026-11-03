@@ -27,7 +27,7 @@ use {
 #[cfg(any(feature = "governance", feature = "names"))]
 use crate::registry::changes::Changes;
 #[cfg(feature = "governance")]
-use crate::{governance::Change, registry::changes::ChangeApproved};
+use crate::{governance::Change, registry::changes::ChangeVoted};
 #[cfg(feature = "staking")]
 use crate::registry::validators::Validators;
 
@@ -58,22 +58,27 @@ pub struct Rules {
     pub pooled_fees: bool,
     #[document(summary = "The chain's names, or None on a chain without them, where name transactions fail.")]
     pub names: Option<Arc<NamesConfig>>,
+    #[document(summary = "What contracts run under in the block: host costs, contract limits, the EVM's spec and the DEX's fee, and the transaction and multisig bounds.")]
+    pub vm: crate::params::vm::VmRules,
 }
 
 impl Rules {
     #[document(
         parent = "Rules",
-        summary = "What makes a contract a token or a collection in a state: genesis's, with the collection standards governance decided last, once it decided any.",
+        summary = "What makes a contract a token or a collection in a state: genesis's, with the token functions and collection standards governance decided last, once it decided any.",
     )]
     pub fn standards_in(&self, state: &State) -> Result<crate::registry::Standards, crate::db::DbError> {
         #[cfg(feature = "governance")]
-        if self.governance.is_some()
-            && let Some(collections) = Changes::new(state).collections()?
-        {
-            return Ok(crate::registry::Standards {
-                tokens: self.standards.tokens.clone(),
-                collections: Some(collections),
-            });
+        if self.governance.is_some() {
+            let changes = Changes::new(state);
+            let (tokens, collections) = (changes.token_functions()?, changes.collections()?);
+
+            if tokens.is_some() || collections.is_some() {
+                return Ok(crate::registry::Standards {
+                    tokens: tokens.map_or_else(|| self.standards.tokens.clone(), Into::into),
+                    collections: collections.or_else(|| self.standards.collections.clone()),
+                });
+            }
         }
         #[cfg(not(feature = "governance"))]
         let _ = state;
@@ -104,14 +109,18 @@ pub struct SignerRules {
 #[document(
     summary = "The settings changes run under, on a chain with governance.",
     category = "Chain",
-    see_also = "Rules, GovernanceConfig, Tx::ApproveChange",
+    see_also = "Rules, GovernanceConfig, Tx::VoteChange",
 )]
 #[derive(Clone)]
 pub struct GovernanceRules {
-    #[document(summary = "Who may approve, and what it takes.")]
+    #[document(summary = "Who may vote, and what it takes.")]
     pub governance: Arc<dyn Governance>,
-    #[document(summary = "How many epochs an approval counts for.")]
+    #[document(summary = "Its settings: genesis's, or those governance decided for itself last.")]
+    pub config: crate::governance::GovernanceConfig,
+    #[document(summary = "How many epochs a vote counts for.")]
     pub approval_epochs: u64,
+    #[document(summary = "The share of the voters' weight, in thousandths, that must vote on a change before Yes decides it.")]
+    pub quorum_permille: u32,
     #[document(summary = "Blocks per epoch, to tell which epoch an approval is made in.")]
     pub checkpoint_interval: u64,
     #[document(summary = "The chain's finality, which a proposed consensus must fit.")]
@@ -123,8 +132,49 @@ impl fmt::Debug for GovernanceRules {
         f.debug_struct("GovernanceRules")
             .field("governance", &self.governance.name())
             .field("approval_epochs", &self.approval_epochs)
+            .field("quorum_permille", &self.quorum_permille)
             .field("checkpoint_interval", &self.checkpoint_interval)
             .finish_non_exhaustive()
+    }
+}
+
+impl GovernanceRules {
+    #[document(
+        parent = "GovernanceRules",
+        summary = "The rules for settings: who votes, what it takes, how long votes count and the quorum, under a chain's finality.",
+        params = {
+            config = "The settings, genesis's or decided.",
+            checkpoint_interval = "Blocks per epoch.",
+            finality = "The chain's finality from genesis.",
+        },
+    )]
+    pub fn new(config: &crate::governance::GovernanceConfig, checkpoint_interval: u64, finality: &FinalityConfig) -> GovernanceRules {
+        GovernanceRules {
+            governance: config.build(finality),
+            config: config.clone(),
+            approval_epochs: config.approval_epochs(),
+            quorum_permille: config.quorum_permille(),
+            checkpoint_interval,
+            finality: finality.clone(),
+        }
+    }
+
+    #[cfg(feature = "governance")]
+    #[document(
+        parent = "GovernanceRules",
+        summary = "The rules a state counts votes by: these, genesis's, until governance decided settings of its own, and those from the block after.",
+    )]
+    pub fn in_state(&self, state: &State) -> Result<GovernanceRules, DbError> {
+        Ok(match Changes::new(state).governance()? {
+            Some(decided) if decided.config != self.config => GovernanceRules::new(&decided.config, self.checkpoint_interval, &self.finality),
+            _ => self.clone(),
+        })
+    }
+
+    #[cfg(feature = "governance")]
+    #[document(parent = "GovernanceRules", summary = "How long votes count, and the quorum.")]
+    pub fn ballot(&self) -> crate::registry::changes::BallotRules {
+        crate::registry::changes::BallotRules { approval_epochs: self.approval_epochs, quorum_permille: self.quorum_permille }
     }
 }
 
@@ -160,8 +210,10 @@ pub enum Effect {
     Upgraded(Address),
     #[document(summary = "A contract call returned these values.")]
     Returned(Vec<TxCallArgumentType>),
-    #[document(summary = "A governance approval decided its change, as the chain's decision-th and its kind's version-th.")]
+    #[document(summary = "A governance vote decided its change, as the chain's decision-th and its kind's version-th.")]
     Decided { decision: u64, kind: crate::governance::ChangeKind, version: u64 },
+    #[document(summary = "A governance vote left its change unable to pass, so it is rejected, as the chain's rejection-th, at its kind's version.")]
+    Rejected { rejection: u64, kind: crate::governance::ChangeKind, version: u64 },
     #[document(summary = "A batch went through: what each step did, in order.")]
     Batch(Vec<StepOutcome>),
 }
@@ -290,6 +342,8 @@ pub enum TxError {
     BlockFull { left: u64 },
     #[document(summary = "A multisig's transaction its members do not back, and why: too few of them, a signature by a key that is no member's or that does not check out, or an address that is no multisig. It never takes the multisig's nonce or fee.")]
     Multisig(RegistryError),
+    #[document(summary = "It takes more bytes than the chain's max_tx_bytes allows, its raw bytes for one Ethereum-signed.")]
+    TooBig { bytes: u64, limit: u64 },
 }
 
 impl fmt::Display for TxError {
@@ -304,6 +358,7 @@ impl fmt::Display for TxError {
             TxError::CannotPay => write!(f, "the sender cannot pay for its gas limit"),
             TxError::BlockFull { left } => write!(f, "its gas limit is more than the {left} the block has left"),
             TxError::Multisig(err) => write!(f, "{err}"),
+            TxError::TooBig { bytes, limit } => write!(f, "it takes {bytes} bytes, more than the {limit} a transaction may"),
         }
     }
 }
@@ -430,6 +485,19 @@ pub(crate) fn execute_authorized(
     // Refused long before here for a block, whose transactions verified; a dry run's did not.
     if let Some(problem) = tx.batch_problem() {
         return Err(ExecuteError::Invalid(TxError::Invalid(problem)));
+    }
+
+    // A transaction over max_tx_bytes never runs: an Ethereum-signed one by its raw bytes, which
+    // are what its signer saw.
+    let (bytes, ethereum) = match &tx.tx {
+        Tx::Ethereum { raw } => (raw.len() as u64, true),
+        _ => (crate::chain::tx_bytes(tx), false),
+    };
+
+    if let Some(limit) = rules.vm.tx_bytes_limit(ethereum)
+        && bytes > limit
+    {
+        return Err(ExecuteError::Invalid(TxError::TooBig { bytes, limit }));
     }
 
     let sender = tx.sender();
@@ -706,7 +774,7 @@ fn batch(
             Ok(Effect::Returned(values)) => StepEffect::Returned(values),
             Ok(Effect::Upgraded(address)) => StepEffect::Upgraded(address),
             // Nothing a batch holds comes to these: if one ever did, the batch stops, not the chain.
-            Ok(Effect::Decided { .. } | Effect::Batch(_)) => return (Err(failed(Failure::Contract(VmError::Runtime("a step did what no step may".to_string())))), all),
+            Ok(Effect::Decided { .. } | Effect::Rejected { .. } | Effect::Batch(_)) => return (Err(failed(Failure::Contract(VmError::Runtime("a step did what no step may".to_string())))), all),
             Err(failure) => return (Err(failed(failure)), all),
         };
 
@@ -751,6 +819,10 @@ fn run(
             let address = crate::structs::address::multisig_address(&sender, nonce, rules.hash);
             let policy = MultisigPolicy { members: members.clone(), threshold: *threshold, testnet: *testnet };
 
+            if members.len() > rules.vm.multisig_members as usize {
+                return (Err(Failure::Registry(RegistryError::BadMultisig("a multisig has more members than this chain's multisig_members"))), Contracted::default());
+            }
+
             match Multisigs::new(layer).create(&address, policy) {
                 Ok(()) => (Ok(Effect::Deployed(address)), Contracted::default()),
                 Err(err) => (Err(Failure::Registry(err)), Contracted::default()),
@@ -759,6 +831,10 @@ fn run(
         Tx::ChangeMultisig { .. } if !matches!(sender, Address::Multisig(_)) => (Err(Failure::Registry(RegistryError::OnlyMultisig)), Contracted::default()),
         Tx::ChangeMultisig { members, threshold, testnet } => {
             let policy = MultisigPolicy { members: members.clone(), threshold: *threshold, testnet: *testnet };
+
+            if members.len() > rules.vm.multisig_members as usize {
+                return (Err(Failure::Registry(RegistryError::BadMultisig("a multisig has more members than this chain's multisig_members"))), Contracted::default());
+            }
 
             (moved(Multisigs::new(layer).change(&sender, policy)), Contracted::default())
         }
@@ -982,7 +1058,7 @@ fn run(
             (moved(Signers::new(layer).withdraw(&sender, *version, epoch, rules.approval_epochs)), Contracted::default())
         }
         #[cfg(feature = "governance")]
-        Tx::ApproveChange { version, change } => {
+        Tx::VoteChange { version, change, vote } => {
             let Some(governance) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
@@ -999,18 +1075,24 @@ fn run(
             let problem = match change {
                 Change::Consensus(consensus) => settled(&|decided| crate::chain::consensus_problem(consensus, Some(decided))),
                 Change::Bootnodes(bootnodes) => Ok(crate::governance::bootnodes_problem(bootnodes)),
-                Change::NamePrices(_) if rules.names.is_none() => return (Err(Failure::NoNames), Contracted::default()),
-                Change::NamePrices(prices) => Ok(crate::registry::names::prices_problem(prices)),
+                Change::Names(_) if rules.names.is_none() => return (Err(Failure::NoNames), Contracted::default()),
+                Change::Names(settings) => Ok(settings.problem()),
+                Change::TokenFunctions(functions) => Ok(crate::registry::tokens::functions_problem(functions)),
+                Change::EvmSpec { from, .. } if *from <= height => Ok(Some("an EVM spec runs from a block ahead of the one deciding it")),
+                Change::EvmSpec { spec, .. } if *spec < rules.vm.evm_spec => Ok(Some("an EVM spec is no older than the one in force, so no deployed contract loses an opcode")),
+                Change::EvmSpec { spec, .. } => Changes::new(layer).evm_specs().map(|specs| specs.eras.last().is_some_and(|(_, last)| spec < last).then_some("an EVM spec is no older than the one decided last")),
+                Change::Dex(dex) => Ok(dex.problem()),
                 Change::Collections(functions) => Ok(functions.problem()),
                 Change::Federation(federation) => Ok(federation.problem()),
                 Change::Directory(directory) => Ok(directory.problem()),
-                Change::Fees(fees) => Ok(fees.problem()),
+                Change::Fees(fees) => Ok(fees.problem().or_else(|| fees.costs.as_ref().and_then(crate::params::vm::HostCosts::problem))),
                 Change::Reward(reward) => Ok(crate::chain::reward_problem(reward)),
-                Change::Limits(limits) => Ok(limits.problem()),
+                Change::Limits(limits) => Ok(limits.problem().or_else(|| limits.contract.and_then(|contract| rules.vm.limits.lowering_problem(&contract)))),
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
                 Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
                 Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),
                 Change::Name(name) => Ok(crate::governance::chain_name_problem(name)),
+                Change::Governance(config) => Ok(governance.config.change_problem(config)),
             };
 
             match problem {
@@ -1020,27 +1102,29 @@ fn run(
             }
 
             let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay() };
-            let approved = Changes::new(layer).approve(&sender, *version, change.clone(), at, governance.approval_epochs, &*governance.governance);
+            let voted = Changes::new(layer).vote(&sender, *version, change.clone(), *vote, at, governance.ballot(), &*governance.governance);
 
-            let effect = approved.map(|approved| match approved {
-                ChangeApproved::DecidedChange { decision, kind, version } => Effect::Decided { decision, kind, version },
-                ChangeApproved::Counted { .. } => Effect::Done,
+            let effect = voted.map(|voted| match voted {
+                ChangeVoted::Decided { decision, kind, version } => Effect::Decided { decision, kind, version },
+                ChangeVoted::Rejected { rejection, kind, version } => Effect::Rejected { rejection, kind, version },
+                ChangeVoted::Counted(_) => Effect::Done,
             });
 
             (effect.map_err(Failure::Registry), Contracted::default())
         }
         #[cfg(feature = "governance")]
-        Tx::WithdrawChange { kind, version } => {
+        Tx::ClearVote { version, change } => {
             let Some(rules) = &rules.governance else {
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
             let epoch = height / rules.checkpoint_interval.max(1);
+            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: rules.finality.activation_delay() };
 
-            (moved(Changes::new(layer).withdraw(&sender, *kind, *version, epoch, rules.approval_epochs, &*rules.governance)), Contracted::default())
+            (moved(Changes::new(layer).clear(&sender, *version, change, at, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }
         // A build without governance opens no chain that has it.
         #[cfg(not(feature = "governance"))]
-        Tx::ApproveChange { .. } | Tx::WithdrawChange { .. } => (Err(Failure::NoGovernance), Contracted::default()),
+        Tx::VoteChange { .. } | Tx::ClearVote { .. } => (Err(Failure::NoGovernance), Contracted::default()),
         #[cfg(feature = "names")]
         Tx::Name { name, action } => {
             use crate::registry::names::Names;
@@ -1048,11 +1132,8 @@ fn run(
             let Some(names) = &rules.names else {
                 return (Err(Failure::NoNames), Contracted::default());
             };
-            // Governance's prices, once it decided any, else genesis's.
-            let acted = Changes::new(layer)
-                .name_prices()
-                .map_err(RegistryError::Db)
-                .and_then(|prices| Names::new(layer).act(&sender, name, action, context.timestamp, height, names, prices.as_deref().unwrap_or(&names.prices)));
+            // The block's names hold governance's settings, once it decided any.
+            let acted = Names::new(layer).act(&sender, name, action, context.timestamp, height, names, &names.prices);
 
             (moved(acted.map(|_| ())), Contracted::default())
         }
@@ -1095,6 +1176,7 @@ fn evm(
         chain_id: evm::chain_id(&context.genesis),
         names: rules.names.as_deref().cloned(),
         hash: rules.hash,
+        vm: rules.vm,
     };
 
     let bridge = evm::Bridge {
@@ -1131,6 +1213,7 @@ fn block_at(rules: &Rules, context: &BlockContext) -> BlockAt {
         time: context.timestamp,
         producer: context.producer,
         fuel_per_gas: fuel_per_gas(rules),
+        vm: rules.vm,
     }
 }
 

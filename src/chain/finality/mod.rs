@@ -100,7 +100,7 @@ pub trait Finality: Send {
         },
         returns = "Invalid for a proof that does not check out.",
     )]
-    fn apply(&self, state: &Arc<State>, block: &Block) -> Result<(), ImportError>;
+    fn apply(&self, state: &Arc<State>, block: &Block, rewards: crate::chain::VoteRewardSource) -> Result<(), ImportError>;
 
     #[document(
         parent = "Finality",

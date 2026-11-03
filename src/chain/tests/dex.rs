@@ -241,3 +241,32 @@ fn the_evm_dex_wraps_the_coin_trades_along_paths_and_pays_shares_back() {
 
     assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
+
+#[test]
+fn both_dexes_charge_the_fee_the_chain_sets_and_not_one_of_their_own() {
+    use AbiType::{Address as Addr, Uint};
+
+    // A chain whose genesis sets the fee at 1%, where both DEXes would charge 0.3% of their own.
+    let genesis = Genesis { dex: Some(crate::params::vm::DexSettings { fee_bps: 100 }), ..genesis() };
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+    let at_one_percent = |amount_in: u128, reserve_in: u128, reserve_out: u128| crate::dex::amount_out(u256::new(amount_in), u256::new(reserve_in), u256::new(reserve_out), 100).unwrap();
+    assert!(at_one_percent(100_000, 10_000_000, 20_000_000) < u256::new(out(100_000, 10_000_000, 20_000_000)));
+
+    // The native DEX: a pool of the coin and a token, and one trade.
+    let token = deploy(&mut chain, Code::Lua(include_str!("../../../contracts/lua/token.lua").to_string()));
+    let template = deploy(&mut chain, Code::Lua(include_str!("../../../contracts/lua/lp_token.lua").to_string()));
+    let dex = deploy(&mut chain, Code::Lua(include_str!("../../../contracts/lua/dex.lua").to_string()));
+    assert!(call(&mut chain, dex, "setup", 0, vec![at(template)]).result.is_ok());
+    assert!(call(&mut chain, token, "approve", 0, vec![at(dex), wide(u128::MAX)]).result.is_ok());
+    assert!(call(&mut chain, dex, "add_liquidity", 10_000_000, vec![at(COIN), at(token), wide(10_000_000), wide(20_000_000), wide(0), wide(0)]).result.is_ok());
+    let expected = at_one_percent(100_000, 10_000_000, 20_000_000);
+    let traded = call(&mut chain, dex, "swap", 100_000, vec![at(COIN), at(token), wide(100_000), wide(0)]);
+    assert_eq!(returned(&traded), [TxCallArgumentType::U256(expected)]);
+
+    // The EVM DEX: its router quotes by the same fee, read through the native precompile.
+    let wdev = create(&mut chain, include_str!("../../../contracts/evm/WDEV.bin"), Vec::new());
+    let factory = create(&mut chain, include_str!("../../../contracts/evm/DexFactory.bin"), Vec::new());
+    let router = create(&mut chain, include_str!("../../../contracts/evm/DexRouter.bin"), encode_values(&[Addr, Addr], &[evm_address(&factory), evm_address(&wdev)]).unwrap());
+    let quoted = evm_call(&mut chain, router, "getAmountOut(uint256,uint256,uint256)", &[AbiValue::Uint(u256::new(100_000)), AbiValue::Uint(u256::new(10_000_000)), AbiValue::Uint(u256::new(20_000_000))], &[Uint(256), Uint(256), Uint(256)]);
+    assert_eq!(words(&quoted), [expected]);
+}

@@ -390,6 +390,7 @@ async fn simulate(api: &Arc<Api>, call: Call, (at, header): (Arc<State>, BlockHe
             chain_id: chain,
             names: api.rules.names.as_deref().cloned(),
             hash: api.rules.hash,
+            vm: api.rules.vm,
         };
 
         let bridge = evm::Bridge {

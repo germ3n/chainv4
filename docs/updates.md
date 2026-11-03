@@ -167,7 +167,7 @@ their own; they wait, stopped, at the last block both agree on.
 - **By governance** on a chain with it, as `Change::Upgrade`:
 
   ```sh
-  chainv4 send --key member.key approve-change --upgrade 0.2.0 --upgrade-from 150000
+  chainv4 send --key member.key vote-change --vote yes --upgrade 0.2.0 --upgrade-from 150000
   ```
 
   It is kept in state (`change:upgrade`), a later one replaces it, and `from` must be ahead of the

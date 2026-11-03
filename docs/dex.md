@@ -19,8 +19,8 @@ The `dex` cargo feature (default on) holds what the apps quote with, `src/dex.rs
 ## Pools and prices
 
 - **A pool's price** is what it holds of one asset per the other. A trade of `x` into a pool
-  holding `X` and `Y` pays out `x·997·Y / (X·1000 + x·997)` (`dex::amount_out`, Uniswap V2's
-  `getAmountOut`), so the product of what it holds grows by the fee.
+  holding `X` and `Y` pays out `x·(10000−f)·Y / (X·10000 + x·(10000−f))` (`dex::amount_out`,
+  Uniswap V2's `getAmountOut`), `f` the chain's fee, so the product of what it holds grows by it.
 - **Adding** takes both assets at the pool's ratio, at most the amounts offered and at least the
   least asked, and mints shares:
   - for a new pool, the square root of the product, less 1,000 kept back forever so it is never
@@ -34,6 +34,18 @@ The `dex` cargo feature (default on) holds what the apps quote with, `src/dex.rs
   weight on the price.
 - **Slippage** sets the least a trade takes (`dex::least_out`); a trade that would pay less fails
   instead.
+
+## The fee
+
+One fee for both DEXes, the chain's: in hundredths of a percent, 30 (0.3%) unless genesis's `dex`
+names another, and `Change::Dex` changes it from the block after its decision.
+
+- **The native DEX** reads it as it trades, `chain.dex_fee()`, from the call's block.
+- **The EVM DEX** reads it through the native precompile, `dexFeeBps()` at `0x…4e43`: the pair's
+  swap checks the product by it, and the router quotes by it, so `getAmountOut` is `view`, no
+  longer `pure`.
+- **The apps** take it from `GET /status`'s `dex_fee_bps`, and quote, show and sum fees by it.
+- **Pools already open** charge the new fee from the next block; nothing is redeployed.
 
 ## The native DEX: dex.lua
 

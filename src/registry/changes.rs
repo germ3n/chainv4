@@ -10,7 +10,7 @@ use {
     crate::consensus::ConsensusConfig,
     crate::crypto::hashable::Hashable,
     crate::db::{Column, DbError, State},
-    crate::governance::{Change, ChangeKind},
+    crate::governance::{Change, ChangeKind, ChangeVote},
     crate::structs::address::Address,
     crate::structs::u256::u256,
     r#macro::document,
@@ -22,7 +22,10 @@ const DECIDED: &[u8] = b"change:decided";
 const BALLOT: &[u8] = b"change:ballot:";
 const VERSION: &[u8] = b"change:version:";
 const BOOTNODES: &[u8] = b"change:bootnodes";
-const NAME_PRICES: &[u8] = b"change:name-prices";
+const NAMES: &[u8] = b"change:names";
+const TOKEN_FUNCTIONS: &[u8] = b"change:token-functions";
+const EVM_SPEC: &[u8] = b"change:evm-spec";
+const DEX: &[u8] = b"change:dex";
 const COLLECTIONS: &[u8] = b"change:collections";
 const FEDERATION: &[u8] = crate::registry::federation::FEDERATION_KEY;
 const DIRECTORY: &[u8] = crate::registry::directory::DIRECTORY_KEY;
@@ -32,6 +35,8 @@ const LIMITS: &[u8] = b"change:limits";
 const FINALITY: &[u8] = b"change:finality";
 const UPGRADE: &[u8] = b"change:upgrade";
 const NAME: &[u8] = b"change:name";
+const GOVERNANCE: &[u8] = b"change:governance";
+const REJECTED: &[u8] = b"change:rejected";
 
 /// How many changes of one kind were decided, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -62,7 +67,7 @@ impl Hashable for ChainName {}
 #[document(
     summary = "Where an approval is made: its block's height and epoch, and how many epochs ahead finality fixes what is decided, which Change::Finality takes effect after.",
     category = "Governance",
-    see_also = "Changes::approve",
+    see_also = "Changes::vote",
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecidedAt {
@@ -141,52 +146,63 @@ pub struct DecidedBootnodes {
 impl Hashable for DecidedBootnodes {}
 
 #[document(
-    summary = "The name prices governance decided last, which replace genesis's.",
+    summary = "The EVM specs governance decided, each with the height it runs from, oldest first: a block runs the last that took effect by its height, or genesis's before any.",
     category = "Governance",
-    see_also = "Changes::name_prices, Change::NamePrices",
+    see_also = "Change::EvmSpec, Changes::evm_spec_at",
 )]
-#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct DecidedNamePrices {
-    #[document(summary = "What a year costs by a name's length, as NamesConfig::prices lists them.")]
-    #[wincode(with = "crate::structs::u256::U256LeList")]
-    pub prices: Vec<u256>,
+#[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct EvmSpecs {
+    #[document(summary = "Each decided spec and the first height it runs.")]
+    pub eras: Vec<(u64, crate::params::vm::EvmSpec)>,
 }
 
-impl Hashable for DecidedNamePrices {}
+impl Hashable for EvmSpecs {}
+
+/// The token functions in force, as a state value.
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct TokenFunctions {
+    functions: Vec<String>,
+}
+
+impl Hashable for TokenFunctions {}
 
 #[document(
-    summary = "One account's approval of a change.",
+    summary = "One account's vote on a change.",
     category = "Governance",
-    see_also = "ChangeBallot",
+    see_also = "ChangeBallot, ChangeVote",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct ChangeApproval {
-    #[document(summary = "The approving account.")]
+pub struct CastVote {
+    #[document(summary = "The voting account.")]
     pub account: Address,
-    #[document(summary = "The change it approves.")]
+    #[document(summary = "The change it votes on.")]
     pub change: Change,
-    #[document(summary = "The epoch it was made in. It counts for approval_epochs epochs from there, and approving again starts it afresh.")]
+    #[document(summary = "Yes, No or Abstain.")]
+    pub vote: ChangeVote,
+    #[document(summary = "The epoch it was cast in. It counts for approval_epochs epochs from there, and voting again starts it afresh.")]
     pub epoch: u64,
 }
 
-impl ChangeApproval {
-    #[document(parent = "ChangeApproval", summary = "Whether it still counts in an epoch, when approvals count for approval_epochs epochs.")]
+impl CastVote {
+    #[document(parent = "CastVote", summary = "Whether it still counts in an epoch, when votes count for approval_epochs epochs.")]
     pub fn counts(&self, epoch: u64, approval_epochs: u64) -> bool {
         epoch < self.epoch.saturating_add(approval_epochs)
     }
 }
 
 #[document(
-    summary = "The approvals for changing one kind of setting from what was decided last, at most one per account: an account backs one change of each kind at once. An account that approves another change of the kind moves its approval there, and one that withdraws takes it back. An approval stops counting approval_epochs epochs after the one it was made in, and what it weighs is counted afresh whenever the ballot is: an account that lost its standing since weighs nothing.",
+    summary = "The votes on changing one kind of setting from what was decided last: at most one per account on each change, and at most one Yes per account in the kind, so an account backs one change of each kind at once. A new vote replaces the account's old one on that change, and Yes on another change of the kind moves its Yes there. A vote stops counting approval_epochs epochs after the one it was cast in, and what it weighs is counted afresh whenever the ballot is: an account that lost its standing since weighs nothing. The changes rejected at the kind's version stay listed, so none comes straight back.",
     category = "Governance",
-    see_also = "Changes::approve",
+    see_also = "Changes::vote",
 )]
 #[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct ChangeBallot {
-    #[document(summary = "The kind's version the approvals change.")]
+    #[document(summary = "The kind's version the votes change.")]
     pub version: u64,
-    #[document(summary = "The approvals, in the order they came.")]
-    pub approvals: Vec<ChangeApproval>,
+    #[document(summary = "The votes, in the order they came.")]
+    pub votes: Vec<CastVote>,
+    #[document(summary = "The changes rejected at this version, in the order they were.")]
+    pub rejected: Vec<Change>,
 }
 
 impl Hashable for ChangeBallot {}
@@ -194,29 +210,39 @@ impl Hashable for ChangeBallot {}
 impl ChangeBallot {
     #[document(
         parent = "ChangeBallot",
-        summary = "The ballot as it stands in an epoch: only the approvals that still count.",
+        summary = "The ballot as it stands in an epoch: only the votes that still count.",
         params = {
             epoch = "The epoch to count in.",
-            approval_epochs = "How many epochs an approval counts for.",
+            approval_epochs = "How many epochs a vote counts for.",
         },
     )]
     pub fn counting(mut self, epoch: u64, approval_epochs: u64) -> ChangeBallot {
-        self.approvals.retain(|approval| approval.counts(epoch, approval_epochs));
+        self.votes.retain(|vote| vote.counts(epoch, approval_epochs));
         self
     }
 
-    #[document(parent = "ChangeBallot", summary = "Who approved a change.")]
-    pub fn approvers(&self, change: &Change) -> Vec<Address> {
-        self.approvals.iter().filter(|approval| approval.change == *change).map(|approval| approval.account).collect()
+    #[document(parent = "ChangeBallot", summary = "Who voted a way on a change.")]
+    pub fn voters(&self, change: &Change, vote: ChangeVote) -> Vec<Address> {
+        self.votes.iter().filter(|cast| cast.change == *change && cast.vote == vote).map(|cast| cast.account).collect()
     }
 
-    #[document(parent = "ChangeBallot", summary = "The changes approved, each once, in the order their first approval came.")]
+    #[document(parent = "ChangeBallot", summary = "Who voted Yes on a change.")]
+    pub fn approvers(&self, change: &Change) -> Vec<Address> {
+        self.voters(change, ChangeVote::Yes)
+    }
+
+    #[document(parent = "ChangeBallot", summary = "The votes on a change, in the order they came.")]
+    pub fn votes_on<'b>(&'b self, change: &'b Change) -> impl Iterator<Item = &'b CastVote> + 'b {
+        self.votes.iter().filter(move |cast| cast.change == *change)
+    }
+
+    #[document(parent = "ChangeBallot", summary = "The changes voted on, each once, in the order their first vote came.")]
     pub fn changes(&self) -> Vec<Change> {
         let mut changes: Vec<Change> = Vec::new();
 
-        for approval in &self.approvals {
-            if !changes.contains(&approval.change) {
-                changes.push(approval.change.clone());
+        for vote in &self.votes {
+            if !changes.contains(&vote.change) {
+                changes.push(vote.change.clone());
             }
         }
 
@@ -225,22 +251,103 @@ impl ChangeBallot {
 }
 
 #[document(
-    summary = "What an approval did.",
+    summary = "How the counting votes on one change stand: what Yes, No and Abstain weigh, what every voter weighs together, what Yes needs, and the quorum's weight, which Yes, No and Abstain together must reach before Yes decides.",
     category = "Governance",
-    see_also = "Changes::approve",
+    see_also = "Changes::tally, ChangeVote",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tally {
+    #[document(summary = "What the Yes votes weigh.")]
+    pub yes: u256,
+    #[document(summary = "What the No votes weigh.")]
+    pub no: u256,
+    #[document(summary = "What the Abstain votes weigh.")]
+    pub abstain: u256,
+    #[document(summary = "What every account that may vote weighs together.")]
+    pub total: u256,
+    #[document(summary = "What Yes must weigh to decide it.")]
+    pub needed: u256,
+    #[document(summary = "What the votes of any kind must weigh together before Yes decides it: the quorum's share of total, rounded up.")]
+    pub quorum: u256,
+}
+
+impl Tally {
+    #[document(parent = "Tally", summary = "What every vote weighs together, Abstain included: what the quorum is measured by.")]
+    pub fn voted(&self) -> u256 {
+        self.yes.saturating_add(self.no).saturating_add(self.abstain)
+    }
+
+    #[document(parent = "Tally", summary = "Whether it decides the change: Yes weighs what is needed, and the quorum has voted.")]
+    pub fn decides(&self) -> bool {
+        self.yes >= self.needed && self.voted() >= self.quorum
+    }
+
+    #[document(parent = "Tally", summary = "Whether the change can still pass: whether what has not voted No, Yes, Abstain and those yet to vote, could still reach what is needed.")]
+    pub fn can_pass(&self) -> bool {
+        self.total.saturating_sub(self.no) >= self.needed
+    }
+
+    #[document(parent = "Tally", summary = "How much more Yes needs to weigh, 0 once it weighs enough.")]
+    pub fn more_needed(&self) -> u256 {
+        self.needed.saturating_sub(self.yes)
+    }
+}
+
+#[document(
+    summary = "What a vote did.",
+    category = "Governance",
+    see_also = "Changes::vote",
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChangeApproved {
-    #[document(summary = "It counted, and the change's approvals now weigh this much of what they need.")]
-    Counted { weight: u256, needed: u256 },
-    #[document(summary = "It was the last one needed: the change is decided, as the chain's decision-th and its kind's version-th.")]
-    DecidedChange { decision: u64, kind: ChangeKind, version: u64 },
+pub enum ChangeVoted {
+    #[document(summary = "It counted, and the change's votes now stand so.")]
+    Counted(Tally),
+    #[document(summary = "It decided the change, as the chain's decision-th and its kind's version-th.")]
+    Decided { decision: u64, kind: ChangeKind, version: u64 },
+    #[document(summary = "It left the change unable to pass, so the change is rejected: the chain's rejection-th, at its kind's version, which stays where it was.")]
+    Rejected { rejection: u64, kind: ChangeKind, version: u64 },
 }
+
+#[document(
+    summary = "How votes count: for how many epochs, and the quorum. Governance's settings, genesis's or those decided last.",
+    category = "Governance",
+    see_also = "Changes::vote, GovernanceConfig",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BallotRules {
+    #[document(summary = "How many epochs a vote counts for.")]
+    pub approval_epochs: u64,
+    #[document(summary = "The share of the voters' weight, in thousandths, that must vote on a change before Yes decides it.")]
+    pub quorum_permille: u32,
+}
+
+#[document(
+    summary = "Governance's settings as decided last, and the first block that counts votes by them: the one after the block that decided them.",
+    category = "Governance",
+    see_also = "Change::Governance, Changes::governance",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct DecidedGovernance {
+    #[document(summary = "The settings.")]
+    pub config: crate::governance::GovernanceConfig,
+    #[document(summary = "The first block they count votes in.")]
+    pub from: u64,
+}
+
+impl Hashable for DecidedGovernance {}
+
+/// How many changes were rejected, as a state value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct Rejections {
+    count: u64,
+}
+
+impl Hashable for Rejections {}
 
 #[document(
     summary = "Governance's records in chain state: the consensus fixed for each epoch, the one decided last, and the ballot for changing it. A decided change is fixed for epochs activation_delay on at the checkpoints that follow, like finality's voters, so every branch that split off after the checkpoint that fixed an epoch's consensus checks that epoch's blocks alike.",
     category = "Governance",
-    see_also = "Governance, Change, Tx::ApproveChange",
+    see_also = "Governance, Change, Tx::VoteChange",
 )]
 pub struct Changes<'a> {
     state: &'a State,
@@ -300,10 +407,34 @@ impl<'a> Changes<'a> {
 
     #[document(
         parent = "Changes",
-        summary = "The name prices decided last, or None while governance never decided any, when genesis's stand.",
+        summary = "The name settings decided last, or None while governance never decided any, when genesis's stand.",
     )]
-    pub fn name_prices(&self) -> Result<Option<Vec<u256>>, DbError> {
-        Ok(self.state.get_value::<DecidedNamePrices>(Column::Validators, NAME_PRICES)?.map(|decided| decided.prices))
+    pub fn names(&self) -> Result<Option<crate::registry::names::NameSettings>, DbError> {
+        self.state.get_value(Column::Validators, NAMES)
+    }
+
+    #[document(parent = "Changes", summary = "The token functions decided last, or None while governance never decided any, when genesis's stand.")]
+    pub fn token_functions(&self) -> Result<Option<Vec<String>>, DbError> {
+        Ok(self.state.get_value::<TokenFunctions>(Column::Validators, TOKEN_FUNCTIONS)?.map(|decided| decided.functions))
+    }
+
+    #[document(parent = "Changes", summary = "Every EVM spec governance decided, with the height each runs from.")]
+    pub fn evm_specs(&self) -> Result<EvmSpecs, DbError> {
+        Ok(self.state.get_value(Column::Validators, EVM_SPEC)?.unwrap_or_default())
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "The EVM spec a block at a height runs: the last decided to run by it, or genesis's.",
+        params = { height = "The block's height.", genesis = "Genesis's spec." },
+    )]
+    pub fn evm_spec_at(&self, height: u64, genesis: crate::params::vm::EvmSpec) -> Result<crate::params::vm::EvmSpec, DbError> {
+        Ok(self.evm_specs()?.eras.into_iter().rev().find(|(from, _)| *from <= height).map_or(genesis, |(_, spec)| spec))
+    }
+
+    #[document(parent = "Changes", summary = "The DEX's settings decided last, or None while governance never decided any, when genesis's stand.")]
+    pub fn dex(&self) -> Result<Option<crate::params::vm::DexSettings>, DbError> {
+        self.state.get_value(Column::Validators, DEX)
     }
 
     #[document(
@@ -442,7 +573,7 @@ impl<'a> Changes<'a> {
 
     #[document(
         parent = "Changes",
-        summary = "The approvals so far for changing a kind of setting from what was decided last, expired ones included: ChangeBallot::counting leaves only those that count.",
+        summary = "The votes so far on changing a kind of setting from what was decided last, expired ones included: ChangeBallot::counting leaves only those that count.",
     )]
     pub fn ballot(&self, kind: ChangeKind) -> Result<ChangeBallot, DbError> {
         let version = self.version_of(kind)?;
@@ -451,18 +582,18 @@ impl<'a> Changes<'a> {
         // Approvals for an older version never count.
         Ok(match ballot.version == version {
             true => ballot,
-            false => ChangeBallot { version, approvals: Vec::new() },
+            false => ChangeBallot { version, ..ChangeBallot::default() },
         })
     }
 
-    #[document(parent = "Changes", summary = "Every kind's ballot with an approval in it, expired ones included, in kind order.")]
+    #[document(parent = "Changes", summary = "Every kind's ballot with a vote in it, expired ones included, in kind order.")]
     pub fn ballots(&self) -> Result<Vec<(ChangeKind, ChangeBallot)>, DbError> {
         let mut ballots = Vec::new();
 
         for kind in ChangeKind::ALL {
             let ballot = self.ballot(kind)?;
 
-            if !ballot.approvals.is_empty() {
+            if !ballot.votes.is_empty() {
                 ballots.push((kind, ballot));
             }
         }
@@ -470,43 +601,80 @@ impl<'a> Changes<'a> {
         Ok(ballots)
     }
 
-    #[cfg(feature = "governance")]
-    #[document(
-        parent = "Changes",
-        summary = "What a change's approvals weigh now: each approver's weight as governance counts it in this state, which an approver that lost its standing since no longer adds to.",
-    )]
-    pub fn weight_of(&self, ballot: &ChangeBallot, change: &Change, epoch: u64, governance: &dyn Governance) -> Result<u256, DbError> {
-        let mut weight = u256::ZERO;
+    #[document(parent = "Changes", summary = "Governance's settings as decided last, with the block they count votes from, or None while governance never changed itself, when genesis's stand.")]
+    pub fn governance(&self) -> Result<Option<DecidedGovernance>, DbError> {
+        self.state.get_value(Column::Validators, GOVERNANCE)
+    }
 
-        for account in ballot.approvers(change) {
-            weight = weight.saturating_add(governance.weight(self.state, epoch, &account)?.unwrap_or(u256::ZERO));
-        }
-
-        Ok(weight)
+    #[document(parent = "Changes", summary = "How many changes were rejected since genesis, of every kind: the count a light client follows without gaps, as it does the decisions.")]
+    pub fn rejections(&self) -> Result<u64, DbError> {
+        Ok(self.state.get_value::<Rejections>(Column::Validators, REJECTED)?.unwrap_or_default().count)
     }
 
     #[cfg(feature = "governance")]
     #[document(
         parent = "Changes",
-        summary = "Counts an account's approval of a change. Once the approvals that still count for the same change weigh what governance needs, it is decided, and the checkpoints that follow fix it for later epochs.",
+        summary = "How the counting votes on a change stand in this state: each voter's weight as governance counts it now, which a voter that lost its standing since no longer adds to, beside what Yes needs, the whole electorate's weight and the quorum's.",
         params = {
-            sender = "Who sent the approval: an account governance lets approve.",
-            version = "The version of the change's kind it changes, which must be the decided one's.",
-            change = "The change it approves, checked to fit the chain already.",
-            at = "Where the approval is made: the block, its epoch and finality's activation_delay.",
-            approval_epochs = "How many epochs an approval counts for.",
-            governance = "Who may approve, and what it takes.",
+            ballot = "The ballot, already left to the votes that count.",
+            change = "The change.",
+            epoch = "The epoch it is counted in.",
+            quorum_permille = "The quorum, in thousandths of the whole.",
+            governance = "Who may vote, and what it takes.",
         },
-        returns = "Whether that decided it. NotGoverning for a sender that may not approve, StaleChange for an older version, SameChange for the consensus, bootnodes, name prices, collection standards, federation or directory already decided.",
     )]
-    pub fn approve(&self, sender: &Address, version: u64, change: Change, at: DecidedAt, approval_epochs: u64, governance: &dyn Governance) -> Result<ChangeApproved, RegistryError> {
+    pub fn tally(&self, ballot: &ChangeBallot, change: &Change, epoch: u64, quorum_permille: u32, governance: &dyn Governance) -> Result<Tally, DbError> {
+        let mut tally = Tally {
+            total: governance.total(self.state, epoch)?,
+            needed: governance.needed(self.state, epoch)?,
+            ..Tally::default()
+        };
+
+        for cast in ballot.votes_on(change) {
+            let weight = governance.weight(self.state, epoch, &cast.account)?.unwrap_or(u256::ZERO);
+            let side = match cast.vote {
+                ChangeVote::Yes => &mut tally.yes,
+                ChangeVote::No => &mut tally.no,
+                ChangeVote::Abstain => &mut tally.abstain,
+            };
+            *side = side.saturating_add(weight);
+        }
+
+        // The quorum's share of the whole, rounded up, so a quorum of any share asks at least one
+        // vote's weight once there is any.
+        let thousand = u256::from(1000u64);
+        tally.quorum = tally.total.saturating_mul(u256::from(quorum_permille)).saturating_add(thousand - u256::ONE) / thousand;
+
+        Ok(tally)
+    }
+
+    #[cfg(feature = "governance")]
+    #[document(
+        parent = "Changes",
+        summary = "Counts an account's vote on a change, replacing its old vote on it. Once Yes weighs what governance needs and the quorum has voted, the change is decided, and the checkpoints that follow fix it for later epochs; once what has not voted No could no longer reach what governance needs, it is rejected instead, its votes cleared, and the same change refused at the kind's version from then on.",
+        params = {
+            sender = "Who voted: an account governance lets vote.",
+            version = "The version of the change's kind it changes, which must be the decided one's.",
+            change = "The change it votes on, checked to fit the chain already.",
+            vote = "Yes, No or Abstain.",
+            at = "Where the vote is cast: the block, its epoch and finality's activation_delay.",
+            rules = "How long votes count, and the quorum.",
+            governance = "Who may vote, and what it takes.",
+        },
+        returns = "Whether that decided or rejected it. NotGoverning for a sender that may not vote, StaleChange for an older version, SameChange for what stands already, RejectedChange for a change rejected at this version, BadChange in the block that changed governance itself.",
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub fn vote(&self, sender: &Address, version: u64, change: Change, vote: ChangeVote, at: DecidedAt, rules: BallotRules, governance: &dyn Governance) -> Result<ChangeVoted, RegistryError> {
         let epoch = at.epoch;
         let kind = change.kind();
-        let decided = self.standing(sender, kind, version, epoch, governance)?;
+        let decided = self.standing(sender, kind, version, at, governance)?;
         let same = match &change {
             Change::Consensus(consensus) => *consensus == decided.consensus,
             Change::Bootnodes(bootnodes) => self.bootnodes()?.as_ref() == Some(bootnodes),
-            Change::NamePrices(prices) => self.name_prices()?.as_ref() == Some(prices),
+            Change::Names(settings) => self.names()?.as_ref() == Some(settings),
+            Change::TokenFunctions(functions) => self.token_functions()?.as_ref() == Some(functions),
+            Change::EvmSpec { spec, .. } => self.evm_specs()?.eras.last().map(|(_, last)| last) == Some(spec),
+            Change::Dex(dex) => self.dex()?.as_ref() == Some(dex),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
             Change::Directory(directory) => self.directory()?.as_ref() == Some(directory),
@@ -516,26 +684,46 @@ impl<'a> Changes<'a> {
             Change::Finality(config) | Change::SwitchFinality { config, .. } => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
             Change::Upgrade(upgrade) => self.upgrade()?.as_ref() == Some(upgrade),
             Change::Name(name) => self.name()?.as_ref() == Some(name),
+            Change::Governance(config) => self.governance()?.map(|decided| decided.config).as_ref() == Some(config),
         };
 
         if same {
             return Err(RegistryError::SameChange);
         }
 
-        let mut ballot = self.ballot(kind)?.counting(epoch, approval_epochs);
-        ballot.approvals.retain(|approval| approval.account != *sender);
-        ballot.approvals.push(ChangeApproval {
+        let mut ballot = self.ballot(kind)?.counting(epoch, rules.approval_epochs);
+
+        if ballot.rejected.contains(&change) {
+            return Err(RegistryError::RejectedChange);
+        }
+
+        // One vote an account on each change, and one Yes an account in the kind.
+        ballot.votes.retain(|cast| cast.account != *sender || (cast.change != change && (vote != ChangeVote::Yes || cast.vote != ChangeVote::Yes)));
+        ballot.votes.push(CastVote {
             account: *sender,
             change: change.clone(),
+            vote,
             epoch,
         });
-        let weight = self.weight_of(&ballot, &change, epoch, governance)?;
-        let needed = governance.needed(self.state, epoch)?;
+        let tally = self.tally(&ballot, &change, epoch, rules.quorum_permille, governance)?;
 
-        if weight < needed {
+        if !tally.decides() {
+            if tally.can_pass() {
+                self.state.put_value(Column::Validators, ballot_key(kind), &ballot);
+
+                return Ok(ChangeVoted::Counted(tally));
+            }
+
+            // It can no longer pass: its votes go, and it stays rejected while the kind's version
+            // does. The version itself stays, as nothing it names changed, so every other change
+            // of the kind keeps its votes and every vote in flight still counts.
+            let rejection = self.rejections()? + 1;
+            ballot.votes.retain(|cast| cast.change != change);
+            ballot.rejected.push(change);
             self.state.put_value(Column::Validators, ballot_key(kind), &ballot);
+            self.state.put_value(Column::Validators, REJECTED.to_vec(), &Rejections { count: rejection });
 
-            return Ok(ChangeApproved::Counted { weight, needed });
+            return Ok(ChangeVoted::Rejected { rejection, kind, version });
         }
 
         // The chain's count of decisions, and the kind's own: only its ballot empties.
@@ -550,9 +738,30 @@ impl<'a> Changes<'a> {
 
                 decided.consensus
             }
-            // So do name prices: what a name costs is read when one is registered or renewed.
-            Change::NamePrices(prices) => {
-                self.state.put_value(Column::Validators, NAME_PRICES.to_vec(), &DecidedNamePrices { prices });
+            // Names, tokens and the DEX's fee are read for each block from its parent's state, so
+            // they hold from the next block.
+            Change::Names(settings) => {
+                self.state.put_value(Column::Validators, NAMES.to_vec(), &settings);
+
+                decided.consensus
+            }
+            Change::TokenFunctions(functions) => {
+                self.state.put_value(Column::Validators, TOKEN_FUNCTIONS.to_vec(), &TokenFunctions { functions });
+
+                decided.consensus
+            }
+            Change::Dex(dex) => {
+                self.state.put_value(Column::Validators, DEX.to_vec(), &dex);
+
+                decided.consensus
+            }
+            // An EVM spec runs from the height it names, which is ahead; one decided later
+            // replaces what was to run from its height on.
+            Change::EvmSpec { spec, from } => {
+                let mut specs = self.evm_specs()?;
+                specs.eras.retain(|(at, _)| *at < from);
+                specs.eras.push((from, spec));
+                self.state.put_value(Column::Validators, EVM_SPEC.to_vec(), &specs);
 
                 decided.consensus
             }
@@ -626,38 +835,51 @@ impl<'a> Changes<'a> {
 
                 decided.consensus
             }
+            // Governance's own settings count votes from the next block. Every vote open now was
+            // cast for, and weighed by, the settings that go, so none carries over: each kind's
+            // ballot empties, while its version stays, since nothing it names changed.
+            Change::Governance(config) => {
+                self.state.put_value(Column::Validators, GOVERNANCE.to_vec(), &DecidedGovernance { config, from: at.height + 1 });
+
+                for other in ChangeKind::ALL {
+                    self.state.delete(Column::Validators, ballot_key(other));
+                }
+
+                decided.consensus
+            }
         };
         self.state.put_value(Column::Validators, DECIDED.to_vec(), &DecidedChange { version: decision, consensus });
         self.state.delete(Column::Validators, ballot_key(kind));
 
-        Ok(ChangeApproved::DecidedChange { decision, kind, version })
+        Ok(ChangeVoted::Decided { decision, kind, version })
     }
 
     #[cfg(feature = "governance")]
     #[document(
         parent = "Changes",
-        summary = "Takes back an account's approval of a change of a kind, while it still counts, so it backs none of that kind.",
+        summary = "Clears an account's vote on a change, while it still counts, so the account has no say on it until it votes again.",
         params = {
             sender = "The account.",
-            kind = "The kind of change it approved.",
-            version = "The kind's version its approval was for, which must be the decided one's.",
-            epoch = "The epoch it is withdrawn in.",
-            approval_epochs = "How many epochs an approval counts for.",
-            governance = "Who may approve.",
+            version = "The kind's version its vote was for, which must be the decided one's.",
+            change = "The change it voted on.",
+            at = "Where it is cleared: the block and its epoch.",
+            approval_epochs = "How many epochs a vote counts for.",
+            governance = "Who may vote.",
         },
-        returns = "NotGoverning for a sender that may not approve, StaleChange for an older version, NoApproval when it has no approval that still counts.",
+        returns = "NotGoverning for a sender that may not vote, StaleChange for an older version, NoVote when it has no vote on the change that still counts.",
     )]
-    pub fn withdraw(&self, sender: &Address, kind: ChangeKind, version: u64, epoch: u64, approval_epochs: u64, governance: &dyn Governance) -> Result<(), RegistryError> {
-        self.standing(sender, kind, version, epoch, governance)?;
-        let mut ballot = self.ballot(kind)?.counting(epoch, approval_epochs);
-        let before = ballot.approvals.len();
-        ballot.approvals.retain(|approval| approval.account != *sender);
+    pub fn clear(&self, sender: &Address, version: u64, change: &Change, at: DecidedAt, approval_epochs: u64, governance: &dyn Governance) -> Result<(), RegistryError> {
+        let kind = change.kind();
+        self.standing(sender, kind, version, at, governance)?;
+        let mut ballot = self.ballot(kind)?.counting(at.epoch, approval_epochs);
+        let before = ballot.votes.len();
+        ballot.votes.retain(|cast| cast.account != *sender || cast.change != *change);
 
-        if ballot.approvals.len() == before {
-            return Err(RegistryError::NoApproval);
+        if ballot.votes.len() == before {
+            return Err(RegistryError::NoVote);
         }
 
-        match ballot.approvals.is_empty() {
+        match ballot.votes.is_empty() && ballot.rejected.is_empty() {
             true => self.state.delete(Column::Validators, ballot_key(kind)),
             false => self.state.put_value(Column::Validators, ballot_key(kind), &ballot),
         }
@@ -666,10 +888,16 @@ impl<'a> Changes<'a> {
     }
 
     #[cfg(feature = "governance")]
-    /// What was decided last, for a sender with standing, at a version that is its kind's.
-    fn standing(&self, sender: &Address, kind: ChangeKind, version: u64, epoch: u64, governance: &dyn Governance) -> Result<DecidedChange, RegistryError> {
-        if governance.weight(self.state, epoch, sender)?.is_none() {
+    /// What was decided last, for a sender with standing, at a version that is its kind's, in a
+    /// block that did not change governance itself: the rest of that one counts by the old
+    /// settings, and its votes would be cleared by the new.
+    fn standing(&self, sender: &Address, kind: ChangeKind, version: u64, at: DecidedAt, governance: &dyn Governance) -> Result<DecidedChange, RegistryError> {
+        if governance.weight(self.state, at.epoch, sender)?.is_none() {
             return Err(RegistryError::NotGoverning);
+        }
+
+        if self.governance()?.is_some_and(|decided| decided.from > at.height) {
+            return Err(RegistryError::BadChange("governance changed itself in this block; vote from the next"));
         }
 
         let decided = self.version_of(kind)?;
@@ -694,7 +922,7 @@ mod tests {
     use crate::structs::address::Address;
     use std::sync::Arc;
 
-    /// Three accounts, the first weighing two, needing three.
+    /// Three accounts, the first weighing two, needing three of the four.
     struct Weighted;
 
     fn member(seed: u8) -> Address {
@@ -717,6 +945,24 @@ mod tests {
         fn needed(&self, _state: &State, _epoch: u64) -> Result<u256, DbError> {
             Ok(u256::from(3u64))
         }
+
+        fn total(&self, _state: &State, _epoch: u64) -> Result<u256, DbError> {
+            Ok(u256::from(4u64))
+        }
+
+        fn voters(&self, _state: &State, _epoch: u64) -> Result<Vec<(Address, u256)>, DbError> {
+            Ok(vec![(member(1), u256::from(2u64)), (member(2), u256::ONE), (member(3), u256::ONE)])
+        }
+    }
+
+    /// Votes counting for some epochs, with no quorum.
+    fn rules(approval_epochs: u64) -> BallotRules {
+        BallotRules { approval_epochs, quorum_permille: 0 }
+    }
+
+    /// A vote that counted, Yes then weighing this much of the three needed, out of four.
+    fn counted(yes: u256) -> Result<ChangeVoted, RegistryError> {
+        Ok(ChangeVoted::Counted(Tally { yes, total: u256::from(4u64), needed: u256::from(3u64), ..Tally::default() }))
     }
 
     fn pow() -> ConsensusConfig {
@@ -725,6 +971,8 @@ mod tests {
             target_block_ms: 1_000,
             initial_difficulty: 1,
             min_difficulty: 1,
+            tuning: None,
+            window: None,
         })
     }
 
@@ -746,23 +994,23 @@ mod tests {
         assert_eq!(changes.consensus_for(3).unwrap(), None);
 
         // A stranger may not; the same consensus is no change; a stale version is refused.
-        assert_eq!(changes.approve(&member(9), 0, staked(), at(1), 4, &Weighted), Err(RegistryError::NotGoverning));
-        assert_eq!(changes.approve(&member(2), 0, Change::Consensus(pow()), at(1), 4, &Weighted), Err(RegistryError::SameChange));
-        assert_eq!(changes.approve(&member(2), 1, staked(), at(1), 4, &Weighted), Err(RegistryError::StaleChange(0)));
+        assert_eq!(changes.vote(&member(9), 0, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::NotGoverning));
+        assert_eq!(changes.vote(&member(2), 0, Change::Consensus(pow()), ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::SameChange));
+        assert_eq!(changes.vote(&member(2), 1, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::StaleChange(0)));
 
         // One of weight one, then the one of weight two decide it: three of three.
         assert_eq!(
-            changes.approve(&member(2), 0, staked(), at(1), 4, &Weighted),
-            Ok(ChangeApproved::Counted { weight: u256::ONE, needed: u256::from(3u64) })
+            changes.vote(&member(2), 0, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted),
+            counted(u256::ONE)
         );
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().approvers(&staked()), [member(2)]);
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().changes(), [staked()]);
-        assert_eq!(changes.approve(&member(1), 0, staked(), at(2), 4, &Weighted), Ok(ChangeApproved::DecidedChange { decision: 1, kind: ChangeKind::Consensus, version: 1 }));
+        assert_eq!(changes.vote(&member(1), 0, staked(), ChangeVote::Yes, at(2), rules(4), &Weighted), Ok(ChangeVoted::Decided { decision: 1, kind: ChangeKind::Consensus, version: 1 }));
 
         let Change::Consensus(consensus) = staked() else { unreachable!() };
 
         assert_eq!(changes.decided().unwrap(), DecidedChange { version: 1, consensus: consensus.clone() });
-        assert!(changes.ballot(ChangeKind::Consensus).unwrap().approvals.is_empty());
+        assert!(changes.ballot(ChangeKind::Consensus).unwrap().votes.is_empty());
 
         // The next checkpoints fix it ahead; the epochs fixed before keep the old one.
         changes.fix(5).unwrap();
@@ -779,11 +1027,11 @@ mod tests {
         changes.write_name("chainv4 testnet");
         let renamed = Change::Name("chainv4 mainnet".to_string());
 
-        assert_eq!(changes.approve(&member(1), 0, Change::Name("chainv4 testnet".to_string()), at(1), 4, &Weighted), Err(RegistryError::SameChange));
+        assert_eq!(changes.vote(&member(1), 0, Change::Name("chainv4 testnet".to_string()), ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::SameChange));
 
-        changes.approve(&member(1), 0, renamed.clone(), at(1), 4, &Weighted).unwrap();
+        changes.vote(&member(1), 0, renamed.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
         assert_eq!(changes.name().unwrap().as_deref(), Some("chainv4 testnet"), "genesis's stands until decided");
-        assert_eq!(changes.approve(&member(2), 0, renamed, at(1), 4, &Weighted), Ok(ChangeApproved::DecidedChange { decision: 1, kind: ChangeKind::Name, version: 1 }));
+        assert_eq!(changes.vote(&member(2), 0, renamed, ChangeVote::Yes, at(1), rules(4), &Weighted), Ok(ChangeVoted::Decided { decision: 1, kind: ChangeKind::Name, version: 1 }));
         assert_eq!(changes.name().unwrap().as_deref(), Some("chainv4 mainnet"));
         assert_eq!(changes.decided().unwrap().consensus, pow(), "the consensus stays");
     }
@@ -798,34 +1046,34 @@ mod tests {
         assert_eq!(changes.bootnodes().unwrap(), None, "genesis's stand until governance decides");
 
         // One account backs a change of each kind at once.
-        changes.approve(&member(2), 0, bootnodes.clone(), at(1), 4, &Weighted).unwrap();
-        changes.approve(&member(2), 0, staked(), at(1), 4, &Weighted).unwrap();
+        changes.vote(&member(2), 0, bootnodes.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        changes.vote(&member(2), 0, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
 
         assert_eq!(changes.ballot(ChangeKind::Bootnodes).unwrap().approvers(&bootnodes), [member(2)]);
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().approvers(&staked()), [member(2)]);
         assert_eq!(changes.ballots().unwrap().iter().map(|(kind, _)| *kind).collect::<Vec<_>>(), [ChangeKind::Consensus, ChangeKind::Bootnodes]);
         assert_eq!(
-            changes.approve(&member(1), 0, bootnodes.clone(), at(1), 4, &Weighted),
-            Ok(ChangeApproved::DecidedChange { decision: 1, kind: ChangeKind::Bootnodes, version: 1 })
+            changes.vote(&member(1), 0, bootnodes.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted),
+            Ok(ChangeVoted::Decided { decision: 1, kind: ChangeKind::Bootnodes, version: 1 })
         );
         assert_eq!(changes.bootnodes().unwrap(), Some(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()]));
         assert_eq!(changes.decided().unwrap(), DecidedChange { version: 1, consensus: pow() }, "the consensus stays, the count of decisions moves");
         assert_eq!((changes.version_of(ChangeKind::Bootnodes).unwrap(), changes.version_of(ChangeKind::Consensus).unwrap()), (1, 0));
-        assert!(changes.ballot(ChangeKind::Bootnodes).unwrap().approvals.is_empty(), "its own ballot empties");
+        assert!(changes.ballot(ChangeKind::Bootnodes).unwrap().votes.is_empty(), "its own ballot empties");
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().approvers(&staked()), [member(2)], "the other kind's approvals stand");
 
         // A stale version is the kind's own; the other kind's stays at 0.
-        assert_eq!(changes.approve(&member(1), 0, Change::Bootnodes(Vec::new()), at(1), 4, &Weighted), Err(RegistryError::StaleChange(1)));
-        assert_eq!(changes.approve(&member(1), 1, bootnodes, at(1), 4, &Weighted), Err(RegistryError::SameChange));
+        assert_eq!(changes.vote(&member(1), 0, Change::Bootnodes(Vec::new()), ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::StaleChange(1)));
+        assert_eq!(changes.vote(&member(1), 1, bootnodes, ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::SameChange));
         assert_eq!(
-            changes.approve(&member(1), 0, staked(), at(1), 4, &Weighted),
-            Ok(ChangeApproved::DecidedChange { decision: 2, kind: ChangeKind::Consensus, version: 1 }),
+            changes.vote(&member(1), 0, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted),
+            Ok(ChangeVoted::Decided { decision: 2, kind: ChangeKind::Consensus, version: 1 }),
             "the consensus decided second, as the chain's second decision and its kind's first"
         );
 
         // An empty list is a change too: the chain has no bootnodes from then on.
-        changes.approve(&member(1), 1, Change::Bootnodes(Vec::new()), at(1), 4, &Weighted).unwrap();
-        changes.approve(&member(2), 1, Change::Bootnodes(Vec::new()), at(1), 4, &Weighted).unwrap();
+        changes.vote(&member(1), 1, Change::Bootnodes(Vec::new()), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        changes.vote(&member(2), 1, Change::Bootnodes(Vec::new()), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
 
         assert_eq!(changes.bootnodes().unwrap(), Some(Vec::new()));
         assert_eq!((changes.decided().unwrap().version, changes.version_of(ChangeKind::Bootnodes).unwrap()), (3, 2));
@@ -848,27 +1096,168 @@ mod tests {
         changes.write_genesis(&pow(), 2).unwrap();
         let other = Change::Consensus(ConsensusConfig::Rotating { slot_ms: 1_000 });
 
-        changes.approve(&member(2), 0, staked(), at(1), 2, &Weighted).unwrap();
-        changes.approve(&member(3), 0, staked(), at(1), 2, &Weighted).unwrap();
+        changes.vote(&member(2), 0, staked(), ChangeVote::Yes, at(1), rules(2), &Weighted).unwrap();
+        changes.vote(&member(3), 0, staked(), ChangeVote::Yes, at(1), rules(2), &Weighted).unwrap();
 
         // Moving an approval takes it from the other change.
-        changes.approve(&member(3), 0, other.clone(), at(1), 2, &Weighted).unwrap();
+        changes.vote(&member(3), 0, other.clone(), ChangeVote::Yes, at(1), rules(2), &Weighted).unwrap();
 
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().approvers(&staked()), [member(2)]);
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().approvers(&other), [member(3)]);
 
         // Withdrawing needs an approval that still counts.
-        assert_eq!(changes.withdraw(&member(3), ChangeKind::Consensus, 0, 1, 2, &Weighted), Ok(()));
-        assert_eq!(changes.withdraw(&member(3), ChangeKind::Consensus, 0, 1, 2, &Weighted), Err(RegistryError::NoApproval));
-        assert_eq!(changes.withdraw(&member(9), ChangeKind::Consensus, 0, 1, 2, &Weighted), Err(RegistryError::NotGoverning));
+        assert_eq!(changes.clear(&member(3), 0, &other, at(1), 2, &Weighted), Ok(()));
+        assert_eq!(changes.clear(&member(3), 0, &other, at(1), 2, &Weighted), Err(RegistryError::NoVote));
+        assert_eq!(changes.clear(&member(9), 0, &other, at(1), 2, &Weighted), Err(RegistryError::NotGoverning));
 
         // An approval from epoch 1 counts through epoch 2 and not in 3: the weight-two account
         // alone does not decide then.
         assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().counting(2, 2).approvers(&staked()), [member(2)]);
         assert!(changes.ballot(ChangeKind::Consensus).unwrap().counting(3, 2).approvers(&staked()).is_empty());
         assert_eq!(
-            changes.approve(&member(1), 0, staked(), at(3), 2, &Weighted),
-            Ok(ChangeApproved::Counted { weight: u256::from(2u64), needed: u256::from(3u64) })
+            changes.vote(&member(1), 0, staked(), ChangeVote::Yes, at(3), rules(2), &Weighted),
+            counted(u256::from(2u64))
         );
+    }
+
+    /// The votes on a change as they stand in an epoch.
+    fn tallied(changes: &Changes, change: &Change, epoch: u64, rules: BallotRules) -> Tally {
+        let ballot = changes.ballot(change.kind()).unwrap().counting(epoch, rules.approval_epochs);
+
+        changes.tally(&ballot, change, epoch, rules.quorum_permille, &Weighted).unwrap()
+    }
+
+    #[test]
+    fn yes_no_and_abstain_weigh_apart_and_a_change_that_can_no_longer_pass_is_rejected() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+        let rotating = Change::Consensus(ConsensusConfig::Rotating { slot_ms: 1_000 });
+
+        // One No of the four leaves three that could still say Yes, as many as it needs.
+        assert_eq!(
+            changes.vote(&member(2), 0, staked(), ChangeVote::No, at(1), rules(4), &Weighted),
+            Ok(ChangeVoted::Counted(Tally { no: u256::ONE, total: u256::from(4u64), needed: u256::from(3u64), ..Tally::default() }))
+        );
+        changes.vote(&member(3), 0, staked(), ChangeVote::Abstain, at(1), rules(4), &Weighted).unwrap();
+        changes.vote(&member(3), 0, rotating.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+
+        let tally = tallied(&changes, &staked(), 1, rules(4));
+        assert_eq!((tally.yes, tally.no, tally.abstain, tally.voted()), (u256::ZERO, u256::ONE, u256::ONE, u256::from(2u64)));
+        assert!(tally.can_pass() && !tally.decides());
+        assert_eq!(tally.more_needed(), u256::from(3u64));
+
+        // The weight-two No leaves one that has not said No: it can no longer reach three.
+        assert_eq!(changes.vote(&member(1), 0, staked(), ChangeVote::No, at(1), rules(4), &Weighted), Ok(ChangeVoted::Rejected { rejection: 1, kind: ChangeKind::Consensus, version: 0 }));
+        assert_eq!(changes.rejections().unwrap(), 1);
+
+        let ballot = changes.ballot(ChangeKind::Consensus).unwrap();
+        assert_eq!(ballot.rejected, [staked()]);
+        assert!(ballot.votes_on(&staked()).next().is_none(), "its votes go with it");
+        assert_eq!(ballot.approvers(&rotating), [member(3)], "another change of the kind keeps its votes");
+        assert_eq!(changes.version_of(ChangeKind::Consensus).unwrap(), 0, "nothing it names changed");
+
+        // It stays rejected at this version, whoever votes on it and however.
+        assert_eq!(changes.vote(&member(1), 0, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted), Err(RegistryError::RejectedChange));
+
+        // Once a change of the kind is decided, it may come back.
+        changes.vote(&member(1), 0, rotating, ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        assert_eq!(changes.vote(&member(2), 1, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted), counted(u256::ONE));
+    }
+
+    #[test]
+    fn a_quorum_holds_yes_back_until_enough_have_voted_abstain_and_no_included() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+        let everyone = BallotRules { approval_epochs: 4, quorum_permille: 1000 };
+
+        // Yes weighs three of the three needed, but only three of the four have voted.
+        changes.vote(&member(1), 0, staked(), ChangeVote::Yes, at(1), everyone, &Weighted).unwrap();
+        assert_eq!(
+            changes.vote(&member(2), 0, staked(), ChangeVote::Yes, at(1), everyone, &Weighted),
+            Ok(ChangeVoted::Counted(Tally { yes: u256::from(3u64), total: u256::from(4u64), needed: u256::from(3u64), quorum: u256::from(4u64), ..Tally::default() }))
+        );
+
+        // An abstention makes the quorum, and so decides it.
+        assert_eq!(changes.vote(&member(3), 0, staked(), ChangeVote::Abstain, at(1), everyone, &Weighted), Ok(ChangeVoted::Decided { decision: 1, kind: ChangeKind::Consensus, version: 1 }));
+
+        // A quorum's share rounds up: a tenth of four is one vote's weight.
+        let tenth = BallotRules { approval_epochs: 4, quorum_permille: 100 };
+        changes.vote(&member(2), 1, Change::Consensus(pow()), ChangeVote::Abstain, at(1), tenth, &Weighted).unwrap();
+        assert_eq!(tallied(&changes, &Change::Consensus(pow()), 1, tenth).quorum, u256::ONE);
+    }
+
+    #[test]
+    fn a_new_vote_replaces_the_old_and_clearing_takes_it_back() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+        let side = |changes: &Changes| {
+            let tally = tallied(changes, &staked(), 1, rules(4));
+            (tally.yes, tally.no, tally.abstain)
+        };
+
+        changes.vote(&member(2), 0, staked(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        assert_eq!(side(&changes), (u256::ONE, u256::ZERO, u256::ZERO));
+        changes.vote(&member(2), 0, staked(), ChangeVote::No, at(1), rules(4), &Weighted).unwrap();
+        assert_eq!(side(&changes), (u256::ZERO, u256::ONE, u256::ZERO));
+        changes.vote(&member(2), 0, staked(), ChangeVote::Abstain, at(1), rules(4), &Weighted).unwrap();
+        assert_eq!(side(&changes), (u256::ZERO, u256::ZERO, u256::ONE));
+        assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().votes.len(), 1, "one vote an account on a change");
+
+        // No on one change and Yes on another stand together; only a second Yes moves.
+        let rotating = Change::Consensus(ConsensusConfig::Rotating { slot_ms: 1_000 });
+        changes.vote(&member(2), 0, rotating.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        assert_eq!(side(&changes), (u256::ZERO, u256::ZERO, u256::ONE));
+
+        assert_eq!(changes.clear(&member(2), 0, &staked(), at(1), 4, &Weighted), Ok(()));
+        assert_eq!(side(&changes), (u256::ZERO, u256::ZERO, u256::ZERO));
+        assert_eq!(changes.ballot(ChangeKind::Consensus).unwrap().approvers(&rotating), [member(2)], "clearing one leaves the other");
+        assert_eq!(changes.clear(&member(2), 0, &staked(), at(1), 4, &Weighted), Err(RegistryError::NoVote));
+        assert_eq!(changes.clear(&member(2), 1, &rotating, at(1), 4, &Weighted), Err(RegistryError::StaleChange(0)));
+    }
+
+    #[test]
+    fn a_no_stops_counting_when_its_epochs_run_out() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+
+        changes.vote(&member(2), 0, staked(), ChangeVote::No, at(1), rules(2), &Weighted).unwrap();
+        assert_eq!(tallied(&changes, &staked(), 2, rules(2)).no, u256::ONE);
+        assert_eq!(tallied(&changes, &staked(), 3, rules(2)).no, u256::ZERO);
+
+        // So in epoch 3 the weight-two No alone leaves two that could say Yes: rejected; in epoch
+        // 2 the expired one would have made it so as well.
+        assert_eq!(changes.vote(&member(1), 0, staked(), ChangeVote::No, at(3), rules(2), &Weighted), Ok(ChangeVoted::Rejected { rejection: 1, kind: ChangeKind::Consensus, version: 0 }));
+    }
+
+    #[cfg(feature = "governance-council")]
+    #[test]
+    fn a_governance_decision_clears_every_open_vote_and_counts_from_the_next_block() {
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+        let bootnodes = Change::Bootnodes(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()]);
+        let council = crate::governance::GovernanceConfig::Council { members: vec![member(1), member(4)], threshold: 2, approval_epochs: 8, quorum_permille: 0 };
+        let change = Change::Governance(council.clone());
+
+        changes.vote(&member(2), 0, bootnodes.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        changes.vote(&member(2), 0, staked(), ChangeVote::No, at(1), rules(4), &Weighted).unwrap();
+        changes.vote(&member(1), 0, change.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted).unwrap();
+        assert_eq!(changes.vote(&member(3), 0, change, ChangeVote::Yes, at(1), rules(4), &Weighted), Ok(ChangeVoted::Decided { decision: 1, kind: ChangeKind::Governance, version: 1 }));
+
+        assert_eq!(changes.governance().unwrap(), Some(DecidedGovernance { config: council, from: 11 }));
+        assert!(changes.ballots().unwrap().is_empty(), "every kind's votes were cast under the old settings");
+        assert_eq!(changes.version_of(ChangeKind::Bootnodes).unwrap(), 0, "other kinds keep their versions");
+
+        // The rest of the deciding block counts by nobody; the next by the new settings.
+        assert_eq!(
+            changes.vote(&member(2), 0, bootnodes.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted),
+            Err(RegistryError::BadChange("governance changed itself in this block; vote from the next"))
+        );
+        let next = DecidedAt { height: 11, epoch: 1, activation_delay: 2 };
+        assert_eq!(changes.vote(&member(2), 0, bootnodes, ChangeVote::Yes, next, rules(4), &Weighted), counted(u256::ONE));
     }
 }

@@ -34,6 +34,25 @@ pub const STANDARD_TOKEN_FUNCTIONS: [&str; 6] = ["allowance", "approve", "balanc
 )]
 pub const METADATA_FUNCTIONS: [&str; 3] = ["name", "symbol", "decimals"];
 
+#[document(
+    summary = "Why a list of functions cannot make a token: one named twice, or one empty or longer than 64 bytes. Empty keeps no token registry.",
+    category = "Registries",
+    see_also = "Change::TokenFunctions, Genesis::token_functions",
+)]
+pub fn functions_problem(functions: &[String]) -> Option<&'static str> {
+    let mut sorted: Vec<&String> = functions.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+
+    if sorted.len() != functions.len() {
+        Some("token_functions names each function once")
+    } else if functions.iter().any(|function| function.is_empty() || function.len() > 64) {
+        Some("each token function is a name of 1 to 64 bytes")
+    } else {
+        None
+    }
+}
+
 #[document(summary = "The longest name a token may give, in bytes.", category = "Registries", see_also = "Token")]
 pub const MAX_NAME: usize = 64;
 

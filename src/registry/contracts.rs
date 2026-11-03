@@ -95,7 +95,7 @@ impl<'a> Contracts<'a> {
             return Err(RegistryError::AlreadyDeployed(address).into());
         }
 
-        let (record, loaded) = load(vm, *deployer, code, limits)?;
+        let (record, loaded) = load(vm, *deployer, code, limits, &block)?;
         self.state.put_value(Column::Contracts, address_key(&address), &record);
         let context = CallContext {
             sender: *deployer,
@@ -146,7 +146,7 @@ impl<'a> Contracts<'a> {
             block,
         };
         let (asked, mut trace) = self.permits(vm, &current, context, "upgrade", limits)?;
-        let (record, loaded) = load(vm, current.deployer, code, spent(limits, asked))
+        let (record, loaded) = load(vm, current.deployer, code, spent(limits, asked), &block)
             .map_err(|failed| failed.after(asked, trace.clone()))?;
         let before = asked + loaded;
 
@@ -458,11 +458,11 @@ fn spent(limits: Limits, fuel_used: u64) -> Limits {
 }
 
 /// Checks and loads code into the record that stores it, and says what loading burned.
-fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits) -> Result<(ContractRecord, u64), Failed> {
+fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits, block: &BlockAt) -> Result<(ContractRecord, u64), Failed> {
     let engine = vm
         .engine(code.engine())
         .ok_or(RegistryError::Vm(VmError::EngineMissing(code.engine())))?;
-    let loading = engine.load(code.bytes(), limits);
+    let loading = engine.load_under(code.bytes(), limits, &block.vm);
     let loaded = loading.result.map_err(|err| Failed {
         error: err.into(),
         fuel_used: loading.fuel_used,

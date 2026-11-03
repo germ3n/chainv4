@@ -134,7 +134,7 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
         }
         DexAction::Quote { from, to, amount } => {
             let (from, to) = (asset(from)?, asset(to)?);
-            let route = best_route(&dex.pools()?, &from, &to, *amount).ok_or("no pool, nor two, trades these")?;
+            let route = best_route(&dex.pools()?, &from, &to, *amount, dex.fee_bps()?).ok_or("no pool, nor two, trades these")?;
             println!("{} out, price impact {:.2}%", route.out, f64::from(route.impact) / 100.0);
 
             if let Some(middle) = route.middle {
@@ -143,7 +143,7 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
         }
         DexAction::Swap { from, to, amount, slippage } => {
             let (from, to) = (asset(from)?, asset(to)?);
-            let route = best_route(&dex.pools()?, &from, &to, *amount).ok_or("no pool, nor two, trades these")?;
+            let route = best_route(&dex.pools()?, &from, &to, *amount, dex.fee_bps()?).ok_or("no pool, nor two, trades these")?;
             let least = least_out(route.out, percent(*slippage)?);
             dex.approve(&from, *amount)?;
 
@@ -316,6 +316,11 @@ impl Dex {
         sent?;
 
         Ok(at)
+    }
+
+    /// The DEX's fee in force, as the node says, which both DEXes charge: what a quote takes off.
+    fn fee_bps(&self) -> CliResult<u32> {
+        Ok(self.status()?["dex_fee_bps"].as_u64().and_then(|bps| u32::try_from(bps).ok()).unwrap_or(crate::dex::DEFAULT_FEE_BPS))
     }
 
     fn status(&self) -> CliResult<Value> {

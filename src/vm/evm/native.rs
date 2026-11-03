@@ -53,12 +53,10 @@ use {
 )]
 pub const NATIVE_PRECOMPILE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4e, 0x43];
 
-/// What callNative costs in EVM gas before the native call burns any: about a cold call.
-const CALL_GAS: u64 = 2_600;
-/// And for every 32 bytes of input.
-const WORD_GAS: u64 = 3;
 
 const CALL_NATIVE: &str = "callNative(bytes32,string,string,bytes)";
+/// The DEX's fee in basis points, as governance set it: what the EVM DEX charges.
+const DEX_FEE: &str = "dexFeeBps()";
 
 const USAGE: &str = "call callNative(bytes32 target, string name, string types, bytes args)";
 
@@ -125,7 +123,23 @@ impl NativeAt<'_> {
         CTX: ContextTr<Journal: JournalTr<State = EvmState>>,
     {
         let input = inputs.input.as_bytes(context).to_vec();
-        let gas = CALL_GAS + WORD_GAS * (input.len() as u64).div_ceil(32);
+        let costs = self.block.vm.costs;
+
+        // The DEX's fee: one of the chain's settings, read as a native contract reads it.
+        if input.as_slice() == &keccak256(DEX_FEE.as_bytes())[..4] {
+            if costs.federation > inputs.gas_limit {
+                return PrecompileOutput::halt(PrecompileHalt::OutOfGas, inputs.reservoir);
+            }
+
+            let mut word = [0u8; 32];
+            word[28..].copy_from_slice(&self.block.vm.dex.fee_bps.to_be_bytes());
+
+            return PrecompileOutput::new(costs.federation, Bytes::from(word.to_vec()), inputs.reservoir);
+        }
+
+        // What callNative costs before the native call burns any, about a cold call, and for
+        // every 32 bytes of input: the block's.
+        let gas = costs.evm_native_call + costs.evm_native_word * (input.len() as u64).div_ceil(32);
 
         if gas > inputs.gas_limit {
             return PrecompileOutput::halt(PrecompileHalt::OutOfGas, inputs.reservoir);

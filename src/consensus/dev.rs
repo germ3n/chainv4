@@ -1,5 +1,5 @@
 use {
-    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer, seal_bytes},
+    super::{Consensus, ConsensusError, Producer, seal_bytes},
     crate::crypto::keypair::{Keypair, PublicKey},
     crate::registry::validators::Member,
     crate::structs::address::Address,
@@ -62,7 +62,7 @@ impl Consensus for DevAuthority {
             return Err(ConsensusError::Early);
         }
 
-        if header.timestamp > now + MAX_DRIFT_MS {
+        if header.timestamp > now + super::drift_ms(self.slot_ms) {
             return Err(ConsensusError::FromTheFuture);
         }
 
@@ -182,7 +182,7 @@ mod tests {
     fn bad_blocks_are_rejected() {
         let rules = rules();
         let early = child(11_999);
-        let future = child(12_000 + MAX_DRIFT_MS + 1);
+        let future = child(12_000 + crate::consensus::MAX_DRIFT_MS + 1);
         let header = child(12_000);
         let hard = BlockHeader {
             difficulty: 5,

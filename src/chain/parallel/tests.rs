@@ -44,6 +44,7 @@ fn rules() -> Rules {
         fees: Some(Arc::new(FeeConfig::dev().build())),
         pooled_fees: false,
         names: None,
+        vm: crate::params::vm::VmRules::default(),
     }
 }
 

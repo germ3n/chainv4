@@ -15,21 +15,27 @@ use {
 )]
 pub const COIN: Address = Address::Contract([0; 32]);
 
-#[document(summary = "What a trade leaves in the pool, in parts in 1000: 3, Uniswap V2's 0.3%.", category = "DEX")]
-pub const FEE_PER_MILLE: u64 = 3;
+#[document(summary = "What a trade leaves in the pool on a chain whose governance never set the DEX's fee, in hundredths of a percent: 30, Uniswap V2's 0.3%. The fee in force is GET /status's dex_fee_bps, which both DEXes charge.", category = "DEX", see_also = "DexSettings")]
+pub const DEFAULT_FEE_BPS: u32 = 30;
 
 #[document(
-    summary = "What a trade of amount_in pays out of a pool holding reserve_in and reserve_out, as Uniswap V2's getAmountOut: the fee off what goes in, then the product kept. None for nothing in, or a pool holding nothing.",
+    summary = "What a trade of amount_in pays out of a pool holding reserve_in and reserve_out, as Uniswap V2's getAmountOut: the fee off what goes in, then the product kept, as both DEXes reckon it. None for nothing in, or a pool holding nothing.",
     category = "DEX",
+    params = { fee_bps = "The chain's DEX fee, in hundredths of a percent." },
 )]
-pub fn amount_out(amount_in: u256, reserve_in: u256, reserve_out: u256) -> Option<u256> {
-    if amount_in == u256::ZERO || reserve_in == u256::ZERO || reserve_out == u256::ZERO {
+pub fn amount_out(amount_in: u256, reserve_in: u256, reserve_out: u256, fee_bps: u32) -> Option<u256> {
+    if amount_in == u256::ZERO || reserve_in == u256::ZERO || reserve_out == u256::ZERO || fee_bps > 10_000 {
         return None;
     }
 
-    let with_fee = amount_in.checked_mul(u256::from(1_000 - FEE_PER_MILLE))?;
+    let with_fee = amount_in.checked_mul(u256::from(10_000 - u64::from(fee_bps)))?;
 
-    with_fee.checked_mul(reserve_out)?.checked_div(reserve_in.checked_mul(u256::from(1_000u64))?.checked_add(with_fee)?)
+    with_fee.checked_mul(reserve_out)?.checked_div(reserve_in.checked_mul(u256::from(10_000u64))?.checked_add(with_fee)?)
+}
+
+#[document(summary = "What a trade of amount pays the pool it goes into, at a fee in hundredths of a percent.", category = "DEX")]
+pub fn fee_of(amount: u256, fee_bps: u32) -> u256 {
+    amount.checked_mul(u256::from(fee_bps)).map_or(u256::ZERO, |all| all / u256::from(10_000u64))
 }
 
 #[document(summary = "A pool: its two assets, what it holds of each, and its share token.", category = "DEX", see_also = "best_route")]
@@ -118,12 +124,12 @@ pub struct TradeRoute {
     summary = "The best route for a trade: through the pool that holds both assets, or through one middle pool, whichever pays out more. None when no pools join them.",
     category = "DEX",
 )]
-pub fn best_route(pools: &[DexPool], from: &Address, to: &Address, amount: u256) -> Option<TradeRoute> {
+pub fn best_route(pools: &[DexPool], from: &Address, to: &Address, amount: u256, fee_bps: u32) -> Option<TradeRoute> {
     let pool = |x: &Address, y: &Address| pools.iter().find(|pool| pool.pairs(x, y));
     let step = |x: &Address, y: &Address, amount: u256| {
         let (held_in, held_out) = pool(x, y)?.facing(x)?;
 
-        Some((amount_out(amount, held_in, held_out)?, held_in, held_out))
+        Some((amount_out(amount, held_in, held_out, fee_bps)?, held_in, held_out))
     };
     // The pools' own rate along a path, before the trade: what amount would buy with no fee and
     // no weight of its own.
@@ -190,26 +196,30 @@ mod tests {
     #[test]
     fn a_trade_pays_as_uniswap_v2_does() {
         // 997/1000 of 100,000 into 10,000,000 against 20,000,000.
-        assert_eq!(amount_out(u256::new(100_000), u256::new(10_000_000), u256::new(20_000_000)), Some(u256::new(197_431)));
-        assert_eq!(amount_out(u256::ZERO, u256::new(1), u256::new(1)), None);
-        assert_eq!(amount_out(u256::new(1), u256::ZERO, u256::new(1)), None);
+        assert_eq!(amount_out(u256::new(100_000), u256::new(10_000_000), u256::new(20_000_000), DEFAULT_FEE_BPS), Some(u256::new(197_431)));
+        assert_eq!(amount_out(u256::ZERO, u256::new(1), u256::new(1), DEFAULT_FEE_BPS), None);
+        assert_eq!(amount_out(u256::new(1), u256::ZERO, u256::new(1), DEFAULT_FEE_BPS), None);
+        // A dearer fee pays less out; none pays the product alone.
+        assert!(amount_out(u256::new(100_000), u256::new(10_000_000), u256::new(20_000_000), 100).unwrap() < u256::new(197_431));
+        assert_eq!(amount_out(u256::new(100_000), u256::new(10_000_000), u256::new(20_000_000), 0), Some(u256::new(198_019)));
+        assert_eq!(fee_of(u256::new(10_000), 30), u256::new(30));
     }
 
     #[test]
     fn the_route_is_the_one_that_pays_more_direct_or_through_a_middle() {
         // 1 to 3 direct is thin; through 2 it is deep.
         let pools = [pool(1, 3, 1_000, 1_000), pool(1, 2, 10u128.pow(9), 10u128.pow(9)), pool(2, 3, 10u128.pow(9), 10u128.pow(9))];
-        let route = best_route(&pools, &at(1), &at(3), u256::new(10_000)).unwrap();
+        let route = best_route(&pools, &at(1), &at(3), u256::new(10_000), DEFAULT_FEE_BPS).unwrap();
         assert_eq!(route.middle, Some(at(2)));
         assert!(route.out > u256::new(9_900), "{route:?}");
         assert!(route.impact >= 59 && route.impact < 70, "two fees, about 0.6%: {}", route.impact);
 
         // A small trade in a deep pool goes direct.
         let pools = [pool(1, 3, 10u128.pow(15), 10u128.pow(15)), pool(1, 2, 1_000, 1_000), pool(2, 3, 1_000, 1_000)];
-        let direct = super::best_route(&pools, &at(3), &at(1), u256::new(10u128.pow(6))).unwrap();
-        assert_eq!((direct.middle, direct.out), (None, amount_out(u256::new(10u128.pow(6)), u256::new(10u128.pow(15)), u256::new(10u128.pow(15))).unwrap()));
+        let direct = super::best_route(&pools, &at(3), &at(1), u256::new(10u128.pow(6)), DEFAULT_FEE_BPS).unwrap();
+        assert_eq!((direct.middle, direct.out), (None, amount_out(u256::new(10u128.pow(6)), u256::new(10u128.pow(15)), u256::new(10u128.pow(15)), DEFAULT_FEE_BPS).unwrap()));
         assert_eq!(direct.impact, 30, "the fee alone");
-        assert_eq!(super::best_route(&pools, &at(1), &at(9), u256::new(1)), None, "nothing joins them");
+        assert_eq!(super::best_route(&pools, &at(1), &at(9), u256::new(1), DEFAULT_FEE_BPS), None, "nothing joins them");
     }
 
     #[test]

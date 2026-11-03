@@ -341,11 +341,18 @@ impl Api {
             _ => None,
         };
 
-        if fees.is_none() && limits.is_none() && reward.is_none() && tuned.is_none() {
-            return Ok(());
+        let mut rules = (*self.rules).clone();
+
+        // Everything else governance decided, as the next block runs by it.
+        if let Some(tip) = stored_tip(&*self.db)? {
+            crate::chain::govern_rules(&mut rules, &state, tip.header.height + 1)?;
         }
 
-        let mut rules = (*self.rules).clone();
+        if fees.is_none() && limits.is_none() && reward.is_none() && tuned.is_none() {
+            self.rules = Arc::new(rules);
+
+            return Ok(());
+        }
 
         if let (Some(governance), Some(tip), Some(genesis)) = (&self.rules.governance, stored_tip(&*self.db)?, stored_header_at(&*self.db, 0)?) {
             let finality = &governance.finality;
@@ -359,7 +366,6 @@ impl Api {
 
         if let Some(limits) = limits {
             (self.limits, self.tx_fuel, self.max_block_bytes) = (limits.tx_limits, limits.tx_limits.fuel, limits.max_block_bytes);
-            rules.limits = limits.tx_limits;
         }
 
         self.reward.decided = reward;
@@ -612,6 +618,7 @@ fn router(api: Api) -> Router {
     let router = router
         .route("/governance", get(governance))
         .route("/governance/history", get(governance_history))
+        .route("/governance/rejections", get(governance_rejections))
         .route("/governance/weight/{address}", get(governance_weight));
     #[cfg(feature = "ethereum")]
     let router = router.route("/rpc", post(ethereum_rpc));
@@ -801,7 +808,8 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
     let directory = crate::registry::changes::Changes::new(&State::new(db.clone())).directory()?;
 
     // Where vote rewards come from, and what the pool holds when they come from it.
-    let vote_rewards = match api.vote_rewards {
+    let decided = crate::registry::changes::Changes::new(&State::new(db.clone())).fees()?.and_then(|fees| fees.vote_rewards);
+    let vote_rewards = match decided.unwrap_or(api.vote_rewards) {
         VoteRewardSource::Mint => json!({ "source": "mint" }),
         VoteRewardSource::Fees => {
             let pool = crate::registry::Accounts::new(&State::new(db.clone())).get(&REWARD_POOL)?.balance;
@@ -823,6 +831,8 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "token_functions": &*api.token_functions,
         "federation": federation_json(&api, &State::new(db.clone()))?,
         "directory": directory.as_ref().map(crate::cli::genesis::directory_json),
+        "dex_fee_bps": api.rules.vm.dex.fee_bps,
+        "evm_spec": api.rules.vm.evm_spec.name(),
         "directory_admin": crate::registry::directory::directory_admin(&State::new(db.clone()))?.map(|admin| admin.to_string()),
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
         "version": crate::structs::version::Version::ours().to_string(),
@@ -1137,19 +1147,23 @@ async fn signers(Shared(api): Shared<Api>) -> Answer {
 }
 
 #[cfg(feature = "governance")]
-/// Governance: the consensus the tip's epoch runs and the one decided last, and the approvals
-/// that still count in the tip's epoch, each change with what its approvals weigh and need.
+/// Governance: the consensus the tip's epoch runs and the one decided last, who may vote and what
+/// each weighs, and the votes that still count in the tip's epoch, each change with its tally:
+/// what Yes, No and Abstain weigh, what Yes needs, the quorum, and whether it can still pass.
 async fn governance(Shared(api): Shared<Api>) -> Answer {
-    let Some(rules) = &api.rules.governance else {
+    let Some(genesis_rules) = &api.rules.governance else {
         return Err(ApiError::NotFound("this chain has no governance".to_string()));
     };
     let db = api.db.clone();
     let height = tip(&*db)?.header.height;
-    let epoch = rules.finality.epoch_of(height);
+    let epoch = genesis_rules.finality.epoch_of(height);
     let state = State::new(db);
+    let rules = genesis_rules.in_state(&state)?;
     let changes = Changes::new(&state);
     let decided = changes.decided()?;
     let needed = rules.governance.needed(&state, epoch)?;
+    let total = rules.governance.total(&state, epoch)?;
+    let voters = rules.governance.voters(&state, epoch)?;
     let mut proposals = Vec::new();
     let mut versions = serde_json::Map::new();
 
@@ -1157,28 +1171,31 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
         versions.insert(kind.name().to_string(), changes.version_of(kind)?.into());
     }
 
-    // Each kind's ballot, in kind order: a change's approvals are of its kind, at its version.
+    // Each kind's ballot, in kind order: a change's votes are of its kind, at its version.
     for (kind, ballot) in changes.ballots()? {
         let ballot = ballot.counting(epoch, rules.approval_epochs);
 
         for change in ballot.changes() {
-            let approvals: Vec<Value> = ballot
-                .approvals
-                .iter()
-                .filter(|approval| approval.change == change)
-                .map(|approval| json!({
-                    "account": approval.account.to_string(),
-                    "weight": rules.governance.weight(&state, epoch, &approval.account).ok().flatten().map_or_else(|| "0".to_string(), |weight| weight.to_string()),
-                    "epoch": approval.epoch,
-                    "counts_until": approval.epoch + rules.approval_epochs - 1,
-                }))
-                .collect();
+            let mut votes = Vec::new();
+
+            for cast in ballot.votes_on(&change) {
+                votes.push(json!({
+                    "account": cast.account.to_string(),
+                    "vote": cast.vote.name(),
+                    "weight": rules.governance.weight(&state, epoch, &cast.account)?.unwrap_or_default().to_string(),
+                    "epoch": cast.epoch,
+                    "counts_until": cast.epoch + rules.approval_epochs - 1,
+                }));
+            }
+
+            let tally = changes.tally(&ballot, &change, epoch, rules.quorum_permille, &*rules.governance)?;
             let mut value = json::change(&change);
             value["kind"] = kind.name().into();
             value["version"] = ballot.version.into();
-            value["weight"] = changes.weight_of(&ballot, &change, epoch, &*rules.governance)?.to_string().into();
-            value["needed"] = needed.to_string().into();
-            value["approvals"] = approvals.into();
+            value["tally"] = tally_json(&tally);
+            // The first epoch a vote on it stops counting in, as old votes run out.
+            value["closes"] = ballot.votes_on(&change).map(|cast| cast.epoch + rules.approval_epochs - 1).min().into();
+            value["votes"] = votes.into();
             proposals.push(value);
         }
     }
@@ -1186,19 +1203,41 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
     Ok(Json(json!({
         "kind": rules.governance.name(),
         "epoch": epoch,
+        "checkpoint_interval": genesis_rules.checkpoint_interval,
         "active": changes.consensus_for(epoch)?.as_ref().map(|consensus| crate::cli::genesis::consensus_json(consensus, api.light.pow_window)),
         "version": decided.version,
         "versions": versions,
+        "rejections": changes.rejections()?,
         "decided": crate::cli::genesis::consensus_json(&decided.consensus, api.light.pow_window),
         "approval_epochs": rules.approval_epochs,
+        "quorum_permille": rules.quorum_permille,
         "needed": needed.to_string(),
+        "total": total.to_string(),
         "bootnodes": api.bootnodes(&state)?,
-        "finality": changes.finality_in(epoch, &rules.finality)?.name(),
-        "switch": changes.switch_ahead(epoch, &rules.finality)?.map(|era| json!({ "epoch": era.from, "type": era.config.name() })),
+        "finality": changes.finality_in(epoch, &genesis_rules.finality)?.name(),
+        "switch": changes.switch_ahead(epoch, &genesis_rules.finality)?.map(|era| json!({ "epoch": era.from, "type": era.config.name() })),
         "proposals": proposals,
         "members": rules.governance.members().map(|members| members.iter().map(Address::to_string).collect::<Vec<_>>()),
+        "voters": voters.iter().map(|(account, weight)| json!({ "account": account.to_string(), "weight": weight.to_string() })).collect::<Vec<_>>(),
         "in_force": in_force(&api, &state, epoch, decided.version)?,
     })))
+}
+
+#[cfg(feature = "governance")]
+/// A change's tally as JSON: weights as decimal strings, beside what they come to.
+fn tally_json(tally: &crate::registry::changes::Tally) -> Value {
+    json!({
+        "yes": tally.yes.to_string(),
+        "no": tally.no.to_string(),
+        "abstain": tally.abstain.to_string(),
+        "voted": tally.voted().to_string(),
+        "total": tally.total.to_string(),
+        "needed": tally.needed.to_string(),
+        "quorum": tally.quorum.to_string(),
+        "more_needed": tally.more_needed().to_string(),
+        "quorum_met": tally.voted() >= tally.quorum,
+        "can_pass": tally.can_pass(),
+    })
 }
 
 #[cfg(feature = "governance")]
@@ -1209,13 +1248,16 @@ fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, 
     let rules = api.rules.governance.as_ref().expect("only a governed chain asks");
     let changes = Changes::new(state);
     let genesis = &api.genesis;
-    let limits = crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: genesis.max_block_bytes };
+    let limits = genesis.block_limits();
     let settings = [
         // The consensus the tip's epoch runs: fixed for it at a checkpoint, else genesis's.
         Some(Change::Consensus(changes.consensus_for(epoch)?.unwrap_or_else(|| genesis.consensus.clone()))),
         changes.name()?.map(Change::Name),
         Some(Change::Bootnodes(api.bootnodes(state)?)),
-        changes.name_prices()?.or_else(|| genesis.names.as_ref().map(|names| names.prices.clone())).map(Change::NamePrices),
+        changes.names()?.or_else(|| genesis.names.as_ref().map(crate::registry::names::NamesConfig::settings)).map(Change::Names),
+        api.rules.standards_in(state).map(|standards| Change::TokenFunctions(standards.tokens.to_vec()))?.into(),
+        Some(Change::EvmSpec { spec: changes.evm_specs()?.eras.last().map_or(genesis.evm_spec.unwrap_or_default(), |(_, spec)| *spec), from: changes.evm_specs()?.eras.last().map_or(0, |(from, _)| *from) }),
+        Some(Change::Dex(changes.dex()?.or(genesis.dex).unwrap_or_default())),
         api.rules.standards_in(state)?.collections.map(Change::Collections),
         changes.federation()?.map(|decided| decided.federation).or_else(|| genesis.federation.clone()).map(Change::Federation),
         changes.directory()?.map(Change::Directory),
@@ -1224,6 +1266,7 @@ fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, 
         Some(Change::Limits(changes.limits()?.unwrap_or(limits))),
         Some(Change::Finality(changes.finality_in(epoch, &rules.finality)?)),
         changes.upgrade()?.map(Change::Upgrade),
+        Some(Change::Governance(rules.in_state(state)?.config)),
     ];
     // The version that last changed each kind, from the decisions this node indexed.
     let mut last = HashMap::new();
@@ -1252,7 +1295,7 @@ fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, 
 }
 
 #[cfg(feature = "governance")]
-/// The change a decision's transaction approved: its own, or the one a multisig approved for it.
+/// The change a decision's or rejection's vote was on: its own, or the one a multisig cast for it.
 fn decided_change(db: &dyn Committed, id: &Hash) -> Result<Option<crate::governance::Change>, ApiError> {
     use crate::structs::tx::Tx;
     let Some(receipt) = stored_receipt(db, id)? else { return Ok(None) };
@@ -1262,7 +1305,7 @@ fn decided_change(db: &dyn Committed, id: &Hash) -> Result<Option<crate::governa
 
     loop {
         match tx {
-            Tx::ApproveChange { change, .. } => return Ok(Some(change.clone())),
+            Tx::VoteChange { change, .. } => return Ok(Some(change.clone())),
             Tx::ApproveMultisig { tx: inner, .. } => tx = inner,
             _ => return Ok(None),
         }
@@ -1374,6 +1417,11 @@ async fn governance_history(Shared(api): Shared<Api>, Query(query): Query<HashMa
             "sender": sender,
         });
 
+        if let crate::chain::TxStatus::Decided { kind, version, .. } = receipt.status {
+            value["kind_version"] = version.into();
+            value["of"] = kind.name().into();
+        }
+
         if let Some(change) = decided_change(&*db, &id)? {
             value["kind"] = change.name().into();
             value["change"] = json::change(&change);
@@ -1389,8 +1437,57 @@ async fn governance_history(Shared(api): Shared<Api>, Query(query): Query<HashMa
 }
 
 #[cfg(feature = "governance")]
-/// What an account's approval weighs in the tip's epoch, beside what a change needs: zero for an
-/// account that may not approve.
+/// Governance's rejections, newest first, below the count in ?before: each the chain's count it
+/// made, the vote that rejected it, its block, who sent it and the change. A light client proves
+/// each with GET /proofs/receipts/{tx}, whose outcome is Rejected at that count; counts go up one
+/// at a time, so a gap shows. from is the oldest this node keeps.
+async fn governance_rejections(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    if api.rules.governance.is_none() {
+        return Err(ApiError::NotFound("this chain has no governance".to_string()));
+    }
+
+    let db = api.db.clone();
+    let tip = tip(&*db)?.header.height;
+    let newest = Changes::new(&State::new(db.clone())).rejections()?;
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE) as usize;
+    let mut rejections = Vec::new();
+
+    for (rejection, id) in crate::chain::stored_rejections(&*db, newest, number(&query, "before")?, limit)? {
+        let Some(receipt) = stored_receipt(&*db, &id)? else { continue };
+        let block = stored_block(&*db, &receipt.block)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
+        let sender = block.txs.get(receipt.index as usize).map(|signed| signed.sender().to_string());
+        let mut value = json!({
+            "rejection": rejection,
+            "tx": id.to_string(),
+            "block": receipt.block.to_string(),
+            "height": block.header.height,
+            "timestamp": block.header.timestamp,
+            "confirmations": tip.saturating_sub(block.header.height) + 1,
+            "final": block.header.height <= finalized_height(&*db)?,
+            "sender": sender,
+        });
+
+        if let crate::chain::TxStatus::Rejected { kind, version, .. } = receipt.status {
+            value["kind_version"] = version.into();
+            value["of"] = kind.name().into();
+        }
+
+        if let Some(change) = decided_change(&*db, &id)? {
+            value["kind"] = change.name().into();
+            value["change"] = json::change(&change);
+        }
+
+        rejections.push(value);
+    }
+
+    let from = crate::chain::stored_rejections(&*db, newest, None, usize::MAX)?.last().map_or(newest + 1, |(rejection, _)| *rejection);
+
+    Ok(Json(json!({ "rejection": newest, "from": from, "rejections": rejections })))
+}
+
+#[cfg(feature = "governance")]
+/// What an account's vote weighs in the tip's epoch, beside what a change needs and what every
+/// voter weighs, and its votes that still count: zero for an account that may not vote.
 async fn governance_weight(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answer {
     let Some(rules) = &api.rules.governance else {
         return Err(ApiError::NotFound("this chain has no governance".to_string()));
@@ -1399,18 +1496,23 @@ async fn governance_weight(Shared(api): Shared<Api>, Path(address): Path<String>
     let db = api.db.clone();
     let epoch = rules.finality.epoch_of(tip(&*db)?.header.height);
     let state = State::new(db);
+    let rules = rules.in_state(&state)?;
     let changes = Changes::new(&state);
-    let mut approved = Vec::new();
+    let mut voted = Vec::new();
 
-    // Its approval in each kind's ballot that still counts, one at most a kind.
+    // Its votes in each kind's ballot that still count: one a change, one Yes a kind at most.
     for (kind, ballot) in changes.ballots()? {
         let ballot = ballot.counting(epoch, rules.approval_epochs);
 
-        if let Some(approval) = ballot.approvals.iter().find(|approval| approval.account == address) {
-            let mut value = json::change(&approval.change);
-            value["kind"] = kind.name().into();
-            value["version"] = ballot.version.into();
-            approved.push(value);
+        for cast in ballot.votes.iter().filter(|cast| cast.account == address) {
+            voted.push(json!({
+                "kind": kind.name(),
+                "version": ballot.version,
+                "vote": cast.vote.name(),
+                "epoch": cast.epoch,
+                "counts_until": cast.epoch + rules.approval_epochs - 1,
+                "change": json::change(&cast.change),
+            }));
         }
     }
 
@@ -1418,7 +1520,8 @@ async fn governance_weight(Shared(api): Shared<Api>, Path(address): Path<String>
         "account": address.to_string(),
         "weight": rules.governance.weight(&state, epoch, &address)?.unwrap_or_default().to_string(),
         "needed": rules.governance.needed(&state, epoch)?.to_string(),
-        "approved": approved,
+        "total": rules.governance.total(&state, epoch)?.to_string(),
+        "voted": voted,
     })))
 }
 
@@ -1841,7 +1944,7 @@ async fn account(Shared(api): Shared<Api>, Path(address): Path<String>, Query(qu
     if let Some(names) = &api.rules.names {
         use crate::registry::names::Names;
 
-        answer["name"] = Names::new(&state).primary(&address, header.timestamp, names.grace_ms)?.map(|name| names.display(&name)).into();
+        answer["name"] = Names::new(&state).primary(&address, header.timestamp, grace_ms(&state, names)?)?.map(|name| names.display(&name)).into();
     }
 
     Ok(Json(answer))
@@ -1862,7 +1965,13 @@ fn names_config(api: &Api) -> Result<&crate::registry::names::NamesConfig, ApiEr
 /// The prices names are registered and renewed at now: governance's last decided, else genesis's.
 #[cfg(feature = "names")]
 fn name_prices(state: &State, names: &crate::registry::names::NamesConfig) -> Result<Vec<u256>, ApiError> {
-    Ok(Changes::new(state).name_prices()?.unwrap_or_else(|| names.prices.clone()))
+    Ok(Changes::new(state).names()?.map_or_else(|| names.prices.clone(), |settings| settings.prices))
+}
+
+/// The grace names are judged by now: governance's last decided, else genesis's.
+#[cfg(feature = "names")]
+fn grace_ms(state: &State, names: &crate::registry::names::NamesConfig) -> Result<u64, ApiError> {
+    Ok(Changes::new(state).names()?.map_or(names.grace_ms, |settings| settings.grace_ms))
 }
 
 /// The chain's names: their suffix, what a year costs by length now and at genesis, the grace
@@ -1895,7 +2004,8 @@ async fn name(Shared(api): Shared<Api>, Path(name): Path<String>) -> Answer {
     let db = api.db.clone();
     let now = tip(&*db)?.header.timestamp;
     let state = State::new(db);
-    let found = Names::new(&state).lookup(&name, now, names.grace_ms)?;
+    let grace = grace_ms(&state, names)?;
+    let found = Names::new(&state).lookup(&name, now, grace)?;
     let top_level = !name.contains('.');
     let per_year = match top_level {
         true => price(&name_prices(&state, names)?, &name, 1).map(|price| price.to_string()),
@@ -1911,7 +2021,7 @@ async fn name(Shared(api): Shared<Api>, Path(name): Path<String>) -> Answer {
         "target": record.and_then(|record| record.target).map(|target| target.to_string()),
         "resolves_to": found.as_ref().filter(|found| found.status == NameStatus::Active).and_then(|found| found.record.target).map(|target| target.to_string()),
         "expires": found.as_ref().map(|found| found.expires),
-        "grace_ends": found.as_ref().map(|found| found.expires.saturating_add(names.grace_ms)),
+        "grace_ends": found.as_ref().map(|found| found.expires.saturating_add(grace)),
         "texts": record.map_or_else(serde_json::Map::new, |record| record.texts.iter().map(|text| (text.key.clone(), Value::from(text.value.clone()))).collect()),
         "price_per_year": per_year,
     })))
@@ -1952,7 +2062,7 @@ async fn names_list(Shared(api): Shared<Api>, Query(query): Query<HashMap<String
     let mut found = Vec::new();
 
     for name in &listed {
-        let looked = registry.lookup(name, now, names.grace_ms)?;
+        let looked = registry.lookup(name, now, grace_ms(&state, names)?)?;
         let record = looked.as_ref().map(|looked| &looked.record);
 
         found.push(json!({
@@ -1988,7 +2098,7 @@ async fn account_names(Shared(api): Shared<Api>, Path(address): Path<String>, Qu
     for name in owned {
         // Listed under it, but expired past its grace period, or a subname of an earlier
         // registration: no longer its.
-        if let Some(found) = registry.lookup(&name, now, names.grace_ms)?
+        if let Some(found) = registry.lookup(&name, now, grace_ms(&state, names)?)?
             && found.record.owner == address
         {
             listed.push(json!({
@@ -2508,6 +2618,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         time: header.timestamp,
         producer: header.producer,
         fuel_per_gas: api.fees.as_ref().map_or(1, |fees| fees.schedule().fuel_for(1).max(1)),
+        vm: api.rules.vm,
     };
     // On a blocking thread, since the API answers everything on one.
     let outcome = tokio::task::spawn_blocking(move || {

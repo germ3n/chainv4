@@ -250,10 +250,10 @@ The explorer does not have to take the node's word for balances. It runs the lib
   not check. Settings tells the whole story on any screen, and can forget the pinned genesis.
 - **An account's page** shows the balance it proved, from the node's proofs, at the finalized
   block and at the tip, each marked final or not yet. A proof that does not check is shown in red.
-- **Governance's page** proves each decision it lists from its receipt and transaction, with
-  `GET /proofs/receipts/{tx}` (see [Governance](#governance)): the receipt decided it by the
-  chain's count of decisions, of the kind listed, and the transaction approved that kind's change
-  from the kind's version before. For a decision in a block below the lowest header it holds, as
+- **Governance's page** proves each decision and rejection it lists from its receipt and
+  transaction, with `GET /proofs/receipts/{tx}` (see [Governance](#governance)): the receipt
+  decided it by the chain's count of decisions, or rejected it by the count of rejections, of the
+  kind listed, and the transaction voted on that kind's change at the kind's version. For a decision in a block below the lowest header it holds, as
   after starting at a checkpoint, it first takes the headers down to it, which the hash chain
   proves.
 - **The supply,** on the Rich list & supply page, and **any proof** on the Tools page's Proof tab,
@@ -263,54 +263,90 @@ The explorer does not have to take the node's word for balances. It runs the lib
 ## Governance
 
 The Governance page, under Network, shows a chain's [governance](governance.md) from
-`GET /governance` and `GET /governance/history`. A chain without governance answers 404, and the
-page says the chain has none.
+`GET /governance`, `GET /governance/history` and `GET /governance/rejections`. A chain without
+governance answers 404, and the page says the chain has none.
 - **Versions:** each kind of change (consensus, which also covers finality's tuning and a switch
-  of its kind, bootnodes, name_prices, collections, federation, directory, fees, reward, limits,
-  upgrade and name) has a ballot and a version of its own, how many of that kind were decided,
-  which an approval names; deciding one kind leaves the others' approvals standing. The chain
-  also counts every decision, of any kind, without gaps. The header shows that count, then the
-  kinds decided at all, compactly: `By kind: upgrade 1 · name 2`.
-- **Who approves:** the kind of governance, and for a council its members, each with its name
-  where it has one. Under an electorate, finality's voters approve: validators by stake under
-  FFG, signers one each under authority. Then what a change needs, how many epochs an approval
-  counts for, the decisions of every kind and each kind's version, and a consensus or switch of
-  finality decided for epochs ahead. **Weigh** looks up what an account's approval weighs now,
-  and what it approved, one change a kind at most, each for its kind's next change, such as
-  `Rename the chain to third, for the name's change 3`, with
+  of its kind, bootnodes, names, collections, token functions, federation, directory, fees, reward, limits,
+  upgrade, name and governance) has a ballot and a version of its own, how many of that kind were
+  decided, which a vote names; deciding one kind leaves the others' votes standing, but a change
+  of governance itself clears every open vote. The chain also counts every decision, and every
+  rejection, of any kind, without gaps. The header shows the decisions, the rejections, what Yes
+  needs, the quorum, how long a vote counts and how many changes are open, then the kinds decided
+  at all, compactly: `By kind: upgrade 1 · name 2`.
+- **Who votes:** the kind of governance, and for a council its members, each with its name where
+  it has one. Under an electorate, finality's voters vote: validators by stake under FFG, signers
+  one each under authority. Then what a change needs, the quorum (a share of every voter's
+  weight that must vote at all, Abstain included, before Yes decides), when a change is rejected
+  (once what has not voted No can no longer reach what it needs), how many epochs a vote counts
+  for, the decisions of every kind and each kind's version, and a consensus or switch of finality
+  decided for epochs ahead. **Weigh** looks up what an account's vote weighs now, and how it
+  voted, each vote for its kind's next change, such as
+  `Yes on rename the chain to third, for the name's change 3`, with
   `GET /governance/weight/{address}`.
-- **Open proposals:** a search box over each change's kind, words and JSON and who approved it, an
-  order (newest approval, most support, or closing soonest, by when the last approval stops
-  counting), and a filter by the kinds there are. Each says its kind, its version and the change it
-  is approving, such as `version 2: approving the name's change 3`, and the change in words, such as
-  `Rename the chain to chainv4 mainnet` or `Nodes older than 0.2.0 stop at block 150,000`, with its
-  JSON to open, a bar of its approvals' weight against what it needs, and each approval: its
-  account, weight, the epoch it was made in and the epoch it counts until.
-- **In force:** every setting governance may change, summed up, with `genesis` while genesis's
-  stands, or the change that last set it, a link to that decision.
+- **Turnout:** a tile each voter, as many across as fit: its name where it has one, a bar of the
+  share of the changes put to a vote that it voted on, its last vote (`last: Yes on name, 3 h
+  ago`), and on a chain whose votes weigh stake, its share of the stake as a bar of its own.
+  Turnout is counted from each voter's newest page of `vote_change` transactions
+  (`GET /accounts/{address}/txs?kind=vote_change`), against every change any voter's pages name,
+  each change told apart by its kind's version and its JSON; votes a multisig cast count for the
+  multisig. With **Read from checked blocks** on, those pages come from the blocks read.
+- **Open proposals:** a search box over each change's kind, words and JSON and who voted which
+  way, an order (newest vote, most support, by how far Yes got toward what it needs, or closing
+  soonest, by when the oldest vote stops counting), and a filter by the kinds there are. Each is
+  a card:
+  - a **ring** toward what Yes needs, its share in the middle, No a red run from the ring's end,
+    and inside it a thin ring toward the quorum when there is one;
+  - its kind, its version and the change it is voting on, such as
+    `version 2: voting on the name's change 3`, and the change in words;
+  - where it stands: `1 more Yes needed`, `Yes is enough; … more votes of any kind make the
+    quorum`, or in red `Can no longer pass: too much has voted No`; then what Yes, No and Abstain
+    weigh, and when the oldest votes stop counting, in blocks and time, from the chain's
+    `checkpoint_interval` and block time;
+  - a **dot a voter** from `voters`: Yes a filled dot, No a cross, Abstain a half-filled ring,
+    not voted an empty ring, each labelled by name where the explorer knows one, its weight said
+    on a hover;
+  - **What it moves:** the setting as it stands in force beside what the change would make it,
+    field by field, each field that moves struck through and highlighted, `burn permille 500 →
+    600`, with how many stay; **Every field** shows them all. It works on any setting's JSON, so a
+    kind the explorer has no words for diffs all the same;
+  - each vote, its account, way, weight, the epoch it was cast in and the epoch it counts until,
+    and the change's JSON to open.
+- **In force:** every setting governance may change, governance's own included, summed up, with
+  `genesis` while genesis's stands, or the change that last set it, a link to that decision.
+- **Along the chain:** the decisions and rejections read so far on a timeline by block height,
+  decisions above the line as dots and rejections below it as crosses, each colored by its kind,
+  with a legend; a hover says which, its kind's version, and the change in words. Under it, a line
+  of the decisions so far by block.
 - **Decisions:** a search box over each one's kind, words, JSON, sender, transaction and block, a
   filter by kind, and newest or oldest first; ten to a page, **Newer page** and **Older page** to
   move, and older pages of `GET /governance/history` read as a page comes to need them, so a search
   goes on through all of them and says how far it got. Each says what it changed, its transaction,
   block, sender and time, and whether it is final or how many confirmations it has. A link from In
   force reads older pages until the decision is listed, and shows the page it is on.
+- **Rejections:** the same, of `GET /governance/rejections`: each the change that could no
+  longer pass, the kind's version it was rejected at, its transaction, block, sender and time.
 
-**Each decision checked:** the light client asks for the proof of its receipt and its
-transaction against the block it landed in, and it is **proven** only when:
-- the receipt says it decided the chain's decision of that number, and of the kind listed, the
-  history's `finality` and `switch_finality` being the consensus's kind;
-- the transaction is an approval, its own or a multisig's, of the change listed, of the
-  receipt's kind, naming the kind's version before the receipt's;
+**Each decision and rejection checked:** the light client asks for the proof of its receipt and
+its transaction against the block it landed in, and it is **proven** only when:
+- the receipt says it decided the chain's decision of that number (`Decided`), or made its
+  rejection of that number (`Rejected`), of the kind listed, the history's `finality` and
+  `switch_finality` being the consensus's kind;
+- the transaction is a vote, its own or a multisig's, on the change listed, of the receipt's
+  kind, naming the kind's version before the one a decision made, or the very version a
+  rejection was at;
 - the block and sender are the ones the node listed.
 
 Until then it says **checking**, or **waiting** for a block the light client has yet to reach. A
 proof that disagrees says **does not check**, and why, in red. With the light client stopped,
 each is **reported by the node** alone.
 
-**Gaps:** the chain's count goes up by one a decision, of whatever kind, so a number missing
-between the lowest read and the newest is a decision the node did not list. The page says so above the list. A node that
-synced from a [snapshot](node.md#syncing-from-a-snapshot) keeps decisions from its snapshot on,
-and the page says from which.
+**Gaps:** the chain's counts go up by one a decision and one a rejection, of whatever kind, so a
+number missing between the lowest read and the newest is one the node did not list. The page says
+so above its list. A node that synced from a [snapshot](node.md#syncing-from-a-snapshot) keeps
+decisions from its snapshot on, and the page says from which.
+
+With **Read from checked blocks** on, governance's own pages, `GET /governance`, its history, its
+rejections and an account's weight, are the node's to answer, and the page says they need asking.
 
 ## Updates
 
@@ -341,7 +377,7 @@ hour. An older node answers 404, and the explorer shows nothing.
 | Overview | The chain's name, coin, hash and genesis. Height, block time, throughput, peers, mempool, finality, base price and the chain's coin. Under proof of work, the network's hashrate as difficulty over block time, and the node's own when it mines, its workers' included. Charts of the last 120 blocks: block times, transactions, gas used against the limit, and the base price or the difficulty. The latest blocks, and the live feed. |
 | Block map | Every loaded block by height. The main chain runs along the middle, with finalized blocks green. Side branches sit in lanes above and below, each block joined to its parent. The tip and the justified checkpoint are outlined. Brighter blocks hold more transactions. |
 | Block | The header, its roots included, seal and finality proofs, and every transaction with its status and fee. For a mining pool's block: what went to the pool's escrow and its percent of the reward and fees, the escrow, what the producer kept as the pool's fee, and the root its miners claim against, over how many miners. |
-| Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. A governance approval says what it changes, an upgrade as the nodes it stops: `an upgrade: nodes older than 0.2.0 stop at block 150,000`, and a rename as the new name: `Approves renaming the chain to chainv4 mainnet, for the name's change 5`, the change after the version of its kind it names. A withdrawal says the kind it takes its approval back from: `Withdraws its approval of the fees' change 3`. The approval that was the last one needed is `decided`, and names the chain's count and its kind's version, `change 5, the upgrade's version 2`, linking to Governance. |
+| Transaction | Where it landed, how deep it is and whether it is final. Its offer, what it used and paid, and what it returned or why it failed. Its hops, what its contracts paid out, its events, its fields and its signature. A claim says whose mining pool earnings it claims and from which of the pool's blocks, its `earned` being the miner's lifetime total, not what it paid. A governance vote says which way and what it changes, an upgrade as the nodes it stops: `an upgrade: nodes older than 0.2.0 stop at block 150,000`, and a rename as the new name: `Votes Yes on renaming the chain to chainv4 mainnet, for the name's change 5`, the change after the version of its kind it names. A cleared vote says the change it clears its vote on: `Clears its vote on new fee settings, for the fees' change 3`. The vote that decided its change is `decided`, and names the chain's count and its kind's version, `change 5, the upgrade's version 2`; the one that left it unable to pass is `rejected`, with the chain's count of rejections, each linking to Governance. |
 | Account | The balance and nonce, and the balance the light client proved, at the finalized block and the tip. For a contract: its deployer, engine, code size and functions, the storage layout its code declares, a form to call any of them read-only, and its events, of one name or all. For a token: its name, symbol and decimals, from the token registry. For anyone: what they hold of the registered tokens, every transaction that touched them, with its type, parties, status and fee, narrowed by [filters](#an-accounts-transactions), and the events that mention them, token transfers and approvals in the token's units. Transactions need a node started with `--index-addresses`, events one started with `--index-events`. On a chain with names, the name the address goes by and the names it owns, every page of them. The multisigs its key is a member of, each with how many must agree, on a node started with `--index-multisigs`. |
 | EVM contract | An [EVM](evm.md) contract's account page: its deployer and code size, and with its ABI pasted, kept on this device per chain, its read functions, run with `eth_call`, and its logs and calls read by name, here and on its transactions' pages. |
 | Name | A [name](names.md), such as `alice.dev`: whether it is active, in its grace period or available, its owner, what it resolves to, when it expires and its grace ends, its text records, what a year of it costs, and for a subname, its name. |
@@ -358,7 +394,7 @@ hour. An older node answers 404, and the explorer shows nothing.
 | Rich list & supply | The richest accounts from `GET /rich`, each with its share of the supply, and the supply from `GET /supply`, its minted and burned proven by the light client. See [Rich list and supply](#rich-list-and-supply). |
 | Tools | Decode, Convert, Hash & verify, and Proof, in tabs. See [Tools](#tools). |
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
-| Governance | Who approves changes and what one needs, the changes being approved with their approvals, every setting in force and the change that set it, and every decision, each proven by the light client. See [Governance](#governance). |
+| Governance | Who votes on changes, what one needs and the quorum, each voter's turnout, the changes being voted on as cards with their votes and what each would move, every setting in force and the change that set it, the decisions and rejections along the chain, and every decision and rejection, each proven by the light client. See [Governance](#governance). |
 | Send | Signs and sends transfers, contract calls, deploys and burns, for the chain the light client follows: until it says which, it says so and signs nothing. |
 | Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, dark or light, and the genesis the light client pinned there, which it can forget. |
 | More | On a phone, the pages the tabs have no room for. |

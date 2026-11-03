@@ -197,6 +197,9 @@ pub struct Ctx<'a> {
     /// The DEX, and the EVM DEX's router, the node names, if it names them.
     #[cfg_attr(not(feature = "dex"), allow(dead_code))]
     pub dex: (Option<&'a str>, Option<&'a str>),
+    /// The DEX's fee in force, in hundredths of a percent, which both DEXes charge.
+    #[cfg_attr(not(feature = "dex"), allow(dead_code))]
+    pub dex_fee_bps: u32,
     /// The upgrade that stops the node's own chainv4 at a height, as GET /status or GET /release
     /// says, if one does.
     pub node_stops: Option<chainv4::structs::version::Upgrade>,
@@ -894,6 +897,7 @@ pub(crate) mod drawn {
                 faucet: None,
                 swap_contract: None,
                 dex: (None, None),
+                dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
                 node_stops: None,
                 #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
                 lights: &mut lights,

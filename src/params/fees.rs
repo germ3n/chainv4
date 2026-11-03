@@ -25,9 +25,58 @@ pub struct FeeConfig {
     pub schedule: ScheduleConfig,
     #[document(summary = "What gas costs.")]
     pub pricing: PricingConfig,
+    #[document(summary = "Where vote rewards come from, or None for genesis's vote_reward_source: a change of fees may move them from minting to the reward pool or back, from the block after the one that decides it. The pool keeps what it holds either way.")]
+    pub vote_rewards: Option<VoteRewardSource>,
+    #[document(summary = "What host operations cost in fuel, and the EVM's native and names precompiles in gas, or None for HostCosts::DEFAULT. A change of fees may name them, from the block after the one that decides it.")]
+    pub costs: Option<super::vm::HostCosts>,
 }
 
 impl Hashable for FeeConfig {}
+
+#[document(
+    summary = "Where the rewards for finality votes come from.",
+    category = "Chain",
+    see_also = "Genesis::vote_reward_source, FeeConfig::vote_rewards, REWARD_POOL",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum VoteRewardSource {
+    #[document(summary = "New supply: every reward is minted.")]
+    #[default]
+    #[wincode(tag = 0)]
+    Mint,
+    #[document(summary = "The reward pool: the burned share of every fee goes to REWARD_POOL instead of vanishing, and voters are paid from it, each as much of its reward as the pool holds. Supply then grows by block rewards alone.")]
+    #[wincode(tag = 1)]
+    Fees,
+}
+
+impl Hashable for VoteRewardSource {
+    const TAG_LEN: usize = 1;
+}
+
+impl VoteRewardSource {
+    #[document(parent = "VoteRewardSource", summary = "The name genesis files and the API use: mint or fees.")]
+    pub fn name(&self) -> &'static str {
+        match self {
+            VoteRewardSource::Mint => "mint",
+            VoteRewardSource::Fees => "fees",
+        }
+    }
+}
+
+impl std::str::FromStr for VoteRewardSource {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<VoteRewardSource, String> {
+        match text {
+            "mint" => Ok(VoteRewardSource::Mint),
+            "fees" => Ok(VoteRewardSource::Fees),
+            other => Err(format!("unknown vote reward source {other}; use mint or fees")),
+        }
+    }
+}
+
+
 
 #[document(
     summary = "Which scorer a chain runs, and its parameters.",
@@ -164,8 +213,8 @@ pub const TX_KINDS: &[&str] = &[
     "slash",
     "approve_signers",
     "withdraw_approval",
-    "approve_change",
-    "withdraw_change",
+    "vote_change",
+    "clear_vote",
     "name",
     "primary_name",
     "ethereum",

@@ -1,8 +1,8 @@
 use {
     super::accounts::refused,
     super::address::LuaAddress,
-    crate::vm::lvm::charge,
-    crate::vm::{Host, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host},
     mlua::{AnyUserData, Error, Lua},
     r#macro::document,
 };
@@ -15,7 +15,7 @@ fn host(lua: &Lua) -> mlua::Result<Host> {
 
 fn resolve(lua: &Lua, name: String) -> mlua::Result<Option<LuaAddress>> {
     let host = host(lua)?;
-    charge(lua, cost::NAME)?;
+    charge(lua, costs(lua).name)?;
 
     host.resolve_name(&name).map(|address| address.map(LuaAddress)).map_err(refused)
 }
@@ -23,7 +23,7 @@ fn resolve(lua: &Lua, name: String) -> mlua::Result<Option<LuaAddress>> {
 fn name_of(lua: &Lua, address: AnyUserData) -> mlua::Result<Option<String>> {
     let address = *address.borrow::<LuaAddress>()?;
     let host = host(lua)?;
-    charge(lua, cost::NAME)?;
+    charge(lua, costs(lua).name)?;
 
     host.name_of(&address.0).map_err(refused)
 }

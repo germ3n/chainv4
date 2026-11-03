@@ -89,6 +89,9 @@ pub enum CommittedOutcome {
     #[document(summary = "A batch that failed, undone whole: which step stopped it, counted from 0. Why is not committed to, as no failure's message is.")]
     #[wincode(tag = 7)]
     BatchFailed { step: u32 },
+    #[document(summary = "A governance vote that left its change unable to pass: the change is rejected, as the chain's rejection-th, the count light clients follow without gaps as they do decisions, at its kind's version, which a rejection leaves as it was. What lets a light client prove a rejection from the receipt alone.")]
+    #[wincode(tag = 8)]
+    Rejected { rejection: u64, kind: crate::governance::ChangeKind, version: u64 },
 }
 
 #[document(

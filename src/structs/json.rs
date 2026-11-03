@@ -113,8 +113,8 @@ pub fn tx(transaction: &Tx) -> Value {
             value
         }
         Tx::WithdrawApproval { version } => json!({ "type": "withdraw_approval", "version": version }),
-        Tx::ApproveChange { version, change } => json!({ "type": "approve_change", "version": version, "change": crate::params::json::change_json(change) }),
-        Tx::WithdrawChange { kind, version } => json!({ "type": "withdraw_change", "kind": kind.name(), "version": version }),
+        Tx::VoteChange { version, change, vote } => json!({ "type": "vote_change", "version": version, "vote": vote.name(), "kind": change.kind().name(), "change": crate::params::json::change_json(change) }),
+        Tx::ClearVote { version, change } => json!({ "type": "clear_vote", "version": version, "kind": change.kind().name(), "change": crate::params::json::change_json(change) }),
         Tx::SetDirectory { directory } => json!({ "type": "set_directory", "directory": crate::params::json::directory_json(directory) }),
         Tx::HandDirectory { to } => json!({ "type": "hand_directory", "to": to.map(|to| to.to_string()) }),
         Tx::Name { name, action } => json!({ "type": "name", "name": name, "action": name_action(action) }),

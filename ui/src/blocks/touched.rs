@@ -144,8 +144,8 @@ fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
         | Tx::Slash { .. }
         | Tx::ApproveSigners { .. }
         | Tx::WithdrawApproval { .. }
-        | Tx::ApproveChange { .. }
-        | Tx::WithdrawChange { .. }
+        | Tx::VoteChange { .. }
+        | Tx::ClearVote { .. }
         | Tx::SetDirectory { .. }
         | Tx::HandDirectory { to: None }
         | Tx::PrimaryName { .. }

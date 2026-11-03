@@ -319,7 +319,7 @@ fn loading_pays_for_the_bytes() {
     let loading = engine.load(&plain, LIMITS);
 
     assert!(loading.result.is_ok(), "{:?}", loading.result);
-    assert_eq!(loading.fuel_used, plain.len() as u64 * crate::vm::cost::LOAD_BYTE, "nothing ran");
+    assert_eq!(loading.fuel_used, plain.len() as u64 * crate::params::vm::HostCosts::DEFAULT.load_byte, "nothing ran");
 
     // A start function would run while loading, so modules may not have one; refusing it still
     // pays for the bytes.
@@ -327,7 +327,7 @@ fn loading_pays_for_the_bytes() {
     let refused = engine.load(&started, LIMITS);
 
     assert!(matches!(refused.result, Err(VmError::Compile(text)) if text.contains("start")));
-    assert_eq!(refused.fuel_used, started.len() as u64 * crate::vm::cost::LOAD_BYTE);
+    assert_eq!(refused.fuel_used, started.len() as u64 * crate::params::vm::HostCosts::DEFAULT.load_byte);
 
     let starved = engine.load(&plain, Limits { fuel: 5, ..LIMITS });
 

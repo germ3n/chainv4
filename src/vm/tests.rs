@@ -387,7 +387,7 @@ fn the_callee_burns_the_caller_s_fuel() {
     let alone = world.call(counter, "bump", &[]).fuel_used;
     let through_lua = world.call(lua, "bump_twice", &[address(counter)]).fuel_used;
 
-    assert!(through_lua > 2 * (alone + cost::CALL), "{through_lua} vs {alone}");
+    assert!(through_lua > 2 * (alone + crate::params::vm::HostCosts::DEFAULT.call), "{through_lua} vs {alone}");
 }
 
 /// contracts/examples/integers on the WASM engine and contracts/lua/integers.lua, given the same
@@ -1013,7 +1013,7 @@ return M
     let poked = world.call(poke, "poke", &[]);
 
     assert_eq!(poked.refresh_tokens, [poke]);
-    assert!(poked.fuel_used >= crate::vm::cost::TOKEN_REFRESH);
+    assert!(poked.fuel_used >= crate::params::vm::HostCosts::DEFAULT.token_refresh);
 
     // The registry asks again when told to, and the answer stands.
     Contracts::new(&world.state).refresh(&world.vm, &token, DEPLOYER, LIMITS, &standard(), crate::vm::BlockAt::at(0)).unwrap();
@@ -1654,7 +1654,7 @@ fn deploys_and_upgrades_pay_for_loading_and_for_failing() {
     // A deploy pays for loading its code as well as for init.
     let (owned, hooked) = deploy(&mut world, OWNED_V1).unwrap();
 
-    assert!(hooked.fuel_used > OWNED_V1.len() as u64 * cost::LOAD_BYTE);
+    assert!(hooked.fuel_used > OWNED_V1.len() as u64 * crate::params::vm::HostCosts::DEFAULT.load_byte);
 
     // A top level that never ends burns everything; an init that fails burns what it got to.
     let Err(Failed { error, fuel_used, .. }) = deploy(&mut world, "while true do end") else {
@@ -2103,7 +2103,7 @@ fn a_contract_clones_another_whose_init_runs_with_it_as_sender() {
     assert_eq!(world.call(template, "get", &[]).result.unwrap(), [TxCallArgumentType::Nil, text(&DEPLOYER.to_string())], "its own, from its deploy");
     let record = Contracts::new(&world.state).get(&clone).unwrap().unwrap();
     assert_eq!(record.deployer, factory);
-    assert!(made.fuel_used > crate::vm::cost::CLONE);
+    assert!(made.fuel_used > crate::params::vm::HostCosts::DEFAULT.clone);
     assert!(made.refresh_tokens.contains(&clone), "asked into the token registry, should it be a token");
 
     // One salt, one clone; init failing keeps nothing; a template without init takes no
@@ -2184,6 +2184,37 @@ const WASM_CHAIN_ID: &str = r#"
 "#;
 
 #[test]
+fn both_engines_charge_and_limit_by_their_block_s_rules_and_not_by_constants() {
+    let mut world = World::new();
+    let lua = world.lua_code(LUA_CHAIN_ID);
+    let wasm = world.wasm(WASM_CHAIN_ID);
+    let dearer = crate::params::vm::VmRules {
+        costs: crate::params::vm::HostCosts { chain_id: 2_000, ..crate::params::vm::HostCosts::DEFAULT },
+        ..crate::params::vm::VmRules::default()
+    };
+    let run = |contract: Address, rules: crate::params::vm::VmRules| {
+        let block = crate::vm::BlockAt { vm: rules, ..crate::vm::BlockAt::at(0) };
+        let context = CallContext { sender: DEPLOYER, contract, value: u256::ZERO, block };
+
+        Contracts::new(&world.state).call(&world.vm, &context, &Hash::Xxh3_64(selector("read")), &[], LIMITS).unwrap().fuel_used
+    };
+
+    // The same read in either engine costs what its block says reading the chain's id costs.
+    for contract in [lua, wasm] {
+        assert_eq!(run(contract, dearer) - run(contract, crate::params::vm::VmRules::default()), 2_000 - crate::params::vm::HostCosts::DEFAULT.chain_id);
+    }
+
+    // A deploy is held to its block's source size: one byte past it is refused.
+    let code = Code::Lua(LUA_CHAIN_ID.to_string());
+    let tight = crate::params::vm::VmRules {
+        limits: crate::params::vm::ContractLimits { source_len: LUA_CHAIN_ID.len() as u32 - 1, ..crate::params::vm::ContractLimits::DEFAULT },
+        ..crate::params::vm::VmRules::default()
+    };
+    let refused = Contracts::new(&world.state).deploy(&world.vm, &DEPLOYER, 99, &code, LIMITS, &standard(), crate::vm::BlockAt { vm: tight, ..crate::vm::BlockAt::at(0) });
+    assert!(matches!(refused, Err(failed) if failed.error.to_string().contains("allowed")));
+}
+
+#[test]
 fn contracts_read_the_chain_s_id_for_the_same_fuel_in_either_engine_and_cannot_change_it() {
     const ID: u64 = 0xabcd_ef01_2345;
     let mut world = World {
@@ -2199,7 +2230,7 @@ fn contracts_read_the_chain_s_id_for_the_same_fuel_in_either_engine_and_cannot_c
     // A second read costs what the host charges, and the few instructions around it.
     for contract in [lua, wasm] {
         let (once, twice) = (world.call(contract, "read", &[]).fuel_used, world.call(contract, "twice", &[]).fuel_used);
-        assert!((cost::CHAIN_ID..cost::CHAIN_ID + 15).contains(&(twice - once)), "{}", twice - once);
+        assert!((crate::params::vm::HostCosts::DEFAULT.chain_id..crate::params::vm::HostCosts::DEFAULT.chain_id + 15).contains(&(twice - once)), "{}", twice - once);
 
         // Out of fuel at the host call: a budget short of the charge fails, and the budget does not.
         let run = |fuel: u64| {
@@ -2208,7 +2239,7 @@ fn contracts_read_the_chain_s_id_for_the_same_fuel_in_either_engine_and_cannot_c
             Contracts::new(&world.state).call(&world.vm, &context, &Hash::Xxh3_64(selector("read")), &[], Limits { fuel, ..LIMITS }).unwrap().result
         };
         assert!(run(once).is_ok());
-        assert!(run(once - cost::CHAIN_ID).is_err());
+        assert!(run(once - crate::params::vm::HostCosts::DEFAULT.chain_id).is_err());
     }
 
     // The sandbox keeps it what the chain says.

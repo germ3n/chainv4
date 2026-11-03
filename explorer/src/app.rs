@@ -309,6 +309,7 @@ impl Explorer {
                                 Ask::Governance if failure.status == 404 => {
                                     self.store.governance = None;
                                     self.store.decisions = Default::default();
+                                    self.store.rejections = Default::default();
                                 }
                                 Ask::GovernanceWeight(address) => {
                                     self.store.governance_weights.remove(address);
@@ -516,6 +517,12 @@ impl Explorer {
                     store.events.entry(query).or_default().take(page, cursor.is_some(), now);
                 }
             }
+            // A voter's votes, for the Governance page's turnout: kept apart from the account page's.
+            Ask::AccountTxs { address, query, cursor: None } if query == crate::views::governance::VOTES_QUERY => {
+                if let Some(page) = parse::<TxsPage>(value) {
+                    store.votes_cast.insert(address, page.items);
+                }
+            }
             Ask::AccountTxs { address, query, cursor } => {
                 if let Some(page) = parse::<TxsPage>(value) {
                     // Only the filter in use: what another one found is asked again if it comes back.
@@ -527,6 +534,11 @@ impl Explorer {
             Ask::Decisions { before } => {
                 if let Some(page) = parse::<DecisionsPage>(value) {
                     store.decisions.take(page.version, page.from, page.decisions, before);
+                }
+            }
+            Ask::Rejections { before } => {
+                if let Some(page) = parse::<crate::model::RejectionsPage>(value) {
+                    store.rejections.take(page.rejection, page.from, page.rejections, before);
                 }
             }
             Ask::GovernanceWeight(address) => {
@@ -746,12 +758,16 @@ impl Explorer {
             View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames { address: address.clone(), cursor: None }, Ask::AccountMultisigs { address: address.clone(), cursor: None }].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
             View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),
-            // The newest decisions, and the light client's proof of each one read.
+            // The newest decisions and rejections, the light client's proof of each one read, and
+            // each voter's votes, for its turnout.
             View::Governance => {
                 let light = &mut self.light;
-                let proofs: Vec<Ask> = self.store.decisions.items.values().filter_map(|decision| light.prove_receipt(&decision.tx, &decision.block, decision.height)).collect();
+                let decided = self.store.decisions.items.values().map(|decision| (&decision.tx, &decision.block, decision.height));
+                let rejected = self.store.rejections.items.values().map(|rejection| (&rejection.tx, &rejection.block, rejection.height));
+                let proofs: Vec<Ask> = decided.chain(rejected).filter_map(|(tx, block, height)| light.prove_receipt(tx, block, height)).collect();
+                let turnout = views::governance::turnout_asks(&self.store);
 
-                [Ask::Governance, Ask::Decisions { before: None }].into_iter().chain(proofs).collect()
+                [Ask::Governance, Ask::Decisions { before: None }, Ask::Rejections { before: None }].into_iter().chain(proofs).chain(turnout).collect()
             }
             View::Multisig(address) if !address.is_empty() => vec![Ask::Multisig(address.clone())],
             // The first page of the directory, refreshed while it is all that was read.

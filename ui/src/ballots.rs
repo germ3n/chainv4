@@ -23,13 +23,13 @@ pub const DECIDED_ORDERS: [(Order, &str); 2] = [(Order::Newest, "Newest"), (Orde
 /// An order to list ballots in. Ties keep the order they came in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Order {
-    /// The one made last first: an open change's latest approval, a decision's count.
+    /// The one made last first: an open change's latest vote, a decision's count.
     #[default]
     Newest,
     Oldest,
     /// The one nearest to what it needs first.
     MostSupport,
-    /// The one whose last approval stops counting first.
+    /// The one whose oldest vote stops counting first.
     ClosingSoonest,
 }
 
@@ -42,9 +42,9 @@ pub struct Item {
     pub text: String,
     /// How recent it is: the higher the newer.
     pub place: u64,
-    /// How far its approvals got, what it needs being 1.
+    /// How far its Yes got, what it needs being 1.
     pub support: f64,
-    /// The epoch its last approval counts until, if it has any.
+    /// The epoch its oldest vote counts until, if it has any.
     pub closes: Option<u64>,
 }
 
@@ -134,7 +134,7 @@ pub fn summary(found: usize, page: usize, per: usize, narrowed: bool, read: usiz
     }
 }
 
-/// One share of another, each a decimal number of any size: how far approvals got, 0 when the whole
+/// One share of another, each a decimal number of any size: how far votes got, 0 when the whole
 /// is nothing or either does not read.
 pub fn share(part: &str, whole: &str) -> f64 {
     match (part.parse::<f64>(), whole.parse::<f64>()) {

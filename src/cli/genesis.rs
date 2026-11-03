@@ -100,12 +100,13 @@ fn parse_governance(text: &str) -> Result<GovernanceChoice, String> {
 pub fn dev_governance(choice: GovernanceChoice) -> Option<GovernanceConfig> {
     match choice {
         #[cfg(feature = "governance-electorate")]
-        GovernanceChoice::Electorate => Some(GovernanceConfig::Electorate { approval_epochs: 64 }),
+        GovernanceChoice::Electorate => Some(GovernanceConfig::Electorate { approval_epochs: 64, quorum_permille: 0 }),
         #[cfg(feature = "governance-council")]
         GovernanceChoice::Council => Some(GovernanceConfig::Council {
             members: vec![crate::consensus::DevAuthority::dev_keypair().public().address()],
             threshold: 1,
             approval_epochs: 64,
+            quorum_permille: 0,
         }),
         GovernanceChoice::None => None,
     }
@@ -342,7 +343,7 @@ mod tests {
         assert!(refused(&depthless).contains("finality that votes"));
 
         let mut empty = dev(DevChain::Authority);
-        empty.governance = Some(GovernanceConfig::Council { members: Vec::new(), threshold: 1, approval_epochs: 64 });
+        empty.governance = Some(GovernanceConfig::Council { members: Vec::new(), threshold: 1, approval_epochs: 64, quorum_permille: 0 });
 
         assert!(refused(&empty).contains("at least one account"));
 
@@ -446,7 +447,8 @@ mod tests {
         // The development authority chain's id from before the field, in the build it was taken
         // from: its hash, key, engines and finality all go into it. Taken again for format 9,
         // whose headers commit to their payouts too, which moved every block's id; and again for
-        // the coin's supply, kept in state from genesis on, which moved every state root.
+        // the coin's supply, kept in state from genesis on, which moved every state root; and again
+        // for FFG's slash_permille, which every FFG config encodes, set or not.
         if cfg!(all(
             feature = "blake3",
             feature = "ed25519",
@@ -456,7 +458,7 @@ mod tests {
             feature = "finality-authority",
             feature = "finality-depth"
         )) {
-            assert_eq!(read.block().id().to_string(), "0xbe84cd245b6321f5206614cd1ee97323dd4cd2d3b87986f2ba501ca3a66c496d");
+            assert_eq!(read.block().id().to_string(), "0x6f74438c3cf44ab7357e15f1275a6967927626dd6d232a70548dc13d120b7820");
         }
 
         // Set, it is part of the chain: the dev chains now have their own ids.
@@ -504,6 +506,7 @@ mod tests {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         };
         let genesis = Genesis { federation: Some(federation.clone()), ..dev(DevChain::Pow) };
         let value = to_json(&genesis);
@@ -517,7 +520,7 @@ mod tests {
 
         assert_eq!(from_json(&without).unwrap().block().id(), Genesis { federation: None, ..genesis.clone() }.block().id());
 
-        // approve-change's flag reads the same JSON, and checks it as genesis would.
+        // vote-change's flag reads the same JSON, and checks it as genesis would.
         assert_eq!(federation_from_text(&value["federation"].to_string()).unwrap(), federation);
 
         let mut short = value["federation"].clone();
@@ -538,7 +541,7 @@ mod tests {
         assert_eq!(fees_from_text(&value["fees"].to_string()).unwrap(), genesis.fees.clone().unwrap());
         assert_eq!(reward_from_text(&value["reward"].to_string()).unwrap(), genesis.reward);
         assert_eq!(reward_from_text(&reward_json(&genesis.reward).to_string()).unwrap(), genesis.reward);
-        let limits = crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: Some(2 << 20) };
+        let limits = crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: Some(2 << 20), contract: None, max_tx_bytes: None, multisig_members: None };
         assert_eq!(limits_from_text(&limits_json(&limits).to_string()).unwrap(), limits);
 
         if let Some(finality) = &genesis.finality {
@@ -621,7 +624,7 @@ mod tests {
 
         assert_eq!(from_json(&without).unwrap().block().id(), Genesis { directory: None, ..genesis.clone() }.block().id());
 
-        // approve-change's flag reads the same JSON, and checks it as genesis would.
+        // vote-change's flag reads the same JSON, and checks it as genesis would.
         assert_eq!(directory_from_text(&value["directory"].to_string()).unwrap(), directory);
 
         let mut wrong = value["directory"].clone();
@@ -662,7 +665,7 @@ mod tests {
             assert!(from_json(&broken).is_err(), "{bad}");
         }
 
-        // approve-change's flag: standard, or the same JSON.
+        // vote-change's flag: standard, or the same JSON.
         assert_eq!(collections_from_text("standard").unwrap(), CollectionFunctions::standard());
         assert_eq!(collections_from_text(r#"{"nft":["owner_of"],"multi":[]}"#).unwrap().nft, ["owner_of"]);
         assert!(collections_from_text("nonsense").is_err());
@@ -844,12 +847,15 @@ mod tests {
         let mut changes = vec![
             Change::Consensus(genesis.consensus.clone()),
             Change::Bootnodes(vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()]),
-            Change::NamePrices(vec![u256::new(5), u256::new(1)]),
+            Change::Names(crate::registry::names::NameSettings { prices: vec![u256::new(5), u256::new(1)], grace_ms: 1_000, max_years: 3 }),
+            Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]),
+            Change::EvmSpec { spec: crate::params::vm::EvmSpec::Osaka, from: 1_000 },
+            Change::Dex(crate::params::vm::DexSettings { fee_bps: 25 }),
             Change::Collections(CollectionFunctions::standard()),
             Change::Directory(Directory { swap: Some(Address::Contract([7; 32])), ..Directory::default() }),
             Change::Fees(FeeConfig::dev()),
             Change::Reward(Reward { initial: u256::new(50), halving_interval: Some(1_000) }),
-            Change::Limits(crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: Some(2 * 1024 * 1024) }),
+            Change::Limits(crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: Some(2 * 1024 * 1024), contract: None, max_tx_bytes: None, multisig_members: None }),
             Change::Upgrade(crate::structs::version::Upgrade { least: "0.2.0".parse().unwrap(), from: 1_000 }),
             Change::Name("chainv4 testnet".to_string()),
         ];
@@ -866,6 +872,7 @@ mod tests {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         }));
 
         for change in changes {

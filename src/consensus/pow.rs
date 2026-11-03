@@ -1,5 +1,5 @@
 use {
-    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer},
+    super::{Consensus, ConsensusError, Producer},
     crate::crypto::hashable::Hashable,
     crate::registry::validators::Member,
     crate::structs::address::Address,
@@ -15,14 +15,7 @@ use {
 
 /// Separates work hashes from every other hash the chain takes.
 const WORK_DOMAIN: &[u8] = b"chainv4 work";
-/// Each step moves difficulty by its parent's divided by this.
-const ADJUSTMENT: u128 = 64;
-/// The most steps difficulty falls in one block, so one long gap cannot undo it all.
-const MAX_STEPS_DOWN: u64 = 32;
-/// Under a window, how far one interval between blocks may count from the target either way: a
-/// block that came in a quarter of the target, or four times it, counts as that, so one gap or one
-/// timestamp moves difficulty by a bounded share of the window.
-const MAX_SWING: u64 = 4;
+
 /// How many nonces a mining thread tries before checking whether its job is still current.
 const NONCES_PER_CHECK: u64 = 4_096;
 
@@ -41,9 +34,40 @@ pub struct PowConfig {
     pub initial_difficulty: u128,
     #[document(summary = "Difficulty never falls below this.")]
     pub min_difficulty: u128,
+    #[document(summary = "The retarget window a change of consensus names, in blocks, at least 2, or None to keep genesis's consensus.window. Genesis itself keeps its window beside the consensus, as Genesis::pow_window.")]
+    pub window: Option<u64>,
+    #[document(summary = "How difficulty steps, or None for PowTuning::DEFAULT's.")]
+    pub tuning: Option<PowTuning>,
 }
 
 impl Hashable for PowConfig {}
+
+#[document(
+    summary = "How proof of work's difficulty steps: by what share of the parent's it moves, how far it may fall at once, and under a window how far one interval may count from the target. Genesis or a change of consensus may name it; unset, PowTuning::DEFAULT's.",
+    category = "Consensus",
+    see_also = "PowConfig, ProofOfWork",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct PowTuning {
+    #[document(summary = "Each step moves difficulty by its parent's divided by this. At least 2.")]
+    pub adjustment: u64,
+    #[document(summary = "The most steps difficulty falls in one block, so one long gap cannot undo it all. At least 1.")]
+    pub max_steps_down: u64,
+    #[document(summary = "Under a window, how far one interval between blocks may count from the target either way: 4 counts one that came in a quarter of the target, or four times it, as that. At least 1.")]
+    pub max_swing: u64,
+}
+
+impl Hashable for PowTuning {}
+
+impl PowTuning {
+    #[document(parent = "PowTuning", summary = "What every proof-of-work chain stepped by before the tuning was governed.")]
+    pub const DEFAULT: PowTuning = PowTuning { adjustment: 64, max_steps_down: 32, max_swing: 4 };
+
+    #[document(parent = "PowTuning", summary = "Why no chain could step by it: an adjustment under 2, or no steps down or swing at all.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        (self.adjustment < 2 || self.max_steps_down == 0 || self.max_swing == 0).then_some("consensus.adjustment is at least 2, and max_steps_down and max_swing at least 1")
+    }
+}
 
 #[document(
     summary = "The rules of proof of work. Anyone may produce a block whose seal holds a nonce that makes the work hash of the block's id and nonce, read as a big-endian number, at most u256::MAX / difficulty. Without a window, difficulty adjusts every block from its parent alone: one step up when a block comes in under the target time, none within one to two targets, and a step down for each further target, at most 32. With one, it retargets every block over the window: the work of the window's blocks over the time they took, scaled to the target, each interval counting as between a quarter of the target and four times it, so one block's timestamp moves it by a bounded share of the window; and a block's timestamp must be after the median of the window's, as in Bitcoin, so a producer who sets its clock ahead does not drag the chain's time along.",
@@ -64,7 +88,15 @@ impl ProofOfWork {
         params = { window = "The retarget and median-time window in blocks, at least 2, or None for the parent-only rule." },
     )]
     pub fn new(config: PowConfig, window: Option<u64>) -> ProofOfWork {
+        // A change of consensus that names a window replaces genesis's.
+        let window = config.window.or(window);
+
         ProofOfWork { config, window }
+    }
+
+    /// How difficulty steps: the config's, or the defaults.
+    fn tuning(&self) -> PowTuning {
+        self.config.tuning.unwrap_or(PowTuning::DEFAULT)
     }
 
     /// Difficulty from the parent's alone, by steps of a 64th.
@@ -73,13 +105,14 @@ impl ProofOfWork {
             return self.config.initial_difficulty.max(self.config.min_difficulty).max(1);
         }
 
-        let step = (parent.difficulty / ADJUSTMENT).max(1);
+        let tuning = self.tuning();
+        let step = (parent.difficulty / u128::from(tuning.adjustment.max(2))).max(1);
         let targets = timestamp.saturating_sub(parent.timestamp) / self.config.target_block_ms.max(1);
         let difficulty = match targets {
             0 => parent.difficulty.saturating_add(step),
             _ => parent
                 .difficulty
-                .saturating_sub(step.saturating_mul(u128::from((targets - 1).min(MAX_STEPS_DOWN)))),
+                .saturating_sub(step.saturating_mul(u128::from((targets - 1).min(tuning.max_steps_down)))),
         };
 
         difficulty.max(self.config.min_difficulty).max(1)
@@ -102,6 +135,7 @@ impl ProofOfWork {
     /// first two blocks, with no interval to measure, take the initial difficulty.
     fn retargeted(&self, ancestors: &[BlockHeader], window: u64) -> u128 {
         let window = self.windowed(ancestors, window);
+        let swing = self.tuning().max_swing.max(1);
         let floor = self.config.min_difficulty.max(1);
 
         if window.len() < 2 {
@@ -111,7 +145,7 @@ impl ProofOfWork {
         let target = u128::from(self.config.target_block_ms.max(1));
         let span: u128 = window
             .windows(2)
-            .map(|pair| u128::from(pair[0].timestamp.saturating_sub(pair[1].timestamp)).clamp(target / u128::from(MAX_SWING), target * u128::from(MAX_SWING)))
+            .map(|pair| u128::from(pair[0].timestamp.saturating_sub(pair[1].timestamp)).clamp(target / u128::from(swing), target * u128::from(swing)))
             .sum();
         // The blocks produced during the span: every one but the oldest, which starts it.
         let work: u256 = window[..window.len() - 1].iter().map(|header| u256::from(header.difficulty)).fold(u256::ZERO, |sum, next| sum + next);
@@ -170,7 +204,7 @@ impl Consensus for ProofOfWork {
             return Err(ConsensusError::Early);
         }
 
-        if header.timestamp > now + MAX_DRIFT_MS {
+        if header.timestamp > now + super::drift_ms(self.config.target_block_ms) {
             return Err(ConsensusError::FromTheFuture);
         }
 
@@ -542,6 +576,8 @@ mod tests {
             target_block_ms: TARGET,
             initial_difficulty: 1_000,
             min_difficulty: min,
+            tuning: None,
+            window: None,
         }, None)
     }
 
@@ -551,6 +587,8 @@ mod tests {
             target_block_ms: TARGET,
             initial_difficulty: 1_000,
             min_difficulty: min,
+            tuning: None,
+            window: None,
         }, Some(window))
     }
 
@@ -597,6 +635,33 @@ mod tests {
         assert_eq!(rules.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET * 1_000), 6_400 - 100 * 32);
         assert_eq!(rules.difficulty(&[header(5, 10_000, 12)], 10_000 + TARGET * 50), 10);
         assert_eq!(rules.lookback(), 1);
+    }
+
+    #[test]
+    fn a_consensus_s_own_tuning_and_window_step_difficulty_in_place_of_the_defaults() {
+        let tuned = ProofOfWork::new(PowConfig {
+            hash: HashType::default_chain(),
+            target_block_ms: TARGET,
+            initial_difficulty: 1_000,
+            min_difficulty: 10,
+            tuning: Some(PowTuning { adjustment: 32, max_steps_down: 2, max_swing: 4 }),
+            window: Some(5),
+        }, None);
+        let parent = header(5, 10_000, 6_400);
+
+        // Steps of a 32nd, and at most two of them down, however long the gap.
+        assert_eq!(tuned.lookback(), 5, "the window the change names, not genesis's none");
+        let unwindowed = ProofOfWork::new(PowConfig { window: None, ..tuned.config.clone() }, None);
+        assert_eq!(unwindowed.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET / 2), 6_600);
+        assert_eq!(unwindowed.difficulty(std::slice::from_ref(&parent), 10_000 + TARGET * 1_000), 6_400 - 200 * 2);
+        assert!(PowTuning { adjustment: 1, ..PowTuning::DEFAULT }.problem().is_some());
+    }
+
+    #[test]
+    fn a_block_may_run_ahead_of_the_clock_by_three_blocks_and_never_less_than_fifteen_seconds() {
+        assert_eq!(crate::consensus::drift_ms(2_000), 15_000);
+        assert_eq!(crate::consensus::drift_ms(5_000), 15_000, "the devnet's 5 s blocks: three of them");
+        assert_eq!(crate::consensus::drift_ms(60_000), 180_000);
     }
 
     /// Ancestors newest first: block heights down from top, this many milliseconds apart, at one
@@ -762,6 +827,8 @@ mod tests {
                 target_block_ms: TARGET,
                 initial_difficulty: 1_000,
                 min_difficulty: 1,
+                tuning: None,
+                window: None,
             }, None);
             let mut child = header(6, 10_100, 0);
             child.parent = parent.id();

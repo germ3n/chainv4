@@ -23,7 +23,7 @@ use {
     crate::abi::{AbiType, AbiValue, decode_values, encode_values},
     crate::crypto::hasher::Hasher,
     crate::structs::hash::HashType,
-    crate::vm::{cost, crypto},
+    crate::vm::crypto,
     r#macro::document,
     revm::precompile::{PrecompileHalt, PrecompileOutput},
     revm::primitives::{Bytes, keccak256},
@@ -39,6 +39,8 @@ pub const CRYPTO_PRECOMPILE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 #[derive(Clone, Copy)]
 pub(super) struct CryptoAt {
     pub hash: HashType,
+    /// What its calls cost, as the native engines charge for the same work.
+    pub costs: crate::params::vm::HostCosts,
 }
 
 /// What a call does, from its signature.
@@ -127,10 +129,10 @@ impl CryptoAt {
     /// What a call costs, as the native engines charge for the same work, by the input's size.
     fn gas(&self, called: &Called, len: u64) -> u64 {
         match called {
-            Called::Verify => cost::VERIFY + len / cost::HASH_BYTES_PER_FUEL,
-            Called::KeyAddress => cost::KEY_ADDRESS,
-            Called::Hash(_) | Called::Digest(_) => cost::HASH + len / cost::HASH_BYTES_PER_FUEL,
-            Called::CheckState | Called::CheckMerkle => cost::CHECK_PROOF + cost::PROOF_SIBLING * (len / 32),
+            Called::Verify => self.costs.verify + len / self.costs.hash_bytes_per_fuel.max(1),
+            Called::KeyAddress => self.costs.key_address,
+            Called::Hash(_) | Called::Digest(_) => self.costs.hash + len / self.costs.hash_bytes_per_fuel.max(1),
+            Called::CheckState | Called::CheckMerkle => self.costs.check_proof + self.costs.proof_sibling * (len / 32),
         }
     }
 

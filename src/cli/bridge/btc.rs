@@ -554,6 +554,13 @@ impl Bridge {
         self.call(*gateway, "propose", u256::ZERO, args)
     }
 
+    /// How long a release waits before this signer votes to cancel it: the federation's policy,
+    /// which governance sets for every signer alike, or what this signer was started with while
+    /// it names none.
+    fn cancel_after(&self) -> u64 {
+        self.status().ok().and_then(|status| status["federation"]["btc"]["cancel_after_ms"].as_u64()).unwrap_or(self.args.cancel_after)
+    }
+
     /// For each release still open, or cancelled and yet mined: broadcasts one with all its
     /// signatures that Bitcoin has not heard of, shows one deep enough, and warns of one with all its
     /// signatures Bitcoin has not mined past the age limit. One going wrong is said and passed over,
@@ -624,7 +631,7 @@ impl Bridge {
     /// past the age limit, by what the chain says of its age. One with an input shown spent can never
     /// be mined and takes a vote instead, and none is said if its age cannot be read.
     pub(crate) fn stuck_warning(&self, gateway: &Address, id: u64, found: &[Value], asked: Option<u64>) -> CliResult<Option<String>> {
-        let Some(age) = self.release_ages(gateway, &[id]).ok().and_then(|ages| ages.get(&id).copied()).filter(|age| *age >= self.args.cancel_after) else {
+        let Some(age) = self.release_ages(gateway, &[id]).ok().and_then(|ages| ages.get(&id).copied()).filter(|age| *age >= self.cancel_after()) else {
             return Ok(None);
         };
         let facts = self.release_facts(gateway, found, 0)?;
@@ -716,7 +723,7 @@ impl Bridge {
         for (id, found, paid) in cancelled {
             let paid_rate = btc_release_rate(&self.release_facts(gateway, &found, 0)?)?;
 
-            if !btc_may_propose_again(rate, paid_rate, ages.get(&id).copied(), self.args.cancel_after) {
+            if !btc_may_propose_again(rate, paid_rate, ages.get(&id).copied(), self.cancel_after()) {
                 for withdrawal in paid.into_iter().filter(|withdrawal| anchored.contains(withdrawal)) {
                     cooling.insert(withdrawal, format!("release {id} paying it was cancelled at {paid_rate} satoshis a virtual byte, and at {rate} it would go the same way: it goes at about a quarter less, or past --cancel-after"));
                 }
@@ -984,7 +991,7 @@ impl Bridge {
                 eprintln!("no fee rate to go by: signing for at most the fixed {most_rate} satoshis a virtual byte");
             }
 
-            let past_limit = ages.as_ref().and_then(|ages| ages.get(&id)).map(|age| *age >= self.args.cancel_after);
+            let past_limit = ages.as_ref().and_then(|ages| ages.get(&id)).map(|age| *age >= self.cancel_after());
 
             if let Err(why) = self.step_release(&gateway, id, &found, &my_key, &secret, &mut paying, most_rate, blind, past_limit, voting) {
                 eprintln!("release {id}: {why}");

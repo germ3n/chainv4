@@ -2,8 +2,8 @@ use {
     super::address::LuaAddress,
     super::integers::{LuaInt, exact_as},
     crate::structs::u256::u256,
-    crate::vm::lvm::charge,
-    crate::vm::{Host, VmError, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host, VmError},
     mlua::{AnyUserData, Error, Lua, Value},
     r#macro::document,
 };
@@ -25,7 +25,7 @@ pub(super) fn refused(err: VmError) -> Error {
 fn balance(lua: &Lua, address: AnyUserData) -> mlua::Result<LuaInt<u256>> {
     let address = *address.borrow::<LuaAddress>()?;
     let host = host(lua)?;
-    charge(lua, cost::BALANCE)?;
+    charge(lua, costs(lua).balance)?;
 
     host.balance(&address.0).map(LuaInt).map_err(refused)
 }
@@ -34,7 +34,7 @@ fn transfer(lua: &Lua, (to, amount): (AnyUserData, Value)) -> mlua::Result<()> {
     let to = *to.borrow::<LuaAddress>()?;
     let amount = exact_as::<u256>(&amount)?;
     let host = host(lua)?;
-    charge(lua, cost::TRANSFER)?;
+    charge(lua, costs(lua).transfer)?;
 
     host.transfer(&to.0, amount).map_err(refused)
 }

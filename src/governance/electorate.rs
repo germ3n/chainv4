@@ -64,4 +64,45 @@ impl Governance for Electorate {
             _ => u256::MAX,
         })
     }
+
+    #[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(unused_variables))]
+    fn total(&self, state: &State, epoch: u64) -> Result<u256, DbError> {
+        Ok(match Changes::new(state).finality_in(epoch, &self.finality)? {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(_) => crate::registry::validators::Validators::new(state).set(epoch)?.map_or(u256::ZERO, |set| set.total()),
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(_) => u256::from(crate::registry::signers::Signers::new(state).decided()?.set.signers.len() as u64),
+            #[allow(unreachable_patterns)]
+            _ => u256::ZERO,
+        })
+    }
+
+    #[cfg_attr(not(any(feature = "finality-ffg", feature = "finality-authority")), allow(unused_variables))]
+    fn voters(&self, state: &State, epoch: u64) -> Result<Vec<(Address, u256)>, DbError> {
+        // Each account once, weighing what all of its validators or signers do together.
+        let mut voters: Vec<(Address, u256)> = Vec::new();
+        let mut add = |account: Address, weight: u256| match voters.iter_mut().find(|(voter, _)| *voter == account) {
+            Some((_, sum)) => *sum = sum.saturating_add(weight),
+            None => voters.push((account, weight)),
+        };
+
+        match Changes::new(state).finality_in(epoch, &self.finality)? {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(_) => {
+                for member in crate::registry::validators::Validators::new(state).set(epoch)?.map(|set| set.members).unwrap_or_default() {
+                    add(member.account, member.weight);
+                }
+            }
+            #[cfg(feature = "finality-authority")]
+            FinalityConfig::Authority(_) => {
+                for signer in crate::registry::signers::Signers::new(state).decided()?.set.signers {
+                    add(signer.account, u256::ONE);
+                }
+            }
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+
+        Ok(voters)
+    }
 }

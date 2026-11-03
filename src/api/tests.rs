@@ -716,11 +716,14 @@ fn governance_lists_the_decision_and_the_ballot() {
             members: vec![dev.public().address(), other.public().address()],
             threshold: 2,
             approval_epochs: 16,
+            quorum_permille: 0,
         }),
         ..free()
     };
     let staked = ConsensusConfig::Staked { slot_ms: SLOT, schedule: Schedule::Priority };
-    let approve = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
+    let approve = SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
+    let renamed = Change::Name("second".to_string());
+    let abstain = SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Abstain, version: 0, change: renamed.clone() }, 0, FeeOffer::NONE, &other, &genesis.block().id());
     let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
@@ -729,7 +732,7 @@ fn governance_lists_the_decision_and_the_ballot() {
         let now = chain.tip().timestamp + SLOT;
         let txs = match height {
             1 => vec![approve.clone()],
-            _ => Vec::new(),
+            _ => vec![abstain.clone()],
         };
         let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
         block.seal = producer.seal(&block.header).unwrap();
@@ -744,7 +747,10 @@ fn governance_lists_the_decision_and_the_ballot() {
     assert_eq!(listing["epoch"], 0);
     assert_eq!(listing["version"], 0);
     assert_eq!(listing["needed"], "2");
+    assert_eq!(listing["total"], "2");
+    assert_eq!(listing["quorum_permille"], 0);
     assert_eq!(listing["approval_epochs"], 16);
+    assert_eq!(listing["voters"], json!([{ "account": dev.public().address().to_string(), "weight": "1" }, { "account": other.public().address().to_string(), "weight": "1" }]));
     assert_eq!(listing["active"], consensus(&genesis.consensus));
     assert_eq!(listing["decided"], consensus(&genesis.consensus));
     assert_eq!(
@@ -753,15 +759,25 @@ fn governance_lists_the_decision_and_the_ballot() {
             "consensus": consensus(&staked),
             "kind": "consensus",
             "version": 0,
-            "weight": "1",
-            "needed": "2",
-            "approvals": [{ "account": dev.public().address().to_string(), "weight": "1", "epoch": 0, "counts_until": 15 }],
+            "closes": 15,
+            "tally": { "yes": "1", "no": "0", "abstain": "0", "voted": "1", "total": "2", "needed": "2", "quorum": "0", "more_needed": "1", "quorum_met": true, "can_pass": true },
+            "votes": [{ "account": dev.public().address().to_string(), "vote": "yes", "weight": "1", "epoch": 0, "counts_until": 15 }],
+        }, {
+            "name": "second",
+            "kind": "name",
+            "version": 0,
+            "closes": 15,
+            "tally": { "yes": "0", "no": "0", "abstain": "1", "voted": "1", "total": "2", "needed": "2", "quorum": "0", "more_needed": "2", "quorum_met": true, "can_pass": true },
+            "votes": [{ "account": other.public().address().to_string(), "vote": "abstain", "weight": "1", "epoch": 0, "counts_until": 15 }],
         }])
     );
+    assert_eq!(ok(address, &format!("/governance/weight/{}", other.public().address()))["voted"][0]["vote"], "abstain");
 
     let tx = &ok(address, "/blocks/1")["txs"][0]["tx"];
 
-    assert_eq!(tx["type"], "approve_change");
+    assert_eq!(tx["type"], "vote_change");
+    assert_eq!(tx["vote"], "yes");
+    assert_eq!(tx["kind"], "consensus");
     assert_eq!(tx["version"], 0);
     assert_eq!(tx["change"]["consensus"], consensus(&staked));
     assert_eq!(get(serve().address, "/governance").0, 404, "the plain dev chain has none");
@@ -769,20 +785,20 @@ fn governance_lists_the_decision_and_the_ballot() {
 
 #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
 #[test]
-fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
+fn governance_lists_its_decisions_what_stands_and_who_may_vote() {
     use crate::governance::{Change, GovernanceConfig};
 
     let dev = DevAuthority::dev_keypair();
     let other = Keypair::generate(dev.public().key_type()).unwrap();
     let genesis = Genesis {
-        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address(), other.public().address()], threshold: 1, approval_epochs: 16 }),
+        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address(), other.public().address()], threshold: 1, approval_epochs: 16, quorum_permille: 0 }),
         name: Some("first".to_string()),
         ..free()
     };
     let bootnodes = vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()];
-    let renamed = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Name("second".to_string()) }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
+    let renamed = SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Name("second".to_string()) }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
     // Each kind its own version: the bootnodes' first decision, after the name's.
-    let booted = SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev, &genesis.block().id());
+    let booted = SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Bootnodes(bootnodes.clone()) }, 1, FeeOffer::NONE, &dev, &genesis.block().id());
     let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
     let db = Arc::new(MemoryDb::default());
     let mut chain = Chain::open(db.clone(), &genesis).unwrap();
@@ -834,11 +850,65 @@ fn governance_lists_its_decisions_what_stands_and_who_may_approve() {
     let stranger = Keypair::generate(dev.public().key_type()).unwrap().public().address();
 
     assert_eq!((member["weight"].clone(), member["needed"].clone()), (json!("1"), json!("1")));
-    assert_eq!(member["approved"], json!([]), "no approval of any kind that still counts");
+    assert_eq!(member["voted"], json!([]), "no vote of any kind that still counts");
+    assert_eq!(member["total"], "2");
     assert_eq!(listing["versions"]["name"], 1);
     assert_eq!(listing["versions"]["bootnodes"], 1);
     assert_eq!(listing["versions"]["fees"], 0, "each kind its own count");
     assert_eq!(ok(address, &format!("/governance/weight/{stranger}"))["weight"], "0");
+}
+
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+#[test]
+fn a_rejection_is_listed_and_a_light_client_proves_it_from_its_receipt() {
+    use crate::governance::{Change, ChangeKind, ChangeVote, GovernanceConfig};
+    use crate::structs::receipt::CommittedOutcome;
+
+    let dev = DevAuthority::dev_keypair();
+    let other = Keypair::generate(dev.public().key_type()).unwrap();
+    let genesis = Genesis {
+        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address(), other.public().address()], threshold: 2, approval_epochs: 16, quorum_permille: 0 }),
+        ..free()
+    };
+    let hash = genesis.hash;
+    let renamed = Change::Name("second".to_string());
+    // A No from one of a council of two that needs both: it can no longer pass.
+    let no = SignedTx::sign(Tx::VoteChange { version: 0, change: renamed.clone(), vote: ChangeVote::No }, 0, FeeOffer::NONE, &dev, &genesis.block().id());
+    let again = SignedTx::sign(Tx::VoteChange { version: 0, change: renamed.clone(), vote: ChangeVote::Yes }, 1, FeeOffer::NONE, &dev, &genesis.block().id());
+    let mut producer = AuthorityProducer::new(dev.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+
+    for txs in [vec![no.clone()], vec![again.clone()], Vec::new(), Vec::new()] {
+        let now = chain.tip().timestamp + SLOT;
+        let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let receipt = ok(address, &format!("/txs/{}", no.id(hash)));
+
+    assert_eq!((receipt["status"].clone(), receipt["rejection"].clone(), receipt["kind"].clone(), receipt["kind_version"].clone()), (json!("rejected"), json!(1), json!("name"), json!(0)));
+    assert!(ok(address, &format!("/txs/{}", again.id(hash)))["error"].as_str().unwrap_or_default().contains("rejected"), "it stays rejected at its version");
+
+    let listed = ok(address, "/governance/rejections");
+
+    assert_eq!((listed["rejection"].clone(), listed["from"].clone()), (json!(1), json!(1)));
+    assert_eq!(listed["rejections"][0]["tx"], no.id(hash).to_string());
+    assert_eq!(listed["rejections"][0]["change"], json!({ "name": "second" }));
+    assert_eq!((listed["rejections"][0]["of"].clone(), listed["rejections"][0]["kind_version"].clone()), (json!("name"), json!(0)));
+    assert_eq!(ok(address, "/governance")["rejections"], 1);
+    assert_eq!(ok(address, "/governance")["proposals"], json!([]), "its votes went with it");
+
+    let client = followed(address, chain.genesis());
+    let decode = |value: &Value| from_hex(value.as_str().unwrap()).unwrap();
+    let hashes = |value: &Value| value.as_array().unwrap().iter().map(|one| Hash::from_bytes(hash, &decode(one)).unwrap()).collect::<Vec<_>>();
+    let proof = ok(address, &format!("/proofs/receipts/{}", no.id(hash)));
+    let (block, count) = (Hash::from_bytes(hash, &decode(&proof["block"])).unwrap(), proof["count"].as_u64().unwrap() as usize);
+    let (receipt, _) = client.check_receipt(&block, &decode(&proof["receipt"]), 0, count, &hashes(&proof["path"])).unwrap();
+
+    assert_eq!(receipt.outcome, CommittedOutcome::Rejected { rejection: 1, kind: ChangeKind::Name, version: 0 });
 }
 
 #[cfg(feature = "finality-depth")]
@@ -2137,6 +2207,7 @@ fn status_names_the_federation_in_force() {
         chain_depth: 20,
         evm_depth: 12,
         bitcoin_depth: 6,
+        btc: None,
     };
     let genesis = Genesis { federation: Some(federation.clone()), ..free() };
     Chain::open(db.clone(), &genesis).unwrap();

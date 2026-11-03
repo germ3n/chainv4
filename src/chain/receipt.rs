@@ -116,6 +116,9 @@ pub enum TxStatus {
     #[document(summary = "A batch that failed, undone whole: which step stopped it, counted from 0, and why. It still used up its nonce.")]
     #[wincode(tag = 7)]
     BatchFailed { step: u32, why: String },
+    #[document(summary = "A governance vote that left its change unable to pass: it is rejected, as the chain's rejection-th, at its kind's version.")]
+    #[wincode(tag = 8)]
+    Rejected { rejection: u64, kind: crate::governance::ChangeKind, version: u64 },
 }
 
 impl TxReceipt {
@@ -175,6 +178,7 @@ impl TxStatus {
             Ok(Effect::Returned(values)) => TxStatus::Returned(values.clone()),
             Ok(Effect::Upgraded(address)) => TxStatus::Upgraded(*address),
             Ok(Effect::Decided { decision, kind, version }) => TxStatus::Decided { decision: *decision, kind: *kind, version: *version },
+            Ok(Effect::Rejected { rejection, kind, version }) => TxStatus::Rejected { rejection: *rejection, kind: *kind, version: *version },
             Ok(Effect::Batch(steps)) => TxStatus::Batch(steps.clone()),
             Err(Failure::Step { step, failure }) => TxStatus::BatchFailed { step: *step, why: failure.to_string() },
             Err(failure) => TxStatus::Failed(failure.to_string()),
@@ -201,6 +205,7 @@ fn outcome(status: &TxStatus) -> CommittedOutcome {
         TxStatus::Failed(_) => CommittedOutcome::Failed,
         TxStatus::Upgraded(address) => CommittedOutcome::Upgraded(*address),
         TxStatus::Decided { decision, kind, version } => CommittedOutcome::Decided { decision: *decision, kind: *kind, version: *version },
+        TxStatus::Rejected { rejection, kind, version } => CommittedOutcome::Rejected { rejection: *rejection, kind: *kind, version: *version },
         TxStatus::Batch(steps) => CommittedOutcome::Batch(steps.clone()),
         TxStatus::BatchFailed { step, .. } => CommittedOutcome::BatchFailed { step: *step },
     }

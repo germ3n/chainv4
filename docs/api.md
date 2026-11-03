@@ -47,6 +47,8 @@ Where the chain stands:
 | `upgrade` | `null`, or the [upgrade](updates.md#upgrades) governance decided last: nodes older than `least` stop before block `from`. |
 | `version` | The node's own chainv4 version, such as `0.1.0`. |
 | `name` | The chain's name, genesis's or the one governance decided last, such as `chainv4 testnet`, or `null` for a chain that has none: what the apps call the network. |
+| `dex_fee_bps` | The DEX's fee for the next block, in hundredths of a percent, which both DEXes charge. |
+| `evm_spec` | The EVM's spec for the next block, such as `prague`. |
 | `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) the `directory` names, else the one a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
 | `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router the `directory` names, each else the one a node started with `--dex-contract` and `--dex-router` names. |
 | `operator` | `null`, or what the node's operator named with `--swap-contract`, `--dex-contract` and `--dex-router`, as `swap`, `dex` and `dex_router`, each only when given: a suggestion, shown apart, that fills only what the directory leaves unset. |
@@ -88,9 +90,10 @@ Each summary has:
 **Each `tx`** has a `type` and that type's fields:
 - `transfer`, `mint`, `burn`, `contract_call`, `evm_call`, `deploy`, `upgrade`;
 - `bond`, `unbond`, `withdraw`, `slash`, `approve_signers`, `withdraw_approval`;
-- `approve_change`, with its `version` and `change`, which holds the new `consensus` as a genesis
-  file writes one, the new `bootnodes`, or the new `name_prices` as decimal strings, and
-  `withdraw_change`;
+- `vote_change`, with its `version`, its `vote` (`yes`, `no` or `abstain`), the change's
+  `kind`, and `change`, which holds the new `consensus` as a genesis file writes one, the new
+  `bootnodes`, or any setting as [governance](governance.md#a-change) lists them; and
+  `clear_vote`, with its `version`, `kind` and `change`;
 - `multisig`, a multisig's own: its `account`, the `tx` it sends and the members' `signatures`,
   each with `key` and `signature`; `create_multisig` and `change_multisig` with `members`, each a
   `key`, its `bitcoin` xpub and its `evm` address or `null`, `threshold` and `testnet`;
@@ -820,22 +823,28 @@ On a chain with [governance](governance.md):
 - `epoch`, the tip's;
 - the `active` consensus, the one fixed for the tip's epoch, and the `decided` one and its
   `version`, each as a genesis file writes a consensus;
-- `approval_epochs`, how many epochs an approval counts for, and `needed`, what a change's
-  approvals must weigh now;
+- `approval_epochs`, how many epochs a vote counts for, `quorum_permille`, the quorum, `needed`,
+  what Yes on a change must weigh now, and `total`, what every voter weighs together;
+- `voters`, every account that may vote, each with its `weight`, and `rejections`, how many
+  changes were rejected;
 - `bootnodes`, the chain's now;
 - `finality`, the kind the tip's epoch runs, and `switch`, a switch of kind decided and still to
   take effect, with the `epoch` it runs from and its `type`, or `null`;
-- the `proposals` with approvals that still count in the tip's epoch, each its change as one
-  field named for what it changes (`consensus`, `bootnodes`, `name`, …, as
-  [governance](governance.md#a-change) lists them), its `kind` and that kind's `version`, what
-  its approvals `weight` and what they `needed`, and its `approvals`. Each approval has its `account`, what it weighs now, the `epoch`
-  it was made in, and the last epoch it counts in (`counts_until`);
+- the `proposals` with votes that still count in the tip's epoch, each its change as one field
+  named for what it changes (`consensus`, `bootnodes`, `name`, …, as
+  [governance](governance.md#a-change) lists them), its `kind` and that kind's `version`, its
+  `tally` (`yes`, `no`, `abstain`, `voted`, `total`, `needed`, `quorum`, `more_needed`,
+  `quorum_met` and `can_pass`, weights as decimal strings), `closes`, the last epoch its oldest
+  vote counts in, and its `votes`. Each vote has its `account`, its `vote`, `yes`, `no` or
+  `abstain`, what it weighs now, the `epoch` it was cast in, and the last epoch it counts in
+  (`counts_until`);
 - `version`, the chain's count of decisions of every kind, and `versions`, each kind's own: what
-  an approval of a change of that kind names;
+  a vote on a change of that kind names;
 - `members`, a council's accounts, or `null` under the electorate, whose voters are finality's;
 - `in_force`, every setting governance may change as it stands at the tip, by kind: `consensus`,
-  `name`, `bootnodes`, `name_prices`, `collections`, `federation`, `directory`, `fees`,
-  `reward`, `limits`, `finality` and `upgrade`, a kind left out when the chain has none of it.
+  `name`, `bootnodes`, `names`, `collections`, `token_functions`, `federation`, `directory`, `fees`,
+  `reward`, `limits`, `finality`, `upgrade`, `governance`, `evm_spec` and `dex`, a kind left out
+  when the chain has none of it.
   Each has its `value`, as a change writes it, and `decided`, the version of the change that set
   it last, or `null` while genesis's stands.
 
@@ -852,16 +861,26 @@ Beside them, `version`, the decisions so far, and `from`, the oldest this node c
 it synced from a snapshot, which lacks the decisions before it.
 
 **A light client checks each** with [`GET /proofs/receipts/{tx}`](#get-proofsreceiptsid): the
-receipt's outcome is `decided` with that version, and the transaction approves the change listed,
-or a multisig approves it. Versions count up one a decision, so one left out shows as a gap; the
+receipt's outcome is `decided` with that version, and the transaction votes on the change listed,
+or a multisig votes for it. Each decision also has `of`, its kind, and `kind_version`, the version
+it made of that kind. Versions count up one a decision, so one left out shows as a gap; the
 newest is `change:decided` in state, which a [state proof](#get-proofscolumnkey) shows.
+
+### `GET /governance/rejections?before=R&limit=N`
+
+Governance's rejections, newest first, as the history lists decisions: each has the `rejection`
+count it made, the `tx` that rejected it, its block, `height`, `timestamp`, `confirmations`,
+whether it is `final`, its `sender`, `of` and `kind_version`, the kind and the version it was
+rejected at, and the change. Beside them, `rejection`, the count so far, and `from`, the oldest
+this node lists. A light client checks each by its receipt, whose outcome is `rejected` with that
+count; the count is `change:rejected` in state.
 
 ### `GET /governance/weight/{address}`
 
-What an account's approval weighs in the tip's epoch (`weight`, `0` for one that may not approve),
-what a change `needed`, and `approved`, the changes its counting approvals are for, one at most of
-each kind, each with its `kind` and that kind's `version`. What the apps ask before offering to
-approve or withdraw.
+What an account's vote weighs in the tip's epoch (`weight`, `0` for one that may not vote), what a
+change `needed`, what every voter weighs (`total`), and `voted`, its votes that still count, each
+with its `kind`, that kind's `version`, its `vote`, `epoch`, `counts_until` and the `change`. What
+the apps ask before offering to vote or clear a vote.
 
 ### `GET /evidence`
 

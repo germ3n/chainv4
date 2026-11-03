@@ -50,6 +50,7 @@ fn ffg(leak: Option<Leak>) -> FinalityConfig {
         max_proofs_per_block: 4,
         validators: vec![GenesisValidator { account: address(1), voter: key(1), bond: u256::new(10_000 * DEV) }],
         leak,
+        slash_permille: None,
     })
 }
 
@@ -69,7 +70,7 @@ fn authority() -> FinalityConfig {
 }
 
 fn fees(schedule: ScheduleConfig, pricing: PricingConfig) -> FeeConfig {
-    FeeConfig { block_gas_limit: 50_000_000, burn_permille: 500, schedule, pricing }
+    FeeConfig { block_gas_limit: 50_000_000, burn_permille: 500, schedule, pricing, costs: None, vote_rewards: None }
 }
 
 fn weights() -> Weighted {
@@ -97,16 +98,20 @@ fn every_shape() -> Vec<Change> {
     vec![
         Change::Name("chainv4 mainnet".to_string()),
         Change::Bootnodes(vec!["/ip4/203.0.113.7/udp/4001/quic-v1".to_string()]),
-        Change::NamePrices(vec![u256::new(5 * DEV), u256::new(DEV)]),
+        Change::Names(chainv4::registry::names::NameSettings { prices: vec![u256::new(5 * DEV), u256::new(DEV)], grace_ms: 86_400_000, max_years: 50 }),
+        Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]),
+        Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32]), Address::Ed25519([2; 32])], threshold: 2, approval_epochs: 64, quorum_permille: 500 }),
+        Change::EvmSpec { spec: chainv4::params::vm::EvmSpec::Osaka, from: 5_000 },
+        Change::Dex(chainv4::params::vm::DexSettings { fee_bps: 25 }),
         Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 2_000 }),
-        Change::Consensus(ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::Blake3_256, target_block_ms: 2_000, initial_difficulty: 100_000, min_difficulty: 1_000 })),
+        Change::Consensus(ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::Blake3_256, target_block_ms: 2_000, initial_difficulty: 100_000, min_difficulty: 1_000, tuning: None, window: None })),
         Change::Consensus(ConsensusConfig::Authority { key: key(1), slot_ms: 1_000 }),
         Change::Consensus(ConsensusConfig::Rotating { slot_ms: 2_000 }),
         Change::Consensus(ConsensusConfig::Staked { slot_ms: 2_000, schedule: Schedule::Priority }),
         Change::Fees(fees(ScheduleConfig::Weighted(weights()), base_fee())),
         Change::Fees(fees(ScheduleConfig::Contract(ContractScorer { weights: weights(), contract: Address::Contract([9; 32]), fuel: 1_000, kinds: vec!["call".to_string()] }), PricingConfig::Bid(Bid { min_price: u256::new(7) }))),
         Change::Reward(Reward { initial: u256::new(50 * DEV), halving_interval: Some(210_000) }),
-        Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 32 << 20 }, max_block_bytes: Some(4 << 20) }),
+        Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 32 << 20 }, max_block_bytes: Some(4 << 20), contract: None, max_tx_bytes: None, multisig_members: None }),
         Change::Finality(ffg(Some(Leak { after_epochs: 4, permille: 10 }))),
         Change::Finality(authority()),
         Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })),
@@ -116,7 +121,7 @@ fn every_shape() -> Vec<Change> {
             other => other,
         } },
         Change::Collections(chainv4::registry::collections::CollectionFunctions::standard()),
-        Change::Federation(Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6 }),
+        Change::Federation(Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6, btc: None }),
         Change::Directory(directory()),
     ]
 }
@@ -293,7 +298,7 @@ fn numbers_and_amounts_read_as_they_are_typed() {
     draft.switches.insert("max_block_bytes".to_string(), true);
     draft.texts.insert("max_block_bytes".to_string(), "2097152".to_string());
     let built = build("limits", &draft, Some(&limits), &env);
-    assert_eq!(built.change, Some(Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: Some(2 << 20) })));
+    assert_eq!(built.change, Some(Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: Some(2 << 20), contract: None, max_tx_bytes: None, multisig_members: None })));
     assert_eq!(built.changes[0].new, "64 MiB");
     assert_eq!(built.changes[1], Diff { label: "Size of a block".to_string(), old: "Gas alone".to_string(), new: "2 MiB".to_string() });
 
@@ -325,7 +330,7 @@ fn what_the_form_refuses_at_a_field_the_node_refuses_too() {
         assert!(change_from_json(&json!({ "fees": over(&base, &edit) })).is_err(), "{edit}");
     }
 
-    let federation = change_json(&every_shape()[18])["federation"].clone();
+    let federation = change_json(&every_shape()[22])["federation"].clone();
 
     for edit in [json!({ "threshold": 0 }), json!({ "chain_depth": 0 }), json!({ "evm_depth": 0 }), json!({ "bitcoin_depth": 0 })] {
         assert!(change_from_json(&json!({ "federation": over(&federation, &edit) })).is_err(), "{edit}");
@@ -343,7 +348,7 @@ fn the_node_s_errors_say_which_field_they_are_about() {
     };
 
     // A federation's threshold past its signers, as its problem says.
-    let federation = change_json(&every_shape()[18])["federation"].clone();
+    let federation = change_json(&every_shape()[22])["federation"].clone();
     let errors = under("federation", &federation, &|draft| {
         draft.texts.insert("threshold".to_string(), "4".to_string());
     });
@@ -437,19 +442,19 @@ fn lists_and_tables_add_and_remove_and_say_what_moved() {
     assert_eq!(build("bootnodes", &draft, Some(&stands), &env).change, Some(Change::Bootnodes(Vec::new())), "none leaves the chain without");
 
     // Prices go by their place, the last for every longer name.
-    let stands = json!(["640000000000000000000", "160000000000000000000", "5000000000000000000"]);
-    let mut draft = Draft::of("name_prices", Some(&stands), &env);
-    assert_eq!(draft.lists[""], ["640", "160", "5"]);
-    draft.lists.get_mut("").unwrap()[2] = "2.5".to_string();
-    draft.lists.get_mut("").unwrap().push("1".to_string());
-    let built = build("name_prices", &draft, Some(&stands), &env);
-    assert_eq!(built.change, Some(Change::NamePrices(vec![u256::new(640 * DEV), u256::new(160 * DEV), u256::new(5 * DEV / 2), u256::new(DEV)])));
+    let stands = json!({ "prices": ["640000000000000000000", "160000000000000000000", "5000000000000000000"], "grace_ms": 7_776_000_000u64, "max_years": 100 });
+    let mut draft = Draft::of("names", Some(&stands), &env);
+    assert_eq!(draft.lists["prices"], ["640", "160", "5"]);
+    draft.lists.get_mut("prices").unwrap()[2] = "2.5".to_string();
+    draft.lists.get_mut("prices").unwrap().push("1".to_string());
+    let built = build("names", &draft, Some(&stands), &env);
+    assert_eq!(built.change, Some(Change::Names(chainv4::registry::names::NameSettings { prices: vec![u256::new(640 * DEV), u256::new(160 * DEV), u256::new(5 * DEV / 2), u256::new(DEV)], grace_ms: 7_776_000_000, max_years: 100 })));
     assert_eq!(built.changes[0], Diff { label: "5 characters".to_string(), old: "5 DEV".to_string(), new: "2.5 DEV".to_string() });
     assert_eq!(built.changes[1], Diff { label: "6 or more characters".to_string(), old: "none".to_string(), new: "1 DEV".to_string() });
 
-    let mut draft = Draft::of("name_prices", Some(&stands), &env);
-    draft.lists.get_mut("").unwrap().clear();
-    assert!(build("name_prices", &draft, Some(&stands), &env).errors[""].contains("at least one price"), "a price for every length");
+    let mut draft = Draft::of("names", Some(&stands), &env);
+    draft.lists.get_mut("prices").unwrap().clear();
+    assert!(build("names", &draft, Some(&stands), &env).errors["prices"].contains("at least one price"), "a price for every length");
 
     // A directory's chains go in order, whatever order they are typed in.
     let stands = change_json(&Change::Directory(directory()))["directory"].clone();

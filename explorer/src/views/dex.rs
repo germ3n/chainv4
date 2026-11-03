@@ -27,8 +27,7 @@ const REFRESH: u64 = 15_000;
 const MAX_POOLS: u64 = 40;
 /// How many events a page of them takes, for volumes and charts.
 const EVENTS: u32 = 500;
-/// What a trade leaves in the pool, out of 1,000.
-const FEE_PER_MILLE: u64 = chainv4::dex::FEE_PER_MILLE;
+
 const DAY_MS: u64 = 86_400_000;
 
 #[derive(Default)]
@@ -42,7 +41,7 @@ pub struct DexState {
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
     let look = ctx.look;
-    super::heading(ui, look, "DEX", "Constant-product pools: each trades its two assets at the price that keeps the product of what it holds, less 0.3% for who provided.", |_| {});
+    super::heading(ui, look, "DEX", "Constant-product pools: each trades its two assets at the price that keeps the product of what it holds, less the fee the chain sets, 0.3% by default, for who provided.", |_| {});
     let (native, router) = (native(ctx), router(ctx));
 
     match (&native, router) {
@@ -83,6 +82,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
     };
     let ms_per_block = block_ms(ctx);
     let tip = ctx.store.status.as_ref().map_or(0, |status| status.height);
+    // The fee both DEXes charge now, as the node says: governance's, or 0.3%.
+    let fee_bps = ctx.store.status.as_ref().and_then(|status| status.dex_fee_bps).unwrap_or(chainv4::dex::DEFAULT_FEE_BPS);
 
     super::section(ui, look, "Pools", |ui| {
         if pools.is_empty() {
@@ -96,7 +97,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
             .iter()
             .map(|pool| {
                 let (a, b) = (symbol(ctx, &pool.a, state.evm), symbol(ctx, &pool.b, state.evm));
-                let (day, week, fees) = (volume(&trades, pool, tip, DAY_MS / ms_per_block), volume(&trades, pool, tip, 7 * DAY_MS / ms_per_block), fees(&trades, pool, tip, 7 * DAY_MS / ms_per_block));
+                let (day, week, fees) = (volume(&trades, pool, tip, DAY_MS / ms_per_block), volume(&trades, pool, tip, 7 * DAY_MS / ms_per_block), fees(&trades, pool, tip, 7 * DAY_MS / ms_per_block, fee_bps));
 
                 [
                     format!("{a} / {b}"),
@@ -353,9 +354,9 @@ fn volume(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64) -> u256 {
         .fold(u256::ZERO, |sum, [in_a, _, out_a, _]| sum + in_a + out_a)
 }
 
-/// The fees a pool kept over the last so many blocks, in its first asset: 0.3% of what came in, of
+/// The fees a pool kept over the last so many blocks, in its first asset: the chain's fee on what came in, of
 /// the second asset at today's price.
-fn fees(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64) -> u256 {
+fn fees(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64, fee_bps: u32) -> u256 {
     trades
         .iter()
         .filter(|trade| trade.kind == "trade" && trade.height + blocks > tip)
@@ -363,7 +364,7 @@ fn fees(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64) -> u256 {
         .fold(u256::ZERO, |sum, [in_a, in_b, _, _]| {
             let in_b_as_a = pool.matching(&pool.b, in_b).unwrap_or(u256::ZERO);
 
-            sum + (in_a + in_b_as_a) * u256::from(FEE_PER_MILLE) / u256::from(1_000u64)
+            sum + chainv4::dex::fee_of(in_a + in_b_as_a, fee_bps)
         })
 }
 

@@ -818,8 +818,8 @@ connected for it with its hashrate.
 
 The **Governance** page (`wallet/src/views/governance.rs`, with its form in `governance/form.rs`
 and `governance/schema.rs`) covers the chain's settings under [governance](governance.md): who
-decides, the changes open and their approvals, approving or withdrawing, proposing a change, what
-is in force and every decision. It reads
+decides, the changes open and their votes, voting Yes, No or Abstain or clearing a vote, proposing
+a change, what is in force and every decision. It reads
 [`GET /governance`](api.md#get-governance),
 [`GET /governance/history`](api.md#get-governancehistorybeforevlimitn) and
 [`GET /governance/weight/{address}`](api.md#get-governanceweightaddress), asking again every
@@ -827,28 +827,41 @@ is in force and every decision. It reads
 actions.
 
 - **Who decides:** the council's members, or finality's voters for an electorate. The card also
-  shows what a change needs, how many epochs an approval counts for, the epoch, the number of
+  shows what Yes needs, the quorum (a share of every voter's weight that must vote at all,
+  Abstain included, before Yes decides), when a change is rejected (once what has not voted No can
+  no longer reach what it needs), how many epochs a vote counts for, the epoch, the number of
   decisions so far of every kind (what the history counts), and each kind's own version. Each kind
   of change has a ballot and a version of its own: consensus (which also covers finality's tuning
-  and switching finality), bootnodes, name_prices, collections, federation, directory, fees,
-  reward, limits, upgrade and name. An approval names the version of its change's kind, from
-  `versions` in `GET /governance`. Under it, each of the wallet's addresses, and each multisig it
-  follows, shows its weight: **may vote** with what it weighs, or **may not vote**. It also lists
-  the address's approvals that count, one per kind with the kind's version, each with its own
-  **Withdraw** for an address this page sends for. A council member weighs one vote; under an
-  electorate, FFG weighs stake and authority finality weighs signers.
-- **Open changes:** a search box over each change's kind, words and JSON and who approved it, an
-  order (newest approval, most support, or closing soonest, by when the last approval stops
-  counting), and a filter by the kinds there are; a list of one has the search box alone. Each
-  change in words, with its kind and that kind's version under it and its JSON folded below. Each has a bar for its approvals' weight against what it needs, and its
-  approvals, each with the epoch it counts until. An address of the account in use, or a
-  followed multisig, that may vote gets **Approve** on each change, or **Withdraw** on the one its
-  approval of that kind counts for. An address backs one change of each kind at a time, so it can
-  back a fee change and a rename at once. Approving another change of the same kind moves its
-  approval there, and leaves its approvals of other kinds alone. The confirm screen says so, and
-  that the approval lapses only once a change of its own kind is decided first and that kind's
-  version moves on: a decision of another kind leaves it standing. To vote with another account's
-  address, switch to that account.
+  and switching finality), bootnodes, names, collections, token functions, federation, directory, fees,
+  reward, limits, upgrade, name and governance. A vote names the version of its change's kind,
+  from `versions` in `GET /governance`. Under it, each of the wallet's addresses, and each
+  multisig it follows, shows its weight: **may vote** with what it weighs, or **may not vote**. It
+  also lists the address's votes that count, each with its way, the kind and the kind's version,
+  and its own **Clear** for an address this page sends for. A council member weighs one vote;
+  under an electorate, FFG weighs stake and authority finality weighs signers.
+- **Open changes:** a search box over each change's kind, words and JSON and who voted on it, an
+  order (newest vote, most support, by how far Yes got toward what it needs, or closing soonest,
+  by when the oldest vote stops counting), and a filter by the kinds there are; a list of one has
+  the search box alone. Each change is a card, the explorer's own (`chainv4_ui::votes::card`):
+  - a **ring** toward what Yes needs, and inside it a thin one toward the quorum when there is one;
+  - the change in words, its kind and that kind's version, where it stands (`1 more vote
+    needed`, `Passes with the next vote counted`, or in red `Can no longer pass: too much has
+    voted No`), what Yes, No and Abstain weigh, and when the oldest votes stop counting, in blocks
+    and time;
+  - a **dot a voter**, Yes filled, No a cross, Abstain half-filled, not voted empty, the wallet's
+    own addresses named by their account, `Main (yours)`;
+  - **What it moves:** the setting in force beside what the change would make it, each field that
+    moves struck through and highlighted, with how many stay;
+  - its JSON folded below.
+
+  An address of the account in use, or a followed multisig, that may vote gets **Yes**, **No** and
+  **Abstain** on each change, the way it voted marked `Voted Yes` in place of its button, and
+  **Clear** once it has voted. A new vote replaces its old one on that change. An address backs
+  one change of each kind with Yes at a time, so it can back a fee change and a rename at once, and
+  vote No on any number: a Yes on another change of the same kind moves its Yes there, and leaves
+  its other votes alone. The confirm screen says so, and that the vote lapses only once a change of
+  its own kind is decided first and that kind's version moves on: a decision of another kind
+  leaves it standing. To vote with another account's address, switch to that account.
 - **Propose:** pick a kind, and each setting of it has a field of its own, with what stands beside
   it (`now 50%`), and **Put back** once it differs: numbers, amounts typed in the coin, sizes as
   `32 MiB`, addresses, on or off with its number (a reward's halving, a block's size, the leak), a
@@ -858,41 +871,45 @@ actions.
   through a change of finality shows as staying as it is: the kind, `checkpoint_interval`,
   `activation_delay`, the starting validators or signers and the thresholds.
   - **Only what changed is sent:** the fields that differ are laid over what stands with chainv4's
-    `params::json::over`, as the CLI's `approve-change` does; a variant of another type, such as
+    `params::json::over`, as the CLI's `vote-change` does; a variant of another type, such as
     bids for a base price, replaces its object whole, as its old fields mean nothing to it.
   - **What is wrong shows under its field, in words,** before anything is sent: the form reads each
-    field, runs the whole through chainv4's `change_from_json`, the same checks as `approve-change`,
+    field, runs the whole through chainv4's `change_from_json`, the same checks as `vote-change`,
     and puts each error under the field it is about. What a node checks against the chain and
     only it can read there is asked of the settings it lists: a consensus against the finality, a
     switch's epoch, kind and signers, a retune's most validators or signers, and that no switch of
-    finality is on its way. The chain has the last word, as the approval's version names what it
-    was laid over: should a change of that kind be decided first, the approval fails.
+    finality is on its way. The chain has the last word, as the vote's version names what it was
+    laid over: should a change of that kind be decided first, the vote fails.
   - **Advanced**, folded under the form, is the kind's JSON, filled with what the form says, for
     what a form does not cover; while it is open it is what is proposed, and it still takes a part
     of fees, reward, limits, finality, federation or directory.
   - **Review** opens the confirm screen with each field that moves, `old → new`, the change in
-    words and, folded, its whole JSON. A change is proposed by approving it. Approving someone
+    words and, folded, its whole JSON. A change is proposed by voting Yes on it. Voting on someone
     else's change shows the same list against what stands.
-- **Sending:** from the confirm screen the transaction, `Tx::ApproveChange { version, change }`
-  at the version of `change.kind()`, or `Tx::WithdrawChange { kind, version }` at the version
-  the approval named (from `approved` in `GET /governance/weight/{address}`), goes to Send like
-  any other: priced, signed with the account's key, a hardware wallet or the offline signer, and
-  sent. A followed multisig's goes to the Multisig page as a bundle for its members.
-- **Your votes:** the account's approvals and withdrawals whose receipts the light client proved,
-  each Final or Proven. An approval that was the last one needed shows **Decided change N · kind
-  vM**: its receipt's committed outcome is `Decided { decision: N, kind, version: M }`, N the
-  chain's count of decisions and M the version of its kind it made. History says the same,
-  "Decided change N · Approved …, making kind vM"; a withdrawal reads "Withdrew approval of a
-  kind change from vM". Each vote the wallet keeps records its kind; one kept before votes named
-  their kind reads as consensus.
-- **In force:** every setting, in words, each marked "genesis" or "decided in change N".
+- **Sending:** from the confirm screen the transaction, `Tx::VoteChange { version, change, vote }`
+  at the version of `change.kind()`, or `Tx::ClearVote { version, change }` at the version the
+  vote named (from `voted` in `GET /governance/weight/{address}`), goes to Send like any other:
+  priced, signed with the account's key, a hardware wallet or the offline signer, and sent. A
+  followed multisig's goes to the Multisig page as a bundle for its members.
+- **Your votes:** the account's votes and cleared votes whose receipts the light client proved,
+  each Final or Proven. A vote that decided its change shows **Decided change N · kind vM**: its
+  receipt's committed outcome is `Decided { decision: N, kind, version: M }`, N the chain's count
+  of decisions and M the version of its kind it made. One that left its change unable to pass
+  shows **Rejected a kind change**, from `Rejected { rejection, kind, version }`. History says the
+  same, "Decided change N · Voted Yes on …, making kind vM" or "Rejected a kind change, the
+  chain's rejection N · Voted No on …"; a cleared vote reads "Cleared a vote on a kind change from
+  vM". Each vote the wallet keeps records its kind and way; one kept before votes named their kind
+  reads as consensus, and an approval kept before votes could be No reads as a Yes.
+- **In force:** every setting, governance's own included, in words, each marked "genesis" or
+  "decided in change N".
 - **Decisions:** every one, ten to a page with **Newer page** and **Older page**, each with its
   block and who sent it; a search box over its kind, words, JSON, sender, transaction and block, a
   filter by kind, and newest or oldest first. Older pages of `GET /governance/history` are read as
   a page comes to need them, so a search goes on through all of them, and says how far it got.
+  Rejections, and the timeline and turnout, are the explorer's.
 - **Trust:** the page shows what the node says. Nothing signed rests on it but the version, the
-  change's kind's, which the chain checks: an approval naming a version that has moved on fails
-  and changes nothing.
+  change's kind's, which the chain checks: a vote naming a version that has moved on fails and
+  changes nothing.
 
 ## Faucet
 
@@ -1271,8 +1288,8 @@ does a node from before releases, which answers 404.
   (`GET /release`) stops the node's chainv4 at a height, Settings → Node says "Your node stops at
   block H unless updated to chainv4 L". Past it the node imports no blocks, so the wallet follows
   no further until it is updated or you connect to another.
-- **History** shows an approved upgrade as "Approved an upgrade: nodes older than 0.2.0 stop at
-  block 150000".
+- **History** shows a vote on an upgrade as "Voted Yes on an upgrade: nodes older than 0.2.0 stop
+  at block 150000".
 
 ## The chain's name
 
@@ -1283,7 +1300,8 @@ answers. With no name known, from no answer yet, a chain with none (`null`) or a
 names, it says "chainv4", and so does an offline signer. A name a chain could not have is taken
 as none. The wallet's own name stays chainv4 wherever it means the software: commands such as
 `chainv4 multisig`, releases and updates, and what it calls itself to MetaMask and sites.
-**History** shows a governance rename as "Approved renaming the chain to chainv4 mainnet".
+**History** shows a vote on a governance rename as "Voted Yes on renaming the chain to chainv4
+mainnet".
 
 ## When a request fails
 

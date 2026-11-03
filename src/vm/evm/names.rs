@@ -30,9 +30,7 @@ use {
 )]
 pub const NAMES_PRECOMPILE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4e, 0x53];
 
-/// What a lookup costs in EVM gas: about a cold storage read for each record it reads.
-const LOOKUP_GAS: u64 = 3_000;
-/// And for every 32 bytes of name read or written.
+/// For every 32 bytes of name read or written, beside the block's evm_name_lookup.
 const WORD_GAS: u64 = 3;
 /// The longest name the precompile reads.
 const MAX_INPUT_NAME: usize = 1_024;
@@ -42,6 +40,8 @@ const MAX_INPUT_NAME: usize = 1_024;
 pub(super) struct NamesAt<'a> {
     pub state: &'a Arc<State>,
     pub config: NamesConfig,
+    /// What a lookup costs in EVM gas: the block's evm_name_lookup.
+    pub costs: crate::params::vm::HostCosts,
     pub now: u64,
     /// The first database failure, which stops the node rather than the transaction.
     pub fault: RefCell<Option<DbError>>,
@@ -61,7 +61,7 @@ fn selector(signature: &str) -> [u8; 4] {
 impl NamesAt<'_> {
     /// Answers one call: resolve(string) or name(address). Bad input reverts; too little gas halts.
     pub fn answer(&self, input: &[u8], gas_limit: u64, reservoir: u64) -> PrecompileOutput {
-        let gas = LOOKUP_GAS + WORD_GAS * (input.len() as u64).div_ceil(32);
+        let gas = self.costs.evm_name_lookup + WORD_GAS * (input.len() as u64).div_ceil(32);
 
         if gas > gas_limit {
             return PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir);

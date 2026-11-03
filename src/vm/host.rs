@@ -19,20 +19,24 @@ fn no_names() -> VmError {
     VmError::Runtime("this chain has no names".to_string())
 }
 
-/// The deepest calls between contracts may nest. A transaction's call is depth 1.
-pub const MAX_CALL_DEPTH: usize = 8;
+// The limits below are a chain's defaults, ContractLimits::DEFAULT's: what each call keeps to is
+// its block's, which governance may raise.
 
-/// The longest storage key, in bytes.
-pub const MAX_KEY_LEN: usize = 256;
+/// The deepest calls between contracts may nest by default. A transaction's call is depth 1.
+pub const MAX_CALL_DEPTH: usize = crate::params::vm::ContractLimits::DEFAULT.call_depth as usize;
 
-/// The largest storage value, in bytes.
-pub const MAX_VALUE_LEN: usize = 64 * 1024;
+/// The longest storage key by default, in bytes.
+pub const MAX_KEY_LEN: usize = crate::params::vm::ContractLimits::DEFAULT.key_len as usize;
+
+/// The largest storage value by default, in bytes.
+pub const MAX_VALUE_LEN: usize = crate::params::vm::ContractLimits::DEFAULT.value_len as usize;
 
 /// The longest namespace name, in bytes.
 pub const MAX_NAMESPACE_LEN: usize = 64;
 
-/// The most entries one storage scan gives: a page, of which a contract asks as many as it needs.
-pub const MAX_SCAN: usize = 256;
+/// The most entries one storage scan gives by default: a page, of which a contract asks as many as
+/// it needs.
+pub const MAX_SCAN: usize = crate::params::vm::ContractLimits::DEFAULT.scan as usize;
 
 /// A page of storage: each key, in its space, with its value.
 pub type Page = Vec<(Vec<u8>, Vec<u8>)>;
@@ -40,11 +44,11 @@ pub type Page = Vec<(Vec<u8>, Vec<u8>)>;
 /// The longest event name, in bytes.
 pub const MAX_EVENT_NAME: usize = 64;
 
-/// The largest event data, encoded, in bytes.
-pub const MAX_EVENT_DATA: usize = 16 * 1024;
+/// The largest event data by default, encoded, in bytes.
+pub const MAX_EVENT_DATA: usize = crate::params::vm::ContractLimits::DEFAULT.event_data as usize;
 
-/// The most events one call may emit itself, not counting calls it makes.
-pub const MAX_EVENTS: usize = 256;
+/// The most events one call may emit itself by default, not counting calls it makes.
+pub const MAX_EVENTS: usize = crate::params::vm::ContractLimits::DEFAULT.events as usize;
 
 #[document(
     summary = "Which part of a contract's storage a key is in. Each part has keys of its own: the same key in two of them is two entries.",
@@ -121,6 +125,21 @@ pub struct Host {
 }
 
 impl Host {
+    #[document(parent = "Host", summary = "What the call's block runs contracts under: costs, limits, the EVM's spec and the DEX's fee.")]
+    pub fn rules(&self) -> crate::params::vm::VmRules {
+        self.context.block.vm
+    }
+
+    #[document(parent = "Host", summary = "What host operations cost in the call's block.")]
+    pub fn costs(&self) -> crate::params::vm::HostCosts {
+        self.context.block.vm.costs
+    }
+
+    #[document(parent = "Host", summary = "The limits contracts keep within in the call's block.")]
+    pub fn limits(&self) -> crate::params::vm::ContractLimits {
+        self.context.block.vm.limits
+    }
+
     #[document(
         parent = "Host",
         summary = "The host for a call made by a transaction rather than by another contract.",
@@ -216,8 +235,10 @@ impl Host {
         panics = "Runtime past a limit, for code run by delegate writing the contract's own space, or for code that declares a layout reaching past it: a namespace or key it does not declare, a value that is not its kind, or a write to something retired or to plain storage.",
     )]
     pub fn storage_set(&self, space: &Space, key: &[u8], value: Option<&[u8]>) -> Result<(), VmError> {
-        if value.is_some_and(|value| value.len() > MAX_VALUE_LEN) {
-            return Err(VmError::Runtime(format!("storage values are at most {MAX_VALUE_LEN} bytes")));
+        let most = self.limits().value_len as usize;
+
+        if value.is_some_and(|value| value.len() > most) {
+            return Err(VmError::Runtime(format!("storage values are at most {most} bytes")));
         }
 
         let access = value.map_or(Access::Clear, Access::Write);
@@ -249,15 +270,19 @@ impl Host {
         returns = "Each key, in the space, and its value. Runtime for a prefix or start too long, a limit past MAX_SCAN, or a namespace code that declares a layout does not declare; Storage when the database failed.",
     )]
     pub fn storage_scan(&self, space: &Space, prefix: &[u8], start: &[u8], limit: usize) -> Result<Page, VmError> {
-        check_key(prefix)?;
+        check_key(prefix, self.limits().key_len as usize)?;
 
         // One past the longest key, as the key right after a longest one, to go on from it.
-        if start.len() > MAX_KEY_LEN + 1 {
-            return Err(VmError::Runtime(format!("a scan starts at a key of at most {MAX_KEY_LEN} bytes, or one past it")));
+        let longest = self.limits().key_len as usize;
+
+        if start.len() > longest + 1 {
+            return Err(VmError::Runtime(format!("a scan starts at a key of at most {longest} bytes, or one past it")));
         }
 
-        if limit == 0 || limit > MAX_SCAN {
-            return Err(VmError::Runtime(format!("a scan gives 1 to {MAX_SCAN} entries at a time")));
+        let page = self.limits().scan as usize;
+
+        if limit == 0 || limit > page {
+            return Err(VmError::Runtime(format!("a scan gives 1 to {page} entries at a time")));
         }
 
         let contract = &self.context.contract;
@@ -290,7 +315,7 @@ impl Host {
 
     /// Where a key in a space is kept, if the code running may do this with it there.
     fn locate(&self, space: &Space, key: &[u8], access: Access<'_>) -> Result<(Column, Vec<u8>), VmError> {
-        check_key(key)?;
+        check_key(key, self.limits().key_len as usize)?;
         let contract = &self.context.contract;
 
         match space {
@@ -478,7 +503,7 @@ impl Host {
         fuel: u64,
         hop: Option<usize>,
     ) -> Outcome {
-        if self.stack.len() >= MAX_CALL_DEPTH {
+        if self.stack.len() >= self.limits().call_depth as usize {
             return Outcome::failed(VmError::TooDeep);
         }
 
@@ -581,7 +606,7 @@ impl Host {
             return Outcome::failed(VmError::Runtime("this chain runs no EVM".to_string()));
         }
 
-        if self.stack.len() >= MAX_CALL_DEPTH {
+        if self.stack.len() >= self.limits().call_depth as usize {
             return Outcome::failed(VmError::TooDeep);
         }
 
@@ -600,6 +625,7 @@ impl Host {
             chain_id: self.vm.chain_id(),
             names: self.vm.names().cloned(),
             hash: self.vm.hash(),
+            vm: self.context.block.vm,
         };
         let bridge = Bridge {
             vm: self.vm.clone(),
@@ -674,7 +700,7 @@ impl Host {
     }
 
     fn run_as_own(&self, target: &Address, function: FunctionId, args: &[TxCallArgumentType], fuel: u64, hop: Option<usize>) -> Outcome {
-        if self.stack.len() >= MAX_CALL_DEPTH {
+        if self.stack.len() >= self.limits().call_depth as usize {
             return Outcome::failed(VmError::TooDeep);
         }
 
@@ -755,7 +781,7 @@ impl Host {
     }
 
     fn create(&self, template: &Address, address: Address, args: &[TxCallArgumentType], fuel: u64, hop: Option<usize>) -> Outcome {
-        if self.stack.len() >= MAX_CALL_DEPTH {
+        if self.stack.len() >= self.limits().call_depth as usize {
             return Outcome::failed(VmError::TooDeep);
         }
 
@@ -773,7 +799,7 @@ impl Host {
         }
 
         // Every node keeps the code again.
-        let copying = template.code.len() as u64 / super::cost::STORAGE_BYTES_PER_FUEL;
+        let copying = template.code.len() as u64 / self.costs().storage_bytes_per_fuel.max(1);
 
         if copying > fuel {
             return Outcome { fuel_used: fuel, ..Outcome::failed(VmError::OutOfFuel) };
@@ -863,14 +889,18 @@ impl Host {
 
         let size = wincode::serialize(&data).expect("values always encode").len();
 
-        if size > MAX_EVENT_DATA {
-            return Err(VmError::Runtime(format!("event data is at most {MAX_EVENT_DATA} bytes")));
+        let largest = self.limits().event_data as usize;
+
+        if size > largest {
+            return Err(VmError::Runtime(format!("event data is at most {largest} bytes")));
         }
 
         let mut emitted = lock(&self.emitted);
 
-        if *emitted >= MAX_EVENTS {
-            return Err(VmError::Runtime(format!("a call emits at most {MAX_EVENTS} events")));
+        let most = self.limits().events as usize;
+
+        if *emitted >= most {
+            return Err(VmError::Runtime(format!("a call emits at most {most} events")));
         }
 
         *emitted += 1;
@@ -943,9 +973,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("never poisoned")
 }
 
-fn check_key(key: &[u8]) -> Result<(), VmError> {
-    if key.len() > MAX_KEY_LEN {
-        return Err(VmError::Runtime(format!("storage keys are at most {MAX_KEY_LEN} bytes")));
+fn check_key(key: &[u8], longest: usize) -> Result<(), VmError> {
+    if key.len() > longest {
+        return Err(VmError::Runtime(format!("storage keys are at most {longest} bytes")));
     }
 
     Ok(())

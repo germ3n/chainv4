@@ -117,7 +117,9 @@ pub enum Ask {
     Governance,
     /// A page of governance's decisions, newest first, below a version, or from the newest.
     Decisions { before: Option<u64> },
-    /// What an account's approval weighs now.
+    /// A page of governance's rejections, newest first, below a count, or from the newest.
+    Rejections { before: Option<u64> },
+    /// What an account's vote weighs now, and its votes that count.
     GovernanceWeight(String),
     /// A proof of a transaction's receipt, and of the transaction, against its block.
     ReceiptProof(String),
@@ -165,6 +167,8 @@ impl Ask {
             Ask::Governance => "/governance".to_string(),
             Ask::Decisions { before: Some(before) } => format!("/governance/history?before={before}&limit={DECISION_PAGE}"),
             Ask::Decisions { before: None } => format!("/governance/history?limit={DECISION_PAGE}"),
+            Ask::Rejections { before: Some(before) } => format!("/governance/rejections?before={before}&limit={DECISION_PAGE}"),
+            Ask::Rejections { before: None } => format!("/governance/rejections?limit={DECISION_PAGE}"),
             Ask::GovernanceWeight(address) => format!("/governance/weight/{address}"),
             Ask::ReceiptProof(tx) => format!("/proofs/receipts/{tx}"),
             Ask::Multisig(address) => format!("/multisig/{address}"),
@@ -285,6 +289,7 @@ impl Ask {
             | Ask::PoolMiner(_)
             | Ask::Governance
             | Ask::Decisions { .. }
+            | Ask::Rejections { .. }
             | Ask::GovernanceWeight(_)
             | Ask::ReceiptProof(_)
             | Ask::Multisig(_)
@@ -704,6 +709,7 @@ mod tests {
             Ask::Release,
             Ask::Governance,
             Ask::Decisions { before: None },
+            Ask::Rejections { before: None },
             Ask::GovernanceWeight(text()),
             Ask::ReceiptProof(text()),
             Ask::Ancestors { from: 0, count: 1 },
@@ -948,6 +954,7 @@ mod tests {
         assert_eq!(Ask::Governance.path(), "/governance");
         assert_eq!(Ask::Decisions { before: None }.path(), "/governance/history?limit=20");
         assert_eq!(Ask::Decisions { before: Some(31) }.path(), "/governance/history?before=31&limit=20");
+        assert_eq!(Ask::Rejections { before: Some(4) }.path(), "/governance/rejections?before=4&limit=20");
         assert_eq!(Ask::GovernanceWeight("ed25519:0x01".to_string()).path(), "/governance/weight/ed25519:0x01");
         assert_eq!(Ask::ReceiptProof("0xab".to_string()).path(), "/proofs/receipts/0xab");
         assert_eq!(Ask::Ancestors { from: 10, count: 5 }.path(), "/headers?from=10&count=5");

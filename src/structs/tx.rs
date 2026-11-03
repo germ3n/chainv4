@@ -8,7 +8,7 @@ use {
     crate::registry::directory::Directory,
     crate::registry::multisig::MultisigMember,
     crate::registry::signers::Signer,
-    crate::governance::{Change, ChangeKind},
+    crate::governance::{Change, ChangeVote},
     crate::registry::names::{NameAction, name_problem},
     crate::structs::code::Code,
     crate::structs::hash::Hash,
@@ -159,25 +159,26 @@ pub enum Tx {
     #[wincode(tag = 11)]
     WithdrawApproval { version: u64 },
     #[document(
-        summary = "Approves a change to what genesis set, under the chain's governance: today, a new consensus. Only an account governance lets approve may send it: a validator's or signer's account under the electorate, a member's under a council. Once the approvals for the same change weigh enough, it is decided, and the next checkpoint fixes it for the epoch activation_delay ahead.",
+        summary = "Votes on a change to what genesis set, under the chain's governance, proposing it if nobody has: Yes, No or Abstain, replacing the sender's old vote on it. Only an account governance lets vote may send it: a validator's or signer's account under the electorate, a member's under a council. Once Yes weighs enough and the quorum has voted, the change is decided; once what has not voted No could no longer weigh enough, it is rejected.",
         params = {
             version = "The version of the change's kind this changes: how many changes of that kind were decided before, as GET /governance reports in versions.",
-            change = "The change it approves.",
+            change = "The change it votes on.",
+            vote = "Yes, No or Abstain.",
         },
-        see_also = "Changes::approve, GovernanceConfig, Change",
+        see_also = "Changes::vote, GovernanceConfig, Change, ChangeVote",
     )]
     #[wincode(tag = 12)]
-    ApproveChange { version: u64, change: Change },
+    VoteChange { version: u64, change: Change, vote: ChangeVote },
     #[document(
-        summary = "Takes back the sender's approval of a change of a kind, so it backs none of that kind. Only an account governance lets approve may send it, while its approval still counts.",
+        summary = "Clears the sender's vote on a change, so it has no say on it until it votes again. Only an account governance lets vote may send it, while its vote still counts.",
         params = {
-            kind = "The kind of change its approval was of.",
-            version = "The kind's version its approval was for.",
+            version = "The kind's version its vote was for.",
+            change = "The change it voted on.",
         },
-        see_also = "Changes::withdraw, Tx::ApproveChange",
+        see_also = "Changes::clear, Tx::VoteChange",
     )]
     #[wincode(tag = 13)]
-    WithdrawChange { kind: ChangeKind, version: u64 },
+    ClearVote { version: u64, change: Change },
     #[document(
         summary = "Calls an EVM contract with raw calldata, as Ethereum does, or sends the coin to any address through the EVM. The sender takes part in the EVM at its 20-byte address: a secp256k1 account as itself, any other under its alias.",
         params = {
@@ -626,17 +627,17 @@ impl Verifiable for Tx {
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
             Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(|signer| signer.key.verify()),
-            Tx::WithdrawApproval { .. } | Tx::WithdrawChange { .. } | Tx::SetDirectory { .. } => Ok(()),
+            Tx::WithdrawApproval { .. } | Tx::ClearVote { .. } | Tx::SetDirectory { .. } => Ok(()),
             Tx::HandDirectory { to } => to.iter().try_for_each(Verifiable::verify),
             // Whether the consensus fits the chain is decided when the transaction runs; an
             // authority's key is checked here.
-            Tx::ApproveChange { change: Change::Consensus(consensus), .. } => match consensus {
+            Tx::VoteChange { change: Change::Consensus(consensus), .. } => match consensus {
                 crate::consensus::ConsensusConfig::Authority { key, .. } => key.verify(),
                 _ => Ok(()),
             },
             // Whether the list is one a chain takes is decided when the transaction runs, and so are
             // name prices and collection standards.
-            Tx::ApproveChange { change: Change::Bootnodes(_) | Change::NamePrices(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_), .. } => Ok(()),
+            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_), .. } => Ok(()),
             // The members' signatures are checked when it runs, against the chain's genesis id and
             // the policy in state.
             Tx::Multisig { account, tx, signatures } => {
@@ -780,8 +781,8 @@ impl Tx {
             | Tx::Slash { .. }
             | Tx::ApproveSigners { .. }
             | Tx::WithdrawApproval { .. }
-            | Tx::ApproveChange { .. }
-            | Tx::WithdrawChange { .. }
+            | Tx::VoteChange { .. }
+            | Tx::ClearVote { .. }
             | Tx::Ethereum { .. }
             | Tx::Multisig { .. }
             | Tx::CreateMultisig { .. }

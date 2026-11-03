@@ -24,10 +24,10 @@ use {
 mod host;
 
 #[document(
-    summary = "The largest module a deploy may carry. Validating and compiling a module is not metered by fuel, so this bounds the work one deploy, or one call, can cause.",
+    summary = "The largest module a deploy may carry by default; a block's contract_limits.module_len may say otherwise. Validating and compiling a module is not metered by fuel, so this bounds the work one deploy, or one call, can cause.",
     category = "WASM VM",
 )]
-pub const MAX_MODULE_LEN: usize = 512 * 1024;
+pub const MAX_MODULE_LEN: usize = crate::params::vm::ContractLimits::DEFAULT.module_len as usize;
 #[document(
     summary = "The module every host function is imported from.",
     category = "WASM VM",
@@ -179,10 +179,10 @@ impl WasmEngine {
 
     /// Checks a module and instantiates it once, adding what instantiating burned to started.
     /// Start functions are refused, so it runs none of the module's code.
-    fn check(&self, code: &[u8], limits: Limits, started: &mut u64) -> Result<Loaded, VmError> {
-        if code.len() > MAX_MODULE_LEN {
+    fn check(&self, code: &[u8], limits: Limits, largest: usize, started: &mut u64) -> Result<Loaded, VmError> {
+        if code.len() > largest {
             return Err(VmError::Compile(format!(
-                "module is {} bytes, more than the {MAX_MODULE_LEN} allowed",
+                "module is {} bytes, more than the {largest} allowed",
                 code.len()
             )));
         }
@@ -272,15 +272,15 @@ impl Default for WasmEngine {
 }
 
 impl ScriptEngine for WasmEngine {
-    fn load(&self, code: &[u8], limits: Limits) -> Loading {
-        let Some(fee) = Loading::fee(code, limits) else {
+    fn load_under(&self, code: &[u8], limits: Limits, rules: &crate::params::vm::VmRules) -> Loading {
+        let Some(fee) = Loading::fee(code, limits, rules) else {
             return Loading::failed(limits.fuel, VmError::OutOfFuel);
         };
         let mut started = 0;
         let result = self.check(code, Limits {
             fuel: limits.fuel - fee,
             ..limits
-        }, &mut started);
+        }, rules.limits.module_len as usize, &mut started);
 
         Loading {
             fuel_used: fee + started,

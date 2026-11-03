@@ -789,6 +789,29 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Governance votes Yes, No or Abstain, rejects what can no longer pass, changes itself, and
+  governs what the audit picked.** Done 2026-11-03, from section 1 of `docs/hardcoded-values.md`.
+  A consensus change: **a new genesis.**
+  - Votes: `Tx::VoteChange { version, change, vote }` and `Tx::ClearVote { version, change }`
+    replace approve and withdraw; one vote an account on each change, one Yes a kind; a change is
+    rejected once what has not voted No cannot reach what is needed, with a provable
+    `Rejected { rejection, kind, version }` receipt, indexed and listed at
+    `GET /governance/rejections`; a governable quorum (`quorum_permille`, Abstain counting); both
+    electorates and the council alike.
+  - `Change::Governance` (members, threshold, approval period, quorum; clears every open vote),
+    `Change::TokenFunctions`, `Change::Names` (prices, grace, years), `Change::EvmSpec` from a
+    height, `Change::Dex`; and inside existing kinds: `fees.vote_rewards`, `fees.costs` (host
+    fuel and the precompiles' gas, read from each block's rules), `limits.contract`,
+    `max_tx_bytes`, `multisig_members`, `finality.slash_permille`, the PoW window and steps, and
+    the federation's `btc` policy the Bitcoin gateway and its signers read. Drift follows the
+    block time.
+  - Both DEXes charge the one governed fee: `chain.dex_fee()` in Lua, `dexFeeBps()` through the
+    native precompile in `Dex.sol`.
+  - The explorer and the wallet: proposal cards with a ring, quorum, a dot per voter, time left
+    and what moves; Yes, No, Abstain and Clear in the wallet; a history timeline and turnout.
+  - Left: WebAssembly's recursion and stack stay fixed (engine settings shared by the module
+    cache); turnout is read from each voter's newest page of votes, not from a node index.
+
 - [x] **One key can no longer fill the mempool, sync takes big blocks, and the directory wins
   over the operator's flags.** Done 2026-11-03, from the audit in `docs/hardcoded-values.md`
   (#2, #15 and section 2's first). Node only: a redeploy, no new genesis, no consensus change.

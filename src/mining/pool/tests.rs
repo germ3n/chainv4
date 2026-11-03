@@ -86,6 +86,8 @@ fn rules() -> ProofOfWork {
             target_block_ms: 1_000,
             initial_difficulty: 1_000,
             min_difficulty: 1,
+            tuning: None,
+            window: None,
         },
         None,
     )

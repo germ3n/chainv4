@@ -112,8 +112,9 @@ fn a_rate_and_a_fee_read_from_the_quote() {
     assert_eq!(rate_words(2_000.5), "2000.50");
     assert_eq!(rate_words(1.5), "1.5000");
     assert_eq!(rate_words(0.000123), "0.000123");
-    assert_eq!(fee_of(u256::new(1_000)), u256::new(3), "0.3%");
-    assert_eq!(fee_of(u256::new(dev)), u256::new(3 * dev / 1_000));
+    assert_eq!(fee_of(u256::new(1_000), 30), u256::new(3), "0.3%");
+    assert_eq!(fee_of(u256::new(dev), 30), u256::new(3 * dev / 1_000));
+    assert_eq!(fee_of(u256::new(1_000), 100), u256::new(10), "the fee the chain sets, 1% here");
 }
 
 #[test]

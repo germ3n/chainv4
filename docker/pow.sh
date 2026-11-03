@@ -204,7 +204,7 @@ EOF
     esac
 
     case "$governance" in
-        council) say "you alone approve changes, such as new bootnodes: chainv4 send --key $home/owner.key approve-change …" ;;
+        council) say "you alone approve changes, such as new bootnodes: chainv4 send --key $home/owner.key vote-change --vote yes …" ;;
         electorate) say "the validators approve changes by stake" ;;
     esac
 

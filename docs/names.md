@@ -227,16 +227,18 @@ it stands, from the current registration of `alice.dev`.
 ## Changing the prices
 
 On a chain with governance, a member or validator proposes new prices, in the smallest unit, in
-the same order as genesis's:
+the same order as genesis's; `--change '{"names":{…}}'` changes the grace and the most years ahead
+as well, all but the suffix:
 
 ```sh
-chainv4 send --key member.key approve-change --name-prices 1000000000000000000000,200000000000000000000,10000000000000000000
+chainv4 send --key member.key vote-change --vote yes --name-prices 1000000000000000000000,200000000000000000000,10000000000000000000
 ```
 
-Approvals count, move and expire as for any change (see [Governance](governance.md)). The prices
-take effect from the block that decides them: no epoch need pass, since nothing checks blocks by
-them. Names already held keep the years they paid for. `GET /names` shows the prices in force and
-genesis's, and `GET /governance` the change while its approvals count.
+Votes count, move and expire as for any change (see [Governance](governance.md)). The new
+settings take effect from the block after the one that decides them. Names already held keep the
+years they paid for; a name in its grace period is judged by the grace in force when it is looked
+at. `GET /names` shows the prices and grace in force and genesis's prices, and `GET /governance`
+the change while its votes count.
 
 ## In the state
 

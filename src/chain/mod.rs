@@ -57,6 +57,7 @@ pub use range::{RangeLimits, RangeProblem, stored_block_range};
 pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
 pub use crate::params::{BlockLimits, MAX_BLOCK_BYTES, MIN_BLOCK_BYTES, Reward, reward_problem};
+pub use crate::params::fees::VoteRewardSource;
 pub use parallel::Workers;
 use parallel::{Runner, Unfit};
 
@@ -270,6 +271,21 @@ pub struct Genesis {
     #[document(summary = "Who sets the directory on a chain without governance: an address that may send Tx::SetDirectory, and hand the role on or renounce it with Tx::HandDirectory. None for none: a chain with governance changes its directory by Change::Directory alone, and one with neither keeps genesis's for good. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<Address>")]
     pub directory_admin: Option<Address>,
+    #[document(summary = "The limits a contract keeps within, or None for ContractLimits::DEFAULT's. Under governance, Change::Limits replaces them. Added after chains launched: None adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::params::vm::ContractLimits>")]
+    pub contract_limits: Option<crate::params::vm::ContractLimits>,
+    #[document(summary = "The most bytes one transaction may take, encoded, Ethereum-signed ones' raw bytes, or None: native ones bounded by the block alone, Ethereum-signed ones by ETHEREUM_TX_BYTES. Under governance, Change::Limits replaces it. Added after chains launched: None adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<u64>")]
+    pub max_tx_bytes: Option<u64>,
+    #[document(summary = "The most members a native multisig may have, at most MAX_MEMBERS, or None for MULTISIG_MEMBERS. Under governance, Change::Limits replaces it. Added after chains launched: None adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<u32>")]
+    pub multisig_members: Option<u32>,
+    #[document(summary = "The EVM's spec from the first block, or None for Prague. Under governance, Change::EvmSpec moves to another from a height. Added after chains launched: None adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::params::vm::EvmSpec>")]
+    pub evm_spec: Option<crate::params::vm::EvmSpec>,
+    #[document(summary = "The DEX's settings, its fee, or None for DexSettings::DEFAULT's 0.3%. Under governance, Change::Dex replaces them. Added after chains launched: None adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::params::vm::DexSettings>")]
+    pub dex: Option<crate::params::vm::DexSettings>,
 }
 
 impl Hashable for Genesis {}
@@ -312,6 +328,16 @@ pub fn consensus_problem(consensus: &ConsensusConfig, finality: Option<&Finality
         return Some("the proof-of-work hash must be a secure 256-bit one, not xxh3");
     }
 
+    if let ConsensusConfig::ProofOfWork(pow) = consensus {
+        if pow.window.is_some_and(|window| window < 2) {
+            return Some("consensus.window is at least 2 blocks");
+        }
+
+        if let Some(problem) = pow.tuning.as_ref().and_then(crate::consensus::PowTuning::problem) {
+            return Some(problem);
+        }
+    }
+
     if matches!(consensus, ConsensusConfig::Rotating { .. }) {
         #[cfg(feature = "finality-authority")]
         let rotating_ok = matches!(finality, Some(FinalityConfig::Authority(_)));
@@ -335,49 +361,6 @@ pub fn consensus_problem(consensus: &ConsensusConfig, finality: Option<&Finality
     }
 
     None
-}
-
-#[document(
-    summary = "Where the rewards for finality votes come from.",
-    category = "Chain",
-    see_also = "Genesis::vote_reward_source, REWARD_POOL",
-)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
-#[wincode(tag_encoding = "u8")]
-pub enum VoteRewardSource {
-    #[document(summary = "New supply: every reward is minted.")]
-    #[default]
-    #[wincode(tag = 0)]
-    Mint,
-    #[document(summary = "The reward pool: the burned share of every fee goes to REWARD_POOL instead of vanishing, and voters are paid from it, each as much of its reward as the pool holds. Supply then grows by block rewards alone.")]
-    #[wincode(tag = 1)]
-    Fees,
-}
-
-impl Hashable for VoteRewardSource {
-    const TAG_LEN: usize = 1;
-}
-
-impl VoteRewardSource {
-    #[document(parent = "VoteRewardSource", summary = "The name genesis files and the API use: mint or fees.")]
-    pub fn name(&self) -> &'static str {
-        match self {
-            VoteRewardSource::Mint => "mint",
-            VoteRewardSource::Fees => "fees",
-        }
-    }
-}
-
-impl std::str::FromStr for VoteRewardSource {
-    type Err = String;
-
-    fn from_str(text: &str) -> Result<VoteRewardSource, String> {
-        match text {
-            "mint" => Ok(VoteRewardSource::Mint),
-            "fees" => Ok(VoteRewardSource::Fees),
-            other => Err(format!("unknown vote reward source {other}; use mint or fees")),
-        }
-    }
 }
 
 /// Encodes Genesis::vote_reward_source as nothing while None, and as a 1 and its tag once set, so
@@ -578,6 +561,11 @@ impl Genesis {
             directory: None,
             name: None,
             directory_admin: None,
+            contract_limits: None,
+            dex: None,
+            evm_spec: None,
+            max_tx_bytes: None,
+            multisig_members: None,
         }
     }
 
@@ -596,6 +584,8 @@ impl Genesis {
                 target_block_ms: 2_000,
                 initial_difficulty: 100_000,
                 min_difficulty: 1_000,
+                tuning: None,
+                window: None,
             }),
             reward: Reward {
                 initial: u256::from(50u64) * u256::from(10u64).pow(18),
@@ -623,6 +613,11 @@ impl Genesis {
             directory: None,
             name: None,
             directory_admin: None,
+            contract_limits: None,
+            dex: None,
+            evm_spec: None,
+            max_tx_bytes: None,
+            multisig_members: None,
         }
     }
 
@@ -882,6 +877,18 @@ impl Genesis {
             return Some(problem);
         }
 
+        if let Some(problem) = self.block_limits().problem() {
+            return Some(problem);
+        }
+
+        if let Some(problem) = self.dex.as_ref().and_then(crate::params::vm::DexSettings::problem) {
+            return Some(problem);
+        }
+
+        if let Some(problem) = self.fees.as_ref().and_then(|fees| fees.costs.as_ref()).and_then(crate::params::vm::HostCosts::problem) {
+            return Some(problem);
+        }
+
         if self.pow_window.is_some() && !matches!(self.consensus, ConsensusConfig::ProofOfWork(_)) {
             return Some("consensus.window is for proof of work alone");
         }
@@ -907,15 +914,38 @@ impl Genesis {
             },
             staking: self.finality.as_ref().and_then(|config| config.staking(self.block().id())),
             signers: self.finality.as_ref().and_then(|config| config.signer_rules(self.block().id())),
-            governance: self.governance.as_ref().zip(self.finality.as_ref()).map(|(governance, finality)| GovernanceRules {
-                governance: governance.build(finality),
-                approval_epochs: governance.approval_epochs(),
-                checkpoint_interval: finality.checkpoint_interval(),
-                finality: finality.clone(),
-            }),
+            governance: self
+                .governance
+                .as_ref()
+                .zip(self.finality.as_ref())
+                .map(|(governance, finality)| GovernanceRules::new(governance, finality.checkpoint_interval(), finality)),
             fees: self.fees.as_ref().map(|config| Arc::new(config.build())),
             pooled_fees: self.vote_reward_source == Some(VoteRewardSource::Fees),
             names: self.names.clone().map(Arc::new),
+            vm: self.vm_rules(),
+        }
+    }
+
+    #[document(parent = "Genesis", summary = "What contracts run under from the first block: genesis's limits, costs, EVM spec and DEX fee, or the defaults it leaves unset.")]
+    pub fn vm_rules(&self) -> crate::params::vm::VmRules {
+        crate::params::vm::VmRules {
+            costs: self.fees.as_ref().and_then(|fees| fees.costs).unwrap_or_default(),
+            limits: self.contract_limits.unwrap_or_default(),
+            evm_spec: self.evm_spec.unwrap_or_default(),
+            dex: self.dex.unwrap_or_default(),
+            max_tx_bytes: self.max_tx_bytes,
+            multisig_members: self.multisig_members.unwrap_or(crate::params::MULTISIG_MEMBERS),
+        }
+    }
+
+    #[document(parent = "Genesis", summary = "Its limits as a change of limits carries them, whole.")]
+    pub fn block_limits(&self) -> BlockLimits {
+        BlockLimits {
+            tx_limits: self.tx_limits,
+            max_block_bytes: self.max_block_bytes,
+            contract: self.contract_limits,
+            max_tx_bytes: self.max_tx_bytes,
+            multisig_members: self.multisig_members,
         }
     }
 
@@ -1241,7 +1271,7 @@ impl Chain {
         let tips = read_value::<Leaves>(&*db, Column::Meta, TIPS_KEY)?.map_or_else(|| vec![tip_id], |leaves| leaves.blocks);
         let workers = Arc::new(Workers::new());
         let finality = match &genesis.finality {
-            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers), genesis.vote_rewards())?),
+            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
             None => None,
         };
         let events = index::events_up_to_date(&db, index::stored_index(&*db, IndexKind::Events)?, tip.header.height)?;
@@ -1686,7 +1716,7 @@ impl Chain {
         // The reward and the proofs change state too, so the root is the one importing reaches.
         // A block whose reward or proofs do not hold is refused for that on import, whatever its
         // root says.
-        match self.settle(layer, &block, params.reward, ran.to_producer, ran.burned) {
+        match self.settle(layer, &block, params.reward, ran.to_producer, ran.burned, params.rules.pooled_fees) {
             Ok(()) => {}
             Err(ImportError::Invalid(err)) => log::warn!("[chain] block {} will be refused: {err}", context.height),
             Err(ImportError::Db(err)) => return Err(err),
@@ -1907,7 +1937,7 @@ impl Chain {
         self.tips = BTreeSet::from([id]);
         self.snapshot = Some(pivot.header.height);
         self.finality = match &self.finality_config {
-            Some(config) => Some(config.build(&self.view(), self.vote_rewards)?),
+            Some(config) => Some(config.build(&self.view())?),
             None => None,
         };
         self.tip_moved()?;
@@ -1942,12 +1972,14 @@ impl Chain {
         }
 
         if let Some(limits) = changes.limits()? {
-            (params.rules.limits, params.max_block_bytes) = (limits.tx_limits, limits.max_block_bytes);
+            params.max_block_bytes = limits.max_block_bytes;
         }
 
         if let Some(decided) = changes.reward()? {
             params.reward = (decided.reward, decided.from);
         }
+
+        govern_rules(&mut params.rules, state, height)?;
 
         if let Some(config) = &self.finality_config
             && config.votes()
@@ -2471,7 +2503,7 @@ impl Chain {
     /// What a block does to state past its transactions: the producer's reward, a mining pool's
     /// share of it and of the fees sent to the pool's escrow with the root of its claims, and what
     /// its finality proofs pay and record.
-    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64), fees: u256, burned: u256) -> Result<(), ImportError> {
+    fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64), fees: u256, burned: u256, pooled: bool) -> Result<(), ImportError> {
         let reward = reward.since(block.header.height, from);
         let accounts = Accounts::new(layer);
 
@@ -2503,7 +2535,7 @@ impl Chain {
         }
 
         match &self.finality {
-            Some(finality) => finality.apply(layer, block)?,
+            Some(finality) => finality.apply(layer, block, if pooled { VoteRewardSource::Fees } else { VoteRewardSource::Mint })?,
             None if !block.proofs.is_empty() => return Err(ImportError::Invalid(BlockError::Proof("this chain has no finality".to_string()))),
             None => {}
         }
@@ -2546,7 +2578,7 @@ impl Chain {
             }));
         }
 
-        self.settle(&layer, block, params.reward, ran.to_producer, ran.burned)?;
+        self.settle(&layer, block, params.reward, ran.to_producer, ran.burned, params.rules.pooled_fees)?;
 
         let committed: Vec<CommittedReceipt> = receipts.iter().map(CommittedReceipt::of).collect();
 
@@ -2580,9 +2612,11 @@ impl Chain {
                 layer.put_value(Column::Ethereum, crate::crypto::ethereum::tx_hash(raw).to_vec(), &tx_id);
             }
 
-            // Which approval decided each change, for GET /governance/history.
-            if let receipt::TxStatus::Decided { decision, .. } = record.status {
-                layer.put_value(Column::Decisions, decision.to_be_bytes().to_vec(), &tx_id);
+            // Which vote decided or rejected each change, for GET /governance/history.
+            match record.status {
+                receipt::TxStatus::Decided { decision, .. } => layer.put_value(Column::Decisions, decision.to_be_bytes().to_vec(), &tx_id),
+                receipt::TxStatus::Rejected { rejection, .. } => layer.put_value(Column::Decisions, rejection_key(rejection), &tx_id),
+                _ => {}
             }
 
             // Blocks below an index's low end wait for catch_up_index, or were dropped.
@@ -3229,6 +3263,78 @@ pub fn stored_decisions(db: &dyn Read, newest: u64, before: Option<u64>, limit: 
     for version in (1..=top).rev().take(limit) {
         match read_value(db, Column::Decisions, &version.to_be_bytes())? {
             Some(id) => found.push((version, id)),
+            None => break,
+        }
+    }
+
+    Ok(found)
+}
+
+/// Lays what governance decided in a state over the rules a block at a height runs by, genesis's
+/// coming in: the limits, where vote rewards come from, the host costs, names, the DEX's fee, the
+/// EVM's spec at the height and governance's own settings. What the chain runs each block by, and
+/// what the API answers dry runs and settings by, alike. Fees themselves, which are built and
+/// kept, are the caller's.
+pub(crate) fn govern_rules(rules: &mut Rules, state: &State, height: u64) -> Result<(), DbError> {
+    let changes = Changes::new(state);
+
+    if let Some(config) = changes.fees()? {
+        // Where vote rewards come from moves with the fees, when they name it.
+        if let Some(source) = config.vote_rewards {
+            rules.pooled_fees = source == VoteRewardSource::Fees;
+        }
+
+        // A change of fees names its costs, or goes back to the defaults.
+        rules.vm.costs = config.costs.unwrap_or_default();
+    }
+
+    if let Some(limits) = changes.limits()? {
+        rules.limits = limits.tx_limits;
+        // What a change of limits leaves unset stays genesis's.
+        rules.vm.limits = limits.contract.unwrap_or(rules.vm.limits);
+        rules.vm.max_tx_bytes = limits.max_tx_bytes.or(rules.vm.max_tx_bytes);
+        rules.vm.multisig_members = limits.multisig_members.unwrap_or(rules.vm.multisig_members);
+    }
+
+    if let Some(settings) = changes.names()?
+        && let Some(names) = &rules.names
+    {
+        rules.names = Some(Arc::new(names.with(&settings)));
+    }
+
+    if let Some(dex) = changes.dex()? {
+        rules.vm.dex = dex;
+    }
+
+    rules.vm.evm_spec = changes.evm_spec_at(height, rules.vm.evm_spec)?;
+
+    // Governance's own settings, from the block after the one that decided them.
+    #[cfg(feature = "governance")]
+    if let Some(governance) = &rules.governance {
+        rules.governance = Some(governance.in_state(state)?);
+    }
+
+    Ok(())
+}
+
+/// Where the vote that made the chain's rejection-th is kept, in Column::Decisions beside the
+/// decisions, whose keys are the 8 bytes of their count alone.
+fn rejection_key(rejection: u64) -> Vec<u8> {
+    [b"rejected:".as_slice(), &rejection.to_be_bytes()].concat()
+}
+
+#[document(
+    summary = "The ids of the votes that rejected governance's changes on the main chain, newest first: each with the chain's count of rejections it made, from the one below before (or newest) down, at most limit. It stops at the first it lacks, as a node that synced from a snapshot lacks those made before it.",
+    category = "Governance",
+    see_also = "TxStatus::Rejected, stored_decisions",
+)]
+pub fn stored_rejections(db: &dyn Read, newest: u64, before: Option<u64>, limit: usize) -> Result<Vec<(u64, Hash)>, DbError> {
+    let top = before.map_or(newest, |before| before.saturating_sub(1).min(newest));
+    let mut found = Vec::new();
+
+    for rejection in (1..=top).rev().take(limit) {
+        match read_value(db, Column::Decisions, &rejection_key(rejection))? {
+            Some(id) => found.push((rejection, id)),
             None => break,
         }
     }

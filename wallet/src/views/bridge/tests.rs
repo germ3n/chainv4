@@ -126,6 +126,7 @@ fn the_deposit_address_is_the_federation_s_under_the_account() {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 2,
+            btc: None,
         },
     };
     let alice = Address::Ed25519([0xa; 32]);
@@ -152,6 +153,7 @@ fn every_address_of_every_account_has_its_deposit_watched() {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 2,
+            btc: None,
         },
     };
     let gateway = Address::Contract([7; 32]);
@@ -184,6 +186,7 @@ fn the_bridge_offers_every_address_and_shows_the_deposit_address_of_the_one_pick
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 2,
+            btc: None,
         },
     };
     let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height: 1, final_: true };

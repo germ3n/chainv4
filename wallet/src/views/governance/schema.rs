@@ -39,6 +39,8 @@ pub enum Line {
     Compressed,
     /// A price in the coin, by its place: names of 3 characters first.
     Price,
+    /// An account here, such as a council's member.
+    Account,
 }
 
 /// The control a field takes, and how what is typed in it is written in the change's JSON.
@@ -137,6 +139,8 @@ const GAS_SCHEDULES: Options = &[("weighted", "Weights"), ("contract", "A contra
 const PRICINGS: Options = &[("base_fee", "A base price"), ("bid", "Bids")];
 const FINALITIES: Options = &[("ffg", "FFG"), ("authority", "Authority"), ("depth", "Depth")];
 const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, by signers")];
+const GOVERNANCES: Options = &[("council", "A council"), ("electorate", "Finality's voters")];
+const EVM_SPECS: Options = &[("shanghai", "Shanghai"), ("cancun", "Cancun"), ("prague", "Prague"), ("osaka", "Osaka")];
 
 const VALIDATOR: &[Column] = &[Column { name: "account", label: "Account", cell: Cell::Account }, Column { name: "voter", label: "Voting key", cell: Cell::Key }, Column { name: "bond", label: "Bond", cell: Cell::Amount }];
 const SIGNER: &[Column] = &[Column { name: "key", label: "Voting key", cell: Cell::Key }, Column { name: "account", label: "Account", cell: Cell::Account }];
@@ -155,6 +159,10 @@ const WHEN_LEAK: &[(&str, &str)] = &[("type", "ffg"), ("leak", "on")];
 const INTO_FFG: &[(&str, &str)] = &[("finality.type", "ffg")];
 const INTO_AUTHORITY: &[(&str, &str)] = &[("finality.type", "authority")];
 const INTO_LEAK: &[(&str, &str)] = &[("finality.type", "ffg"), ("finality.leak", "on")];
+const WHEN_COUNCIL: &[(&str, &str)] = &[("type", "council")];
+const WHEN_COSTS: &[(&str, &str)] = &[("costs", "on")];
+const WHEN_BTC: &[(&str, &str)] = &[("btc", "on")];
+const WHEN_CONTRACT_LIMITS: &[(&str, &str)] = &[("contract", "on")];
 
 /// The least fuel and memory a transaction may have, as BlockLimits::problem says, and the least
 /// and most a block may hold.
@@ -171,13 +179,34 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("least", "Least version that runs on", "Nodes older than this stop and say to update.", Control::Version),
             field("from", "From block", "Must be ahead of the block that decides it.", Control::Whole),
         ],
-        "name_prices" => vec![field("", "What a year of a name costs", "By its length; the last price holds for every longer name.", Control::List(Line::Price))],
+        "names" => vec![
+            field("prices", "What a year of a name costs", "By its length; the last price holds for every longer name.", Control::List(Line::Price)),
+            field("grace_ms", "Grace after a name expires, in ms", "Its owner alone may renew it until then; a name in grace is judged by the grace in force.", Control::Millis),
+            field("max_years", "Most years ahead a name is held", "", Control::Small).least(1),
+        ],
+        "token_functions" => vec![field("", "Functions a token exports", "A contract exporting all of them is one. None keeps no token registry.", Control::List(Line::Function))],
+        "governance" => vec![
+            field("type", "Kind", "Governance keeps its kind.", Control::Choice(GOVERNANCES)).fixed(),
+            field("members", "Members", "Each once; they vote from the block after the decision, and every open vote is cleared.", Control::List(Line::Account)).when(WHEN_COUNCIL),
+            field("threshold", "Members whose Yes decides", "At least one, at most all.", Control::Small).when(WHEN_COUNCIL).least(1),
+            field("approval_epochs", "Epochs a vote counts", "", Control::Whole).least(1),
+            field("quorum_permille", "Quorum, in thousandths", "How much of the voters' weight must vote at all, Abstain included, before Yes decides. 0 asks for none.", Control::Permille).most(1000),
+        ],
+        "evm_spec" => vec![
+            field("spec", "Hard fork", "No older than the one in force, so no deployed contract loses an opcode.", Control::Choice(EVM_SPECS)),
+            field("from", "From block", "Must be ahead of the block that decides it; blocks below replay as they ran.", Control::Whole),
+        ],
+        "dex" => vec![field("fee_bps", "Fee a trade keeps, in hundredths of a percent", "30 is 0.3%. Both DEXes charge it from the block after the decision.", Control::Small).most(1000)],
         "consensus" => vec![
             field("type", "Who makes blocks", "It must fit the chain's finality: signers in turn need authority, validators by stake need FFG.", Control::Choice(CONSENSUS_KINDS)),
             field("hash", "Work hash", "", Control::Choice(SECURE_HASHES)).when(WHEN_POW),
             field("target_block_ms", "Time between blocks, in ms", "Difficulty rises when blocks come faster, and falls when they come slower.", Control::Millis).when(WHEN_POW),
             field("initial_difficulty", "First block's difficulty", "The hashes expected to find its seal.", Control::Digits).when(WHEN_POW),
             field("min_difficulty", "Least difficulty", "Difficulty never falls below this.", Control::Digits).when(WHEN_POW),
+            field("window", "Retarget window", "Genesis's, or over so many blocks, at least 2.", Control::MaybeWhole { off: "Genesis's", on: "Blocks" }).when(WHEN_POW).least(2),
+            field("adjustment", "Step of difficulty", "Each step moves it by the parent's divided by this, 64 by default.", Control::MaybeWhole { off: "Default", on: "Divide by" }).when(WHEN_POW).least(2),
+            field("max_steps_down", "Most steps down in a block", "32 by default.", Control::MaybeWhole { off: "Default", on: "At most" }).when(WHEN_POW).least(1),
+            field("max_swing", "Most an interval counts", "Under a window, from a quarter to four times the target by default.", Control::MaybeWhole { off: "Default", on: "Times the target" }).when(WHEN_POW).least(1),
             field("key", "The key that makes blocks", "", Control::Key).when(WHEN_AUTHORITY),
             field("slot_ms", "Time between blocks, in ms", "", Control::Millis).when(WHEN_AUTHORITY),
             field("slot_ms", "Time between blocks, in ms", "Also from a missed slot to the next in line's.", Control::Millis).when(WHEN_ROTATING),
@@ -201,6 +230,36 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("pricing.elasticity", "Elasticity", "The gas limit divided by this is the target a block aims for: 2 aims for half-full blocks.", Control::Whole).under("Pricing").when(WHEN_BASE_FEE).least(1),
             field("pricing.change_denominator", "Change denominator", "The price moves by at most one over this a block: 8 is an eighth.", Control::Whole).under("Pricing").when(WHEN_BASE_FEE).least(1),
             field("pricing.min_price", "Least bid", "", Control::Amount).under("Pricing").when(WHEN_BID),
+            field("costs", "What host operations cost", "In fuel, and the EVM precompiles in gas.", Control::Switch { off: "The defaults", on: "These" }).under("Host costs"),
+            field("costs.storage_read", "Storage read", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.storage_write", "Storage write", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.storage_bytes_per_fuel", "Storage bytes per fuel", "", Control::Whole).under("Host costs").when(WHEN_COSTS).least(1),
+            field("costs.storage_scan", "Storage scan", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.storage_scan_entry", "Storage scan entry", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.hash", "Hash", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.hash_bytes_per_fuel", "Hash bytes per fuel", "", Control::Whole).under("Host costs").when(WHEN_COSTS).least(1),
+            field("costs.call", "Call", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.balance", "Balance", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.transfer", "Transfer", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.event", "Event", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.event_bytes_per_fuel", "Event bytes per fuel", "", Control::Whole).under("Host costs").when(WHEN_COSTS).least(1),
+            field("costs.copy_bytes_per_fuel", "Copy bytes per fuel", "", Control::Whole).under("Host costs").when(WHEN_COSTS).least(1),
+            field("costs.load_byte", "Load byte", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.token_refresh", "Token refresh", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.check_layout", "Check layout", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.clone", "Clone", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.name", "Name", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.abi", "Abi", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.verify", "Verify", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.recover", "Recover", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.key_address", "Key address", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.check_proof", "Check proof", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.proof_sibling", "Proof sibling", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.federation", "Federation", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.chain_id", "Chain id", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.evm_native_call", "Evm native call", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.evm_native_word", "Evm native word", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.evm_name_lookup", "Evm name lookup", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
         ],
         "reward" => vec![
             field("initial", "What a block mints", "From the block after the one that decides it.", Control::Amount),
@@ -210,6 +269,17 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("tx_limits.fuel", "Fuel a transaction may use", "", Control::Whole).least(LEAST_FUEL),
             field("tx_limits.memory", "Memory a transaction may use", "", Control::Bytes).least(MIB),
             field("max_block_bytes", "Size of a block", "Bound by gas alone, or at most 1 MiB to 6 MiB.", Control::MaybeBytes { off: "Gas alone", on: "At most" }).least(MIB).most(6 * MIB),
+            field("max_tx_bytes", "Size of a transaction", "Genesis's, or at most 64 KiB to 6 MiB; Ethereum-signed ones by their raw bytes.", Control::MaybeBytes { off: "Genesis's", on: "At most" }).least(64 * 1024).most(6 * MIB),
+            field("multisig_members", "Members of a multisig", "Genesis's, or at most 1 to 20; a multisig made under more keeps its members.", Control::MaybeWhole { off: "Genesis's", on: "At most" }).least(1).most(20),
+            field("contract", "Contract limits", "Lowering what deployed contracts may rely on is refused.", Control::Switch { off: "Genesis's", on: "These" }).under("Contracts"),
+            field("contract.call_depth", "Deepest calls nest", "", Control::Small).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1).most(64),
+            field("contract.key_len", "Longest storage key", "", Control::Bytes).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1),
+            field("contract.value_len", "Largest storage value", "", Control::Bytes).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1),
+            field("contract.scan", "Most entries a scan gives", "", Control::Small).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1),
+            field("contract.event_data", "Largest event data", "", Control::Bytes).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1),
+            field("contract.events", "Most events a call emits", "", Control::Small).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1),
+            field("contract.module_len", "Largest WebAssembly module", "Bounds only new deploys.", Control::Bytes).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1).most(512 * 1024),
+            field("contract.source_len", "Longest Lua source", "Bounds only new deploys.", Control::Bytes).under("Contracts").when(WHEN_CONTRACT_LIMITS).least(1).most(512 * 1024),
         ],
         "finality" => vec![
             field("type", "Kind", "A switch changes it: pick Finality's kind.", Control::Choice(FINALITIES)).fixed(),
@@ -225,6 +295,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("vote_reward", "What each voter earns", "For a justification a block carries.", Control::Amount).when(WHEN_FFG),
             field("max_proofs_per_block", "Most justifications a block carries", "", Control::Small).when(WHEN_FFG),
             field("validators", "Validators from genesis", "History keeps them.", Control::Table(VALIDATOR)).fixed().when(WHEN_FFG),
+            field("slash_permille", "What a slash takes", "Of a cheater's bond, in thousandths; the reporter gets its share of that.", Control::MaybeWhole { off: "The whole bond", on: "Thousandths" }).when(WHEN_FFG).least(1).most(1000),
             field("leak", "Inactivity leak", "Takes bonds from validators who stopped voting once nothing was proven for a while.", Control::Switch { off: "None", on: "A leak" }).when(WHEN_FFG),
             field("leak.after_epochs", "After this many epochs without a proof", "", Control::Whole).when(WHEN_LEAK).least(1),
             field("leak.permille", "Thousandths of a bond each checkpoint", "", Control::Permille).when(WHEN_LEAK).most(1000),
@@ -269,6 +340,12 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("chain_depth", "Blocks to wait here", "", Control::Whole).least(1),
             field("evm_depth", "Blocks to wait on EVM chains", "Where the chain's RPC names no finalized block.", Control::Whole).least(1),
             field("bitcoin_depth", "Confirmations to wait on Bitcoin", "", Control::Small).least(1),
+            field("btc", "Bitcoin policy", "What the Bitcoin gateway and its signers go by; while unset, what the gateway was set up with.", Control::Switch { off: "The gateway's own", on: "These" }).under("Bitcoin"),
+            field("btc.fee_cap", "Most fee a release pays, in sats", "", Control::Whole).under("Bitcoin").when(WHEN_BTC).least(710),
+            field("btc.fee_floor", "Least a release pays a vbyte, in sats", "", Control::Whole).under("Bitcoin").when(WHEN_BTC).least(1),
+            field("btc.grace_ms", "How long a retired federation's addresses stay open, in ms", "", Control::Millis).under("Bitcoin").when(WHEN_BTC),
+            field("btc.cancel_after_ms", "How long a release waits before its signers vote it down, in ms", "", Control::Millis).under("Bitcoin").when(WHEN_BTC).least(1),
+            field("btc.fee_part", "A withdrawal's fee is at most its sats divided by", "10 is a tenth.", Control::Whole).under("Bitcoin").when(WHEN_BTC).least(1),
         ],
         "directory" => vec![
             field("gateway", "The bridges' gateway", "", Control::MaybeContract),
@@ -287,7 +364,10 @@ pub fn schema(kind: &str) -> Vec<Spec> {
 /// it does not run now.
 pub fn defaults(kind: &str) -> Value {
     match kind {
-        "bootnodes" | "name_prices" => json!([]),
+        "bootnodes" | "token_functions" => json!([]),
+        "names" => json!({ "prices": [], "grace_ms": 7_776_000_000u64, "max_years": 100 }),
+        "evm_spec" => json!({ "spec": "prague", "from": null }),
+        "dex" => json!({ "fee_bps": 30 }),
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),

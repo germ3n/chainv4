@@ -1387,6 +1387,27 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **revm brings older crypto crates.** It pins k256 0.13 and sha3 0.11 beside the newer ones
   chainv4 uses, so both are built. It has no KZG precompile, since that needs C.
 
+## Governance votes
+
+- **Yes, No and Abstain.** A change is decided once Yes weighs what governance needs and the
+  quorum has voted, Abstain and No included; rejected once what has not voted No could no longer
+  reach what is needed. A rejection leaves the kind's version where it was, and the same change is
+  refused until a change of its kind is decided.
+- **One vote an account on each change, one Yes a kind.** A second Yes in a kind moves the first;
+  No and Abstain stand beside it. `Tx::ClearVote` takes one back. Votes expire after
+  `approval_epochs`, No as much as Yes.
+- **Governance changing itself clears every open vote,** of every kind, and the rest of its block
+  refuses votes; the new settings count from the next block.
+- **Settings hold from the block after their decision,** read from each block's parent's state:
+  host costs, contract limits, names, the DEX's fee and governance's own settings alike. An EVM
+  spec runs from the height it names; finality's tuning from an epoch ahead.
+- **A limit deployed contracts may rely on never falls,** and `multisig_members` never rises past
+  20. Lowering the module or source size bounds only new deploys.
+- **The Bitcoin gateway goes by the federation's `btc` policy once it names one,** and by its own
+  setup until then; signers go by its `cancel_after_ms` over their `--cancel-after`.
+- **Every new setting changes genesis's encoding,** so the devnet moves to them with a new genesis
+  (see [Governance](governance.md#what-else-each-kind-carries)).
+
 ## Names
 
 - **A name's price is burned, by length, per year.** Its fee is paid on top. A registration that

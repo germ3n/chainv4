@@ -76,7 +76,8 @@ pub struct BridgeArgs {
     pub max_fee_rate: Option<u64>,
     /// How long, by the chain's block time, a Bitcoin release may stay short of its signatures before
     /// a signer's pass votes to cancel it, and stay unmined with all of them before it warns: 6h, 90m,
-    /// 30s. Reading a release's age takes a node with --index-events.
+    /// 30s. The federation's own policy, btc.cancel_after_ms, wins once governance names one, so
+    /// every signer waits alike. Reading a release's age takes a node with --index-events.
     #[arg(long, global = true, default_value = "6h", value_parser = parse_age)]
     pub cancel_after: u64,
 }

@@ -1,18 +1,19 @@
 //! Governance: the chain's settings that its council, or finality's own voters, change on chain.
-//! What a change needs and who may approve, the changes open and their approvals, found by search,
-//! kind and order, approving one or withdrawing an approval, proposing a change of any kind by a
-//! form of its fields (form.rs), what stands, and every decision, a page at a time.
+//! What a change needs, its quorum and who may vote, the changes open, each a card with its ring
+//! toward what it needs, a dot a voter and what it would move, found by search, kind and order;
+//! voting Yes, No or Abstain on one, or clearing a vote; proposing a change of any kind by a form of
+//! its fields (form.rs), which votes Yes on it; what stands, and every decision, a page at a time.
 //!
 //! What the node says of governance is shown as its word: GET /governance, /governance/history and
-//! /governance/weight/{address}. Nothing signed rests on it but the version an approval names, its
-//! change's kind's, which the chain checks: an approval for a version that moved on fails and
-//! changes nothing. Each kind of change has a ballot and a version of its own, so an account backs
-//! one change of each kind at a time. Each change is read with chainv4's own change_from_json,
-//! which checks it as the CLI's approve-change does, before it is signed; a partial one is laid
-//! over what stands first, with params::json::over, as the CLI does. Approvals are signed and sent
-//! on the Send page, as any other transaction, or proposed to a multisig's members on its page; once
-//! in a block, the light client proves their receipts, whose outcome says which change an approval
-//! decided.
+//! /governance/weight/{address}. Nothing signed rests on it but the version a vote names, its
+//! change's kind's, which the chain checks: a vote for a version that moved on fails and changes
+//! nothing. Each kind of change has a ballot and a version of its own; an account votes once on each
+//! change, a new vote replacing the old, and backs one change of each kind with Yes at a time. Each
+//! change is read with chainv4's own change_from_json, which checks it as the CLI's vote-change does,
+//! before it is signed; a partial one is laid over what stands first, with params::json::over, as the
+//! CLI does. Votes are signed and sent on the Send page, as any other transaction, or proposed to a
+//! multisig's members on its page; once in a block, the light client proves their receipts, whose
+//! outcome says which change a vote decided or rejected.
 
 mod form;
 mod schema;
@@ -23,12 +24,13 @@ use {
     super::{Ctx, Page},
     crate::app::Coin,
     crate::format,
-    crate::history::{Vote, kind_words},
+    crate::history::{Vote, kind_words, voted},
     crate::node::{Ask, Failure},
     crate::theme,
     chainv4_ui::ballots::{self, Counted, Decided, Finder, Item, PER_PAGE},
+    chainv4_ui::votes::{self, Choice},
     chainv4::consensus::ConsensusConfig,
-    chainv4::governance::{Change, ChangeKind},
+    chainv4::governance::{Change, ChangeKind, ChangeVote},
     chainv4::params::fees::PricingConfig,
     chainv4::params::finality::FinalityConfig,
     chainv4::params::json::{change_from_json, change_json, over},
@@ -48,17 +50,17 @@ const REFRESH: u64 = 15_000;
 const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
-const KINDS: [&str; 13] = ["name", "bootnodes", "upgrade", "name_prices", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "federation", "directory"];
+const KINDS: [&str; 17] = ["name", "bootnodes", "upgrade", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex"];
 
 /// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
 const KIND_LIST_HEIGHT: f32 = 620.0;
 
 /// The kinds the propose form takes in part: a JSON object naming only some fields, laid over what
-/// stands, as the CLI's approve-change takes them.
-const PARTIAL: [&str; 6] = ["fees", "reward", "limits", "finality", "federation", "directory"];
+/// stands, as the CLI's vote-change takes them.
+const PARTIAL: [&str; 9] = ["fees", "reward", "limits", "finality", "federation", "directory", "names", "governance", "dex"];
 
 /// The settings in force, in the order the API lists them.
-const IN_FORCE: [&str; 12] = ["consensus", "name", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade"];
+const IN_FORCE: [&str; 16] = ["consensus", "name", "bootnodes", "names", "collections", "token_functions", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade", "governance", "evm_spec", "dex"];
 
 /// GET /governance, read.
 #[derive(Clone, Debug, PartialEq)]
@@ -71,8 +73,16 @@ pub struct Listing {
     /// Each kind's own version: how many changes of it were decided. What an approval names.
     pub versions: BTreeMap<ChangeKind, u64>,
     pub approval_epochs: u64,
-    /// What a change needs, as a decimal.
+    /// What Yes must weigh to decide a change, as a decimal.
     pub needed: String,
+    /// What every voter weighs together, and the quorum, in thousandths of it.
+    pub total: String,
+    pub quorum_permille: u32,
+    /// Blocks per epoch, and a block's time, to say when old votes stop counting.
+    pub checkpoint_interval: u64,
+    pub block_ms: Option<u64>,
+    /// Everyone who may vote, with what each weighs, as decimals.
+    pub voters: Vec<(String, String)>,
     /// The council's accounts; None for finality's voters.
     pub members: Option<Vec<String>>,
     pub proposals: Vec<Proposal>,
@@ -83,27 +93,39 @@ pub struct Listing {
     pub switch: Option<(u64, String)>,
 }
 
-/// An open change and its approvals.
+/// An open change and its votes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Proposal {
     /// The change's JSON, without what the listing adds to it.
     pub json: Value,
     /// The change, or why it does not read.
     pub change: Result<Change, String>,
-    /// Its kind, as the node names it, and that kind's version its approvals are at.
+    /// Its kind, as the node names it, and that kind's version its votes are at.
     pub kind: String,
     pub version: Option<u64>,
-    pub weight: String,
-    pub needed: String,
-    pub approvals: Vec<Approval>,
+    /// How its votes stand, as the node tallied them, and as numbers.
+    pub tally_json: Value,
+    pub tally: votes::Tally,
+    /// The epoch its oldest vote counts through.
+    pub closes: Option<u64>,
+    pub votes: Vec<CastVote>,
 }
 
+/// One vote on an open change.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Approval {
+pub struct CastVote {
     pub account: String,
+    pub vote: Option<Choice>,
     pub weight: String,
     pub epoch: u64,
     pub counts_until: u64,
+}
+
+impl Proposal {
+    /// How an account voted on it, if it did.
+    pub fn vote_of(&self, account: &str) -> Option<Choice> {
+        self.votes.iter().find(|vote| vote.account == account).and_then(|vote| vote.vote)
+    }
 }
 
 /// A setting as it stands: genesis's, or the change that last decided it.
@@ -131,27 +153,33 @@ impl Listing {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Weight {
     pub weight: u256,
-    /// The address's approvals that count, one at most a kind, in kind order.
-    pub approved: Vec<Approved>,
+    /// The address's votes that count, in kind order: one a change, one Yes a kind at most.
+    pub voted: Vec<Voted>,
 }
 
-/// An address's approval that counts: the change, its kind, and the kind's version it names.
+/// An address's vote that counts: the change, its kind, the kind's version it names, and which way.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Approved {
+pub struct Voted {
     pub kind: ChangeKind,
     pub version: u64,
+    pub vote: ChangeVote,
     pub change: Change,
 }
 
 impl Weight {
-    /// Whether the address may approve at all.
+    /// Whether the address may vote at all.
     pub fn may_vote(&self) -> bool {
         self.weight > u256::ZERO
     }
 
-    /// Its approval of a change of this kind, if one counts.
-    pub fn approved_in(&self, kind: ChangeKind) -> Option<&Approved> {
-        self.approved.iter().find(|approved| approved.kind == kind)
+    /// Its vote on a change, if one counts.
+    pub fn vote_on(&self, change: &Change) -> Option<&Voted> {
+        self.voted.iter().find(|voted| voted.change == *change)
+    }
+
+    /// Its Yes on another change of this kind than this one, which a Yes on this one would move.
+    pub fn yes_elsewhere(&self, change: &Change) -> Option<&Voted> {
+        self.voted.iter().find(|voted| voted.kind == change.kind() && voted.vote == ChangeVote::Yes && voted.change != *change)
     }
 }
 
@@ -189,7 +217,7 @@ struct Pending {
     changes: Vec<Diff>,
     /// The change's JSON, pretty.
     json: Option<String>,
-    /// What it does to the address's approval.
+    /// What it does to the address's vote.
     note: String,
 }
 
@@ -430,13 +458,22 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
         ui.add_space(4.0);
         super::row(ui, &palette, "A change needs", |ui| {
             let needed = match &listing.members {
-                Some(members) => format!("{} of the {} members' approvals", listing.needed, members.len()),
-                None => weighs(listing, &listing.needed, &coin),
+                Some(members) => format!("Yes from {} of the {} members", listing.needed, members.len()),
+                None => format!("Yes weighing {}", weighs(listing, &listing.needed, &coin)),
             };
             ui.label(RichText::new(needed).color(palette.ink));
         });
-        super::row(ui, &palette, "Approvals count", |ui| {
-            ui.label(format!("{} epoch{} from the one they were made in", listing.approval_epochs, plural(listing.approval_epochs)));
+        super::row(ui, &palette, "Quorum", |ui| {
+            ui.label(match listing.quorum_permille {
+                0 => "None: Yes alone decides".to_string(),
+                permille => format!("{}% of every voter's weight votes, Abstain included, before Yes decides", f64::from(permille) / 10.0),
+            });
+        });
+        super::row(ui, &palette, "Rejected", |ui| {
+            ui.add(egui::Label::new("Once what has not voted No can no longer reach what a change needs").wrap());
+        });
+        super::row(ui, &palette, "Votes count", |ui| {
+            ui.label(format!("{} epoch{} from the one they were cast in", listing.approval_epochs, plural(listing.approval_epochs)));
         });
         super::row(ui, &palette, "Decisions", |ui| {
             ui.label(format!("{} so far, of every kind", listing.version));
@@ -444,7 +481,7 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
         super::row(ui, &palette, "Versions", |ui| {
             ui.vertical(|ui| {
                 ui.label(versions_line(listing));
-                ui.label(RichText::new("Each kind of change has a ballot and a version of its own: an approval names its kind's, and lapses only once a change of that kind is decided.").small().color(palette.muted));
+                ui.label(RichText::new("Each kind of change has a ballot and a version of its own: a vote names its kind's, and lapses only once a change of that kind is decided.").small().color(palette.muted));
             });
         });
         super::row(ui, &palette, "Epoch", |ui| {
@@ -496,16 +533,16 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
                 continue;
             };
 
-            // Its approvals, one a kind, each withdrawn on its own.
-            for approved in &weight.approved {
+            // Its votes, each cleared on its own.
+            for cast in &weight.voted {
                 theme::end_row(
                     ui,
                     |ui| {
-                        ui.add(egui::Label::new(RichText::new(format!("Approves, in {} v{}: {}", kind_label(approved.kind).to_lowercase(), approved.version, describe(&approved.change, &coin))).small().color(palette.muted)).wrap());
+                        ui.add(egui::Label::new(RichText::new(format!("{}, in {} v{}: {}", voted(cast.vote), kind_label(cast.kind).to_lowercase(), cast.version, describe(&cast.change, &coin))).small().color(palette.muted)).wrap());
                     },
                     |ui| {
-                        if voter.here && weight.may_vote() && theme::quiet(ui, &palette, "Withdraw").clicked() {
-                            *chosen = Some(withdrawal(voter.address, approved, &coin));
+                        if voter.here && weight.may_vote() && theme::quiet(ui, &palette, "Clear").clicked() {
+                            *chosen = Some(clearing(voter.address, cast, &coin));
                         }
                     },
                 );
@@ -514,20 +551,21 @@ fn header(ui: &mut Ui, ctx: &mut Ctx, state: &GovernanceState, listing: &Listing
     });
 }
 
-/// The changes open, found by search, kind and order, each with its approvals, and approving or
-/// withdrawing.
+/// The changes open, found by search, kind and order, each a card with its votes, and Yes, No,
+/// Abstain or Clear for each address this page votes with.
 fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Listing, voters: &[Voter], chosen: &mut Option<Pending>) {
     let palette = *ctx.palette;
     let coin = ctx.coin.clone();
     let acting = acting(voters, &state.weights);
-    let ours: Vec<String> = voters.iter().map(|voter| voter.address.to_string()).collect();
+    let tip = ctx.chain.following().map(|(tip, _)| tip);
     let items: Vec<Item> = listing.proposals.iter().map(|proposal| open_item(proposal, &coin)).collect();
+    let narrow = chainv4_ui::layout::is_narrow(ui.available_width());
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Open changes");
 
         if listing.proposals.is_empty() {
-            ui.label(RichText::new("No change has approvals that still count. Propose one below.").color(palette.muted));
+            ui.label(RichText::new("No change has votes that still count. Propose one below.").color(palette.muted));
         }
 
         ballots::controls(ui, &palette, &mut state.open, "Search: kind, address or value", &items, &ballots::OPEN_ORDERS, &kind_name);
@@ -543,61 +581,38 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &
             ui.add_space(6.0);
             ui.separator();
 
-            match &proposal.change {
-                Ok(change) => {
-                    ui.label(RichText::new(describe(change, &coin)).color(palette.ink).size(15.0));
-                }
-                Err(why) => {
+            let card = card_of(listing, proposal, voters, &coin, tip);
+            votes::card(ui, &palette, &card, narrow, |ui| {
+                if let Err(why) = &proposal.change {
                     ui.colored_label(palette.bad, format!("A change this wallet does not read: {why}"));
                 }
-            }
 
-            ui.label(RichText::new(ballot(proposal)).small().color(palette.muted));
+                egui::CollapsingHeader::new(RichText::new("JSON").small().color(palette.muted)).id_salt(("governance proposal", index)).show(ui, |ui| {
+                    super::text_block(ui, &palette, &pretty(&proposal.json));
+                });
 
-            let fraction = ballots::share(&proposal.weight, &proposal.needed).clamp(0.0, 1.0) as f32;
-            ui.add(egui::ProgressBar::new(fraction).text(format!("{} of {}", weighs(listing, &proposal.weight, &coin), weighs(listing, &proposal.needed, &coin))));
+                let Ok(change) = &proposal.change else {
+                    return;
+                };
 
-            for approval in &proposal.approvals {
-                ui.horizontal_wrapped(|ui| {
-                    super::address(ui, &palette, &approval.account);
+                // The kind's version the ballot is at, as the proposal or the listing says.
+                let version = proposal.version.unwrap_or_else(|| listing.version_of(change.kind()));
 
-                    if ours.contains(&approval.account) {
-                        theme::pill(ui, "yours", palette.accent);
+                for from in &acting {
+                    let weight = state.weights.get(&from.to_string()).and_then(|weight| weight.as_ref().ok());
+                    let cast = weight.and_then(|weight| weight.vote_on(change));
+                    let moves = weight.is_some_and(|weight| weight.yes_elsewhere(change).is_some());
+
+                    if acting.len() > 1 {
+                        ui.label(RichText::new(format!("As {}", format::short(&from.to_string()))).small().color(palette.muted));
                     }
 
-                    ui.label(RichText::new(format!("{} · approved in epoch {}, counts until epoch {}", weighs(listing, &approval.weight, &coin), approval.epoch, approval.counts_until)).small().color(palette.muted));
-                });
-            }
-
-            egui::CollapsingHeader::new(RichText::new("JSON").small().color(palette.muted)).id_salt(("governance proposal", index)).show(ui, |ui| {
-                super::text_block(ui, &palette, &pretty(&proposal.json));
-            });
-
-            let Ok(change) = &proposal.change else {
-                continue;
-            };
-
-            // The kind's version the ballot is at, as the proposal or the listing says.
-            let version = proposal.version.unwrap_or_else(|| listing.version_of(change.kind()));
-
-            ui.horizontal_wrapped(|ui| {
-                for from in &acting {
-                    // Its approval of this change's kind, which approving moves, or withdrawing takes back.
-                    let counted = state.weights.get(&from.to_string()).and_then(|weight| weight.as_ref().ok()).and_then(|weight| weight.approved_in(change.kind()));
-                    let short = format::short(&from.to_string());
-                    let by = if acting.len() > 1 { format!(" as {short}") } else { String::new() };
-
-                    match counted.filter(|counted| counted.change == *change) {
-                        Some(counted) => {
-                            if theme::quiet(ui, &palette, &format!("Withdraw{by}")).clicked() {
-                                *chosen = Some(withdrawal(*from, counted, &coin));
-                            }
-                        }
-                        None => {
-                            if theme::primary(ui, &palette, &format!("Approve{by}"), true).clicked() {
-                                *chosen = Some(approval(*from, listing, change.clone(), version, counted.is_some(), &coin));
-                            }
-                        }
+                    if let Some(picked) = buttons(ui, &palette, cast.map(|cast| cast.vote)) {
+                        *chosen = Some(match (picked, cast) {
+                            (None, Some(cast)) => clearing(*from, cast, &coin),
+                            (Some(vote), _) => voting(*from, listing, change.clone(), version, vote, moves, &coin),
+                            (None, None) => continue,
+                        });
                     }
                 }
             });
@@ -610,9 +625,82 @@ fn proposals(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &
 
         if acting.is_empty() && !listing.proposals.is_empty() {
             ui.add_space(4.0);
-            ui.label(RichText::new("None of this account's addresses, nor a multisig it follows, may approve: only the council's members, or finality's voters, do.").small().color(palette.muted));
+            ui.label(RichText::new("None of this account's addresses, nor a multisig it follows, may vote: only the council's members, or finality's voters, do.").small().color(palette.muted));
         }
     });
+}
+
+/// Yes, No and Abstain, the one cast marked, and Clear once one is: Some(Some(vote)) for a vote,
+/// Some(None) to clear, None for nothing pressed.
+fn buttons(ui: &mut Ui, palette: &theme::Palette, cast: Option<ChangeVote>) -> Option<Option<ChangeVote>> {
+    let mut picked = None;
+
+    ui.horizontal_wrapped(|ui| {
+        chainv4_ui::widgets::together(ui, &["Yes", "No", "Abstain", "Clear"]);
+
+        for (vote, word) in [(ChangeVote::Yes, "Yes"), (ChangeVote::No, "No"), (ChangeVote::Abstain, "Abstain")] {
+            let pressed = match cast == Some(vote) {
+                // The vote cast stands marked, and pressing it again changes nothing.
+                true => {
+                    theme::pill(ui, &format!("Voted {word}"), choice(vote).color(palette));
+                    false
+                }
+                false if vote == ChangeVote::Yes => theme::primary(ui, palette, word, true).clicked(),
+                false => theme::quiet(ui, palette, word).clicked(),
+            };
+
+            if pressed {
+                picked = Some(Some(vote));
+            }
+        }
+
+        if cast.is_some() && theme::quiet(ui, palette, "Clear").clicked() {
+            picked = Some(None);
+        }
+    });
+
+    picked
+}
+
+/// A vote as the shared drawing knows it.
+fn choice(vote: ChangeVote) -> Choice {
+    match vote {
+        ChangeVote::Yes => Choice::Yes,
+        ChangeVote::No => Choice::No,
+        ChangeVote::Abstain => Choice::Abstain,
+    }
+}
+
+/// A proposal as its card shows it: the wallet's own addresses named as its accounts are.
+fn card_of(listing: &Listing, proposal: &Proposal, voters: &[Voter], coin: &Coin, tip: Option<u64>) -> votes::Card {
+    let kind = kind_of(&proposal.kind, proposal.change.as_ref().ok());
+    let raw = |name: &str| proposal.tally_json[name].as_str().map_or_else(|| "0".to_string(), str::to_string);
+    let field = proposal.json.as_object().and_then(|change| change.keys().next().cloned()).unwrap_or_default();
+    let (before, after) = match field.as_str() {
+        "switch_finality" => (standing(listing, "finality").cloned().unwrap_or(Value::Null), proposal.json[&field]["finality"].clone()),
+        field => (standing(listing, field).cloned().unwrap_or(Value::Null), proposal.json[field].clone()),
+    };
+    let dots = listing
+        .voters
+        .iter()
+        .map(|(account, weight)| votes::Dot {
+            label: voters.iter().find(|voter| voter.address.to_string() == *account).map_or_else(|| account.clone(), |voter| format!("{} (yours)", voter.account)),
+            vote: proposal.vote_of(account),
+            about: format!("{account} weighs {}", weighs(listing, weight, coin)),
+        })
+        .collect();
+
+    votes::Card {
+        title: kind_name(&kind),
+        subtitle: ballot(proposal),
+        what: proposal.change.as_ref().map_or_else(|why| format!("A change this wallet does not read: {why}"), |change| describe(change, coin)),
+        weights: [weighs(listing, &raw("yes"), coin), weighs(listing, &raw("no"), coin), weighs(listing, &raw("abstain"), coin)],
+        standing: proposal.tally.standing(&|more| weighs(listing, &format!("{more:.0}"), coin)),
+        tally: proposal.tally,
+        closing: proposal.closes.zip(tip).map(|(closes, tip)| votes::closing(closes, tip, listing.checkpoint_interval, listing.block_ms)),
+        voters: dots,
+        fields: votes::fields(&before, &after),
+    }
 }
 
 /// What the page's search and kinds know of an open change.
@@ -621,15 +709,15 @@ fn open_item(proposal: &Proposal, coin: &Coin) -> Item {
         Ok(change) => describe(change, coin),
         Err(why) => why.clone(),
     };
-    let accounts: Vec<&str> = proposal.approvals.iter().map(|approval| approval.account.as_str()).collect();
+    let accounts: Vec<&str> = proposal.votes.iter().map(|vote| vote.account.as_str()).collect();
     let kind = kind_of(&proposal.kind, proposal.change.as_ref().ok());
 
     Item {
         text: format!("{} {words} {} {}", kind_name(&kind), proposal.json, accounts.join(" ")),
         kind,
-        place: proposal.approvals.iter().map(|approval| approval.epoch).max().unwrap_or_default(),
-        support: ballots::share(&proposal.weight, &proposal.needed),
-        closes: proposal.approvals.iter().map(|approval| approval.counts_until).max(),
+        place: proposal.votes.iter().map(|vote| vote.epoch).max().unwrap_or_default(),
+        support: proposal.tally.support(),
+        closes: proposal.closes.or_else(|| proposal.votes.iter().map(|vote| vote.counts_until).min()),
     }
 }
 
@@ -700,7 +788,7 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
         }
 
         theme::caps(ui, &palette, "Propose a change");
-        ui.label(RichText::new("A change is proposed by approving it: others then approve the same change, and it is decided once its approvals weigh what it needs. Change only the fields that should move: the rest keep what stands.").small().color(palette.muted));
+        ui.label(RichText::new("A change is proposed by voting Yes on it: others then vote on the same change, and it is decided once Yes weighs what it needs and the quorum has voted, or rejected once it no longer can. Change only the fields that should move: the rest keep what stands.").small().color(palette.muted));
         ui.add_space(4.0);
 
         egui::ComboBox::from_id_salt("governance-kind").selected_text(label(&state.kind)).width(ui.available_width()).height(KIND_LIST_HEIGHT).show_ui(ui, |ui| {
@@ -736,7 +824,7 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
                     ui.add_space(4.0);
                     theme::caps(ui, &palette, &format!("{} to change", built.changes.len()));
                     changes(ui, &palette, &built.changes);
-                    ui.label(RichText::new(format!("Approves at {} v{}", kind_label(change.kind()).to_lowercase(), listing.version_of(change.kind()))).small().color(palette.muted));
+                    ui.label(RichText::new(format!("Votes Yes at {} v{}", kind_label(change.kind()).to_lowercase(), listing.version_of(change.kind()))).small().color(palette.muted));
                 }
             }
         }
@@ -745,7 +833,7 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
 
         match acting.as_slice() {
             [] => {
-                ui.label(RichText::new("None of this account's addresses, nor a multisig it follows, may approve, so it cannot propose.").small().color(palette.muted));
+                ui.label(RichText::new("None of this account's addresses, nor a multisig it follows, may vote, so it cannot propose.").small().color(palette.muted));
             }
             [only] => state.proposer = Some(*only),
             _ => {
@@ -763,11 +851,11 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
         }
 
         if let (Some(from), Some(change)) = (state.proposer.filter(|proposer| acting.contains(proposer)), built.change.clone()) {
-            let counted = state.weights.get(&from.to_string()).and_then(|weight| weight.as_ref().ok()).is_some_and(|weight| weight.approved_in(change.kind()).is_some());
+            let moves = state.weights.get(&from.to_string()).and_then(|weight| weight.as_ref().ok()).is_some_and(|weight| weight.yes_elsewhere(&change).is_some());
 
             if theme::primary(ui, &palette, "Review", !built.changes.is_empty()).clicked() {
                 let version = listing.version_of(change.kind());
-                *chosen = Some(approval(from, listing, change, version, counted, &coin));
+                *chosen = Some(voting(from, listing, change, version, ChangeVote::Yes, moves, &coin));
                 state.reviewing = true;
             }
         }
@@ -817,7 +905,7 @@ fn changes(ui: &mut Ui, palette: &theme::Palette, changes: &[Diff]) {
     }
 }
 
-/// The review: what moves, field by field, the change in words and as JSON, and what approving does.
+/// The review: what moves, field by field, the change in words and as JSON, and what the vote does.
 /// Some(true) to go on, Some(false) to go back.
 fn confirm(ui: &mut Ui, ctx: &mut Ctx, pending: &Pending) -> Option<bool> {
     let palette = *ctx.palette;
@@ -866,7 +954,8 @@ fn confirm(ui: &mut Ui, ctx: &mut Ctx, pending: &Pending) -> Option<bool> {
     })
 }
 
-/// The account's votes, as the light client proved them: which change each decided, if one did.
+/// The account's votes, as the light client proved them: which change each decided or rejected, if
+/// one did.
 fn votes(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
     let genesis = ctx.chain.genesis.map(|genesis| genesis.to_string()).unwrap_or_default();
@@ -890,9 +979,13 @@ fn votes(ui: &mut Ui, ctx: &mut Ctx) {
                 }
                 .on_hover_text(format!("Its receipt is proven at block {}", checked.height));
 
-                if let Some(Vote::Approved { decided: Some(decision), kind, kind_version, .. }) = &checked.vote {
+                if let Some(Vote::Voted { decided: Some(decision), kind, kind_version, .. }) = &checked.vote {
                     let made = kind_version.map(|made| format!(" · {} v{made}", kind_words(*kind))).unwrap_or_default();
                     theme::pill(ui, &format!("Decided change {decision}{made}"), palette.good);
+                }
+
+                if let Some(Vote::Voted { rejected: Some(rejection), kind, .. }) = &checked.vote {
+                    theme::pill(ui, &format!("Rejected a {} change, the chain's {rejection}th", kind_words(*kind)), palette.bad);
                 }
 
                 if !checked.done {
@@ -1027,6 +1120,14 @@ fn listing(value: &Value) -> Result<Listing, String> {
         versions: versions(value)?,
         approval_epochs: whole("approval_epochs")?,
         needed: value["needed"].as_str().ok_or("it says no needed")?.to_string(),
+        total: value["total"].as_str().unwrap_or("0").to_string(),
+        quorum_permille: value["quorum_permille"].as_u64().and_then(|permille| u32::try_from(permille).ok()).unwrap_or(0),
+        checkpoint_interval: value["checkpoint_interval"].as_u64().unwrap_or(0),
+        block_ms: value["active"]["slot_ms"].as_u64().or_else(|| value["active"]["target_block_ms"].as_u64()),
+        voters: value["voters"]
+            .as_array()
+            .map(|voters| voters.iter().filter_map(|voter| Some((voter["account"].as_str()?.to_string(), voter["weight"].as_str().unwrap_or("0").to_string()))).collect())
+            .unwrap_or_default(),
         members: value["members"].as_array().map(|members| members.iter().filter_map(Value::as_str).map(str::to_string).collect()),
         proposals: value["proposals"].as_array().map(|proposals| proposals.iter().map(proposal).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default(),
         in_force: settings,
@@ -1046,56 +1147,51 @@ fn versions(value: &Value) -> Result<BTreeMap<ChangeKind, u64>, String> {
 }
 
 /// A proposal of the listing: the change's JSON, which the listing adds its kind, that kind's
-/// version, its weight, what it needs and its approvals to, read as the change.
+/// version, its tally, when its oldest vote closes and its votes to, read as the change.
 fn proposal(value: &Value) -> Result<Proposal, String> {
     let mut fields = value.as_object().ok_or("a proposal is not an object")?.clone();
-    let text = |value: Option<Value>| value.and_then(|value| value.as_str().map(str::to_string)).unwrap_or_else(|| "0".to_string());
     let kind = fields.remove("kind").and_then(|kind| kind.as_str().map(str::to_string)).unwrap_or_default();
     let version = fields.remove("version").and_then(|version| version.as_u64());
-    let weight = text(fields.remove("weight"));
-    let needed = text(fields.remove("needed"));
-    let approvals = fields
-        .remove("approvals")
-        .and_then(|approvals| approvals.as_array().cloned())
+    let tally_json = fields.remove("tally").unwrap_or(Value::Null);
+    let closes = fields.remove("closes").and_then(|closes| closes.as_u64());
+    let votes = fields
+        .remove("votes")
+        .and_then(|votes| votes.as_array().cloned())
         .unwrap_or_default()
         .iter()
-        .map(|approval| Approval {
-            account: approval["account"].as_str().unwrap_or("?").to_string(),
-            weight: approval["weight"].as_str().unwrap_or("0").to_string(),
-            epoch: approval["epoch"].as_u64().unwrap_or(0),
-            counts_until: approval["counts_until"].as_u64().unwrap_or(0),
+        .map(|vote| CastVote {
+            account: vote["account"].as_str().unwrap_or("?").to_string(),
+            vote: vote["vote"].as_str().and_then(Choice::of),
+            weight: vote["weight"].as_str().unwrap_or("0").to_string(),
+            epoch: vote["epoch"].as_u64().unwrap_or(0),
+            counts_until: vote["counts_until"].as_u64().unwrap_or(0),
         })
         .collect();
     let json = Value::Object(fields);
 
-    Ok(Proposal { change: change_from_json(&json), json, kind, version, weight, needed, approvals })
+    Ok(Proposal { change: change_from_json(&json), json, kind, version, tally: votes::Tally::of(&tally_json), tally_json, closes, votes })
 }
 
 /// GET /governance/weight/{address}'s answer, read.
 fn weight(value: &Value) -> Result<Weight, String> {
     let weight = value["weight"].as_str().and_then(|text| u256::from_str_radix(text, 10).ok()).ok_or("it says no weight")?;
-    let approved = value["approved"]
-        .as_array()
-        .map(|approved| approved.iter().map(approved_change).collect::<Result<Vec<_>, _>>())
-        .transpose()?
-        .unwrap_or_default();
+    let voted = value["voted"].as_array().map(|voted| voted.iter().map(voted_change).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default();
 
-    Ok(Weight { weight, approved })
+    Ok(Weight { weight, voted })
 }
 
-/// One of an address's approvals: the change's JSON with its kind and the kind's version beside it.
-fn approved_change(value: &Value) -> Result<Approved, String> {
-    let mut fields = value.as_object().ok_or("an approval is not an object")?.clone();
-    let kind = fields.remove("kind");
-    let version = fields.remove("version").and_then(|version| version.as_u64()).ok_or("an approval names no version")?;
-    let change = change_from_json(&Value::Object(fields))?;
+/// One of an address's votes: its change, the kind, the kind's version and which way.
+fn voted_change(value: &Value) -> Result<Voted, String> {
+    let version = value["version"].as_u64().ok_or("a vote names no version")?;
+    let vote = value["vote"].as_str().ok_or("a vote says no way")?.parse()?;
+    let change = change_from_json(&value["change"])?;
     // The kind the node names, or the change's own should it name none.
-    let kind = match kind.as_ref().and_then(Value::as_str) {
+    let kind = match value["kind"].as_str() {
         Some(kind) => kind.parse()?,
         None => change.kind(),
     };
 
-    Ok(Approved { kind, version, change })
+    Ok(Voted { kind, version, vote, change })
 }
 
 /// GET /governance/history's decisions, read.
@@ -1134,13 +1230,20 @@ fn since(decided: Option<u64>) -> String {
     }
 }
 
-/// Approving a change from an address, at its kind's version. moves says whether the address's
-/// approval of another change of that kind counts now.
-fn approval(from: Address, listing: &Listing, change: Change, version: u64, moves: bool, coin: &Coin) -> Pending {
+/// Voting on a change from an address, at its kind's version. moves says whether the address's Yes
+/// on another change of that kind counts now, which a Yes here moves.
+fn voting(from: Address, listing: &Listing, change: Change, version: u64, vote: ChangeVote, moves: bool, coin: &Coin) -> Pending {
     let kind = kind_words(change.kind());
-    let moving = match moves {
-        true => format!(" This address's approval of a {kind} change counts for another one now: approving this one moves it here, as an address backs one change of each kind at a time. Its approvals of other kinds stay."),
-        false => format!(" An address backs one change of each kind at a time: approving another {kind} change later moves this approval there, and its approvals of other kinds stay."),
+    let word = voted(vote);
+    let way = match (vote, moves) {
+        (ChangeVote::Yes, true) => format!(" This address's Yes on another {kind} change counts now: Yes here moves it, as an address backs one change of each kind at a time. Its other votes stay."),
+        (ChangeVote::Yes, false) => format!(" An address backs one change of each kind with Yes at a time: Yes on another {kind} change later moves this one there."),
+        (ChangeVote::No, _) => " No counts against it: once what has not voted No can no longer reach what it needs, it is rejected.".to_string(),
+        (ChangeVote::Abstain, _) => " Abstain counts toward the quorum alone, and leaves this address free to vote Yes later.".to_string(),
+    };
+    let quorum = match listing.quorum_permille {
+        0 => String::new(),
+        permille => format!(" and {}% of every voter's weight has voted", f64::from(permille) / 10.0),
     };
 
     Pending {
@@ -1149,28 +1252,28 @@ fn approval(from: Address, listing: &Listing, change: Change, version: u64, move
         changes: form::diff(change.name(), standing_for(listing, change.name()).as_ref(), &change_value(&change, change.name()), &env_of(listing, coin, None)),
         json: Some(pretty(&change_json(&change))),
         note: format!(
-            "Approves at {kind} version {version}: should another {kind} change be decided first, the version moves on and this approval no longer counts. A decision of another kind leaves it standing.{moving} It counts for {} epoch{}, and decides the change once the approvals weigh {}.",
+            "Votes {word} at {kind} version {version}, replacing this address's old vote on it: should another {kind} change be decided first, the version moves on and this vote no longer counts. A decision of another kind leaves it standing.{way} It counts for {} epoch{}; the change is decided once Yes weighs {}{quorum}.",
             listing.approval_epochs,
             plural(listing.approval_epochs),
             weighs(listing, &listing.needed, coin)
         ),
-        tx: Tx::ApproveChange { version, change },
-        what: "Approve a change".to_string(),
+        tx: Tx::VoteChange { version, change, vote },
+        what: format!("Vote {word} on a change"),
     }
 }
 
-/// Withdrawing an address's approval of a change of a kind, at the kind's version it named.
-fn withdrawal(from: Address, approved: &Approved, coin: &Coin) -> Pending {
-    let kind = kind_words(approved.kind);
+/// Clearing an address's vote on a change, at the kind's version it named.
+fn clearing(from: Address, cast: &Voted, coin: &Coin) -> Pending {
+    let kind = kind_words(cast.kind);
 
     Pending {
         from,
-        tx: Tx::WithdrawChange { kind: approved.kind, version: approved.version },
-        what: "Withdraw an approval".to_string(),
-        words: describe(&approved.change, coin),
+        tx: Tx::ClearVote { version: cast.version, change: cast.change.clone() },
+        what: "Clear a vote".to_string(),
+        words: describe(&cast.change, coin),
         changes: Vec::new(),
-        json: Some(pretty(&change_json(&approved.change))),
-        note: format!("Takes this address's approval off this {kind} change; its approvals of other kinds, and the others' approvals, stay. Approving another {kind} change instead would move the approval there."),
+        json: Some(pretty(&change_json(&cast.change))),
+        note: format!("Takes this address's {} off this {kind} change, so it has no say on it until it votes again; its votes on other changes, and the others' votes, stay.", voted(cast.vote)),
     }
 }
 
@@ -1202,7 +1305,7 @@ fn env_of<'a>(listing: &'a Listing, coin: &'a Coin, tip: Option<u64>) -> Env<'a>
 }
 
 /// The change Advanced's JSON asks for, through change_from_json, so it is checked as the CLI's
-/// approve-change checks it, with what else the form checks. A partial object of a PARTIAL kind is
+/// vote-change checks it, with what else the form checks. A partial object of a PARTIAL kind is
 /// laid over what stands, so the fields left out keep it.
 fn proposed(kind: &str, typed: &str, standing: Option<&Value>, env: &Env) -> Built {
     let mut built = Built::default();
@@ -1260,7 +1363,10 @@ fn label(kind: &str) -> &str {
         "name" => "The chain's name",
         "bootnodes" => "Bootnodes",
         "upgrade" => "Upgrade",
-        "name_prices" => "Name prices",
+        "names" => "Names",
+        "token_functions" => "Tokens",
+        "evm_spec" => "EVM spec",
+        "dex" => "DEX fee",
         "consensus" => "Consensus",
         "fees" => "Fees",
         "reward" => "Block reward",
@@ -1270,6 +1376,7 @@ fn label(kind: &str) -> &str {
         "collections" => "Collections",
         "federation" => "Federation",
         "directory" => "Directory",
+        "governance" => "Governance",
         other => other,
     }
 }
@@ -1292,7 +1399,13 @@ pub fn describe(change: &Change, coin: &Coin) -> String {
         Change::Name(name) => format!("Rename the chain to {name}"),
         Change::Bootnodes(bootnodes) if bootnodes.is_empty() => "Leave the chain without bootnodes".to_string(),
         Change::Bootnodes(bootnodes) => format!("Set {} bootnode{}: {}", bootnodes.len(), plural(bootnodes.len() as u64), bootnodes.join(", ")),
-        Change::NamePrices(_) => format!("Price a year of a name by its length: {}", name_prices(change, coin)),
+        Change::Names(settings) => format!(
+            "Price a year of a name by its length: {}; {} of grace, held at most {} year{} ahead",
+            name_prices(change, coin),
+            millis(settings.grace_ms),
+            settings.max_years,
+            plural(u64::from(settings.max_years))
+        ),
         change => stated(change, coin),
     }
 }
@@ -1303,7 +1416,7 @@ fn standing_words(change: &Change, coin: &Coin) -> String {
         Change::Name(name) => name.clone(),
         Change::Bootnodes(bootnodes) if bootnodes.is_empty() => "None".to_string(),
         Change::Bootnodes(bootnodes) => format!("{} bootnode{}: {}", bootnodes.len(), plural(bootnodes.len() as u64), bootnodes.join(", ")),
-        Change::NamePrices(_) => format!("A year of a name by its length: {}", name_prices(change, coin)),
+        Change::Names(settings) => format!("A year of a name by its length: {}; {} of grace, at most {} year{} ahead", name_prices(change, coin), millis(settings.grace_ms), settings.max_years, plural(u64::from(settings.max_years))),
         Change::SwitchFinality { epoch, config } => format!("{} from epoch {epoch}", capitalized(&stated(&Change::Finality(config.clone()), coin).replacen("Finality: ", "", 1))),
         Change::Directory(_) => stated(change, coin).replacen("Directory: announce ", "Announced: ", 1).replacen("Announced: nothing", "Nothing announced", 1),
         change => stated(change, coin),
@@ -1318,9 +1431,10 @@ fn capitalized(text: &str) -> String {
 
 /// What each length of name costs a year.
 fn name_prices(change: &Change, coin: &Coin) -> String {
-    let Change::NamePrices(prices) = change else {
+    let Change::Names(settings) = change else {
         return String::new();
     };
+    let prices = &settings.prices;
     let each: Vec<String> = prices
         .iter()
         .enumerate()
@@ -1351,7 +1465,11 @@ fn stated(change: &Change, coin: &Coin) -> String {
     };
 
     match change {
-        Change::Name(_) | Change::Bootnodes(_) | Change::NamePrices(_) => describe(change, coin),
+        Change::Name(_) | Change::Bootnodes(_) | Change::Names(_) => describe(change, coin),
+        Change::TokenFunctions(functions) if functions.is_empty() => "Tokens: keep no token registry".to_string(),
+        Change::TokenFunctions(functions) => format!("Tokens: {} function{} make one: {}", functions.len(), plural(functions.len() as u64), functions.join(", ")),
+        Change::EvmSpec { spec, from } => format!("EVM spec: {} from block {}", spec.name(), format::thousands(&from.to_string())),
+        Change::Dex(dex) => format!("DEX fee: {}% a trade", dex.fee_bps as f64 / 100.0),
         Change::Upgrade(upgrade) => format!("Upgrade: nodes older than {} stop at block {}", upgrade.least, format::thousands(&upgrade.from.to_string())),
         Change::Consensus(consensus) => match consensus {
             ConsensusConfig::Authority { key, slot_ms } => format!("Consensus: one key, {}, makes a block every {}", format::short(&key.to_string()), millis(*slot_ms)),
@@ -1417,6 +1535,19 @@ fn stated(change: &Change, coin: &Coin) -> String {
                 false => format!("Directory: announce {}", named.join(", ")),
             }
         }
+        Change::Governance(_) => {
+            let value = &change_json(change)["governance"];
+            let quorum = match value["quorum_permille"].as_u64().unwrap_or_default() {
+                0 => "no quorum".to_string(),
+                permille => format!("a quorum of {}%", permille as f64 / 10.0),
+            };
+            let epochs = value["approval_epochs"].as_u64().unwrap_or_default();
+
+            match value["members"].as_array() {
+                Some(members) => format!("Governance: a council of {}, {} voting Yes deciding, votes counting {epochs} epoch{}, {quorum}", members.len(), value["threshold"], plural(epochs)),
+                None => format!("Governance: finality's voters, votes counting {epochs} epoch{}, {quorum}", plural(epochs)),
+            }
+        }
     }
 }
 
@@ -1479,26 +1610,29 @@ mod tests {
             "epoch": 3,
             "version": 2,
             "versions": {
-                "consensus": 0, "bootnodes": 1, "name_prices": 0, "collections": 0, "federation": 0, "directory": 0,
-                "fees": 0, "reward": 0, "limits": 0, "upgrade": 0, "name": 1,
+                "consensus": 0, "bootnodes": 1, "names": 0, "collections": 0, "federation": 0, "directory": 0, "token_functions": 0, "evm_spec": 0, "dex": 0,
+                "fees": 0, "reward": 0, "limits": 0, "upgrade": 0, "name": 1, "governance": 0,
             },
             "approval_epochs": 16,
             "needed": "1",
+            "total": "2",
+            "quorum_permille": 500,
+            "checkpoint_interval": 10,
+            "voters": [{ "account": member(1).to_string(), "weight": "1" }, { "account": member(2).to_string(), "weight": "1" }],
             "members": [member(1).to_string(), member(2).to_string()],
             "proposals": [{
                 "bootnodes": ["/dns4/boot.example/udp/4001/quic-v1"],
                 "kind": "bootnodes",
                 "version": 1,
-                "weight": "1",
-                "needed": "1",
-                "approvals": [{ "account": member(2).to_string(), "weight": "1", "epoch": 3, "counts_until": 18 }],
+                "tally": { "yes": "1", "no": "0", "abstain": "0", "voted": "1", "total": "2", "needed": "1", "quorum": "1", "more_needed": "0", "quorum_met": true, "can_pass": true },
+                "closes": 18,
+                "votes": [{ "account": member(2).to_string(), "vote": "yes", "weight": "1", "epoch": 3, "counts_until": 18 }],
             }, {
                 "name": "",
                 "kind": "name",
                 "version": 1,
-                "weight": "0",
-                "needed": "1",
-                "approvals": [],
+                "tally": { "yes": "0", "no": "0", "abstain": "0", "voted": "0", "total": "2", "needed": "1", "quorum": "1", "more_needed": "1", "quorum_met": false, "can_pass": true },
+                "votes": [],
             }],
             "in_force": {
                 "reward": { "value": { "initial": "5000000000000000000", "halving_interval": null }, "decided": null },
@@ -1507,7 +1641,7 @@ mod tests {
                 "limits": { "value": { "tx_limits": { "fuel": 10000000, "memory": 67108864 }, "max_block_bytes": null }, "decided": null },
                 "consensus": { "value": { "type": "rotating", "slot_ms": 2000 }, "decided": null },
             },
-            "active": null,
+            "active": { "type": "rotating", "slot_ms": 2000 },
             "decided": { "type": "rotating", "slot_ms": 2000 },
             "bootnodes": [],
             "finality": "authority",
@@ -1526,19 +1660,21 @@ mod tests {
         // Each kind's version, beside the count of every decision.
         assert_eq!(listing.versions.len(), ChangeKind::ALL.len());
         assert_eq!((listing.version_of(ChangeKind::Bootnodes), listing.version_of(ChangeKind::Name), listing.version_of(ChangeKind::Fees)), (1, 1, 0));
-        assert!(versions_line(&listing).starts_with("consensus v0 · bootnodes v1 · name prices v0"), "{}", versions_line(&listing));
+        assert!(versions_line(&listing).starts_with("consensus v0 · bootnodes v1 · names v0"), "{}", versions_line(&listing));
 
         let mut short = council();
         short["versions"].as_object_mut().unwrap().remove("fees");
         assert!(super::listing(&short).is_err_and(|why| why == "it says no version for fees"), "every kind's version, or approvals could name none");
 
         let open = &listing.proposals[0];
-        assert_eq!(open.json, json!({ "bootnodes": ["/dns4/boot.example/udp/4001/quic-v1"] }), "kind, version, weight, needed and approvals are the listing's, not the change's");
+        assert_eq!(open.json, json!({ "bootnodes": ["/dns4/boot.example/udp/4001/quic-v1"] }), "kind, version, tally, closes and votes are the listing's, not the change's");
         assert_eq!((open.kind.as_str(), open.version), ("bootnodes", Some(1)), "the version of its own kind, not the decisions'");
         assert_eq!(ballot(open), "bootnodes · version 1");
         assert_eq!(open.change, Ok(Change::Bootnodes(vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()])));
-        assert_eq!((open.weight.as_str(), open.needed.as_str()), ("1", "1"));
-        assert_eq!(open.approvals, vec![Approval { account: member(2).to_string(), weight: "1".to_string(), epoch: 3, counts_until: 18 }]);
+        assert_eq!((open.tally.yes, open.tally.needed, open.tally.quorum, open.closes), (1.0, 1.0, 1.0, Some(18)));
+        assert_eq!(open.votes, vec![CastVote { account: member(2).to_string(), vote: Some(Choice::Yes), weight: "1".to_string(), epoch: 3, counts_until: 18 }]);
+        assert_eq!((open.vote_of(&member(2).to_string()), open.vote_of(&member(1).to_string())), (Some(Choice::Yes), None));
+        assert_eq!((listing.quorum_permille, listing.total.as_str(), listing.checkpoint_interval, listing.block_ms, listing.voters.len()), (500, "2", 10, Some(2000), 2));
 
         // A change that does not read says why, as change_from_json does, and the rest still show.
         assert!(listing.proposals[1].change.as_ref().is_err_and(|why| why.starts_with("name:")), "{:?}", listing.proposals[1].change);
@@ -1574,29 +1710,37 @@ mod tests {
     }
 
     #[test]
-    fn weights_say_which_accounts_may_vote_and_what_their_approval_counts_for() {
+    fn weights_say_which_accounts_may_vote_and_how_they_voted() {
         let reward = json!({ "initial": "7", "halving_interval": null });
         let voting = weight(&json!({
             "account": member(1).to_string(),
             "weight": "1",
             "needed": "1",
-            "approved": [{ "name": "third", "kind": "name", "version": 1 }, { "reward": reward, "kind": "reward", "version": 0 }],
+            "voted": [
+                { "kind": "name", "version": 1, "vote": "yes", "change": { "name": "third" } },
+                { "kind": "name", "version": 1, "vote": "no", "change": { "name": "fourth" } },
+                { "kind": "reward", "version": 0, "vote": "abstain", "change": { "reward": reward } },
+            ],
         }))
         .unwrap();
-        let barred = weight(&json!({ "account": member(3).to_string(), "weight": "0", "needed": "1", "approved": [] })).unwrap();
+        let barred = weight(&json!({ "account": member(3).to_string(), "weight": "0", "needed": "1", "voted": [] })).unwrap();
+        let (third, fourth) = (Change::Name("third".to_string()), Change::Name("fourth".to_string()));
 
-        // One approval a kind: a rename and a reward at once.
+        // A Yes and a No on two names, and an abstention on a reward, at once.
         assert!(voting.may_vote());
-        assert_eq!(voting.approved_in(ChangeKind::Name), Some(&Approved { kind: ChangeKind::Name, version: 1, change: Change::Name("third".to_string()) }));
-        assert_eq!(voting.approved_in(ChangeKind::Reward).map(|approved| (approved.version, &approved.change)), Some((0, &Change::Reward(Reward { initial: u256::new(7), halving_interval: None }))));
-        assert_eq!(voting.approved_in(ChangeKind::Fees), None);
+        assert_eq!(voting.vote_on(&third), Some(&Voted { kind: ChangeKind::Name, version: 1, vote: ChangeVote::Yes, change: third.clone() }));
+        assert_eq!(voting.vote_on(&fourth).map(|cast| cast.vote), Some(ChangeVote::No));
+        assert_eq!(voting.vote_on(&Change::Reward(Reward { initial: u256::new(7), halving_interval: None })).map(|cast| (cast.version, cast.vote)), Some((0, ChangeVote::Abstain)));
+        assert_eq!(voting.yes_elsewhere(&fourth).map(|cast| &cast.change), Some(&third), "a Yes on the fourth would move the third's");
+        assert_eq!(voting.yes_elsewhere(&third), None, "not from itself");
         assert!(!barred.may_vote());
-        assert_eq!(barred.approved, Vec::new());
+        assert_eq!(barred.voted, Vec::new());
         assert!(weight(&json!({ "weight": 1 })).is_err());
-        assert!(weight(&json!({ "weight": "1", "approved": [{ "name": "third", "kind": "name" }] })).is_err_and(|why| why.contains("no version")));
-        assert!(weight(&json!({ "weight": "1", "approved": [{ "name": "third", "kind": "weather", "version": 1 }] })).is_err());
+        assert!(weight(&json!({ "weight": "1", "voted": [{ "kind": "name", "vote": "yes", "change": { "name": "third" } }] })).is_err_and(|why| why.contains("no version")));
+        assert!(weight(&json!({ "weight": "1", "voted": [{ "kind": "weather", "version": 1, "vote": "yes", "change": { "name": "third" } }] })).is_err());
+        assert!(weight(&json!({ "weight": "1", "voted": [{ "kind": "name", "version": 1, "vote": "maybe", "change": { "name": "third" } }] })).is_err());
         assert_eq!(
-            weight(&json!({ "weight": "1", "approved": [{ "finality": change_json(&Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })))["finality"], "version": 2 }] })).unwrap().approved[0].kind,
+            weight(&json!({ "weight": "1", "voted": [{ "change": change_json(&Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 }))), "version": 2, "vote": "yes" }] })).unwrap().voted[0].kind,
             ChangeKind::Consensus,
             "a kind not named is the change's own"
         );
@@ -1623,41 +1767,90 @@ mod tests {
     }
 
     #[test]
-    fn approving_and_withdrawing_build_their_transactions_at_their_kind_s_version() {
+    fn yes_no_abstain_and_clear_build_their_transactions_at_their_kind_s_version() {
         let listing = listing(&council()).unwrap();
         let change = Change::Bootnodes(vec!["/dns4/boot.example/udp/4001/quic-v1".to_string()]);
         let version = listing.version_of(change.kind());
-        let approve = approval(member(1), &listing, change.clone(), version, true, &coin());
+        let yes = voting(member(1), &listing, change.clone(), version, ChangeVote::Yes, true, &coin());
 
         // Bootnodes v1, not the two decisions of every kind.
-        assert_eq!(approve.tx, Tx::ApproveChange { version: 1, change: change.clone() });
-        assert_eq!(approve.from, member(1));
-        assert_eq!(approve.words, "Set 1 bootnode: /dns4/boot.example/udp/4001/quic-v1");
-        assert!(approve.note.contains("moves it here"), "moving an approval is approving another change: {}", approve.note);
-        assert!(approve.note.contains("approval of a bootnodes change counts for another one now"), "{}", approve.note);
-        assert!(approve.note.contains("Its approvals of other kinds stay"), "{}", approve.note);
-        assert!(approve.note.starts_with("Approves at bootnodes version 1: should another bootnodes change be decided first"), "{}", approve.note);
-        assert!(approve.note.contains("A decision of another kind leaves it standing"), "{}", approve.note);
-        assert_eq!(approve.json.as_deref().map(|json| serde_json::from_str::<Value>(json).unwrap()), Some(change_json(&change)));
-        assert!(approval(member(1), &listing, change.clone(), version, false, &coin()).note.contains("approving another bootnodes change later moves this approval there"));
+        assert_eq!(yes.tx, Tx::VoteChange { version: 1, change: change.clone(), vote: ChangeVote::Yes });
+        assert_eq!((yes.from, yes.what.as_str()), (member(1), "Vote Yes on a change"));
+        assert_eq!(yes.words, "Set 1 bootnode: /dns4/boot.example/udp/4001/quic-v1");
+        assert!(yes.note.contains("Yes on another bootnodes change counts now: Yes here moves it"), "{}", yes.note);
+        assert!(yes.note.starts_with("Votes Yes at bootnodes version 1, replacing this address's old vote on it: should another bootnodes change be decided first"), "{}", yes.note);
+        assert!(yes.note.contains("A decision of another kind leaves it standing"), "{}", yes.note);
+        assert!(yes.note.contains("and 50% of every voter's weight has voted"), "the quorum: {}", yes.note);
+        assert_eq!(yes.json.as_deref().map(|json| serde_json::from_str::<Value>(json).unwrap()), Some(change_json(&change)));
+
+        for (vote, says) in [(ChangeVote::No, "it is rejected"), (ChangeVote::Abstain, "toward the quorum alone")] {
+            let pending = voting(member(1), &listing, change.clone(), version, vote, false, &coin());
+
+            assert_eq!(pending.tx, Tx::VoteChange { version: 1, change: change.clone(), vote });
+            assert!(pending.note.contains(says), "{}", pending.note);
+        }
 
         // A finality change is on the consensus's ballot.
         let depth = Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 }));
-        assert!(approval(member(1), &listing, depth.clone(), listing.version_of(depth.kind()), false, &coin()).note.starts_with("Approves at consensus version 0"));
+        assert!(voting(member(1), &listing, depth.clone(), listing.version_of(depth.kind()), ChangeVote::Yes, false, &coin()).note.starts_with("Votes Yes at consensus version 0"));
 
-        // Withdrawing names the kind and the version its approval was at, one per kind.
+        // Clearing names the change and the version its vote was at.
         let weight = weight(&json!({
             "weight": "1",
-            "approved": [{ "bootnodes": ["/dns4/boot.example/udp/4001/quic-v1"], "kind": "bootnodes", "version": 1 }, { "name": "third", "kind": "name", "version": 1 }],
+            "voted": [{ "change": { "bootnodes": ["/dns4/boot.example/udp/4001/quic-v1"] }, "kind": "bootnodes", "version": 1, "vote": "no" }, { "change": { "name": "third" }, "kind": "name", "version": 1, "vote": "yes" }],
         }))
         .unwrap();
-        let withdrawals: Vec<Tx> = weight.approved.iter().map(|approved| withdrawal(member(1), approved, &coin()).tx).collect();
+        let cleared: Vec<Tx> = weight.voted.iter().map(|cast| clearing(member(1), cast, &coin()).tx).collect();
 
-        assert_eq!(withdrawals, [Tx::WithdrawChange { kind: ChangeKind::Bootnodes, version: 1 }, Tx::WithdrawChange { kind: ChangeKind::Name, version: 1 }]);
+        assert_eq!(cleared, [Tx::ClearVote { version: 1, change: change.clone() }, Tx::ClearVote { version: 1, change: Change::Name("third".to_string()) }]);
 
-        let withdraw = withdrawal(member(1), &weight.approved[1], &coin());
-        assert_eq!((withdraw.what.as_str(), withdraw.words.as_str()), ("Withdraw an approval", "Rename the chain to third"));
-        assert!(withdraw.note.contains("off this name change; its approvals of other kinds"), "{}", withdraw.note);
+        let clear = clearing(member(1), &weight.voted[1], &coin());
+        assert_eq!((clear.what.as_str(), clear.words.as_str()), ("Clear a vote", "Rename the chain to third"));
+        assert!(clear.note.contains("Takes this address's Yes off this name change"), "{}", clear.note);
+    }
+
+    #[test]
+    fn a_card_dots_each_voter_names_the_wallet_s_own_and_marks_what_moves() {
+        let listing = listing(&council()).unwrap();
+        let voters = [Voter { address: member(2), account: "Main".to_string(), here: true }];
+        let card = card_of(&listing, &listing.proposals[0], &voters, &coin(), Some(29));
+
+        assert_eq!(card.voters.iter().map(|dot| (dot.label.clone(), dot.vote)).collect::<Vec<_>>(), [(member(1).to_string(), None), ("Main (yours)".to_string(), Some(Choice::Yes))]);
+        assert_eq!(card.standing, "Passes with the next vote counted", "Yes weighs enough and the quorum voted");
+        assert_eq!(card.closing.as_deref(), Some("The oldest votes stop counting in 160 blocks, about 5 min"));
+        assert_eq!(card.fields.iter().filter(|field| field.changed()).count(), 1, "the one bootnode where none stand");
+        assert_eq!(card.weights[0], "1 vote");
+    }
+
+    #[test]
+    fn the_page_draws_its_cards_and_buttons_on_a_phone_either_way_and_a_desktop() {
+        let ctx = egui::Context::default();
+        let listing = listing(&council()).unwrap();
+        let voters = [Voter { address: member(2), account: "Main".to_string(), here: true }];
+
+        for (width, height) in [(360.0, 740.0), (740.0, 360.0), (1200.0, 800.0)] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            let mut drawn = egui::Rect::NOTHING;
+            let mut pressed = None;
+
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                    drawn = ui
+                        .scope(|ui| {
+                            let card = card_of(&listing, &listing.proposals[0], &voters, &coin(), Some(29));
+                            votes::card(ui, &crate::theme::DARK, &card, chainv4_ui::layout::is_narrow(width), |ui| {
+                                pressed = buttons(ui, &crate::theme::DARK, Some(ChangeVote::Yes));
+                            });
+                        })
+                        .response
+                        .rect;
+                });
+                output.textures_delta.clear();
+            }
+
+            assert!(drawn.right() <= width + 1.0, "within {width}x{height}: {drawn:?}");
+            assert_eq!(pressed, None, "nothing pressed");
+        }
     }
 
     /// What Advanced's JSON says, its first error if it says none.
@@ -1685,6 +1878,8 @@ mod tests {
             burn_permille: 500,
             schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
             pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
+            costs: None,
+            vote_rewards: None,
         };
         let mut value = council();
         value["in_force"]["fees"] = json!({ "value": change_json(&Change::Fees(fees.clone()))["fees"], "decided": null });
@@ -1701,7 +1896,7 @@ mod tests {
         );
         assert_eq!(
             raw("limits", r#"{ "tx_limits": { "fuel": 5000000 } }"#, standing(&listing, "limits")),
-            Ok(Change::Limits(BlockLimits { tx_limits: Limits { fuel: 5_000_000, memory: 67_108_864 }, max_block_bytes: None }))
+            Ok(Change::Limits(BlockLimits { tx_limits: Limits { fuel: 5_000_000, memory: 67_108_864 }, max_block_bytes: None, contract: None, max_tx_bytes: None, multisig_members: None }))
         );
 
         // The federation's threshold alone, finality's depth alone, and the directory's DEX taken
@@ -1717,7 +1912,7 @@ mod tests {
         };
         value["in_force"]["finality"] = json!({ "value": change_json(&Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })))["finality"], "decided": null });
         value["in_force"]["directory"] = json!({ "value": change_json(&Change::Directory(directory.clone()))["directory"], "decided": 2 });
-        let federation = Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 1, chain_depth: 10, evm_depth: 12, bitcoin_depth: 1 };
+        let federation = Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 1, chain_depth: 10, evm_depth: 12, bitcoin_depth: 1, btc: None };
         value["in_force"]["federation"] = json!({ "value": change_json(&Change::Federation(federation.clone()))["federation"], "decided": null });
         let listing = listing_of(&value);
 
@@ -1730,24 +1925,24 @@ mod tests {
 
         // The consensus is not laid over: a part of it is not one.
         assert!(raw("consensus", r#"{ "slot_ms": 1000 }"#, standing(&listing, "consensus")).is_err());
-        assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 6], "each a kind the form lists");
+        assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 9], "each a kind the form lists");
         assert!(PARTIAL.iter().all(|kind| KINDS.contains(kind)));
     }
 
     #[test]
-    fn approving_says_what_moves_field_by_field() {
+    fn voting_says_what_moves_field_by_field() {
         let mut value = council();
         value["in_force"]["fees"] = json!({ "value": { "block_gas_limit": 50_000_000, "burn_permille": 500, "schedule": { "type": "weighted", "per_tx": 1000, "per_byte": 10, "per_code_byte": 20, "fuel_per_gas": 1 }, "pricing": { "type": "bid", "min_price": "7" } }, "decided": null });
         let listing = listing_of(&value);
-        let name = approval(member(1), &listing, Change::Name("third".to_string()), 1, false, &coin());
+        let name = voting(member(1), &listing, Change::Name("third".to_string()), 1, ChangeVote::Yes, false, &coin());
 
         assert_eq!(name.changes, [Diff { label: "The chain's name".to_string(), old: "second".to_string(), new: "third".to_string() }]);
 
-        let reward = approval(member(1), &listing, Change::Reward(Reward { initial: u256::new(7_000_000_000_000_000_000), halving_interval: None }), 0, false, &coin());
+        let reward = voting(member(1), &listing, Change::Reward(Reward { initial: u256::new(7_000_000_000_000_000_000), halving_interval: None }), 0, ChangeVote::No, false, &coin());
         assert_eq!(reward.changes, [Diff { label: "What a block mints".to_string(), old: "5 DEV".to_string(), new: "7 DEV".to_string() }], "what stayed is not listed");
 
-        let withdrawn = weight(&json!({ "weight": "1", "approved": [{ "name": "third", "kind": "name", "version": 1 }] })).unwrap();
-        assert!(withdrawal(member(1), &withdrawn.approved[0], &coin()).changes.is_empty(), "a withdrawal moves no setting");
+        let cast = weight(&json!({ "weight": "1", "voted": [{ "change": { "name": "third" }, "kind": "name", "version": 1, "vote": "yes" }] })).unwrap();
+        assert!(clearing(member(1), &cast.voted[0], &coin()).changes.is_empty(), "clearing a vote moves no setting");
     }
 
     #[test]
@@ -1763,7 +1958,7 @@ mod tests {
         assert_eq!(find("bootnodes"), [0], "a kind");
         assert_eq!(kind_name("name"), "name");
         assert_eq!(kind_name("consensus"), "Consensus");
-        assert_eq!(kind_name("name_prices"), "Name prices");
+        assert_eq!(kind_name("names"), "Names");
 
         let history = decisions(&json!({ "decisions": [
             { "version": 2, "tx": "0x02", "height": 77, "timestamp": 2000, "final": false, "sender": member(1).to_string(), "kind": "bootnodes", "change": { "bootnodes": [] } },
@@ -1807,7 +2002,7 @@ mod tests {
             assert_eq!(describe(&change, &coin), would);
         }
 
-        let prices = Change::NamePrices(vec![u256::from(1_000u64)]);
+        let prices = Change::Names(chainv4::registry::names::NameSettings { prices: vec![u256::from(1_000u64)], grace_ms: 1_000, max_years: 2 });
         assert!(standing_words(&prices, &coin).starts_with("A year of a name by its length: "), "{}", standing_words(&prices, &coin));
         assert!(describe(&prices, &coin).starts_with("Price a year of a name by its length: "));
 
@@ -1833,16 +2028,17 @@ mod tests {
             max_proofs_per_block: 4,
             validators: Vec::new(),
             leak: None,
+            slash_permille: None,
         };
         let changes = [
             (Change::Name("chainv4 mainnet".to_string()), "Rename the chain to chainv4 mainnet"),
             (Change::Bootnodes(Vec::new()), "Leave the chain without bootnodes"),
-            (Change::NamePrices(vec![u256::new(100_000_000_000_000_000_000), u256::new(5_000_000_000_000_000_000)]), "Price a year of a name by its length: 3 characters 100 DEV, 4 or more characters 5 DEV"),
+            (Change::Names(chainv4::registry::names::NameSettings { prices: vec![u256::new(100_000_000_000_000_000_000), u256::new(5_000_000_000_000_000_000)], grace_ms: 86_400_000, max_years: 10 }), "Price a year of a name by its length: 3 characters 100 DEV, 4 or more characters 5 DEV; 86400s of grace, held at most 10 years ahead"),
             (Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 150_000 }), "Upgrade: nodes older than 0.2.0 stop at block 150,000"),
             (Change::Consensus(ConsensusConfig::Rotating { slot_ms: 2000 }), "Consensus: finality's signers take turns, a block every 2s"),
             (Change::Consensus(ConsensusConfig::Staked { slot_ms: 1500, schedule: Schedule::Draw }), "Consensus: bonded validators by stake, picked by draw, a block every 1500 ms"),
             (
-                Change::Consensus(ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::Sha256, target_block_ms: 10_000, initial_difficulty: 1, min_difficulty: 1 })),
+                Change::Consensus(ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::Sha256, target_block_ms: 10_000, initial_difficulty: 1, min_difficulty: 1, tuning: None, window: None })),
                 "Consensus: proof of work on sha256, a block every 10s",
             ),
             (
@@ -1855,6 +2051,8 @@ mod tests {
                     burn_permille: 500,
                     schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
                     pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
+                    costs: None,
+                    vote_rewards: None,
                 }),
                 "Fees: 50,000,000 gas a block, 50% of each fee burned, weighted gas schedule, bids of at least 0.000000000000000007 DEV a gas",
             ),
@@ -1864,13 +2062,15 @@ mod tests {
                     burn_permille: 0,
                     schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1, per_byte: 1, per_code_byte: 1, fuel_per_gas: 1 }),
                     pricing: PricingConfig::BaseFee(BaseFee { initial: u256::new(10), min: u256::new(1), elasticity: 2, change_denominator: 8 }),
+                    costs: None,
+                    vote_rewards: None,
                 }),
                 "a base price from",
             ),
             (Change::Reward(Reward { initial: u256::new(25_000_000_000_000_000_000), halving_interval: Some(210_000) }), "Block reward: 25 DEV, halving every 210,000 blocks"),
             (Change::Reward(Reward { initial: u256::new(1_000_000_000_000_000_000), halving_interval: None }), "Block reward: 1 DEV, never halving"),
             (
-                Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: Some(2 << 20) }),
+                Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: Some(2 << 20), contract: None, max_tx_bytes: None, multisig_members: None }),
                 "Limits: 10,000,000 fuel and 64 MiB of memory a transaction, blocks of at most 2 MiB",
             ),
             (Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })), "Finality: final once 6 blocks deep"),
@@ -1878,7 +2078,7 @@ mod tests {
             (Change::SwitchFinality { epoch: 40, config: FinalityConfig::Ffg(ffg) }, "Switch finality to ffg from epoch 40: FFG, votes 3 blocks deep"),
             (Change::Collections(CollectionFunctions { nft: vec!["owner_of".to_string()], multi: Vec::new() }), "Collections: 1 NFT function and 0 multi-token functions make one"),
             (
-                Change::Federation(Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 2, chain_depth: 10, evm_depth: 12, bitcoin_depth: 1 }),
+                Change::Federation(Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 2, chain_depth: 10, evm_depth: 12, bitcoin_depth: 1, btc: None }),
                 "Federation: 2 of 3 signers, waiting 10 blocks here, 12 blocks on EVM chains and 1 block on Bitcoin",
             ),
             (
@@ -1892,6 +2092,13 @@ mod tests {
                     nft_factory: None,
                 }),
                 "Directory: announce the gateway, 1 EVM gateway, the DEX",
+            ),
+            (Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]), "Tokens: 2 functions make one: balance_of, transfer"),
+            (Change::EvmSpec { spec: chainv4::params::vm::EvmSpec::Osaka, from: 9_000 }, "EVM spec: osaka from block 9,000"),
+            (Change::Dex(chainv4::params::vm::DexSettings { fee_bps: 25 }), "DEX fee: 0.25% a trade"),
+            (
+                Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32])], threshold: 1, approval_epochs: 8, quorum_permille: 500 }),
+                "Governance: a council of 1",
             ),
         ];
         let mut kinds = std::collections::BTreeSet::new();
@@ -1936,7 +2143,7 @@ mod tests {
         assert!(matches!(&state.listing, Some(Err(failure)) if failure.status == NOT_FOUND));
 
         state.answered(&Ask::Governance, &Ok(council()));
-        state.answered(&Ask::GovernanceWeight(member(1).to_string()), &Ok(json!({ "weight": "1", "needed": "1", "approved": [] })));
+        state.answered(&Ask::GovernanceWeight(member(1).to_string()), &Ok(json!({ "weight": "1", "needed": "1", "voted": [] })));
         state.answered(&Ask::GovernanceHistory { before: None }, &Ok(json!({ "version": 2, "from": 1, "decisions": [{ "version": 2, "tx": "0x02", "height": 2 }, { "version": 1, "tx": "0x01", "height": 1 }] })));
 
         assert_eq!(state.listing.as_ref().and_then(|listing| listing.as_ref().ok()).map(|listing| listing.version), Some(2));

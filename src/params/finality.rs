@@ -117,6 +117,8 @@ pub struct FfgConfig {
     pub max_proofs_per_block: u32,
     #[document(summary = "Validators bonded from the start. With none, nothing finalizes until someone bonds.")]
     pub validators: Vec<GenesisValidator>,
+    #[document(summary = "How much of a cheater's bond a slash takes, in thousandths: None, as genesis files without it mean, takes it all, 1000. The reporter gets what is taken divided by reporter_divisor and the rest is burned; what is left stays the validator's, to withdraw once its delay is over. Governance retunes it by Change::Finality.")]
+    pub slash_permille: Option<u32>,
     #[document(summary = "The inactivity leak, or None for none: once no checkpoint has been proven in a block for after_epochs epochs, each checkpoint takes permille thousandths of the bond of every validator that has not voted since, until those that do vote hold two thirds again. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
     #[wincode(with = "UnsetLeak")]
     pub leak: Option<Leak>,

@@ -216,8 +216,8 @@ fn summary(tx: &Tx) -> String {
         Tx::Slash { .. } => "slash a voter that voted twice".to_string(),
         Tx::ApproveSigners { version, .. } => format!("approve signers version {version}"),
         Tx::WithdrawApproval { version } => format!("withdraw approval of signers version {version}"),
-        Tx::ApproveChange { version, change } => format!("approve a {} change from version {version}", change.name()),
-        Tx::WithdrawChange { kind, version } => format!("withdraw approval of a {} change from version {version}", kind.name()),
+        Tx::VoteChange { version, change, vote } => format!("vote {} on a {} change from version {version}", vote.name(), change.name()),
+        Tx::ClearVote { version, change } => format!("clear a vote on a {} change from version {version}", change.name()),
         Tx::SetDirectory { .. } => "set the directory, as its admin".to_string(),
         Tx::HandDirectory { to: Some(to) } => format!("hand the directory's admin role to {to}"),
         Tx::HandDirectory { to: None } => "renounce the directory's admin role, leaving the directory as it is".to_string(),
@@ -247,6 +247,7 @@ fn outcome(outcome: &CommittedOutcome) -> String {
         CommittedOutcome::Failed => "failed".to_string(),
         CommittedOutcome::Upgraded(address) => format!("upgraded {address}"),
         CommittedOutcome::Decided { decision, kind, version } => format!("decided governance's change {decision}, {} version {version}", kind.name()),
+        CommittedOutcome::Rejected { rejection, kind, version } => format!("rejected governance's change, the chain's rejection {rejection}, at {} version {version}", kind.name()),
         CommittedOutcome::Batch(steps) => {
             let listed: Vec<String> = steps.iter().enumerate().map(|(index, step)| format!("{}. {}", index + 1, self::outcome(&step.effect.outcome()))).collect();
 

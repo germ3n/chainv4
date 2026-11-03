@@ -1,8 +1,7 @@
 use {
     crate::crypto::hasher::Hasher,
     crate::structs::hash::{Hash, HashType},
-    crate::vm::cost,
-    crate::vm::lvm::{charge, to_hex},
+    crate::vm::lvm::{charge, costs, to_hex},
     mlua::{Lua, MetaMethod, UserData, UserDataMethods, Value},
     r#macro::document,
 };
@@ -174,7 +173,7 @@ pub fn register_hash_lib(lua: &Lua) {
                 name,
                 lua.create_function(move |lua, data: mlua::String| {
                     let data = data.as_bytes();
-                    charge(lua, cost::HASH + data.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+                    charge(lua, costs(lua).hash + data.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 
                     Ok(LuaHash(Hasher::digest(algorithm, &data)))
                 })

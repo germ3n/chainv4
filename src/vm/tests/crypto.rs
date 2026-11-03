@@ -127,6 +127,7 @@ fn federation_of(threshold: u32, signers: &[u8]) -> crate::registry::federation:
         chain_depth: 20,
         evm_depth: 12,
         bitcoin_depth: 6,
+        btc: None,
     }
 }
 

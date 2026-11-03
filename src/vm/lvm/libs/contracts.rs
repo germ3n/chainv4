@@ -4,8 +4,8 @@ use {
     super::integers::{LuaInt, exact_as},
     super::values::{Given, LuaValues},
     crate::structs::u256::u256,
-    crate::vm::lvm::{charge, value},
-    crate::vm::{FunctionId, Host, VmError, cost, selector},
+    crate::vm::lvm::{charge, costs, value},
+    crate::vm::{FunctionId, Host, VmError, selector},
     mlua::{AnyUserData, Error, Lua, MultiValue, Value},
     r#macro::document,
 };
@@ -40,7 +40,7 @@ fn delegate(lua: &Lua, (target, function, args): (AnyUserData, Value, MultiValue
     let given = Given::read(args).map_err(|err| Error::runtime(format!("contracts.delegate: {err}")))?;
     let untouched = given.untouched();
     let args = given.into_values();
-    charge(lua, cost::CALL)?;
+    charge(lua, costs(lua).call)?;
     let fuel = lua.get_fuel()?;
     let outcome = host.delegate(&target.0, id, &args, fuel);
     lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
@@ -53,7 +53,7 @@ fn check_layout(lua: &Lua, (from, to): (AnyUserData, AnyUserData)) -> mlua::Resu
         .app_data_ref::<Host>()
         .map(|host| host.clone())
         .ok_or_else(|| Error::runtime("contracts.check_layout is only available inside a call"))?;
-    charge(lua, cost::CHECK_LAYOUT)?;
+    charge(lua, costs(lua).check_layout)?;
 
     host.check_layout(&from.0, &to.0).map_err(refused)
 }
@@ -66,7 +66,7 @@ fn clone_contract(lua: &Lua, (template, salt, args): (AnyUserData, mlua::String,
         .ok_or_else(|| Error::runtime("contracts.clone is only available inside a call"))?;
     let salt = salt.as_bytes().to_vec();
     let args = Given::read(args).map_err(|err| Error::runtime(format!("contracts.clone: {err}")))?.into_values();
-    charge(lua, cost::CLONE + cost::HASH + salt.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).clone + costs(lua).hash + salt.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
     let fuel = lua.get_fuel()?;
     let outcome = host.clone_contract(&template.0, &salt, &args, fuel);
     lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
@@ -87,7 +87,7 @@ fn cloned_at(lua: &Lua, salt: mlua::String) -> mlua::Result<LuaAddress> {
         .map(|host| host.clone())
         .ok_or_else(|| Error::runtime("contracts.cloned_at is only available inside a call"))?;
     let salt = salt.as_bytes().to_vec();
-    charge(lua, cost::HASH + salt.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).hash + salt.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 
     Ok(LuaAddress(host.cloned_at(&salt)))
 }
@@ -131,8 +131,8 @@ fn call_with(lua: &Lua, target: AnyUserData, value: u256, function: String, args
     let given = Given::read(args).map_err(|err| Error::runtime(format!("contracts.call: {err}")))?;
     let untouched = given.untouched();
     let args = given.into_values();
-    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
-    charge(lua, cost::CALL + transfer)?;
+    let transfer = if value == u256::ZERO { 0 } else { costs(lua).transfer };
+    charge(lua, costs(lua).call + transfer)?;
     let fuel = lua.get_fuel()?;
     let outcome = host.call(&target.0, &function, &args, value, fuel);
     lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;

@@ -38,7 +38,8 @@ fn the_native_dexs_events_read_as_trades_adds_and_removals_in_the_pools_order() 
     let trades = [trade, add];
     assert_eq!(volume(&trades, &pool(), 20, 5), u256::new(9_900));
     assert_eq!(volume(&trades, &pool(), 100, 5), u256::ZERO, "outside the window");
-    assert_eq!(fees(&trades, &pool(), 20, 5), u256::new(30), "40,000 tokens are 10,000 of the coin at 4 to 1");
+    assert_eq!(fees(&trades, &pool(), 20, 5, 30), u256::new(30), "40,000 tokens are 10,000 of the coin at 4 to 1");
+    assert_eq!(fees(&trades, &pool(), 20, 5, 100), u256::new(100), "at the fee the chain sets");
 }
 
 #[test]

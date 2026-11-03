@@ -368,6 +368,7 @@ fn outcome(receipt: &TxReceipt) -> Value {
         }),
         TxStatus::Failed(error) => json!({ "status": "failed", "error": error }),
         TxStatus::Decided { decision, kind, version } => json!({ "status": "decided", "version": decision, "kind": kind.name(), "kind_version": version }),
+        TxStatus::Rejected { rejection, kind, version } => json!({ "status": "rejected", "rejection": rejection, "kind": kind.name(), "kind_version": version }),
         TxStatus::Batch(steps) => json!({ "status": "batch", "steps": steps.iter().map(step_outcome).collect::<Vec<_>>() }),
         // Failed as any failure says it, so what reads no further sees that; which step is extra.
         TxStatus::BatchFailed { step, why } => json!({ "status": "failed", "failed_step": step, "error": format!("step {} failed, undoing every step: {why}", step + 1) }),

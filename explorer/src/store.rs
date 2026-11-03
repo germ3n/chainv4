@@ -179,6 +179,16 @@ impl<T: Placed> Listing<T> {
 /// Governance's decisions read so far, by version, and how far down the pages read reach.
 pub type Decisions = chainv4_ui::ballots::Decided<Decision>;
 
+/// Governance's rejections read so far, by the chain's count of them, and how far down the pages
+/// read reach.
+pub type Rejections = chainv4_ui::ballots::Decided<crate::model::Rejection>;
+
+impl chainv4_ui::ballots::Counted for crate::model::Rejection {
+    fn version(&self) -> u64 {
+        self.rejection
+    }
+}
+
 impl chainv4_ui::ballots::Counted for Decision {
     fn version(&self) -> u64 {
         self.version
@@ -252,7 +262,12 @@ pub struct Store {
     pub governance: Option<GovernanceView>,
     /// Governance's decisions read so far.
     pub decisions: Decisions,
-    /// What accounts' approvals weigh, by the address looked up.
+    /// Governance's rejections read so far.
+    pub rejections: Rejections,
+    /// Each voter's votes, newest first, by its address, from its first page of vote_change
+    /// transactions: what the Governance page's turnout is counted from.
+    pub votes_cast: HashMap<String, Vec<FoundTx>>,
+    /// What accounts' votes weigh, by the address looked up.
     pub governance_weights: HashMap<String, GovernanceWeight>,
     /// Multisigs looked up, by address.
     pub multisigs: HashMap<String, MultisigView>,

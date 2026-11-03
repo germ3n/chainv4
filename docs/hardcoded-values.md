@@ -3,7 +3,16 @@
 This was a read-only audit. Nothing was built or run. Line numbers are from the working tree on 2026-11-03.
 
 **Fixed since:** #2 (the mempool's limits), #15 (sync answers capped by bytes) and section 2's
-first (the directory wins over `--swap-contract`, `--dex-contract` and `--dex-router`). See
+first (the directory wins over `--swap-contract`, `--dex-contract` and `--dex-router`); and by the
+governance batch, every item of section 1 the user picked: #1 (`Change::Governance`), #3 and
+section 2's second and third (the federation's `btc` policy, which the Bitcoin gateway reads and
+whose `cancel_after_ms` the signers go by), #4 (genesis's `evm_spec` and `Change::EvmSpec` from a
+height), #5 (`fees.costs`, the precompiles' gas among them), #6 (`limits.contract`, `max_tx_bytes`
+with `MAX_RAW` folded in, and `multisig_members`; WebAssembly's recursion and stack stay fixed),
+#7 (`Change::Names`), #8 and section 2's fourth (the PoW window and steps in the consensus), #9
+(drift follows the block time: three blocks, never under 15 s), #11 (`finality.slash_permille`),
+#12 (`Change::TokenFunctions`), #13 (`fees.vote_rewards`) and #14 (one governed DEX fee both DEXes
+read). See [Governance](governance.md#what-else-each-kind-carries). See
 `docs/todo.md`, under Node, API and tooling, for what changed and what is still open.
 
 **Classes:** A = governance (votable), B = genesis only, C = node operator flag or config, D = app setting, E = leave it.
@@ -13,7 +22,7 @@ first (the directory wins over `--swap-contract`, `--dex-contract` and `--dex-ro
 - "Contracts?" asks whether deployed contracts depend on the value.
 - "Consensus?" asks whether the fix needs a redeploy of every node (R) or a regenesis (G).
 
-Today governance can change consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade and name. Some items below are already in `docs/todo.md`, and are marked **(todo)**:
+Before the governance batch, governance could change consensus, bootnodes, name_prices, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade and name. Some items below are already in `docs/todo.md`, and are marked **(todo)**:
 - vm::cost from genesis
 - `Change::Engines`
 - the DEX fee decision

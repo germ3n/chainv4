@@ -44,6 +44,8 @@ impl FeeConfig {
             burn_permille: 500,
             schedule: ScheduleConfig::Weighted(Weighted::dev()),
             pricing: PricingConfig::BaseFee(BaseFee::dev()),
+            vote_rewards: None,
+            costs: None,
         }
     }
 

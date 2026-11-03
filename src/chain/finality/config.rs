@@ -20,7 +20,7 @@ use super::ffg::{self, FfgConfig};
 use super::votes::Votes;
 use {
     super::{Finality, View},
-    crate::chain::{SignerRules, StakingRules, VoteRewardSource},
+    crate::chain::{SignerRules, StakingRules},
     crate::crypto::keypair::PublicKey,
     crate::db::{DbError, State},
     crate::registry::validators::ValidatorSet,
@@ -264,12 +264,12 @@ impl FinalityConfig {
         summary = "The finality these settings describe, with what this node learned before: the votes it counted or held back are counted again.",
         params = { chain = "The chain as it was opened." },
     )]
-    pub fn build(&self, chain: &View, rewards: VoteRewardSource) -> Result<Box<dyn Finality>, DbError> {
+    pub fn build(&self, chain: &View) -> Result<Box<dyn Finality>, DbError> {
         Ok(match *self {
             #[cfg(feature = "finality-ffg")]
-            FinalityConfig::Ffg(_) => Box::new(Votes::load(super::switch::Elected::new(self.clone()), chain, rewards)?),
+            FinalityConfig::Ffg(_) => Box::new(Votes::load(super::switch::Elected::new(self.clone()), chain)?),
             #[cfg(feature = "finality-authority")]
-            FinalityConfig::Authority(_) => Box::new(Votes::load(super::switch::Elected::new(self.clone()), chain, rewards)?),
+            FinalityConfig::Authority(_) => Box::new(Votes::load(super::switch::Elected::new(self.clone()), chain)?),
             #[cfg(feature = "finality-depth")]
             FinalityConfig::Depth(ref config) => Box::new(Depth::load(config, &**chain.db(), chain.genesis())?),
         })

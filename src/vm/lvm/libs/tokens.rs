@@ -1,6 +1,6 @@
 use {
-    crate::vm::lvm::charge,
-    crate::vm::{Host, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host},
     mlua::{Error, Lua},
     r#macro::document,
 };
@@ -12,7 +12,7 @@ fn refresh(lua: &Lua, (): ()) -> mlua::Result<()> {
         .ok_or_else(|| Error::runtime("tokens is only available inside a call"))?;
     host.refresh_token();
 
-    charge(lua, cost::TOKEN_REFRESH)
+    charge(lua, costs(lua).token_refresh)
 }
 
 #[document(

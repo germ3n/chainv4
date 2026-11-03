@@ -15,9 +15,9 @@ pub const OPTIMIZATION_LEVEL: u8 = 1;
 pub const DEBUG_LEVEL: u8 = 1;
 /// None. Type information only feeds native code generation, which contracts never use.
 pub const TYPE_INFO_LEVEL: u8 = 0;
-/// The largest source a contract may have. Compiling is not metered by fuel, so this bounds the
-/// work one deploy can cause.
-pub const MAX_SOURCE_LEN: usize = 128 * 1024;
+/// The largest source a contract may have by default: a block's contract_limits.source_len may
+/// say otherwise. Compiling is not metered by fuel, so this bounds the work one deploy can cause.
+pub const MAX_SOURCE_LEN: usize = crate::params::vm::ContractLimits::DEFAULT.source_len as usize;
 
 #[document(
     summary = "Compiles contract source with the chain's fixed settings. The same source always gives the same bytecode.",
@@ -27,9 +27,20 @@ pub const MAX_SOURCE_LEN: usize = 128 * 1024;
     see_also = "Contract::from_bytecode",
 )]
 pub fn compile(source: &str) -> Result<Vec<u8>, VmError> {
-    if source.len() > MAX_SOURCE_LEN {
+    compile_within(source, MAX_SOURCE_LEN)
+}
+
+#[document(
+    summary = "Compiles contract source as compile does, refusing source longer than a block's limit.",
+    category = "Lua VM",
+    params = { source = "The Luau source.", longest = "The most bytes it may take." },
+    returns = "The bytecode, or why it does not compile.",
+    see_also = "compile, ContractLimits",
+)]
+pub fn compile_within(source: &str, longest: usize) -> Result<Vec<u8>, VmError> {
+    if source.len() > longest {
         return Err(VmError::Compile(format!(
-            "source is {} bytes, more than the {MAX_SOURCE_LEN} allowed",
+            "source is {} bytes, more than the {longest} allowed",
             source.len()
         )));
     }

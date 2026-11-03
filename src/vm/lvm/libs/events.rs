@@ -1,8 +1,8 @@
 use {
     super::accounts::refused,
     super::values::Given,
-    crate::vm::lvm::charge,
-    crate::vm::{Host, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host},
     mlua::{Error, Lua, MultiValue},
     r#macro::document,
 };
@@ -17,7 +17,7 @@ fn emit(lua: &Lua, (name, data): (String, MultiValue)) -> mlua::Result<()> {
         .into_values();
     let size = host.emit(&name, data).map_err(refused)?;
 
-    charge(lua, cost::EVENT + size as u64 / cost::EVENT_BYTES_PER_FUEL)
+    charge(lua, costs(lua).event + size as u64 / costs(lua).event_bytes_per_fuel)
 }
 
 #[document(

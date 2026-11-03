@@ -9,7 +9,7 @@ use {
     crate::structs::hash::HashType,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{FunctionId, Host, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space, VmError, cost},
+    crate::vm::{FunctionId, Host, MAX_EVENT_NAME, MAX_NAMESPACE_LEN, Space, VmError},
     r#macro::document,
     wasmi::{Caller, Engine, Extern, Linker, Memory},
 };
@@ -709,13 +709,15 @@ fn input_len(caller: Caller<'_, Run>) -> Result<u32> {
 
 fn input_read(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
     let input = caller.data().input.clone();
-    charge(&mut caller, input.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); input.len() as u64 / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
 
     write(&mut caller, ptr, &input)
 }
 
 fn output(mut caller: Caller<'_, Run>, ptr: u32, len: u32) -> Result<()> {
-    charge(&mut caller, u64::from(len) / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); u64::from(len) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let bytes = read(&mut caller, ptr, len)?;
     caller.data_mut().output = Some(bytes);
 
@@ -728,7 +730,8 @@ fn result_len(caller: Caller<'_, Run>) -> Result<u32> {
 
 fn result_read(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
     let result = caller.data().result.clone();
-    charge(&mut caller, result.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); result.len() as u64 / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
 
     write(&mut caller, ptr, &result)
 }
@@ -786,10 +789,12 @@ fn namespace_scan(mut caller: Caller<'_, Run>, name: u32, name_len: u32, prefix:
 /// them; how many it gave.
 fn scan_in(caller: &mut Caller<'_, Run>, space: &Space, (prefix, prefix_len): (u32, u32), (start, start_len): (u32, u32), limit: u32) -> Result<i32> {
     let host = host(caller)?;
-    check_len(caller, prefix_len, MAX_KEY_LEN, "scan prefixes")?;
-    check_len(caller, start_len, MAX_KEY_LEN + 1, "scan starts")?;
+    let longest = limits(caller).key_len as usize;
+    check_len(caller, prefix_len, longest, "scan prefixes")?;
+    check_len(caller, start_len, longest + 1, "scan starts")?;
     let asked = space.name().len() as u64 + u64::from(prefix_len) + u64::from(start_len);
-    charge(caller, cost::STORAGE_SCAN + asked / cost::STORAGE_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(caller); costs.storage_scan + asked / costs.storage_bytes_per_fuel };
+    charge(caller, fuel)?;
     let prefix = read(caller, prefix, prefix_len)?;
     let start = match start_len {
         0 => prefix.clone(),
@@ -797,7 +802,8 @@ fn scan_in(caller: &mut Caller<'_, Run>, space: &Space, (prefix, prefix_len): (u
     };
     let found = host.storage_scan(space, &prefix, &start, limit as usize).map_err(|err| stop(caller, err))?;
     let moved: usize = found.iter().map(|(key, value)| key.len() + value.len()).sum();
-    charge(caller, cost::STORAGE_SCAN_ENTRY * found.len() as u64 + moved as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(caller); costs.storage_scan_entry * found.len() as u64 + moved as u64 / costs.storage_bytes_per_fuel };
+    charge(caller, fuel)?;
     let mut result = Vec::with_capacity(moved + 8 * found.len());
 
     for (key, value) in &found {
@@ -822,9 +828,10 @@ fn space(caller: &mut Caller<'_, Run>, name: u32, name_len: u32) -> Result<Space
 
 fn get_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32) -> Result<i32> {
     let host = host(caller)?;
-    check_len(caller, key_len, MAX_KEY_LEN, "storage keys")?;
+    check_len(caller, key_len, limits(caller).key_len as usize, "storage keys")?;
     let named = space.name().len() as u64 + u64::from(key_len);
-    charge(caller, cost::STORAGE_READ + named / cost::STORAGE_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(caller); costs.storage_read + named / costs.storage_bytes_per_fuel };
+    charge(caller, fuel)?;
     let key = read(caller, key, key_len)?;
     let value = host.storage_get(space, &key).map_err(|err| stop(caller, err))?;
 
@@ -832,7 +839,8 @@ fn get_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32) -
         return Ok(-1);
     };
 
-    charge(caller, value.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(caller); value.len() as u64 / costs.storage_bytes_per_fuel };
+    charge(caller, fuel)?;
     let len = value.len() as i32;
     caller.data_mut().result = value;
 
@@ -842,11 +850,12 @@ fn get_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32) -
 /// Writes the value at value's pointer and length, or deletes the key for None.
 fn set_in(caller: &mut Caller<'_, Run>, space: &Space, key: u32, key_len: u32, value: Option<(u32, u32)>) -> Result<()> {
     let host = host(caller)?;
-    check_len(caller, key_len, MAX_KEY_LEN, "storage keys")?;
+    check_len(caller, key_len, limits(caller).key_len as usize, "storage keys")?;
     let value_len = value.map_or(0, |(_, len)| len);
-    check_len(caller, value_len, MAX_VALUE_LEN, "storage values")?;
+    check_len(caller, value_len, limits(caller).value_len as usize, "storage values")?;
     let moved = space.name().len() as u64 + u64::from(key_len) + u64::from(value_len);
-    charge(caller, cost::STORAGE_WRITE + moved / cost::STORAGE_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(caller); costs.storage_write + moved / costs.storage_bytes_per_fuel };
+    charge(caller, fuel)?;
     let key = read(caller, key, key_len)?;
     let value = match value {
         Some((ptr, len)) => Some(read(caller, ptr, len)?),
@@ -883,7 +892,8 @@ fn value(mut caller: Caller<'_, Run>, ptr: u32) -> Result<()> {
 }
 
 fn hash(mut caller: Caller<'_, Run>, algorithm: u32, data: u32, len: u32, out: u32) -> Result<u32> {
-    charge(&mut caller, cost::HASH + u64::from(len) / cost::HASH_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.hash + u64::from(len) / costs.hash_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let algorithm = u8::try_from(algorithm)
         .ok()
         .and_then(|tag| wincode::deserialize::<HashType>(&[tag]).ok());
@@ -899,7 +909,8 @@ fn hash(mut caller: Caller<'_, Run>, algorithm: u32, data: u32, len: u32, out: u
 
 fn balance(mut caller: Caller<'_, Run>, address: u32, out: u32) -> Result<()> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::BALANCE)?;
+    let fuel = { let costs = costs(&caller); costs.balance };
+    charge(&mut caller, fuel)?;
     let address = address_at(&mut caller, address)?;
     let balance = host.balance(&address).map_err(|err| stop(&mut caller, err))?;
 
@@ -908,7 +919,8 @@ fn balance(mut caller: Caller<'_, Run>, address: u32, out: u32) -> Result<()> {
 
 fn transfer(mut caller: Caller<'_, Run>, address: u32, amount: u32) -> Result<u32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::TRANSFER)?;
+    let fuel = { let costs = costs(&caller); costs.transfer };
+    charge(&mut caller, fuel)?;
     let to = address_at(&mut caller, address)?;
     let amount = amount_at(&mut caller, amount)?;
 
@@ -932,7 +944,8 @@ fn text_at(caller: &mut Caller<'_, Run>, ptr: u32, len: u32, what: &str) -> Resu
 
 #[allow(clippy::too_many_arguments)]
 fn verify(mut caller: Caller<'_, Run>, scheme: u32, scheme_len: u32, key: u32, key_len: u32, message: u32, message_len: u32, signature: u32, signature_len: u32) -> Result<u32> {
-    charge(&mut caller, cost::VERIFY + u64::from(message_len) / cost::HASH_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.verify + u64::from(message_len) / costs.hash_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let scheme = text_at(&mut caller, scheme, scheme_len, "the scheme")?;
     let (key, message, signature) = (read(&mut caller, key, key_len)?, read(&mut caller, message, message_len)?, read(&mut caller, signature, signature_len)?);
 
@@ -943,7 +956,8 @@ fn verify(mut caller: Caller<'_, Run>, scheme: u32, scheme_len: u32, key: u32, k
 }
 
 fn recover(mut caller: Caller<'_, Run>, digest: u32, signature: u32, signature_len: u32, out: u32) -> Result<u32> {
-    charge(&mut caller, cost::RECOVER)?;
+    let fuel = { let costs = costs(&caller); costs.recover };
+    charge(&mut caller, fuel)?;
     let digest: [u8; 32] = read(&mut caller, digest, 32)?.try_into().expect("32 bytes read");
     let signature = read(&mut caller, signature, signature_len)?;
 
@@ -961,7 +975,8 @@ fn recover(mut caller: Caller<'_, Run>, digest: u32, signature: u32, signature_l
 }
 
 fn key_address(mut caller: Caller<'_, Run>, scheme: u32, scheme_len: u32, key: u32, key_len: u32, out: u32) -> Result<()> {
-    charge(&mut caller, cost::KEY_ADDRESS)?;
+    let fuel = { let costs = costs(&caller); costs.key_address };
+    charge(&mut caller, fuel)?;
     let scheme = text_at(&mut caller, scheme, scheme_len, "the scheme")?;
     let key = read(&mut caller, key, key_len)?;
 
@@ -972,7 +987,8 @@ fn key_address(mut caller: Caller<'_, Run>, scheme: u32, scheme_len: u32, key: u
 }
 
 fn crypto_hash(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, len: u32, out: u32) -> Result<u32> {
-    charge(&mut caller, cost::HASH + u64::from(len) / cost::HASH_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.hash + u64::from(len) / costs.hash_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let name = text_at(&mut caller, name, name_len, "the hash's name")?;
     let data = read(&mut caller, data, len)?;
     let Some(digest) = crate::vm::crypto::digest(&name, &data) else {
@@ -998,7 +1014,8 @@ fn check_state(
     proof: u32,
     proof_len: u32,
 ) -> Result<u32> {
-    charge(&mut caller, cost::CHECK_PROOF + cost::PROOF_SIBLING * (u64::from(proof_len) / 32))?;
+    let fuel = { let costs = costs(&caller); costs.check_proof + costs.proof_sibling * (u64::from(proof_len) / 32) };
+    charge(&mut caller, fuel)?;
     let hash = host(&mut caller)?.chain_hash();
     let column = text_at(&mut caller, column, column_len, "the column")?;
     let (root, key, value, proof) = (read(&mut caller, root, root_len)?, read(&mut caller, key, key_len)?, read(&mut caller, value, value_len)?, read(&mut caller, proof, proof_len)?);
@@ -1008,7 +1025,8 @@ fn check_state(
 
 #[allow(clippy::too_many_arguments)]
 fn check_merkle(mut caller: Caller<'_, Run>, root: u32, root_len: u32, data: u32, data_len: u32, index: u64, count: u64, path: u32, path_len: u32) -> Result<u32> {
-    charge(&mut caller, cost::CHECK_PROOF + cost::PROOF_SIBLING * (u64::from(path_len) / 32))?;
+    let fuel = { let costs = costs(&caller); costs.check_proof + costs.proof_sibling * (u64::from(path_len) / 32) };
+    charge(&mut caller, fuel)?;
     let hash = host(&mut caller)?.chain_hash();
     let (root, data, path) = (read(&mut caller, root, root_len)?, read(&mut caller, data, data_len)?, read(&mut caller, path, path_len)?);
 
@@ -1019,7 +1037,8 @@ fn check_merkle(mut caller: Caller<'_, Run>, root: u32, root_len: u32, data: u32
 /// signers, u32, all little-endian, then their 33-byte keys. Its length, or -1 for none.
 fn federation(mut caller: Caller<'_, Run>) -> Result<i32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::FEDERATION)?;
+    let fuel = { let costs = costs(&caller); costs.federation };
+    charge(&mut caller, fuel)?;
 
     match host.federation() {
         Ok(Some(decided)) => {
@@ -1039,14 +1058,16 @@ fn federation(mut caller: Caller<'_, Run>) -> Result<i32> {
 
 fn chain_id(mut caller: Caller<'_, Run>) -> Result<u64> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::CHAIN_ID)?;
+    let fuel = { let costs = costs(&caller); costs.chain_id };
+    charge(&mut caller, fuel)?;
 
     Ok(host.chain_id())
 }
 
 fn resolve_name(mut caller: Caller<'_, Run>, name: u32, len: u32, out: u32) -> Result<u32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::NAME + u64::from(len) / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.name + u64::from(len) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let name = read(&mut caller, name, len)?;
     // Text that is no name resolves to nothing, as in Lua.
     let Ok(name) = String::from_utf8(name) else {
@@ -1066,7 +1087,8 @@ fn resolve_name(mut caller: Caller<'_, Run>, name: u32, len: u32, out: u32) -> R
 
 fn name_of(mut caller: Caller<'_, Run>, address: u32) -> Result<i32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::NAME)?;
+    let fuel = { let costs = costs(&caller); costs.name };
+    charge(&mut caller, fuel)?;
     let address = address_at(&mut caller, address)?;
 
     match host.name_of(&address) {
@@ -1083,7 +1105,8 @@ fn name_of(mut caller: Caller<'_, Run>, address: u32) -> Result<i32> {
 
 fn check_layout(mut caller: Caller<'_, Run>, from: u32, to: u32) -> Result<u32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::CHECK_LAYOUT)?;
+    let fuel = { let costs = costs(&caller); costs.check_layout };
+    charge(&mut caller, fuel)?;
     let from = address_at(&mut caller, from)?;
     let to = address_at(&mut caller, to)?;
 
@@ -1111,8 +1134,9 @@ fn call(
     let target = address_at(&mut caller, address)?;
     let value = amount_at(&mut caller, value)?;
     let moved = u64::from(name_len) + u64::from(args_len);
-    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
-    charge(&mut caller, cost::CALL + transfer + moved / cost::COPY_BYTES_PER_FUEL)?;
+    let transfer = if value == u256::ZERO { 0 } else { costs(&caller).transfer };
+    let fuel = { let costs = costs(&caller); costs.call + transfer + moved / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let name = read(&mut caller, name, name_len)?;
     let args = read(&mut caller, args, args_len)?;
     let Ok(name) = String::from_utf8(name) else {
@@ -1140,8 +1164,9 @@ fn evm_call(mut caller: Caller<'_, Run>, address: u32, value: u32, input: u32, i
     let host = host(&mut caller)?;
     let target = address_at(&mut caller, address)?;
     let value = amount_at(&mut caller, value)?;
-    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
-    charge(&mut caller, cost::CALL + transfer + u64::from(input_len) / cost::COPY_BYTES_PER_FUEL)?;
+    let transfer = if value == u256::ZERO { 0 } else { costs(&caller).transfer };
+    let fuel = { let costs = costs(&caller); costs.call + transfer + u64::from(input_len) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let input = read(&mut caller, input, input_len)?;
     let fuel = caller.get_fuel()?;
     let outcome = host.evm_call(&target, &input, value, fuel);
@@ -1166,7 +1191,8 @@ fn abi_text(caller: &mut Caller<'_, Run>, ptr: u32, len: u32) -> Result<std::res
 
 fn abi_encode(mut caller: Caller<'_, Run>, signature: u32, signature_len: u32, values: u32, values_len: u32) -> Result<u32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::ABI + (u64::from(signature_len) + u64::from(values_len)) / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.abi + (u64::from(signature_len) + u64::from(values_len)) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let signature = abi_text(&mut caller, signature, signature_len)?;
     let values = read(&mut caller, values, values_len)?;
     let encoded = signature.and_then(|signature| {
@@ -1176,7 +1202,8 @@ fn abi_encode(mut caller: Caller<'_, Run>, signature: u32, signature_len: u32, v
     });
     let (status, result) = match encoded {
         Ok(bytes) => {
-            charge(&mut caller, bytes.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+            let fuel = { let costs = costs(&caller); bytes.len() as u64 / costs.copy_bytes_per_fuel };
+            charge(&mut caller, fuel)?;
             (0, bytes)
         }
         Err(VmError::Storage(err)) => return Err(stop(&mut caller, VmError::Storage(err))),
@@ -1189,7 +1216,8 @@ fn abi_encode(mut caller: Caller<'_, Run>, signature: u32, signature_len: u32, v
 
 fn abi_decode(mut caller: Caller<'_, Run>, types: u32, types_len: u32, data: u32, data_len: u32) -> Result<u32> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::ABI + (u64::from(types_len) + u64::from(data_len)) / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.abi + (u64::from(types_len) + u64::from(data_len)) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let types = abi_text(&mut caller, types, types_len)?;
     let data = read(&mut caller, data, data_len)?;
     let (status, result) = match types.and_then(|types| decode(&host, &types, &data)) {
@@ -1245,7 +1273,8 @@ fn decode(_: &Host, _: &str, _: &[u8]) -> std::result::Result<Vec<TxCallArgument
 fn delegate(mut caller: Caller<'_, Run>, address: u32, selector: u64, args: u32, args_len: u32) -> Result<u32> {
     let host = host(&mut caller)?;
     let target = address_at(&mut caller, address)?;
-    charge(&mut caller, cost::CALL + u64::from(args_len) / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.call + u64::from(args_len) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let args = read(&mut caller, args, args_len)?;
     let args = match wincode::deserialize::<Vec<TxCallArgumentType>>(&args) {
         Ok(args) => args,
@@ -1267,7 +1296,8 @@ fn delegate(mut caller: Caller<'_, Run>, address: u32, selector: u64, args: u32,
 fn clone(mut caller: Caller<'_, Run>, template: u32, salt: u32, salt_len: u32, args: u32, args_len: u32, out: u32) -> Result<u32> {
     let host = host(&mut caller)?;
     let template = address_at(&mut caller, template)?;
-    charge(&mut caller, cost::CLONE + cost::HASH + u64::from(salt_len) / cost::HASH_BYTES_PER_FUEL + u64::from(args_len) / cost::COPY_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.clone + costs.hash + u64::from(salt_len) / costs.hash_bytes_per_fuel + u64::from(args_len) / costs.copy_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let salt = read(&mut caller, salt, salt_len)?;
     let args = read(&mut caller, args, args_len)?;
     let args = match wincode::deserialize::<Vec<TxCallArgumentType>>(&args) {
@@ -1298,7 +1328,8 @@ fn clone(mut caller: Caller<'_, Run>, template: u32, salt: u32, salt_len: u32, a
 
 fn cloned_at(mut caller: Caller<'_, Run>, salt: u32, salt_len: u32, out: u32) -> Result<()> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::HASH + u64::from(salt_len) / cost::HASH_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.hash + u64::from(salt_len) / costs.hash_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let salt = read(&mut caller, salt, salt_len)?;
 
     write(&mut caller, out, &host.cloned_at(&salt).to_abi())
@@ -1307,9 +1338,11 @@ fn cloned_at(mut caller: Caller<'_, Run>, salt: u32, salt_len: u32, out: u32) ->
 fn emit(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, data_len: u32) -> Result<()> {
     let host = host(&mut caller)?;
     check_len(&mut caller, name_len, MAX_EVENT_NAME, "event names")?;
-    check_len(&mut caller, data_len, MAX_EVENT_DATA, "event data")?;
+    let largest = host.limits().event_data as usize;
+    check_len(&mut caller, data_len, largest, "event data")?;
     let size = u64::from(name_len) + u64::from(data_len);
-    charge(&mut caller, cost::EVENT + size / cost::EVENT_BYTES_PER_FUEL)?;
+    let fuel = { let costs = costs(&caller); costs.event + size / costs.event_bytes_per_fuel };
+    charge(&mut caller, fuel)?;
     let name = read(&mut caller, name, name_len)?;
     let data = read(&mut caller, data, data_len)?;
     let Ok(name) = String::from_utf8(name) else {
@@ -1325,7 +1358,8 @@ fn emit(mut caller: Caller<'_, Run>, name: u32, name_len: u32, data: u32, data_l
 
 fn refresh_token(mut caller: Caller<'_, Run>) -> Result<()> {
     let host = host(&mut caller)?;
-    charge(&mut caller, cost::TOKEN_REFRESH)?;
+    let fuel = { let costs = costs(&caller); costs.token_refresh };
+    charge(&mut caller, fuel)?;
     host.refresh_token();
 
     Ok(())
@@ -1344,6 +1378,17 @@ fn stop(caller: &mut Caller<'_, Run>, err: VmError) -> wasmi::Error {
     caller.data_mut().error.get_or_insert(err);
 
     wasmi::Error::new(message)
+}
+
+/// What host operations cost in the call's block: the defaults while no call is attached, as
+/// while a deploy checks its module.
+fn costs(caller: &Caller<'_, Run>) -> crate::params::vm::HostCosts {
+    caller.data().host.as_ref().map_or(crate::params::vm::HostCosts::DEFAULT, Host::costs)
+}
+
+/// The limits contracts keep within in the call's block.
+fn limits(caller: &Caller<'_, Run>) -> crate::params::vm::ContractLimits {
+    caller.data().host.as_ref().map_or(crate::params::vm::ContractLimits::DEFAULT, Host::limits)
 }
 
 fn charge(caller: &mut Caller<'_, Run>, cost: u64) -> Result<()> {

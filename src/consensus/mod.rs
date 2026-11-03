@@ -26,7 +26,7 @@ pub mod rotating;
 pub mod staked;
 
 pub use dev::{AuthorityProducer, DevAuthority};
-pub use pow::{Miner, PowConfig, ProofOfWork, Rig, meets, work_hash};
+pub use pow::{Miner, PowConfig, PowTuning, ProofOfWork, Rig, meets, work_hash};
 pub use rates::{ClaimTree, DeviceReport, Meter, MinerStanding, MiningReport, PoolBlock, PoolReport, PoolSettled, WorkerReport};
 pub use rotating::{Rotating, RotatingProducer};
 pub use staked::{Schedule, Staked, StakedProducer};
@@ -44,8 +44,17 @@ pub(crate) fn seal_bytes(header: &BlockHeader) -> Vec<u8> {
     bytes
 }
 
-/// How far ahead of this node's clock a block's timestamp may be.
+/// The least a block's timestamp may be ahead of this node's clock, whatever the block time.
 pub const MAX_DRIFT_MS: u64 = 15_000;
+
+#[document(
+    summary = "How far ahead of this node's clock a block's timestamp may be: three blocks' time, and never under MAX_DRIFT_MS's 15 seconds, so a chain of 5 s blocks allows three of them and one of 60 s blocks three minutes. It follows the consensus governance decides, which sets the block time; it is checked against the local clock alone, never on replay, so changing it leaves the past valid.",
+    category = "Consensus",
+    params = { block_ms = "The consensus's block time: its slot, or proof of work's target." },
+)]
+pub fn drift_ms(block_ms: u64) -> u64 {
+    block_ms.saturating_mul(3).max(MAX_DRIFT_MS)
+}
 
 #[document(
     summary = "The rules blocks are checked against: who may produce, when, with what difficulty, and how much each block counts for when choosing between forks. Built from genesis by ConsensusConfig::rules.",

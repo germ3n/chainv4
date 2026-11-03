@@ -9,7 +9,7 @@
 //! client from the voters it proved.
 
 use {
-    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer, seal_bytes},
+    super::{Consensus, ConsensusError, Producer, seal_bytes},
     crate::crypto::hashable::Hashable,
     crate::crypto::hasher::Hasher,
     crate::crypto::keypair::{Keypair, PublicKey},
@@ -288,7 +288,7 @@ impl Consensus for Staked {
             return Err(ConsensusError::Early);
         }
 
-        if header.timestamp > now + MAX_DRIFT_MS {
+        if header.timestamp > now + super::drift_ms(self.slot_ms) {
             return Err(ConsensusError::FromTheFuture);
         }
 
@@ -539,7 +539,7 @@ mod tests {
             let (stranger, stranger_seal) = block(rules, &key(7), &parent, 10_000 + SLOT, &set);
             let wrong_offset = BlockHeader { difficulty: 1, ..good.clone() };
             let forged = Seal::Signature(keypair_of(other).sign(&seal_bytes(&good)));
-            let future = BlockHeader { timestamp: 10_000 + SLOT + MAX_DRIFT_MS + 1, ..good.clone() };
+            let future = BlockHeader { timestamp: 10_000 + SLOT + crate::consensus::MAX_DRIFT_MS + 1, ..good.clone() };
 
             assert_eq!(rules.check(&stranger, &stranger_seal, std::slice::from_ref(&parent), &set, 12_000), Err(ConsensusError::WrongProducer));
             assert_eq!(

@@ -347,7 +347,7 @@ fn loading_pays_for_compiling_and_the_top_level() {
     let heavy_loading = engine.load(heavy.as_bytes(), LIMITS);
 
     assert!(light_loading.result.is_ok() && heavy_loading.result.is_ok());
-    assert!(light_loading.fuel_used > light.len() as u64 * crate::vm::cost::LOAD_BYTE, "the bytes, and the top level");
+    assert!(light_loading.fuel_used > light.len() as u64 * crate::params::vm::HostCosts::DEFAULT.load_byte, "the bytes, and the top level");
     assert!(heavy_loading.fuel_used > light_loading.fuel_used + 20_000, "the loop is paid for");
 
     // Failing to load still pays: a compile error for its bytes, an endless top level for all of
@@ -355,7 +355,7 @@ fn loading_pays_for_compiling_and_the_top_level() {
     let broken = engine.load(b"local = 1", LIMITS);
 
     assert!(matches!(broken.result, Err(VmError::Compile(_))));
-    assert_eq!(broken.fuel_used, 9 * crate::vm::cost::LOAD_BYTE);
+    assert_eq!(broken.fuel_used, 9 * crate::params::vm::HostCosts::DEFAULT.load_byte);
 
     let endless = engine.load(b"while true do end", LIMITS);
 

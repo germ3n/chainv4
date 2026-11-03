@@ -25,6 +25,10 @@ pub struct Status {
     /// The functions that make a contract a token on this chain; none keeps no registry.
     #[serde(default)]
     pub token_functions: Vec<String>,
+    /// The DEX's fee in force, in hundredths of a percent; none from older nodes, which charged
+    /// 0.3%.
+    #[serde(default)]
+    pub dex_fee_bps: Option<u32>,
     pub finality: Option<Finality>,
     /// The fee settings as genesis files write them, with base_price and tx_fuel.
     pub fees: Option<Value>,
@@ -333,10 +337,14 @@ pub struct Outcome {
     pub payments: Vec<PaymentView>,
     #[serde(default)]
     pub trace: Trace,
-    /// The change a governance approval decided, for status decided: the chain's count of
-    /// decisions, its kind and the kind's version.
+    /// The change a governance vote decided, for status decided: the chain's count of decisions,
+    /// its kind and the kind's version; or, for status rejected, the kind and the version it was
+    /// rejected at.
     #[serde(default)]
     pub version: Option<u64>,
+    /// The chain's count of rejections a vote made, for status rejected.
+    #[serde(default)]
+    pub rejection: Option<u64>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -1018,8 +1026,8 @@ pub struct Estimate {
     pub error: Option<String>,
 }
 
-/// GET /governance: who approves, what a change needs, the changes being approved, and every
-/// setting in force. A chain without governance answers 404.
+/// GET /governance: who votes, what a change needs, the changes being voted on, and every setting
+/// in force. A chain without governance answers 404.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GovernanceView {
     /// council or electorate.
@@ -1032,13 +1040,29 @@ pub struct GovernanceView {
     pub decided: Value,
     /// How many changes were decided so far, of every kind: the chain's gap-free count.
     pub version: u64,
-    /// How many of each kind were decided, by the kind's name: what an approval of one names.
+    /// How many of each kind were decided, by the kind's name: what a vote on one names.
     #[serde(default)]
     pub versions: BTreeMap<String, u64>,
-    /// How many epochs an approval counts for, from the one it was made in.
+    /// How many epochs a vote counts for, from the one it was cast in.
     pub approval_epochs: u64,
-    /// What a change's approvals must weigh, in all.
+    /// The share of every voter's weight, in thousandths, that must vote on a change before Yes
+    /// decides it.
+    #[serde(default)]
+    pub quorum_permille: u32,
+    /// What Yes must weigh to decide a change.
     pub needed: String,
+    /// What every voter weighs together.
+    #[serde(default)]
+    pub total: String,
+    /// How many changes were rejected so far, of every kind.
+    #[serde(default)]
+    pub rejections: u64,
+    /// Blocks per epoch, to say when old votes stop counting.
+    #[serde(default)]
+    pub checkpoint_interval: u64,
+    /// Everyone who may vote, with what each weighs: the council, or finality's voters.
+    #[serde(default)]
+    pub voters: Vec<Voter>,
     /// The finality the tip's epoch runs: ffg, authority or depth.
     #[serde(default)]
     pub finality: String,
@@ -1057,7 +1081,7 @@ pub struct GovernanceView {
 }
 
 impl GovernanceView {
-    /// Whether approvals weigh stake, in the chain's coin: an electorate under FFG. Elsewhere each
+    /// Whether votes weigh stake, in the chain's coin: an electorate under FFG. Elsewhere each
     /// weighs a member or a signer.
     pub fn weighs_stake(&self) -> bool {
         self.kind == "electorate" && self.finality == "ffg"
@@ -1072,7 +1096,14 @@ pub struct SwitchView {
     pub kind: String,
 }
 
-/// A change being approved: the change, what its approvals weigh and need, and who approved.
+/// One who may vote, and what its vote weighs.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct Voter {
+    pub account: String,
+    pub weight: String,
+}
+
+/// A change being voted on: the change, how its votes stand, and who voted which way.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Proposal {
     /// The kind of change it is, whose ballot it is on: consensus, bootnodes, name_prices, …
@@ -1081,19 +1112,33 @@ pub struct Proposal {
     /// Its kind's version: how many of that kind were decided before. It would be the next.
     #[serde(default)]
     pub version: u64,
-    pub weight: String,
-    pub needed: String,
+    /// How its votes stand: each side's weight, what is needed, the quorum, whether it can pass.
     #[serde(default)]
-    pub approvals: Vec<ChangeApproval>,
+    pub tally: Value,
+    /// The epoch its oldest vote counts through.
+    #[serde(default)]
+    pub closes: Option<u64>,
+    #[serde(default)]
+    pub votes: Vec<CastVote>,
     /// The change itself: one field, named for its kind.
     #[serde(flatten)]
     pub change: serde_json::Map<String, Value>,
 }
 
 impl Proposal {
-    /// The change, as Tx::ApproveChange's JSON carries it: { kind: value }.
+    /// The change, as Tx::VoteChange's JSON carries it: { kind: value }.
     pub fn change(&self) -> Value {
         Value::Object(self.change.clone())
+    }
+
+    /// How its votes stand, as numbers.
+    pub fn tally(&self) -> chainv4_ui::votes::Tally {
+        chainv4_ui::votes::Tally::of(&self.tally)
+    }
+
+    /// How an account voted on it, if it did.
+    pub fn vote_of(&self, account: &str) -> Option<chainv4_ui::votes::Choice> {
+        self.votes.iter().find(|vote| vote.account == account).and_then(|vote| chainv4_ui::votes::Choice::of(&vote.vote))
     }
 
     /// Its kind's name: as the node lists it, or from the change's field when it does not.
@@ -1114,10 +1159,12 @@ pub fn change_kind(change: &Value) -> Option<String> {
     Some(field.parse::<chainv4::governance::ChangeKind>().map_or_else(|_| field.clone(), |kind| kind.name().to_string()))
 }
 
-/// One approval of a change, and the epoch it stops counting after.
+/// One vote on a change: who, which way, what it weighs, and the epoch it stops counting after.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct ChangeApproval {
+pub struct CastVote {
     pub account: String,
+    /// yes, no or abstain.
+    pub vote: String,
     pub weight: String,
     pub epoch: u64,
     pub counts_until: u64,
@@ -1142,10 +1189,15 @@ pub struct DecisionsPage {
     pub decisions: Vec<Decision>,
 }
 
-/// A decision: the approval that decided a change, where it landed, and the change.
+/// A decision: the vote that decided a change, where it landed, and the change.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Decision {
     pub version: u64,
+    /// The kind its receipt decided one of, and the kind's version it made.
+    #[serde(default)]
+    pub of: Option<String>,
+    #[serde(default)]
+    pub kind_version: Option<u64>,
     pub tx: String,
     pub block: String,
     pub height: u64,
@@ -1162,32 +1214,62 @@ pub struct Decision {
     pub change: Option<Value>,
 }
 
-/// GET /governance/weight/{address}: what an account's approval weighs now, beside what a change
-/// needs, and the changes it approved, one a kind at most.
+/// GET /governance/rejections: a page of rejections, newest first.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RejectionsPage {
+    /// The newest rejection's count: how many there were.
+    pub rejection: u64,
+    /// The oldest the node keeps.
+    pub from: u64,
+    pub rejections: Vec<Rejection>,
+}
+
+/// A rejection: the vote that left a change unable to pass, where it landed, and the change.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Rejection {
+    pub rejection: u64,
+    pub tx: String,
+    pub block: String,
+    pub height: u64,
+    pub timestamp: u64,
+    pub confirmations: u64,
+    #[serde(rename = "final", default)]
+    pub finalized: bool,
+    #[serde(default)]
+    pub sender: Option<String>,
+    /// The kind its receipt rejected one of, and the kind's version it was rejected at.
+    #[serde(default)]
+    pub of: Option<String>,
+    #[serde(default)]
+    pub kind_version: Option<u64>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub change: Option<Value>,
+}
+
+/// GET /governance/weight/{address}: what an account's vote weighs now, beside what a change
+/// needs, and its votes that still count.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GovernanceWeight {
     pub account: String,
     pub weight: String,
     pub needed: String,
     #[serde(default)]
-    pub approved: Vec<ApprovedChange>,
+    pub voted: Vec<VotedChange>,
 }
 
-/// A change an account approved, on its kind's ballot, at the kind's version.
+/// A vote an account cast, on its kind's ballot, at the kind's version.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct ApprovedChange {
+pub struct VotedChange {
     pub kind: String,
     pub version: u64,
-    /// The change itself: one field, named for what it changes.
-    #[serde(flatten)]
-    pub change: serde_json::Map<String, Value>,
-}
-
-impl ApprovedChange {
-    /// The change, as Tx::ApproveChange's JSON carries it: { kind: value }.
-    pub fn change(&self) -> Value {
-        Value::Object(self.change.clone())
-    }
+    /// yes, no or abstain.
+    pub vote: String,
+    #[serde(default)]
+    pub counts_until: u64,
+    /// The change: one field, named for what it changes.
+    pub change: Value,
 }
 
 /// The stream's reorganized event.

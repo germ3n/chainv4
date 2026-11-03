@@ -920,6 +920,7 @@ mod tests {
             node_stops: None,
             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
             lights: &mut lights,
+            dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
         };
         let mut returned = None;
         let mut draw = Some(draw);

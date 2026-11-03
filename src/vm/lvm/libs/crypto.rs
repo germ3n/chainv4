@@ -1,8 +1,8 @@
 use {
     super::address::LuaAddress,
     super::hash::LuaHash,
-    crate::vm::lvm::charge,
-    crate::vm::{Host, cost, crypto},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host, crypto},
     mlua::{Error, Lua, ObjectLike, Value},
     r#macro::document,
 };
@@ -36,35 +36,35 @@ fn whole(value: &Value, what: &str) -> mlua::Result<u64> {
 
 fn verify(lua: &Lua, (scheme, key, message, signature): (String, mlua::String, mlua::String, mlua::String)) -> mlua::Result<bool> {
     let message = message.as_bytes();
-    charge(lua, cost::VERIFY + message.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).verify + message.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 
     crypto::check_signature(&scheme, &key.as_bytes(), &message, &signature.as_bytes()).map_err(Error::runtime)
 }
 
 #[cfg(feature = "secp256k1")]
 fn recover(lua: &Lua, (digest, signature): (Value, mlua::String)) -> mlua::Result<Option<mlua::String>> {
-    charge(lua, cost::RECOVER)?;
+    charge(lua, costs(lua).recover)?;
     let digest: [u8; 32] = bytes(&digest, "the digest")?.try_into().map_err(|_| Error::runtime("the digest is 32 bytes"))?;
 
     crypto::recover_key(&digest, &signature.as_bytes()).map(|key| lua.create_string(key)).transpose()
 }
 
 fn address(lua: &Lua, (scheme, key): (String, mlua::String)) -> mlua::Result<LuaAddress> {
-    charge(lua, cost::KEY_ADDRESS)?;
+    charge(lua, costs(lua).key_address)?;
 
     crypto::key_address(&scheme, &key.as_bytes()).map(LuaAddress).map_err(Error::runtime)
 }
 
 fn digest(lua: &Lua, name: &'static str, data: mlua::String) -> mlua::Result<mlua::String> {
     let data = data.as_bytes();
-    charge(lua, cost::HASH + data.len() as u64 / cost::HASH_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).hash + data.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 
     lua.create_string(crypto::digest(name, &data).ok_or_else(|| Error::runtime(format!("{name} is not in this build")))?)
 }
 
 fn check_state(lua: &Lua, (root, column, key, value, proof): (Value, String, mlua::String, Option<mlua::String>, mlua::String)) -> mlua::Result<bool> {
     let proof = proof.as_bytes();
-    charge(lua, cost::CHECK_PROOF + cost::PROOF_SIBLING * (proof.len() as u64 / 32))?;
+    charge(lua, costs(lua).check_proof + costs(lua).proof_sibling * (proof.len() as u64 / 32))?;
     let hash = host(lua)?.chain_hash();
     let value = value.map(|value| value.as_bytes().to_vec());
 
@@ -73,7 +73,7 @@ fn check_state(lua: &Lua, (root, column, key, value, proof): (Value, String, mlu
 
 fn check_merkle(lua: &Lua, (root, data, index, count, path): (Value, mlua::String, Value, Value, mlua::String)) -> mlua::Result<bool> {
     let path = path.as_bytes();
-    charge(lua, cost::CHECK_PROOF + cost::PROOF_SIBLING * (path.len() as u64 / 32))?;
+    charge(lua, costs(lua).check_proof + costs(lua).proof_sibling * (path.len() as u64 / 32))?;
     let hash = host(lua)?.chain_hash();
 
     Ok(crypto::check_merkle(hash, &bytes(&root, "the root")?, &data.as_bytes(), whole(&index, "the index")?, whole(&count, "the count")?, &path))

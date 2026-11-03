@@ -39,6 +39,8 @@ fn easy_pow() -> Genesis {
             target_block_ms: 1_000,
             initial_difficulty: 1,
             min_difficulty: 1,
+            tuning: None,
+            window: None,
         }),
         reward: Reward {
             initial: u256::new(5),
@@ -834,7 +836,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
     // Blocks two deep can no longer be undone, so the pool credits its miner soon. Difficulty
     // stays at a few thousand: shares never come easier than blocks, and at easy_pow's 1 a
     // worker's thread sends a share every few hashes, a flood no pool sees.
-    let pow = PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 4_000, min_difficulty: 4_000 };
+    let pow = PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 4_000, min_difficulty: 4_000, tuning: None, window: None };
     let genesis = Genesis { max_reorg_depth: 2, consensus: ConsensusConfig::ProofOfWork(pow), ..easy_pow() };
     let (link, _net) = NetLink::pair();
     let mut node = Node::new(Arc::new(MemoryDb::default()), &genesis, None, link)
@@ -1632,6 +1634,7 @@ fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
             members: vec![dev.public().address()],
             threshold: 1,
             approval_epochs: 64,
+            quorum_permille: 0,
         }),
         ..Genesis::dev_authority(dev.public())
     };
@@ -1663,7 +1666,7 @@ fn a_node_switches_its_producer_when_governance_changes_the_consensus() {
 
     assert_eq!(node.chain().tip().difficulty, 0);
     assert_eq!(node.chain().tip_work(), u256::new(3), "authority blocks weigh 1");
-    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
+    node.submit(SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Consensus(staked.clone()) }, 0, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
 
     for slot in 4..=30 {
         node.step(SLOT * slot).unwrap();
@@ -1842,7 +1845,7 @@ fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
     let dev = DevAuthority::dev_keypair();
     let genesis = Genesis {
         fees: None,
-        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address()], threshold: 1, approval_epochs: 64 }),
+        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address()], threshold: 1, approval_epochs: 64, quorum_permille: 0 }),
         ..Genesis::dev_authority(dev.public())
     };
     let (mut node, _net) = producing_on(&genesis);
@@ -1851,9 +1854,9 @@ fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
     let behind = Upgrade { least: ours, from: 3 };
     node.step(SLOT).unwrap();
     // One this version already meets, which stops nothing, then one it does not.
-    node.submit(SignedTx::sign(Tx::ApproveChange { version: 0, change: Change::Upgrade(behind) }, 0, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
+    node.submit(SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Upgrade(behind) }, 0, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
     node.step(SLOT * 2).unwrap();
-    node.submit(SignedTx::sign(Tx::ApproveChange { version: 1, change: Change::Upgrade(upgrade) }, 1, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
+    node.submit(SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 1, change: Change::Upgrade(upgrade) }, 1, FeeOffer::NONE, &dev, &node.chain().genesis())).unwrap();
 
     for slot in 3..=4 {
         node.step(SLOT * slot).unwrap();

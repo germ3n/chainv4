@@ -257,6 +257,22 @@ pub struct EvmBlock {
     pub names: Option<crate::registry::names::NamesConfig>,
     #[document(summary = "The chain's hash, which the crypto precompile checks proofs by.")]
     pub hash: crate::structs::hash::HashType,
+    #[document(summary = "What the block's contracts run under: the EVM's spec, which hard fork's opcodes and gas it runs, and what the precompiles cost.")]
+    pub vm: crate::params::vm::VmRules,
+}
+
+#[document(
+    summary = "The revm spec a chain's EVM spec runs as.",
+    category = "VM",
+    see_also = "EvmSpec",
+)]
+pub fn spec_id(spec: crate::params::vm::EvmSpec) -> SpecId {
+    match spec {
+        crate::params::vm::EvmSpec::Shanghai => SpecId::SHANGHAI,
+        crate::params::vm::EvmSpec::Cancun => SpecId::CANCUN,
+        crate::params::vm::EvmSpec::Prague => SpecId::PRAGUE,
+        crate::params::vm::EvmSpec::Osaka => SpecId::OSAKA,
+    }
 }
 
 #[document(
@@ -334,7 +350,7 @@ pub fn run(
             })
             .collect(),
     );
-    let mut cfg = CfgEnv::new_with_spec(SpecId::PRAGUE);
+    let mut cfg = CfgEnv::new_with_spec(spec_id(block.vm.evm_spec));
     cfg.chain_id = block.chain_id;
     cfg.disable_nonce_check = true;
     cfg.disable_fee_charge = true;
@@ -376,6 +392,7 @@ pub fn run(
     let names = block.names.clone().map(|config| names::NamesAt {
         state,
         config,
+        costs: block.vm.costs,
         now: block.timestamp,
         fault: Default::default(),
     });
@@ -387,6 +404,7 @@ pub fn run(
             time: block.timestamp,
             producer: block.producer,
             fuel_per_gas: bridge.fuel_per_gas,
+            vm: block.vm,
         },
         memory: usize::try_from(memory).unwrap_or(usize::MAX),
         caller,
@@ -401,7 +419,7 @@ pub fn run(
         #[cfg(feature = "names")]
         names,
         native,
-        crypto::CryptoAt { hash: block.hash },
+        crypto::CryptoAt { hash: block.hash, costs: block.vm.costs },
     ));
 
     let transacted = evm.inspect_tx(tx);

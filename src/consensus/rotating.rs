@@ -6,7 +6,7 @@
 //! checks the block: a node from its state, a light client from the voters it proved.
 
 use {
-    super::{Consensus, ConsensusError, MAX_DRIFT_MS, Producer, seal_bytes},
+    super::{Consensus, ConsensusError, Producer, seal_bytes},
     crate::crypto::keypair::Keypair,
     crate::registry::validators::Member,
     crate::structs::address::Address,
@@ -97,7 +97,7 @@ impl Consensus for Rotating {
             return Err(ConsensusError::Early);
         }
 
-        if header.timestamp > now + MAX_DRIFT_MS {
+        if header.timestamp > now + super::drift_ms(self.slot_ms) {
             return Err(ConsensusError::FromTheFuture);
         }
 
@@ -272,7 +272,7 @@ mod tests {
         let wrong_offset = BlockHeader { difficulty: 1, ..good.clone() };
         let other = [key(1), key(2), key(3)].into_iter().find(|keypair| keypair.public() == sorted[0].voter).unwrap();
         let forged = Seal::Signature(other.sign(&seal_bytes(&good)));
-        let future = BlockHeader { timestamp: 10_000 + SLOT + MAX_DRIFT_MS + 1, ..good.clone() };
+        let future = BlockHeader { timestamp: 10_000 + SLOT + crate::consensus::MAX_DRIFT_MS + 1, ..good.clone() };
 
         assert_eq!(rules.check(&stranger, &stranger_seal, &[parent()], &signers, 12_000), Err(ConsensusError::WrongProducer));
         assert!(matches!(rules.check(&wrong_offset, &seal, &[parent()], &signers, 12_000), Err(ConsensusError::WrongDifficulty { .. })));

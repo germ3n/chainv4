@@ -36,6 +36,7 @@ fn federation(secrets: &[u8], threshold: u32) -> Federation {
         chain_depth: 20,
         evm_depth: 12,
         bitcoin_depth: 2,
+        btc: None,
     }
 }
 
@@ -612,6 +613,31 @@ fn a_release_pays_at_least_the_floor_for_its_size_and_at_most_the_cap() {
     btc.propose(&release(least).base(), &[number(id)]).unwrap();
 
     assert_eq!(btc.call("fee_limits", &[]).unwrap(), [TxCallArgumentType::I64(CAP as i64), TxCallArgumentType::I64(FLOOR as i64)]);
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn the_gateway_goes_by_the_fee_policy_the_federation_names_once_governance_names_one() {
+    use crate::registry::federation::BtcPolicy;
+
+    let mut btc = Btc::new();
+    let deposit = btc.deposited(100_000);
+    let id = btc.withdrawal(20_000);
+    assert_eq!(btc.call("fee_limits", &[]).unwrap(), [TxCallArgumentType::I64(CAP as i64), TxCallArgumentType::I64(FLOOR as i64)], "what it was set up with");
+
+    // The same signers, with a policy of their own: a higher floor and a lower cap.
+    let policy = BtcPolicy { fee_cap: 8_000, fee_floor: 10, grace_ms: 1_000, cancel_after_ms: 60_000, fee_part: 4 };
+    let next = DecidedFederation { version: 0, federation: Federation { btc: Some(policy), ..federation(&[21, 22, 23], 2) } };
+    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+
+    assert_eq!(btc.call("fee_limits", &[]).unwrap(), [TxCallArgumentType::I64(8_000), TxCallArgumentType::I64(10)]);
+    let release = |fee: u64| spending(&[deposit], vec![pays_bob(20_000 - fee), btc.change(80_000)]);
+    assert!(btc.propose(&release(8_001).base(), &[number(id)]).unwrap_err().contains("past the cap"), "the federation's cap, not the setup's");
+    assert!(btc.propose(&release(2 * 300).base(), &[number(id)]).unwrap_err().contains("under the floor"), "the federation's floor, not the setup's");
+
+    // A withdrawal that names no most fee loses at most the policy's share, a quarter here.
+    let named = btc.withdrawal(40_000);
+    assert_eq!(btc.call("withdrawal", &[number(named)]).unwrap()[4], TxCallArgumentType::I64(10_000));
 }
 
 #[cfg(feature = "bridge")]

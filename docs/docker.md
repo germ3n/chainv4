@@ -275,7 +275,7 @@ docker/pow.sh logs                # on the VPS: follow the node's log
    **Governance** (`--governance`, `GOVERNANCE`), under `ffg` or `authority`: `council` (the
    default) makes your account its one member, so you alone approve changes, such as new
    [bootnodes](governance.md#bootnodes), with `chainv4 send --key ~/.chainv4-pow/owner.key
-   approve-change …`; `electorate` lets the validators approve by stake; `none` fixes the chain
+   vote-change --vote yes …`; `electorate` lets the validators approve by stake; `none` fixes the chain
    as genesis says.
 2. **`push`** copies the repository by rsync, logging in with `-i KEY` and `-p PORT` when given
    (or `SSH_KEY` and `SSH_PORT`), without build output, `.git`, databases or keys, to

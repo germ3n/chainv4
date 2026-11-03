@@ -3,8 +3,8 @@ use {
     super::address::LuaAddress,
     super::integers::exact_as,
     crate::structs::u256::u256,
-    crate::vm::lvm::charge,
-    crate::vm::{Host, VmError, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host, VmError},
     mlua::{AnyUserData, Error, Lua, Value},
     r#macro::document,
 };
@@ -23,8 +23,8 @@ fn call(lua: &Lua, (to, input, value): (AnyUserData, mlua::String, Option<Value>
     };
     let host = host(lua)?;
     let input = input.as_bytes().to_vec();
-    let transfer = if value == u256::ZERO { 0 } else { cost::TRANSFER };
-    charge(lua, cost::CALL + transfer + input.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+    let transfer = if value == u256::ZERO { 0 } else { costs(lua).transfer };
+    charge(lua, costs(lua).call + transfer + input.len() as u64 / costs(lua).copy_bytes_per_fuel)?;
     let fuel = lua.get_fuel()?;
     let outcome = host.evm_call(&to.0, &input, value, fuel);
     lua.set_fuel(fuel.saturating_sub(outcome.fuel_used))?;
@@ -42,11 +42,11 @@ fn call(lua: &Lua, (to, input, value): (AnyUserData, mlua::String, Option<Value>
 #[cfg(feature = "evm")]
 mod abi {
     use {
-        super::{charge, host, refused},
+        super::{charge, costs, host, refused},
         crate::abi::{AbiType, AbiValue, decode_values, encode_values, parse_signature},
         crate::vm::evm::{abi_value, native_from_abi},
         crate::vm::lvm::value,
-        crate::vm::{Host, VmError, cost},
+        crate::vm::{Host, VmError},
         mlua::{Error, Lua, MultiValue, Table, Value},
     };
 
@@ -62,7 +62,7 @@ mod abi {
 
     pub fn encode(lua: &Lua, (signature, args): (String, MultiValue)) -> mlua::Result<mlua::String> {
         let host = host(lua)?;
-        charge(lua, cost::ABI + signature.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+        charge(lua, costs(lua).abi + signature.len() as u64 / costs(lua).copy_bytes_per_fuel)?;
         let (selector, types) = parse_signature(&signature).map_err(Error::runtime)?;
 
         if args.len() != types.len() {
@@ -71,7 +71,7 @@ mod abi {
 
         let values = types.iter().zip(args).map(|(ty, arg)| to_abi(&host, ty, arg, 0)).collect::<mlua::Result<Vec<_>>>()?;
         let encoded = encode_values(&types, &values).map_err(Error::runtime)?;
-        charge(lua, encoded.len() as u64 / cost::COPY_BYTES_PER_FUEL)?;
+        charge(lua, encoded.len() as u64 / costs(lua).copy_bytes_per_fuel)?;
 
         lua.create_string([selector.map(Vec::from).unwrap_or_default(), encoded].concat())
     }
@@ -79,7 +79,7 @@ mod abi {
     pub fn decode(lua: &Lua, (types, data): (String, mlua::String)) -> mlua::Result<MultiValue> {
         let host = host(lua)?;
         let data = data.as_bytes().to_vec();
-        charge(lua, cost::ABI + (types.len() + data.len()) as u64 / cost::COPY_BYTES_PER_FUEL)?;
+        charge(lua, costs(lua).abi + (types.len() + data.len()) as u64 / costs(lua).copy_bytes_per_fuel)?;
         // A bare list, uint256,bool, reads as one in parentheses.
         let text = match types.trim().contains('(') {
             true => types.clone(),

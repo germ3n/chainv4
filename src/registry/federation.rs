@@ -41,9 +41,52 @@ pub struct Federation {
     pub evm_depth: u64,
     #[document(summary = "How many confirmations a Bitcoin deposit needs before it mints.")]
     pub bitcoin_depth: u32,
+    #[document(summary = "What the Bitcoin gateway lets releases pay and how its federation works, or None for what each gateway was set up with. Governance changes it with the federation, and the gateway reads it as it runs.")]
+    pub btc: Option<BtcPolicy>,
 }
 
 impl Hashable for Federation {}
+
+#[document(
+    summary = "The federation's Bitcoin policy, which the Bitcoin gateway and its signers go by from the block a change of federation decides it: the most fee a release may pay, the least it pays a virtual byte, how long a retired federation's deposit addresses stay open, how long a release waits before its signers vote it down, and the share of a withdrawal its fee may take unless the withdrawal says.",
+    category = "Bridges",
+    see_also = "Federation::btc, Change::Federation",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct BtcPolicy {
+    #[document(summary = "The most fee a release may pay, in satoshis. It must pay the smallest release at the floor.")]
+    pub fee_cap: u64,
+    #[document(summary = "The least a release pays a virtual byte, in satoshis. At least 1.")]
+    pub fee_floor: u64,
+    #[document(summary = "How long a retired federation's deposit addresses stay open, in milliseconds.")]
+    pub grace_ms: u64,
+    #[document(summary = "How long a release waits for Bitcoin before the federation's signers vote to cancel it, in milliseconds: what each signer once chose for itself with --cancel-after.")]
+    pub cancel_after_ms: u64,
+    #[document(summary = "A withdrawal that names no most fee may lose at most its sats divided by this to its release's fee: 10, a tenth, by default. At least 1.")]
+    pub fee_part: u64,
+}
+
+impl Hashable for BtcPolicy {}
+
+impl BtcPolicy {
+    #[document(parent = "BtcPolicy", summary = "The smallest release there is, in virtual bytes: one input under 20 of 20 signers, paying a withdrawal and change. The cap must pay it at the floor.")]
+    pub const ONE_INPUT_VBYTES: u64 = 710;
+
+    #[document(parent = "BtcPolicy", summary = "Why no gateway could go by it: a floor of 0, a cap that pays no release at the floor, no fee share, or no wait before a cancel.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.fee_floor == 0 {
+            Some("btc.fee_floor is at least 1 satoshi a virtual byte")
+        } else if self.fee_cap < self.fee_floor.saturating_mul(BtcPolicy::ONE_INPUT_VBYTES) {
+            Some("btc.fee_cap is under what the floor asks of the smallest release: it would allow none")
+        } else if self.fee_part == 0 {
+            Some("btc.fee_part is at least 1")
+        } else if self.cancel_after_ms == 0 {
+            Some("btc.cancel_after_ms is at least 1")
+        } else {
+            None
+        }
+    }
+}
 
 impl Federation {
     #[document(
@@ -75,7 +118,7 @@ impl Federation {
             return Some("a federation waits at least one block on each chain");
         }
 
-        None
+        self.btc.as_ref().and_then(BtcPolicy::problem)
     }
 }
 
@@ -104,7 +147,8 @@ mod tests {
 
     #[test]
     fn a_federation_holds_together_or_says_why_not() {
-        let good = Federation { signers: vec![key(1), key(2), key(3)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6 };
+        let good = Federation { signers: vec![key(1), key(2), key(3)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6, btc: None };
+        let policy = BtcPolicy { fee_cap: 50_000, fee_floor: 2, grace_ms: 3_600_000, cancel_after_ms: 3_600_000, fee_part: 10 };
 
         assert_eq!(good.problem(), None);
 
@@ -116,6 +160,9 @@ mod tests {
             (Federation { threshold: 0, ..good.clone() }, "threshold"),
             (Federation { threshold: 4, ..good.clone() }, "threshold"),
             (Federation { bitcoin_depth: 0, ..good.clone() }, "at least one block"),
+            (Federation { btc: Some(BtcPolicy { fee_floor: 0, ..policy }), ..good.clone() }, "fee_floor"),
+            (Federation { btc: Some(BtcPolicy { fee_cap: 1_000, ..policy }), ..good.clone() }, "allow none"),
+            (Federation { btc: Some(BtcPolicy { fee_part: 0, ..policy }), ..good.clone() }, "fee_part"),
         ] {
             assert!(bad.problem().is_some_and(|problem| problem.contains(why)), "{bad:?}");
         }

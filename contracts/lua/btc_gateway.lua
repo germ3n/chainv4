@@ -248,6 +248,36 @@ local function relayed(script)
     return first ~= nil and first >= 0x51 and first <= 0x60 and size >= 4 and size <= 42 and string.byte(script, 2) == size - 2
 end
 
+-- What the federation in force names of its Bitcoin policy, or what this gateway was set up with
+-- while it names none: governance changes it with the federation, and it holds from the block
+-- after a decision.
+local function policy(name, stored)
+    local fed = federation.get()
+    local btc = fed and fed.btc
+
+    if btc ~= nil then
+        return btc[name]
+    end
+
+    return stored and tonumber(storage.get(stored))
+end
+
+local function fee_cap()
+    return policy("fee_cap", "fee_cap")
+end
+
+local function fee_floor()
+    return policy("fee_floor", "fee_floor")
+end
+
+local function grace_ms()
+    return policy("grace_ms", "grace")
+end
+
+local function fee_part()
+    return policy("fee_part", nil) or DEFAULT_FEE_PART
+end
+
 -- The federations this gateway has seen, by version: their threshold and keys, and when the next
 -- took over, after which their deposit addresses stay open for the grace period.
 local function remember()
@@ -366,7 +396,8 @@ end
 -- The relay, started and synced to Bitcoin's tip, the wBTC token's template
 -- (contracts/lua/wrapped.lua), the most fee a release may pay, in satoshis, the least it may pay a
 -- virtual byte, and how long an old federation's deposit addresses stay open, in milliseconds; set
--- once. A chain restarted from the identical genesis has the same id and this gateway the same
+-- once, and what holds while the federation names no Bitcoin policy of its own, which governance
+-- may set, and then holds instead. A chain restarted from the identical genesis has the same id and this gateway the same
 -- address, so what is at or under the relay's tip now, before this gateway existed, is never a
 -- deposit to it.
 function M.setup(relay_address, template, fee_cap, fee_floor, grace_ms)
@@ -425,7 +456,7 @@ function M.deposit(block, raw, index, path, coinbase, coinbase_path, vout, recip
     version = tostring(whole(version or fed.version, "the version"))
     local threshold, keys, retired = fed_at(version)
 
-    if retired and ctx.time > retired + tonumber(storage.get("grace")) then
+    if retired and ctx.time > retired + grace_ms() then
         error("that federation's deposit addresses closed")
     end
 
@@ -458,7 +489,7 @@ end
 -- What a withdrawal is at least: enough to pay a release of its own at the floor and leave what
 -- reaches its script.
 local function least_withdrawal()
-    return math.max(LEAST, tonumber(storage.get("fee_floor")) * ONE_INPUT_VBYTES + LEAST_PAYOUT)
+    return math.max(LEAST, fee_floor() * ONE_INPUT_VBYTES + LEAST_PAYOUT)
 end
 
 -- The most a withdrawal of this much may say it loses to fees, checked.
@@ -481,7 +512,7 @@ function M.withdraw(script, sats, most_fee)
         error("a withdrawal pays at least " .. least_withdrawal() .. " satoshis")
     end
 
-    most_fee = fee_limit(most_fee or math.floor(sats / DEFAULT_FEE_PART), sats)
+    most_fee = fee_limit(most_fee or math.floor(sats / fee_part()), sats)
 
     if not relayed(script) then
         error("an output script Bitcoin's nodes relay: P2PKH, P2SH or a witness program")
@@ -631,7 +662,7 @@ function M.propose(raw, signature, ...)
 
     local fee = spent - paid
 
-    if fee <= 0 or fee > tonumber(storage.get("fee_cap")) then
+    if fee <= 0 or fee > fee_cap() then
         error("a fee of nothing, or past the cap")
     end
 
@@ -687,8 +718,8 @@ function M.propose(raw, signature, ...)
         error("a release larger than Bitcoin's nodes relay: pay fewer, from fewer")
     end
 
-    if fee < vbytes * tonumber(storage.get("fee_floor")) then
-        error("a fee under the floor: this release pays at least " .. (vbytes * tonumber(storage.get("fee_floor"))))
+    if fee < vbytes * fee_floor() then
+        error("a fee under the floor: this release pays at least " .. (vbytes * fee_floor()))
     end
 
     local id = count("proposal_count") + 1
@@ -1018,9 +1049,10 @@ function M.utxo_of(key)
     return tonumber(sats), tonumber(version), recipient, utxos:get(key .. ":state"), witness_script(version, recipient), threshold
 end
 
--- The most fee a release may pay, in satoshis, and the least it may pay a virtual byte.
+-- The most fee a release may pay, in satoshis, and the least it may pay a virtual byte: the
+-- federation's policy, or what the gateway was set up with.
 function M.fee_limits()
-    return tonumber(storage.get("fee_cap")), tonumber(storage.get("fee_floor"))
+    return fee_cap(), fee_floor()
 end
 
 -- A withdrawal: its output script, the satoshis it burned, its state: queued, proposed or paid; who

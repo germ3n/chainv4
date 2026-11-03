@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // A decentralized exchange for chainv4's EVM, in the manner of Uniswap V2, written afresh:
-// constant-product pairs of ERC-20s, each pair its own share token, a 0.3% fee to whoever
-// provides, a factory that opens one pair for any two tokens, and a router that adds, removes and
+// constant-product pairs of ERC-20s, each pair its own share token, a fee to whoever provides, the
+// chain's own as governance sets it (0.3% by default), read through the native precompile; a
+// factory that opens one pair for any two tokens, and a router that adds, removes and
 // trades through a path of pairs, the chain's coin wrapped as WDEV. contracts/lua/dex.lua is the
 // same for native tokens. Built with solc 0.8 for Paris:
 //
@@ -10,6 +11,19 @@
 // DexFactory.bin, DexRouter.bin and WDEV.bin beside it are what that writes; DexPair is created
 // by the factory, from its own code. docs/dex.md walks through them.
 pragma solidity ^0.8.24;
+
+/// The chain's native precompile, which answers the DEX's fee as governance set it, in hundredths
+/// of a percent: 30 is 0.3%.
+interface ChainSettings {
+    function dexFeeBps() external view returns (uint256);
+}
+
+address constant NATIVE_PRECOMPILE = 0x0000000000000000000000000000000000004e43;
+
+/// The fee every trade of this chain's DEXes pays, as the chain says it now.
+function dexFee() view returns (uint256) {
+    return ChainSettings(NATIVE_PRECOMPILE).dexFeeBps();
+}
 
 interface IERC20 {
     function balanceOf(address owner) external view returns (uint256);
@@ -193,9 +207,12 @@ contract DexPair is ERC20 {
         uint256 amount0In = balance0 > held0 - amount0Out ? balance0 - (held0 - amount0Out) : 0;
         uint256 amount1In = balance1 > held1 - amount1Out ? balance1 - (held1 - amount1Out) : 0;
         require(amount0In > 0 || amount1In > 0, "nothing came in");
-        uint256 adjusted0 = balance0 * 1000 - amount0In * 3;
-        uint256 adjusted1 = balance1 * 1000 - amount1In * 3;
-        require(adjusted0 * adjusted1 >= uint256(held0) * held1 * 1000 ** 2, "that trade takes more than it gives");
+        {
+            // The fee in hundredths of a percent, kept in the pair: in a block of its own, as the
+            // stack holds no more.
+            uint256 fee = dexFee();
+            require((balance0 * 10000 - amount0In * fee) * (balance1 * 10000 - amount1In * fee) >= uint256(held0) * held1 * 10000 ** 2, "that trade takes more than it gives");
+        }
 
         _update(balance0, balance1);
         emit Swap(msg.sender, amount0In, amount1In, amount0Out, amount1Out, to);
@@ -268,11 +285,11 @@ contract DexRouter {
     }
 
     // What a trade of amountIn pays out of a pair.
-    function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) public pure returns (uint256) {
+    function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) public view returns (uint256) {
         require(amountIn > 0, "trade more than nothing");
         require(reserveIn > 0 && reserveOut > 0, "the pair holds nothing to trade");
-        uint256 withFee = amountIn * 997;
-        return withFee * reserveOut / (reserveIn * 1000 + withFee);
+        uint256 withFee = amountIn * (10000 - dexFee());
+        return withFee * reserveOut / (reserveIn * 10000 + withFee);
     }
 
     function getReserves(address a, address b) public view returns (uint256 reserveA, uint256 reserveB) {

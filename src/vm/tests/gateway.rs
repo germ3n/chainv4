@@ -51,6 +51,7 @@ impl Bridge {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         };
         let mut world = World {
             vm: Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_federation(Some(federation)).with_chain_id(here)),
@@ -661,6 +662,7 @@ fn a_refund_begun_under_one_federation_takes_the_threshold_of_the_next() {
         chain_depth: 20,
         evm_depth: 12,
         bitcoin_depth: 6,
+        btc: None,
     };
     bridge.world.vm = Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_federation(Some(next)).with_chain_id(HERE));
     assert!(bridge.attest_refund(&left, &alice.to_abi(), 2).unwrap_err().contains("not signed by a signer"));

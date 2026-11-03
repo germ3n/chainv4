@@ -44,6 +44,7 @@ impl FfgConfig {
                 bond: coins(10_000),
             }],
             leak: None,
+            slash_permille: None,
         }
     }
 
@@ -55,6 +56,7 @@ impl FfgConfig {
             withdrawal_delay: self.withdrawal_delay,
             reporter_divisor: self.reporter_divisor,
             max_validators: self.max_validators,
+            slash_permille: self.slash_permille.unwrap_or(1000),
         }
     }
 
@@ -66,6 +68,10 @@ impl FfgConfig {
 
         if self.activation_delay == 0 {
             return Some("activation_delay must be at least 1");
+        }
+
+        if self.slash_permille.is_some_and(|permille| permille == 0 || permille > 1000) {
+            return Some("slash_permille is 1 to 1000: a slash takes something, and at most the whole bond");
         }
 
         if self.reporter_divisor == 0 {

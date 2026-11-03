@@ -29,6 +29,8 @@ pub struct Staking {
     pub reporter_divisor: u64,
     #[document(summary = "The most validators registered at once, active or leaving.")]
     pub max_validators: u32,
+    #[document(summary = "How much of a cheater's bond a slash takes, in thousandths: 1000, the whole bond, unless finality says less.")]
+    pub slash_permille: u32,
 }
 
 #[document(
@@ -261,7 +263,7 @@ impl<'a> Validators<'a> {
     #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
-        summary = "Takes a cheating validator's whole bond: the reporter gets bond / reporter_divisor, and the rest is burned. The validator stops voting as an unbond would, and can be withdrawn, for nothing, later. It also leaves the sets already fixed for the epochs from two after this one on: this epoch's and the next one's stay as they are, so the next checkpoint's light update, which re-states the sets ahead, reaches light clients by the usual path.",
+        summary = "Takes slash_permille thousandths of a cheating validator's bond, all of it by default: the reporter gets what is taken / reporter_divisor, and the rest of that is burned; what is left the validator withdraws later. The validator stops voting as an unbond would, and can be withdrawn, for nothing, later. It also leaves the sets already fixed for the epochs from two after this one on: this epoch's and the next one's stay as they are, so the next checkpoint's light update, which re-states the sets ahead, reaches light clients by the usual path.",
         returns = "What the reporter got.",
         panics = "NotBonded, AlreadySlashed.",
     )]
@@ -272,11 +274,15 @@ impl<'a> Validators<'a> {
             return Err(RegistryError::AlreadySlashed);
         }
 
-        let reward = record.bond / u256::from(staking.reporter_divisor.max(1));
-        // The reporter's share goes on; the rest of the bond is gone.
-        crate::registry::supply::Supply::burn(self.state, record.bond - reward)?;
+        let taken = match staking.slash_permille {
+            1000.. => record.bond,
+            permille => record.bond.saturating_mul(u256::from(permille)) / u256::from(1000u64),
+        };
+        let reward = taken / u256::from(staking.reporter_divisor.max(1));
+        // The reporter's share goes on; the rest of what is taken is gone.
+        crate::registry::supply::Supply::burn(self.state, taken - reward)?;
         let until = epoch + staking.activation_delay + 1;
-        record.bond = u256::ZERO;
+        record.bond -= taken;
         record.slashed = true;
         record.active_until = Some(record.active_until.map_or(until, |current| current.min(until)));
         record.withdrawable_from = Some(record.active_until.expect("set above") + staking.withdrawal_delay);
@@ -559,6 +565,7 @@ mod tests {
         withdrawal_delay: 4,
         reporter_divisor: 4,
         max_validators: 2,
+        slash_permille: 1000,
     };
     const ALICE: Address = Address::Ed25519([1; 32]);
     const BOB: Address = Address::Ed25519([2; 32]);
@@ -608,6 +615,24 @@ mod tests {
         validators.bond(&ALICE, &voter(2), u256::new(100), 0, &STAKING).unwrap();
         assert_eq!(validators.bond(&ALICE, &voter(3), u256::new(100), 0, &STAKING), Err(RegistryError::TooManyValidators));
         assert_eq!(validators.bond(&BOB, &voter(3), u256::new(100), 0, &STAKING).unwrap_err(), RegistryError::TooManyValidators);
+    }
+
+    #[test]
+    fn a_slash_takes_its_share_of_the_bond_and_leaves_the_rest_to_withdraw() {
+        let state = state();
+        let validators = Validators::new(&state);
+        let staking = Staking { slash_permille: 250, reporter_divisor: 5, ..STAKING };
+        Accounts::new(&state).credit(&ALICE, u256::new(1_000)).unwrap();
+        validators.bond(&ALICE, &voter(1), u256::new(800), 0, &staking).unwrap();
+        let reporter = Address::Ed25519([9; 32]);
+
+        // A quarter of 800 is taken: a fifth of that to the reporter, the rest burned.
+        assert_eq!(validators.slash(&reporter, &voter(1), 0, &staking), Ok(u256::new(40)));
+        assert_eq!(Accounts::new(&state).get(&reporter).unwrap().balance, u256::new(40));
+
+        let record = validators.get(&voter(1)).unwrap().unwrap();
+        assert_eq!((record.bond, record.slashed), (u256::new(600), true));
+        assert_eq!(validators.slash(&reporter, &voter(1), 0, &staking), Err(RegistryError::AlreadySlashed));
     }
 
     #[test]

@@ -62,7 +62,7 @@ impl Finality for Depth {
         self.finalized
     }
 
-    fn apply(&self, _state: &Arc<State>, block: &Block) -> Result<(), ImportError> {
+    fn apply(&self, _state: &Arc<State>, block: &Block, _rewards: crate::chain::VoteRewardSource) -> Result<(), ImportError> {
         match block.proofs.is_empty() {
             true => Ok(()),
             false => Err(ImportError::Invalid(BlockError::Proof("this chain's finality takes no proofs".to_string()))),

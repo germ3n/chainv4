@@ -98,11 +98,15 @@ pub enum RegistryError {
     NoApproval,
     #[document(summary = "The voting key is not one of the decided signers.")]
     UnknownSigner,
-    #[document(summary = "A change approved or withdrawn by an account governance does not let approve.")]
+    #[document(summary = "A change voted on by an account governance does not let vote.")]
     NotGoverning,
+    #[document(summary = "A vote cleared on a change the account has no vote on that still counts.")]
+    NoVote,
+    #[document(summary = "A vote on a change rejected already at its kind's version: a change of the kind must be decided before the same one comes back.")]
+    RejectedChange,
     #[document(summary = "A directory set or handed on by an account that is not the directory's admin, or on a chain with none.")]
     NotDirectoryAdmin,
-    #[document(summary = "A change approved or withdrawn for an older version than the consensus decided last; the decided version.")]
+    #[document(summary = "A vote on a change for an older version than its kind's; the kind's version.")]
     StaleChange(u64),
     #[document(summary = "A change that does not fit the chain, and why: a consensus that needs another finality, or settings no chain could run.")]
     BadChange(&'static str),
@@ -166,9 +170,11 @@ impl fmt::Display for RegistryError {
             RegistryError::SameSigners => write!(f, "those are the signers already"),
             RegistryError::NoApproval => write!(f, "no approval of this signer's counts to withdraw"),
             RegistryError::UnknownSigner => write!(f, "not one of the decided signers"),
-            RegistryError::NotGoverning => write!(f, "only an account governance lets approve may approve or withdraw a change"),
+            RegistryError::NotGoverning => write!(f, "only an account governance lets vote may vote on a change"),
+            RegistryError::NoVote => write!(f, "no vote of this account's on that change counts to clear"),
+            RegistryError::RejectedChange => write!(f, "that change was rejected; it comes back only after a change of its kind is decided"),
             RegistryError::NotDirectoryAdmin => write!(f, "only the directory's admin may set the directory or hand the role on, and this chain may have none"),
-            RegistryError::StaleChange(version) => write!(f, "the consensus changed since; the decided version is {version}"),
+            RegistryError::StaleChange(version) => write!(f, "a change of this kind was decided since; the decided version is {version}"),
             RegistryError::BadChange(why) => write!(f, "{why}"),
             RegistryError::SameChange => write!(f, "that change was decided already"),
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),

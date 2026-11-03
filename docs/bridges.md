@@ -105,7 +105,7 @@ transaction each, with `attest`:
 chainv4 bridge deploy                                     # the gateway here, with its templates
 chainv4 bridge deploy-evm --gateway contract:0x… --eth-rpc URL --evm-key k.key    # Gateway.sol under the federation in force
 chainv4 bridge peer 0x<Gateway.sol> --gateway contract:0x… --eth-rpc URL --evm-key k.key
-chainv4 send --key member.key approve-change --directory '{"gateway":"contract:0x…","evm_gateways":[{"chain_id":11155111,"gateway":"0x…"}],…}'
+chainv4 send --key member.key vote-change --vote yes --directory '{"gateway":"contract:0x…","evm_gateways":[{"chain_id":11155111,"gateway":"0x…"}],…}'
 ```
 
 `deploy-evm` reads the federation from `GET /status`, so governance names one first. `peer` makes
@@ -275,8 +275,17 @@ Bitcoin's nodes do not relay one.
 ### The gateway
 
 `contracts/lua/btc_gateway.lua` is set up once by its owner, on a relay, with wBTC's template
-(`wrapped.lua`, cloned as Wrapped Bitcoin), the most fee a release may pay, and how long an old
-federation's deposit addresses stay open.
+(`wrapped.lua`, cloned as Wrapped Bitcoin), the most fee a release may pay, the least a virtual
+byte, and how long an old federation's deposit addresses stay open.
+
+**The federation's Bitcoin policy.** Once the federation names one, its `btc`
+(`fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms` and `fee_part`, the share of a withdrawal
+its fee may take unless it says, 10 for a tenth), the gateway goes by that in place of what it was
+set up with, from the block after a change of federation decides it: `fee_limits`, the least
+withdrawal, a release's cap and floor, and a retired federation's grace all read it as they run.
+A spike in Bitcoin's fees is then a governance vote away, with no new gateway and no sweep. The
+signers' `--cancel-after` gives way to `cancel_after_ms` too, so every signer waits alike rather
+than the threshold-th most patient one deciding.
 
 **Depositing.** Every address here has its own deposit address on Bitcoin, under the federation in
 force, for this chain and this gateway, a P2WSH any wallet pays:

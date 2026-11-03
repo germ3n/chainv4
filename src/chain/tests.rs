@@ -728,6 +728,8 @@ fn pow_genesis() -> Genesis {
             target_block_ms: 1_000,
             initial_difficulty: 1,
             min_difficulty: 1,
+            tuning: None,
+            window: None,
         }),
         reward: Reward {
             initial: u256::new(100),
@@ -2087,6 +2089,7 @@ mod names;
 mod multisig;
 mod batch;
 mod range;
+mod settings;
 
 /// The state at a main-chain height, through history.
 fn state_at(db: &Arc<MemoryDb>, chain: &Chain, height: u64) -> Option<Arc<State>> {
@@ -2324,7 +2327,7 @@ fn a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_
     #[cfg(all(feature = "governance-council", feature = "finality-ffg"))]
     {
         let governed = Genesis {
-            governance: Some(crate::governance::GovernanceConfig::Council { members: vec![authority().public().address()], threshold: 1, approval_epochs: 4 }),
+            governance: Some(crate::governance::GovernanceConfig::Council { members: vec![authority().public().address()], threshold: 1, approval_epochs: 4, quorum_permille: 0 }),
             directory_admin: Some(someone.public().address()),
             ..genesis()
         };

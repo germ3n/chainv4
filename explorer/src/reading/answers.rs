@@ -116,6 +116,7 @@ pub fn outcome(receipt: &CommittedReceipt) -> Value {
         CommittedOutcome::Returned(values) => json!({ "status": "returned", "values": values.iter().map(argument).collect::<Vec<_>>() }),
         CommittedOutcome::Failed => json!({ "status": "failed", "error": FAILED }),
         CommittedOutcome::Decided { decision, kind, version } => json!({ "status": "decided", "version": decision, "kind": kind.name(), "kind_version": version }),
+        CommittedOutcome::Rejected { rejection, kind, version } => json!({ "status": "rejected", "rejection": rejection, "kind": kind.name(), "kind_version": version }),
         CommittedOutcome::Batch(steps) => json!({ "status": "batch", "steps": steps.iter().map(step).collect::<Vec<_>>() }),
         CommittedOutcome::BatchFailed { step } => json!({ "status": "failed", "failed_step": step, "error": format!("step {} failed, undoing every step: {FAILED}", step + 1) }),
     };

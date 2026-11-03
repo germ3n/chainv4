@@ -953,7 +953,7 @@ mod send {
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
     #[test]
-    fn approve_change_and_withdraw_change_go_through_governance() {
+    fn vote_change_and_clear_vote_go_through_governance() {
         use crate::governance::GovernanceConfig;
 
         let dev = DevAuthority::dev_keypair();
@@ -961,23 +961,24 @@ mod send {
             members: vec![dev.public().address()],
             threshold: 1,
             approval_epochs: 64,
+            quorum_permille: 0,
         };
         let running = Running::launch_governed(true, false, Some(FinalityConfig::Ffg(crate::chain::FfgConfig::dev(dev.public()))), Some(council), |node| node);
         let staked = r#"{"type":"staked","slot_ms":2000,"schedule":"draw"}"#.to_string();
-        let windowed = r#"{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1","min_difficulty":"1","window":5}"#.to_string();
+        let windowed = r#"{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1","min_difficulty":"1","window":1}"#.to_string();
 
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::ApproveChange { consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
-        let nothing = send(running.args(TxArgs::WithdrawChange { kind: None, version: None }));
-        let approved = send(running.args(TxArgs::ApproveChange { consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
-        let decided = send(running.args(TxArgs::WithdrawChange { kind: None, version: None }));
+        let kept = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let nothing = send(running.args(TxArgs::ClearVote { kind: None, change: None, version: None }));
+        let approved = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let decided = send(running.args(TxArgs::ClearVote { kind: None, change: None, version: None }));
         // Production by stake needs FFG, so finality cannot switch away from it under staked.
         let authority = crate::cli::genesis::finality_json(&FinalityConfig::Authority(crate::chain::AuthorityConfig::dev(dev.public()))).to_string();
-        let switched = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: Some(authority), switch_epoch: Some(1_000), upgrade: None, upgrade_from: None, chain_name: None, version: None }));
-        let unreadable = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
-        let booted = send(running.args(TxArgs::ApproveChange { consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let switched = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: Some(authority), switch_epoch: Some(1_000), upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let unreadable = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let booted = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
@@ -986,13 +987,13 @@ mod send {
         assert_eq!(node.chain().bootnodes().unwrap(), std::slice::from_ref(&bootnode), "decided at once");
         assert_eq!(governance["bootnodes"], serde_json::json!([bootnode]));
 
-        assert!(kept.unwrap_err().to_string().contains("keeps the chain's window"));
+        assert!(kept.unwrap_err().to_string().contains("window is at least 2"), "a change may name a window, but not one no chain could retarget over");
         let nothing = nothing.unwrap_err().to_string();
         let decided = decided.unwrap_err().to_string();
 
-        assert!(nothing.contains("no approval"), "{nothing}");
+        assert!(nothing.contains("no vote"), "{nothing}");
         approved.unwrap();
-        assert!(decided.contains("no approval"), "{decided}");
+        assert!(decided.contains("no vote"), "{decided}");
         let switched = switched.unwrap_err().to_string();
 
         assert!(switched.contains("yet to be fixed") || switched.contains("needs finality of type ffg"), "{switched}");
@@ -1415,7 +1416,7 @@ mod send {
         let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let payout = Address::Ed25519([4; 32]);
         let pow = |genesis: Genesis| Genesis {
-            consensus: ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 64, min_difficulty: 64 }),
+            consensus: ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 64, min_difficulty: 64, tuning: None, window: None }),
             ..genesis
         };
         let mining = move |node: Node| {
@@ -1535,7 +1536,7 @@ mod send {
         let listen = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let payout = Address::Ed25519([4; 32]);
         let pow = |genesis: Genesis| Genesis {
-            consensus: ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 64, min_difficulty: 64 }),
+            consensus: ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::default_chain(), target_block_ms: 1_000, initial_difficulty: 64, min_difficulty: 64, tuning: None, window: None }),
             ..genesis
         };
         let mining = move |node: Node| {
@@ -1838,7 +1839,7 @@ mod send {
         let held = |owner: &Address| read(&token, "balance_of", serde_json::json!([{ "type": "address", "value": owner.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
         let before = held(&me);
         run(DexAction::Swap { from: coin.clone(), to: token_text.clone(), amount: u256::new(10_000), slippage: 1.0 }, false, Some(contract), None).unwrap();
-        assert_eq!(held(&me) - before, crate::dex::amount_out(u256::new(10_000), u256::new(1_000_000), u256::new(4_000_000)).unwrap().as_u128());
+        assert_eq!(held(&me) - before, crate::dex::amount_out(u256::new(10_000), u256::new(1_000_000), u256::new(4_000_000), crate::dex::DEFAULT_FEE_BPS).unwrap().as_u128());
         run(DexAction::Swap { from: token_text.clone(), to: coin.clone(), amount: u256::new(20_000), slippage: 1.0 }, false, Some(contract), None).unwrap();
         let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token_text }]));
         let share: Address = pool["values"][2]["value"].as_str().unwrap().parse().unwrap();
@@ -2144,6 +2145,7 @@ mod send {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 2,
+            btc: None,
         };
         let me = DevAuthority::dev_keypair().public().address();
         let hash = crate::structs::hash::HashType::default_chain();
@@ -2331,6 +2333,7 @@ mod send {
                 chain_depth: 20,
                 evm_depth: 12,
                 bitcoin_depth: 2,
+                btc: None,
             };
             let me = DevAuthority::dev_keypair().public().address();
             let hash = crate::structs::hash::HashType::default_chain();
@@ -2746,6 +2749,7 @@ mod send {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         };
         let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
         let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();
@@ -2941,6 +2945,7 @@ mod send {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 2,
+            btc: None,
         };
         let me = DevAuthority::dev_keypair().public().address();
         let hash = crate::structs::hash::HashType::default_chain();
@@ -3131,6 +3136,7 @@ mod send {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         };
         let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
         let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();
@@ -3245,7 +3251,7 @@ mod send {
 
         const FAKE: [u8; 20] = [0xfa; 20];
         const CHAIN: u64 = 777;
-        let federation = Federation { signers: vec![crate::crypto::secp256k1::public_key(&[11; 32]).unwrap()], threshold: 1, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6 };
+        let federation = Federation { signers: vec![crate::crypto::secp256k1::public_key(&[11; 32]).unwrap()], threshold: 1, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6, btc: None };
         let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
         let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), finality: finality.clone(), ..genesis }, |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap(), Default::default());
         let node = format!("http://{}", a.api);
@@ -3326,6 +3332,7 @@ mod send {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         };
         let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
         let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();

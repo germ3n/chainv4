@@ -10,7 +10,7 @@ fn call(signature: &str, values: &[AbiValue]) -> Vec<u8> {
 }
 
 fn answered(input: &[u8]) -> PrecompileOutput {
-    CryptoAt { hash: HashType::default_chain() }.answer(input, 1_000_000, 0)
+    CryptoAt { costs: crate::params::vm::HostCosts::DEFAULT, hash: HashType::default_chain() }.answer(input, 1_000_000, 0)
 }
 
 fn output(input: &[u8]) -> Vec<u8> {
@@ -83,5 +83,5 @@ fn what_it_does_not_know_reverts_and_too_little_gas_halts() {
 
     let costly = call("verify(string,bytes,bytes,bytes)", &[AbiValue::String("ed25519".into()), AbiValue::Bytes(vec![0; 32]), AbiValue::Bytes(Vec::new()), AbiValue::Bytes(vec![0; 64])]);
 
-    assert!(CryptoAt { hash: HashType::default_chain() }.answer(&costly, 100, 0).is_halt());
+    assert!(CryptoAt { costs: crate::params::vm::HostCosts::DEFAULT, hash: HashType::default_chain() }.answer(&costly, 100, 0).is_halt());
 }

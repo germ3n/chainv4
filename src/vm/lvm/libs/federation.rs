@@ -1,7 +1,7 @@
 use {
     super::accounts::refused,
-    crate::vm::lvm::charge,
-    crate::vm::{Host, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host},
     mlua::{Error, Lua, Table},
     r#macro::document,
 };
@@ -11,7 +11,7 @@ fn get(lua: &Lua, (): ()) -> mlua::Result<Option<Table>> {
         .app_data_ref::<Host>()
         .map(|host| host.clone())
         .ok_or_else(|| Error::runtime("federation is only available inside a call"))?;
-    charge(lua, cost::FEDERATION)?;
+    charge(lua, costs(lua).federation)?;
     let Some(decided) = host.federation().map_err(refused)? else {
         return Ok(None);
     };
@@ -28,6 +28,16 @@ fn get(lua: &Lua, (): ()) -> mlua::Result<Option<Table>> {
     }
 
     table.set("signers", signers)?;
+
+    if let Some(btc) = decided.federation.btc {
+        let policy = lua.create_table()?;
+        policy.set("fee_cap", btc.fee_cap)?;
+        policy.set("fee_floor", btc.fee_floor)?;
+        policy.set("grace_ms", btc.grace_ms)?;
+        policy.set("cancel_after_ms", btc.cancel_after_ms)?;
+        policy.set("fee_part", btc.fee_part)?;
+        table.set("btc", policy)?;
+    }
 
     Ok(Some(table))
 }
@@ -49,7 +59,7 @@ fn federation_lib() {}
     parent = "federation",
     name = "get",
     summary = "The federation in force.",
-    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; and chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be. nil on a chain with none." },
+    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be; and btc, the Bitcoin policy, with fee_cap, fee_floor, grace_ms, cancel_after_ms and fee_part, or nil while the federation names none. nil on a chain with none." },
 )]
 fn federation_get() {}
 

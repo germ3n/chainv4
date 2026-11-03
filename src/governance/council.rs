@@ -34,6 +34,14 @@ impl Governance for Council {
         Ok(u256::from(self.threshold))
     }
 
+    fn total(&self, _state: &State, _epoch: u64) -> Result<u256, DbError> {
+        Ok(u256::from(self.members.len() as u64))
+    }
+
+    fn voters(&self, _state: &State, _epoch: u64) -> Result<Vec<(Address, u256)>, DbError> {
+        Ok(self.members.iter().map(|member| (*member, u256::ONE)).collect())
+    }
+
     fn members(&self) -> Option<&[Address]> {
         Some(&self.members)
     }

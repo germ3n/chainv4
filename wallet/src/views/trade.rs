@@ -653,9 +653,14 @@ fn rate_words(rate: f64) -> String {
     }
 }
 
-/// The part of what is paid the first pool keeps.
-fn fee_of(amount: u256) -> u256 {
-    amount.checked_mul(u256::from(chainv4::dex::FEE_PER_MILLE)).map_or(u256::ZERO, |all| all / u256::from(1_000u64))
+/// The part of what is paid the first pool keeps, at the chain's fee.
+fn fee_of(amount: u256, fee_bps: u32) -> u256 {
+    chainv4::dex::fee_of(amount, fee_bps)
+}
+
+/// A fee in hundredths of a percent, as a percentage.
+fn percent_of(fee_bps: u32) -> String {
+    format!("{}%", f64::from(fee_bps) / 100.0)
 }
 
 /// Slippage as offered, in percent: what the page offers before someone types their own.
@@ -715,7 +720,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
         let mut to = state.to.filter(|to| assets.contains(to)).unwrap_or_else(|| *assets.iter().find(|asset| **asset != state.from).unwrap_or(&COIN));
         let amount = parse_amount(ctx, &state.from, &state.amount);
         let same = state.from == to;
-        let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount));
+        let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount, ctx.dex_fee_bps));
         let held = held_of(ctx, state.sender, &state.from);
         let wide = ui.available_width() >= SIDE_BY_SIDE;
         let mut flip = false;
@@ -804,8 +809,8 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
             });
             detail(ui, &palette, "Fee", |ui| {
                 ui.label(match route.middle {
-                    None => format!("0.3%, {}", shown(ctx, &from, fee_of(amount))),
-                    Some(_) => "0.3% at each of 2 pools".to_string(),
+                    None => format!("{}, {}", percent_of(ctx.dex_fee_bps), shown(ctx, &from, fee_of(amount, ctx.dex_fee_bps))),
+                    Some(_) => format!("{} at each of 2 pools", percent_of(ctx.dex_fee_bps)),
                 });
             });
             detail(ui, &palette, "Minimum received", |ui| {
@@ -908,7 +913,7 @@ fn liquidity(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pools: &[DexPoo
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Pools");
-        ui.add(egui::Label::new(RichText::new("Add to a pool and earn a share of its 0.3% on every trade; take your share out when you like.").small().color(palette.muted)).wrap());
+        ui.add(egui::Label::new(RichText::new("Add to a pool and earn a share of the fee every trade pays, the chain's, 0.3% unless governance changed it; take your share out when you like.").small().color(palette.muted)).wrap());
 
         if pools.is_empty() {
             ui.label(RichText::new("None yet: open the first below.").color(palette.soft));

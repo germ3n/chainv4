@@ -471,6 +471,8 @@ pub struct Wallet {
     swap_contract: Option<String>,
     /// The DEX, and the EVM DEX's router, the node names in GET /status.
     dex: (Option<String>, Option<String>),
+    /// The DEX's fee in force, in hundredths of a percent, as the node's status says.
+    dex_fee_bps: u32,
     /// Where this wallet stands against the newest release the node relays, and whether the node
     /// stops at an upgrade.
     updates: Updates,
@@ -578,6 +580,7 @@ impl Wallet {
             faucet: None,
             swap_contract: None,
             dex: (None, None),
+            dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
             updates: Updates::default(),
             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
             lights: crate::light::Lights {
@@ -753,6 +756,7 @@ impl Wallet {
                     self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
+                    self.dex_fee_bps = value["dex_fee_bps"].as_u64().and_then(|bps| u32::try_from(bps).ok()).unwrap_or(chainv4::params::vm::DexSettings::DEFAULT.fee_bps);
                     self.updates.status(value);
                     self.name = status_name(value);
 
@@ -1591,6 +1595,7 @@ impl eframe::App for Wallet {
                             faucet: self.faucet.as_ref(),
                             swap_contract: self.swap_contract.as_deref(),
                             dex: (self.dex.0.as_deref(), self.dex.1.as_deref()),
+                            dex_fee_bps: self.dex_fee_bps,
                             node_stops: self.updates.stops(),
                             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
                             lights: &mut self.lights,

@@ -18,7 +18,7 @@ pub const KINDS: [(&str, &str); 8] = [
     ("name", "Name"),
     ("claim", "Claim"),
     ("multisig", "Multisig"),
-    ("approve_change", "Vote"),
+    ("vote_change", "Vote"),
 ];
 
 /// What the token filter says for the chain's own coin, as the API does.

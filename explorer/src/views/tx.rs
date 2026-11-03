@@ -285,16 +285,18 @@ fn means(tx: &TxView) -> Option<String> {
             tx.tx["to"].as_str().map_or_else(|| "?".to_string(), format::short),
             tx.tx["height"].as_u64().map_or_else(|| "?".to_string(), |height| format::thousands(&height.to_string())),
         )),
-        // An approval names its kind's version: it is for that kind's change after it.
-        "approve_change" => Some(format!(
-            "Approves {}, for {} change {}",
+        // A vote names its kind's version: it is for that kind's change after it.
+        "vote_change" => Some(format!(
+            "Votes {} on {}, for {} change {}",
+            tx.tx["vote"].as_str().and_then(chainv4_ui::votes::Choice::of).map_or("?", chainv4_ui::votes::Choice::word),
             change(&tx.tx["change"]),
-            super::governance::kinds(&crate::model::change_kind(&tx.tx["change"]).unwrap_or_else(|| "governance".to_string())),
+            super::governance::kinds(&kind_of(tx)),
             next(&tx.tx["version"]),
         )),
-        "withdraw_change" => Some(format!(
-            "Withdraws its approval of {} change {}: it backs no change of that kind",
-            super::governance::kinds(tx.tx["kind"].as_str().unwrap_or("governance")),
+        "clear_vote" => Some(format!(
+            "Clears its vote on {}, for {} change {}: it has no say on it until it votes again",
+            change(&tx.tx["change"]),
+            super::governance::kinds(&kind_of(tx)),
             next(&tx.tx["version"]),
         )),
         "set_directory" => Some("The directory's admin sets the chain's directory: the contracts the apps use".to_string()),
@@ -306,12 +308,17 @@ fn means(tx: &TxView) -> Option<String> {
     }
 }
 
-/// The change after a version: what an approval or withdrawal naming it is for.
+/// The kind of change a vote is on: as the node names it, or from its change.
+fn kind_of(tx: &TxView) -> String {
+    tx.tx["kind"].as_str().map(str::to_string).or_else(|| crate::model::change_kind(&tx.tx["change"])).unwrap_or_else(|| "governance".to_string())
+}
+
+/// The change after a version: what a vote naming it is for.
 fn next(version: &Value) -> String {
     version.as_u64().map_or_else(|| "?".to_string(), |version| (version + 1).to_string())
 }
 
-/// A change under governance, as Tx::ApproveChange carries it: { what it is of: its new value }.
+/// A change under governance, as Tx::VoteChange carries it: { what it is of: its new value }.
 pub fn change(change: &Value) -> String {
     let Some((what, value)) = change.as_object().and_then(|change| change.iter().next()) else {
         return "a change".to_string();
@@ -326,7 +333,10 @@ pub fn change(change: &Value) -> String {
         "name" => format!("renaming the chain to {}", value.as_str().unwrap_or("?")),
         "consensus" => "a new consensus".to_string(),
         "bootnodes" => "new bootnodes".to_string(),
-        "name_prices" => "new name prices".to_string(),
+        "names" => "new name prices and terms".to_string(),
+        "token_functions" => "new token standards".to_string(),
+        "evm_spec" => "a new EVM spec".to_string(),
+        "dex" => "a new DEX fee".to_string(),
         "collections" => "new collection standards".to_string(),
         "federation" => "a new bridge federation".to_string(),
         "directory" => "a new directory".to_string(),
@@ -334,6 +344,7 @@ pub fn change(change: &Value) -> String {
         "reward" => "a new block reward".to_string(),
         "limits" => "new limits".to_string(),
         "finality" => "new finality settings".to_string(),
+        "governance" => "new governance settings".to_string(),
         other => format!("a change of its {}", other.replace('_', " ")),
     }
 }
@@ -362,6 +373,13 @@ fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
                 }
             });
         }
+        "rejected" => {
+            facts.row("rejected", |ui| {
+                if ui.link(RichText::new(rejected(outcome)).color(look.palette.accent)).on_hover_text("Open governance").clicked() {
+                    ctx.go(super::View::Governance);
+                }
+            });
+        }
         "returned" if !outcome.values.is_empty() => {
             facts.row("returned", |ui| {
                 for value in &outcome.values {
@@ -373,13 +391,23 @@ fn result(facts: &mut Facts, ctx: &mut Ctx, look: Look, outcome: &Outcome) {
     }
 }
 
-/// What a governance approval that decided its change says of it: the chain's count of decisions,
-/// and its kind's version.
+/// What a governance vote that decided its change says of it: the chain's count of decisions, and
+/// its kind's version.
 pub fn decided(outcome: &Outcome) -> String {
     match (outcome.version, &outcome.kind, outcome.kind_version) {
-        (Some(decision), Some(kind), Some(version)) => format!("change {decision}, {} version {version}: its approval was the last one needed", super::governance::kinds(kind)),
-        (Some(decision), _, _) => format!("change {decision} under governance: its approval was the last one needed"),
+        (Some(decision), Some(kind), Some(version)) => format!("change {decision}, {} version {version}: its vote decided it", super::governance::kinds(kind)),
+        (Some(decision), _, _) => format!("change {decision} under governance: its vote decided it"),
         (None, _, _) => "a change under governance".to_string(),
+    }
+}
+
+/// What a governance vote that left its change unable to pass says of it: the chain's count of
+/// rejections, and the kind's version it was rejected at.
+pub fn rejected(outcome: &Outcome) -> String {
+    match (outcome.rejection, &outcome.kind, outcome.kind_version) {
+        (Some(rejection), Some(kind), Some(version)) => format!("rejection {rejection}, of {} change {}: its vote left it unable to pass", super::governance::kinds(kind), version + 1),
+        (Some(rejection), _, _) => format!("rejection {rejection} under governance: its vote left the change unable to pass"),
+        (None, _, _) => "a change rejected under governance".to_string(),
     }
 }
 
@@ -510,12 +538,12 @@ fn signature(ui: &mut Ui, look: Look, tx: &TxView) {
 mod tests {
     use {super::*, serde_json::json};
 
-    /// A governance approval of this change, as decision 4.
-    fn approval(change: Value) -> TxView {
+    /// A governance Yes on this change, from version 4.
+    fn yes(change: Value) -> TxView {
         serde_json::from_value(json!({
             "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
             "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
-            "tx": { "type": "approve_change", "version": 4, "change": change },
+            "tx": { "type": "vote_change", "version": 4, "vote": "yes", "change": change },
         }))
         .unwrap()
     }
@@ -639,27 +667,39 @@ mod tests {
     fn a_rename_under_governance_reads_as_the_chains_new_name() {
         assert_eq!(change(&json!({ "name": "chainv4 mainnet" })), "renaming the chain to chainv4 mainnet");
         assert_eq!(
-            means(&approval(json!({ "name": "chainv4 mainnet" }))).as_deref(),
-            Some("Approves renaming the chain to chainv4 mainnet, for the name's change 5")
+            means(&yes(json!({ "name": "chainv4 mainnet" }))).as_deref(),
+            Some("Votes Yes on renaming the chain to chainv4 mainnet, for the name's change 5")
         );
         assert_eq!(
-            means(&approval(json!({ "switch_finality": { "epoch": 9, "finality": {} } }))).as_deref(),
-            Some("Approves a switch of finality at epoch 9, for the consensus's change 5"),
+            means(&yes(json!({ "switch_finality": { "epoch": 9, "finality": {} } }))).as_deref(),
+            Some("Votes Yes on a switch of finality at epoch 9, for the consensus's change 5"),
             "finality's changes are on the consensus's ballot"
         );
-        assert_eq!(means(&approval(json!({ "name_prices": [] }))).as_deref(), Some("Approves new name prices, for the name prices' change 5"));
+        assert_eq!(means(&yes(json!({ "names": { "prices": [] } }))).as_deref(), Some("Votes Yes on new name prices and terms, for the names' change 5"));
     }
 
     #[test]
-    fn a_withdrawal_says_whose_kind_it_takes_back() {
-        let withdrawal: TxView = serde_json::from_value(json!({
-            "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
-            "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
-            "tx": { "type": "withdraw_change", "kind": "fees", "version": 2 },
-        }))
-        .unwrap();
+    fn a_vote_says_which_way_and_a_cleared_one_whose_kind_it_was() {
+        let of = |tx: Value| -> TxView {
+            serde_json::from_value(json!({
+                "id": "0x01", "sender": "ed25519:0x02", "nonce": 0, "signer": "0x03", "signature": "0x04",
+                "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+                "tx": tx,
+            }))
+            .unwrap()
+        };
+        let no = of(json!({ "type": "vote_change", "version": 2, "vote": "no", "kind": "fees", "change": { "fees": {} } }));
+        let cleared = of(json!({ "type": "clear_vote", "version": 2, "kind": "fees", "change": { "fees": {} } }));
 
-        assert_eq!(means(&withdrawal).as_deref(), Some("Withdraws its approval of the fees' change 3: it backs no change of that kind"));
+        assert_eq!(means(&no).as_deref(), Some("Votes No on new fee settings, for the fees' change 3"));
+        assert_eq!(means(&cleared).as_deref(), Some("Clears its vote on new fee settings, for the fees' change 3: it has no say on it until it votes again"));
+    }
+
+    #[test]
+    fn a_receipt_that_rejected_a_change_says_which() {
+        let receipt: Outcome = serde_json::from_value(json!({ "status": "rejected", "rejection": 3, "kind": "fees", "kind_version": 2, "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] })).unwrap();
+
+        assert_eq!(rejected(&receipt), "rejection 3, of the fees' change 3: its vote left it unable to pass");
     }
 
     #[test]
@@ -687,12 +727,12 @@ mod tests {
         .unwrap();
 
         assert_eq!((receipt.outcome.status.as_str(), receipt.outcome.version, receipt.outcome.kind.as_deref(), receipt.outcome.kind_version), ("decided", Some(5), Some("upgrade"), Some(2)));
-        assert_eq!(decided(&receipt.outcome), "change 5, the upgrade's version 2: its approval was the last one needed");
+        assert_eq!(decided(&receipt.outcome), "change 5, the upgrade's version 2: its vote decided it");
 
         let unkinded = Outcome { kind: None, kind_version: None, ..receipt.outcome.clone() };
-        assert_eq!(decided(&unkinded), "change 5 under governance: its approval was the last one needed", "a receipt that names no kind");
+        assert_eq!(decided(&unkinded), "change 5 under governance: its vote decided it", "a receipt that names no kind");
 
         let counted: Outcome = serde_json::from_value(json!({ "status": "done", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] })).unwrap();
-        assert_eq!(counted.version, None, "an approval that only counted decided nothing");
+        assert_eq!(counted.version, None, "a vote that only counted decided nothing");
     }
 }

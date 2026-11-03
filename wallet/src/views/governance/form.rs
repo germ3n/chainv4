@@ -1,7 +1,7 @@
 //! The propose form: a field for each setting of a kind of change, as schema.rs lists them, what
 //! stands beside each, what is wrong with it under it, and what changed. What is typed reads into
 //! the change's JSON: only the fields that differ from what stands are given, laid over it with
-//! params::json::over as the CLI's approve-change does, and the whole goes through change_from_json,
+//! params::json::over as the CLI's vote-change does, and the whole goes through change_from_json,
 //! so the form checks what the node checks. What only a node can reach of its checks, such as
 //! whether a consensus fits the finality, is asked of the settings the node lists.
 
@@ -330,6 +330,7 @@ fn line_value(line: Line, text: &str, env: &Env) -> Result<Value, String> {
         Line::TxKind if !TX_KINDS.contains(&text) => Err(format!("Not a kind of transaction. One of {}.", TX_KINDS.join(", "))),
         Line::Compressed if !from_hex(text).is_some_and(|bytes| bytes.len() == 33) => Err("A compressed key: 0x and 66 hex digits.".to_string()),
         Line::Price => amount(text, env).map(Value::String),
+        Line::Account => text.parse::<Address>().map(|address| Value::String(address.to_string())).map_err(|_| "An address, such as ed25519:0x and 64 hex digits.".to_string()),
         _ => Ok(Value::String(text.to_string())),
     }
 }
@@ -696,7 +697,7 @@ pub fn blame(kind: &str, why: &str) -> String {
     const WORDS: [(&str, &str, &str); 27] = [
         ("name", "chain's name", ""),
         ("bootnodes", "bootnode", ""),
-        ("name_prices", "names.prices", ""),
+        ("names", "names.prices", "prices"),
         ("fees", "block_gas_limit", "block_gas_limit"),
         ("fees", "burn_permille", "burn_permille"),
         ("fees", "fuel_per_gas", "schedule.fuel_per_gas"),
@@ -1040,6 +1041,7 @@ fn list(ui: &mut Ui, palette: &theme::Palette, spec: &Spec, line: Line, draft: &
         Line::TxKind => ("call", true),
         Line::Compressed => ("0x02…", true),
         Line::Price => (price_hint, false),
+        Line::Account => ("ed25519:0x…", true),
     };
 
     for (index, typed) in lines.iter_mut().enumerate() {

@@ -3,10 +3,6 @@
 //! default. A change under governance, and each part of genesis one may replace, are
 //! params::json's, which this re-exports, so the apps read them without a node.
 
-// A build without any kind of governance has an empty GovernanceConfig, matched on nothing.
-#![cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unreachable_code, unused_variables))]
-
-use crate::governance::GovernanceConfig;
 use {
     crate::chain::{Allocation, Coin, Genesis, Reward},
     crate::registry::names::NamesConfig,
@@ -52,6 +48,11 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "directory": genesis.directory.as_ref().map(directory_json),
         "name": genesis.name,
         "directory_admin": genesis.directory_admin.map(|admin| admin.to_string()),
+        "contract_limits": genesis.contract_limits.as_ref().map(crate::params::json::contract_limits_json),
+        "max_tx_bytes": genesis.max_tx_bytes,
+        "multisig_members": genesis.multisig_members,
+        "evm_spec": genesis.evm_spec.map(|spec| spec.name()),
+        "dex": genesis.dex.as_ref().map(crate::params::json::dex_json),
     })
 }
 
@@ -73,44 +74,6 @@ fn names_from_json(mut names: Fields) -> Result<NamesConfig, String> {
         max_years: names.small("max_years")?,
     };
     names.done()?;
-
-    Ok(config)
-}
-
-/// Governance as JSON: the shape genesis files and GET /governance use.
-pub fn governance_json(config: &GovernanceConfig) -> Value {
-    match *config {
-        #[cfg(feature = "governance-electorate")]
-        GovernanceConfig::Electorate { approval_epochs } => json!({ "type": "electorate", "approval_epochs": approval_epochs }),
-        #[cfg(feature = "governance-council")]
-        GovernanceConfig::Council { ref members, threshold, approval_epochs } => json!({
-            "type": "council",
-            "members": members.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "threshold": threshold,
-            "approval_epochs": approval_epochs,
-        }),
-    }
-}
-
-fn governance_from_json(mut governance: Fields) -> Result<GovernanceConfig, String> {
-    let config = match governance.text("type")?.as_str() {
-        #[cfg(feature = "governance-electorate")]
-        "electorate" => GovernanceConfig::Electorate {
-            approval_epochs: governance.whole("approval_epochs")?,
-        },
-        #[cfg(feature = "governance-council")]
-        "council" => GovernanceConfig::Council {
-            members: governance
-                .strings("members")?
-                .iter()
-                .map(|text| text.parse().map_err(|_| format!("governance.members: cannot read {text}")))
-                .collect::<Result<Vec<_>, String>>()?,
-            threshold: governance.small("threshold")?,
-            approval_epochs: governance.whole("approval_epochs")?,
-        },
-        other => return Err(format!("governance.type: unknown governance {other}; use {}", GovernanceConfig::KINDS.join(" or "))),
-    };
-    governance.done()?;
 
     Ok(config)
 }
@@ -215,6 +178,21 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_parse("directory_admin")?,
         false => None,
     };
+    // Each absent from files written before it: those chains run by the defaults.
+    let contract_limits = match root.map.contains_key("contract_limits") {
+        true => root.optional_object("contract_limits")?.map(crate::params::json::contract_limits_from_json).transpose()?,
+        false => None,
+    };
+    let max_tx_bytes = root.later_whole("max_tx_bytes")?;
+    let multisig_members = root.later_whole("multisig_members")?.map(|members| u32::try_from(members).map_err(|_| "multisig_members is too large".to_string())).transpose()?;
+    let evm_spec = match root.map.contains_key("evm_spec") {
+        true => root.optional_parse("evm_spec")?,
+        false => None,
+    };
+    let dex = match root.map.contains_key("dex") {
+        true => root.optional_object("dex")?.map(crate::params::json::dex_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -240,6 +218,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         directory,
         name,
         directory_admin,
+        contract_limits,
+        max_tx_bytes,
+        multisig_members,
+        evm_spec,
+        dex,
     };
     root.done()?;
 

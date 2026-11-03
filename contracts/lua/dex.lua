@@ -169,9 +169,10 @@ local function amount_out(amount_in, reserve_in, reserve_out)
         error("the pool holds nothing to trade")
     end
 
-    local with_fee = amount_in * u256(997)
+    -- The fee is the chain's, as governance set it, in hundredths of a percent.
+    local with_fee = amount_in * (u256(10000) - u256(chain.dex_fee()))
 
-    return with_fee * reserve_out / (reserve_in * u256(1000) + with_fee)
+    return with_fee * reserve_out / (reserve_in * u256(10000) + with_fee)
 end
 
 local function open(a, b, salt)

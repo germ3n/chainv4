@@ -186,7 +186,7 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
         Tx::ApproveSigners { .. } | Tx::WithdrawApproval { .. } => touched.push(Touch::Signers),
         // The directory is governance's state, as the admin keeps it without governance.
-        Tx::ApproveChange { .. } | Tx::WithdrawChange { .. } | Tx::SetDirectory { .. } => touched.push(Touch::Governance),
+        Tx::VoteChange { .. } | Tx::ClearVote { .. } | Tx::SetDirectory { .. } => touched.push(Touch::Governance),
         Tx::HandDirectory { to } => touched.extend(to.map(Touch::Address).into_iter().chain([Touch::Governance])),
         // Names share the registry, and a registration reads the prices governance decides.
         Tx::Name { .. } | Tx::PrimaryName { .. } => touched.extend([Touch::Names, Touch::Governance]),

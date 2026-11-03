@@ -1,6 +1,6 @@
 //! The name registry: names such as alice.dev that point at an address, chainv4's own ENS. Genesis
 //! turns it on with a suffix, the price of a year by a label's length, a grace period and the most
-//! years a name is held ahead; under governance, Change::NamePrices changes the prices.
+//! years a name is held ahead; under governance, Change::Names changes the prices.
 //!
 //! A name is registered for whole years, its price burned. It points at an address, holds text
 //! records, and has subnames its owner creates for free, which last as long as it does. When it
@@ -47,13 +47,13 @@ pub const MAX_TEXT_VALUE: usize = 512;
 #[document(
     summary = "A chain's names, as genesis sets them: the suffix every name ends in, what a year costs, the grace period and how far ahead a name may be held.",
     category = "Names",
-    see_also = "Names, Genesis::names, Change::NamePrices",
+    see_also = "Names, Genesis::names, Change::Names",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct NamesConfig {
     #[document(summary = "What every name ends in, such as dev for alice.dev: one label, as names are made of.")]
     pub suffix: String,
-    #[document(summary = "What one year of a name costs, in the coin's smallest units, by its length: the first for names of MIN_LABEL characters, the next for one more, and the last for every length from its own on. One to MAX_PRICES of them. Burned. Governance's Change::NamePrices replaces them.")]
+    #[document(summary = "What one year of a name costs, in the coin's smallest units, by its length: the first for names of MIN_LABEL characters, the next for one more, and the last for every length from its own on. One to MAX_PRICES of them. Burned. Governance's Change::Names replaces them.")]
     #[wincode(with = "U256LeList")]
     pub prices: Vec<u256>,
     #[document(summary = "How long after a name expires its owner alone may still renew it, in milliseconds; then anyone may register it.")]
@@ -63,6 +63,35 @@ pub struct NamesConfig {
 }
 
 impl Hashable for NamesConfig {}
+
+#[document(
+    summary = "What governance may change of a chain's names: all but the suffix, which every name already ends in.",
+    category = "Names",
+    see_also = "Change::Names, NamesConfig",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct NameSettings {
+    #[document(summary = "What one year of a name costs, by its length, as NamesConfig::prices lists them.")]
+    #[wincode(with = "U256LeList")]
+    pub prices: Vec<u256>,
+    #[document(summary = "The grace period after a name expires, in milliseconds.")]
+    pub grace_ms: u64,
+    #[document(summary = "The most years ahead a name is held.")]
+    pub max_years: u32,
+}
+
+impl Hashable for NameSettings {}
+
+impl NameSettings {
+    #[document(parent = "NameSettings", summary = "Why a chain's names could not go by them: no prices or too many, or no years at all.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        if let Some(problem) = prices_problem(&self.prices) {
+            return Some(problem);
+        }
+
+        (self.max_years == 0).then_some("names.max_years must be at least 1")
+    }
+}
 
 impl NamesConfig {
     #[document(
@@ -78,6 +107,16 @@ impl NamesConfig {
             grace_ms: 90 * 24 * 60 * 60 * 1000,
             max_years: 100,
         }
+    }
+
+    #[document(parent = "NamesConfig", summary = "What governance may change of these.")]
+    pub fn settings(&self) -> NameSettings {
+        NameSettings { prices: self.prices.clone(), grace_ms: self.grace_ms, max_years: self.max_years }
+    }
+
+    #[document(parent = "NamesConfig", summary = "These names, with governance's settings in place of their own: the suffix kept.")]
+    pub fn with(&self, settings: &NameSettings) -> NamesConfig {
+        NamesConfig { suffix: self.suffix.clone(), prices: settings.prices.clone(), grace_ms: settings.grace_ms, max_years: settings.max_years }
     }
 
     #[document(parent = "NamesConfig", summary = "Why the settings cannot be a chain's: a suffix that is no label, no prices or too many, or no years at all.")]

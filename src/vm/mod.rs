@@ -124,70 +124,6 @@ pub(crate) fn route<'r>(
     }
 }
 
-/// What host operations cost in fuel. The same in every engine, so moving a contract from one
-/// engine to another never changes what its storage or calls cost.
-pub mod cost {
-    /// A storage read, plus 1 for every STORAGE_BYTES_PER_FUEL bytes of key and value.
-    pub const STORAGE_READ: u64 = 100;
-    /// A storage write or delete. Dearer than a read: every node keeps what is written.
-    pub const STORAGE_WRITE: u64 = 500;
-    pub const STORAGE_BYTES_PER_FUEL: u64 = 16;
-    /// One hash, plus 1 for every HASH_BYTES_PER_FUEL bytes hashed, a block of most algorithms.
-    pub const HASH: u64 = 20;
-    pub const HASH_BYTES_PER_FUEL: u64 = 64;
-    /// Calling another contract, on top of the fuel the callee burns.
-    pub const CALL: u64 = 1_000;
-    /// Reading a balance: one account read.
-    pub const BALANCE: u64 = 100;
-    /// Moving funds, by transfer or with a call: two account writes.
-    pub const TRANSFER: u64 = 1_000;
-    /// Emitting an event, plus 1 for every EVENT_BYTES_PER_FUEL bytes of name and data: every
-    /// node keeps it in the receipt.
-    pub const EVENT: u64 = 200;
-    pub const EVENT_BYTES_PER_FUEL: u64 = 16;
-    /// Copying bytes between a WebAssembly contract's memory and the host.
-    pub const COPY_BYTES_PER_FUEL: u64 = 64;
-    /// Compiling and checking a contract's code at deploy or upgrade, per byte of it. A Lua
-    /// script's top level, which runs while it loads, is charged on top as it runs; WebAssembly
-    /// modules may not have a start function, so they run nothing while they load.
-    pub const LOAD_BYTE: u64 = 1;
-    /// Asking the token registry to ask a token's name, symbol and decimals again, once the
-    /// transaction succeeds; the questions themselves are charged as they run.
-    pub const TOKEN_REFRESH: u64 = 100;
-    /// Comparing two contracts' storage layouts: two contract reads, as a call makes one.
-    pub const CHECK_LAYOUT: u64 = 2_000;
-    /// Cloning a contract: the template read and the new contract written, plus 1 for every
-    /// STORAGE_BYTES_PER_FUEL bytes of its code, which every node keeps again; its init is
-    /// charged on top as it runs.
-    pub const CLONE: u64 = 5_000;
-    /// Resolving a name, or an address's primary name: a few name records read, one for each
-    /// label, and the primary name's.
-    pub const NAME: u64 = 500;
-    /// Encoding or decoding values in Solidity's ABI, plus 1 for every COPY_BYTES_PER_FUEL bytes
-    /// of signature and data.
-    pub const ABI: u64 = 50;
-    /// Checking a signature, of any scheme, as the EVM's ecrecover costs, plus 1 for every
-    /// HASH_BYTES_PER_FUEL bytes of message.
-    pub const VERIFY: u64 = 3_000;
-    /// Recovering a secp256k1 key from a signature, as the EVM's ecrecover costs.
-    pub const RECOVER: u64 = 3_000;
-    /// The address a key controls: a hash of the key, at most.
-    pub const KEY_ADDRESS: u64 = 100;
-    /// Checking a state proof or a Merkle path: the proof decoded, plus a hash for each of its
-    /// siblings.
-    pub const CHECK_PROOF: u64 = 200;
-    pub const PROOF_SIBLING: u64 = 60;
-    /// Reading the federation in force: one record.
-    pub const FEDERATION: u64 = 200;
-    /// Reading the chain's id: a number every node holds, no record read.
-    pub const CHAIN_ID: u64 = 20;
-    /// A storage scan's seek, plus STORAGE_SCAN_ENTRY for each entry it gives and 1 for every
-    /// STORAGE_BYTES_PER_FUEL bytes of key and value: cheaper an entry than a read, as the scan
-    /// reads them in order.
-    pub const STORAGE_SCAN: u64 = 100;
-    pub const STORAGE_SCAN_ENTRY: u64 = 40;
-}
-
 #[document(
     summary = "Who is calling, which contract, and what they sent. Lua scripts read it through ctx, WebAssembly modules through the sender, contract and value host functions.",
     category = "VM",
@@ -220,6 +156,8 @@ pub struct BlockAt {
     pub producer: Address,
     #[document(summary = "The fuel one EVM gas burns there: the chain's gas price in fuel, 1 on a chain without fees.")]
     pub fuel_per_gas: u64,
+    #[document(summary = "What its contracts run under: host costs, contract limits, the EVM's spec and the DEX's fee.")]
+    pub vm: crate::params::vm::VmRules,
 }
 
 impl BlockAt {
@@ -230,6 +168,7 @@ impl BlockAt {
             time,
             producer: Address::Ed25519([0; 32]),
             fuel_per_gas: 1,
+            vm: crate::params::vm::VmRules::default(),
         }
     }
 }
@@ -293,7 +232,7 @@ pub struct Loaded {
 )]
 #[derive(Debug)]
 pub struct Loading {
-    #[document(summary = "Fuel for compiling the code, cost::LOAD_BYTE a byte, and for what it ran while loading. All the fuel allowed when it ran out.")]
+    #[document(summary = "Fuel for compiling the code, the block's load_byte a byte, and for what it ran while loading. All the fuel allowed when it ran out.")]
     pub fuel_used: u64,
     #[document(summary = "The stored form and its exports, or why the code cannot be deployed.")]
     pub result: Result<Loaded, VmError>,
@@ -309,8 +248,8 @@ impl Loading {
     }
 
     /// What compiling code this long costs, or None when the fuel allowed does not cover it.
-    pub(crate) fn fee(code: &[u8], limits: Limits) -> Option<u64> {
-        let fee = (code.len() as u64).saturating_mul(cost::LOAD_BYTE);
+    pub(crate) fn fee(code: &[u8], limits: Limits, rules: &crate::params::vm::VmRules) -> Option<u64> {
+        let fee = (code.len() as u64).saturating_mul(rules.costs.load_byte);
 
         (fee <= limits.fuel).then_some(fee)
     }
@@ -324,14 +263,20 @@ impl Loading {
 pub trait ScriptEngine: Send + Sync {
     #[document(
         parent = "ScriptEngine",
-        summary = "Checks deployed code and turns it into what is stored, charging cost::LOAD_BYTE a byte for it, and for whatever it runs while it loads. That runs before any call is attached, so it sees nothing of one.",
+        summary = "Checks deployed code and turns it into what is stored, charging the block's load_byte a byte for it, and for whatever it runs while it loads, within the block's module or source size. That runs before any call is attached, so it sees nothing of one.",
         params = {
             code = "The code from the deploy: Luau source, or a WebAssembly module.",
             limits = "What loading, and anything run while loading, may use.",
+            rules = "What the block's contracts run under: its costs and contract limits.",
         },
         returns = "The fuel it burned, and the stored form and its exports or why the code cannot be deployed.",
     )]
-    fn load(&self, code: &[u8], limits: Limits) -> Loading;
+    fn load_under(&self, code: &[u8], limits: Limits, rules: &crate::params::vm::VmRules) -> Loading;
+
+    #[document(parent = "ScriptEngine", summary = "Checks code as load_under does, by the default costs and limits: for tools and tests, which run no block.")]
+    fn load(&self, code: &[u8], limits: Limits) -> Loading {
+        self.load_under(code, limits, &crate::params::vm::VmRules::default())
+    }
 
     #[document(
         parent = "ScriptEngine",

@@ -12,6 +12,7 @@ use {
 
 pub mod fees;
 pub mod finality;
+pub mod vm;
 #[cfg(feature = "json")]
 pub mod json;
 
@@ -39,6 +40,12 @@ pub struct BlockLimits {
     pub tx_limits: Limits,
     #[document(summary = "The most bytes a block's transactions may take, encoded, or None for no bound but the gas limit.")]
     pub max_block_bytes: Option<u64>,
+    #[document(summary = "The limits a contract keeps within, or None for genesis's contract_limits, ContractLimits::DEFAULT's when genesis names none.")]
+    pub contract: Option<vm::ContractLimits>,
+    #[document(summary = "The most bytes one transaction may take, encoded, Ethereum-signed ones' raw bytes; or None for genesis's max_tx_bytes, which unset bounds native transactions by the block alone and Ethereum-signed ones by ETHEREUM_TX_BYTES.")]
+    pub max_tx_bytes: Option<u64>,
+    #[document(summary = "The most members a native multisig may have, or None for genesis's multisig_members, MULTISIG_MEMBERS when genesis names none. A multisig made under a higher limit keeps its members; it only cannot add more.")]
+    pub multisig_members: Option<u32>,
 }
 
 impl Hashable for BlockLimits {}
@@ -82,9 +89,35 @@ impl BlockLimits {
             return Some("max_block_bytes must be 1 MiB to 6 MiB, 1048576 to 6291456");
         }
 
+        if let Some(problem) = self.contract.as_ref().and_then(vm::ContractLimits::problem) {
+            return Some(problem);
+        }
+
+        if self.max_tx_bytes.is_some_and(|bytes| !(MIN_TX_BYTES..=MAX_BLOCK_BYTES).contains(&bytes)) {
+            return Some("max_tx_bytes must be 64 KiB to 6 MiB, 65536 to 6291456");
+        }
+
+        if self.multisig_members.is_some_and(|members| members == 0 || members as usize > crate::registry::multisig::MAX_MEMBERS) {
+            return Some("multisig_members must be 1 to 20, CHECKMULTISIG's most, so every multisig keeps its Bitcoin address");
+        }
+
         None
     }
 }
+
+#[document(
+    summary = "The least max_tx_bytes may be, 64 KiB: room for a governance change or a multisig's bundle.",
+    category = "Chain",
+    see_also = "BlockLimits::max_tx_bytes",
+)]
+pub const MIN_TX_BYTES: u64 = 64 * 1024;
+
+#[document(
+    summary = "The most members a native multisig had before the limit was governed, and has on a chain whose genesis names no multisig_members.",
+    category = "Chain",
+    see_also = "BlockLimits::multisig_members, MAX_MEMBERS",
+)]
+pub const MULTISIG_MEMBERS: u32 = 20;
 
 #[document(
     summary = "The least max_block_bytes a genesis may set, 1 MiB, so a block still holds the largest transaction there is: a deploy of a 512 KiB WebAssembly module.",

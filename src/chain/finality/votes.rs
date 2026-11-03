@@ -167,8 +167,6 @@ fn own_key(voter: &PublicKey) -> Vec<u8> {
 pub(super) struct Votes<E> {
     electorate: E,
     params: VoteParams,
-    /// Where rewards come from: minted, or paid from the reward pool.
-    source: VoteRewardSource,
     genesis: Hash,
     /// The chain's threads, which check a proof's or a justification's signatures all at once.
     workers: Arc<Workers>,
@@ -237,7 +235,7 @@ impl<E: Electorate> Votes<E> {
     /// The finality an electorate makes, with everything this node learned before: the
     /// checkpoints it justified and finalized, and the votes it counted or held back, which it
     /// counts again.
-    pub(super) fn load(electorate: E, chain: &View, source: VoteRewardSource) -> Result<Votes<E>, DbError> {
+    pub(super) fn load(electorate: E, chain: &View) -> Result<Votes<E>, DbError> {
         let db = &**chain.db();
         let start = Checkpoint {
             epoch: 0,
@@ -246,7 +244,6 @@ impl<E: Electorate> Votes<E> {
         let mut votes = Votes {
             params: electorate.params(),
             electorate,
-            source,
             genesis: chain.genesis(),
             workers: chain.workers().clone(),
             justified: read_value(db, Column::Finality, JUSTIFIED_KEY)?.unwrap_or(start),
@@ -532,7 +529,7 @@ impl<E: Electorate> Finality for Votes<E> {
     /// while no checkpoint has been proven for after_epochs epochs, a proof may fall short of a
     /// justification: a bundle of votes, which pays nothing and proves nothing, but records who
     /// still votes, for the leak to spare.
-    fn apply(&self, state: &Arc<State>, block: &Block) -> Result<(), ImportError> {
+    fn apply(&self, state: &Arc<State>, block: &Block, rewards: VoteRewardSource) -> Result<(), ImportError> {
         let bad = |why: String| ImportError::Invalid(BlockError::Proof(why));
         let (params, leak) = self.tuned(state, self.epoch_of(block.header.height))?;
 
@@ -626,7 +623,7 @@ impl<E: Electorate> Finality for Votes<E> {
                 // Voters in the proof's order, which is by key: from the pool, each gets as much
                 // of its reward as the pool still holds; minted, each gets it whole.
                 for account in paid {
-                    let reward = match self.source {
+                    let reward = match rewards {
                         VoteRewardSource::Mint => {
                             crate::registry::supply::Supply::mint(state, params.vote_reward).map_err(ImportError::Db)?;
 

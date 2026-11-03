@@ -4,8 +4,8 @@ use {
     super::integers::{LuaInt, Prim, exact_as},
     crate::structs::address::Address,
     crate::structs::u256::{i256, u256},
-    crate::vm::lvm::charge,
-    crate::vm::{Host, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_VALUE_LEN, Space, cost},
+    crate::vm::lvm::{charge, costs},
+    crate::vm::{Host, MAX_NAMESPACE_LEN, Space},
     std::collections::VecDeque,
     mlua::{Error, Lua, UserData, UserDataMethods, Value},
     r#macro::document,
@@ -180,18 +180,20 @@ fn host(lua: &Lua) -> mlua::Result<Host> {
 fn storage_get(lua: &Lua, space: &Space, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
     let host = host(lua)?;
 
-    if key.len() > MAX_KEY_LEN {
-        return Err(Error::runtime(format!("storage keys are at most {MAX_KEY_LEN} bytes")));
+    let longest = host.limits().key_len as usize;
+
+    if key.len() > longest {
+        return Err(Error::runtime(format!("storage keys are at most {longest} bytes")));
     }
 
     let named = (space.name().len() + key.len()) as u64;
-    charge(lua, cost::STORAGE_READ + named / cost::STORAGE_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).storage_read + named / costs(lua).storage_bytes_per_fuel)?;
 
     let Some(value) = host.storage_get(space, key).map_err(refused)? else {
         return Ok(None);
     };
 
-    charge(lua, value.len() as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    charge(lua, value.len() as u64 / costs(lua).storage_bytes_per_fuel)?;
     lua.create_string(&value).map(Some)
 }
 
@@ -199,13 +201,13 @@ fn storage_set(lua: &Lua, space: &Space, key: &[u8], value: Option<&[u8]>) -> ml
     let host = host(lua)?;
     let len = value.map_or(0, <[u8]>::len);
 
-    if key.len() > MAX_KEY_LEN || len > MAX_VALUE_LEN {
+    if key.len() > host.limits().key_len as usize || len > host.limits().value_len as usize {
         // The Host words the error.
         return host.storage_set(space, key, value).map_err(refused);
     }
 
     let moved = (space.name().len() + key.len() + len) as u64;
-    charge(lua, cost::STORAGE_WRITE + moved / cost::STORAGE_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).storage_write + moved / costs(lua).storage_bytes_per_fuel)?;
     host.storage_set(space, key, value).map_err(refused)
 }
 
@@ -213,10 +215,10 @@ fn storage_set(lua: &Lua, space: &Space, key: &[u8], value: Option<&[u8]>) -> ml
 fn storage_scan(lua: &Lua, space: &Space, prefix: &[u8], start: &[u8]) -> mlua::Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let host = host(lua)?;
     let asked = (space.name().len() + prefix.len() + start.len()) as u64;
-    charge(lua, cost::STORAGE_SCAN + asked / cost::STORAGE_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).storage_scan + asked / costs(lua).storage_bytes_per_fuel)?;
     let found = host.storage_scan(space, prefix, start, ITER_PAGE).map_err(refused)?;
     let moved: usize = found.iter().map(|(key, value)| key.len() + value.len()).sum();
-    charge(lua, cost::STORAGE_SCAN_ENTRY * found.len() as u64 + moved as u64 / cost::STORAGE_BYTES_PER_FUEL)?;
+    charge(lua, costs(lua).storage_scan_entry * found.len() as u64 + moved as u64 / costs(lua).storage_bytes_per_fuel)?;
 
     Ok(found)
 }
@@ -795,8 +797,8 @@ mod tests {
     #[test]
     fn limits_and_missing_access_are_errors() {
         let (lua, _) = setup(Address::Contract([1; 32]));
-        let long_key = format!("storage.set(string.rep('k', {}), 'v')", MAX_KEY_LEN + 1);
-        let long_value = format!("storage.set('k', string.rep('v', {}))", MAX_VALUE_LEN + 1);
+        let long_key = format!("storage.set(string.rep('k', {}), 'v')", crate::vm::MAX_KEY_LEN + 1);
+        let long_value = format!("storage.set('k', string.rep('v', {}))", crate::vm::MAX_VALUE_LEN + 1);
 
         assert!(lua.load(long_key).exec().unwrap_err().to_string().contains("at most"));
         assert!(lua.load(long_value).exec().unwrap_err().to_string().contains("at most"));

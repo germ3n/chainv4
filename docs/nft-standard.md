@@ -166,7 +166,7 @@ with `Change::Collections`. From the block that decides it on, deploys, upgrades
 register; contracts deployed before join at their next upgrade or refresh.
 
 ```sh
-chainv4 send approve-change --collections standard
+chainv4 send vote-change --vote yes --collections standard
 ```
 
 **Getting in and out:** nothing to send, as for tokens. A deploy, upgrade or clone that leaves a

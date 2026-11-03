@@ -88,7 +88,7 @@ pub struct SendArgs {
     pub tx: TxArgs,
 }
 
-// Parsed once per command: approve-change's many flags make it large, and nothing keeps many.
+// Parsed once per command: vote-change's many flags make it large, and nothing keeps many.
 #[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 pub enum TxArgs {
@@ -205,11 +205,26 @@ pub enum TxArgs {
         version: Option<u64>,
     },
     #[cfg(feature = "governance")]
-    /// Approves a change under the chain's governance: a new consensus, as a genesis file's
-    /// consensus object, or new bootnodes. Sign with an account governance lets approve: a
-    /// validator's or signer's account under the electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("change").required(true).args(["consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name"]))]
-    ApproveChange {
+    /// Votes Yes, No or Abstain on a change under the chain's governance, proposing it if nobody
+    /// has: a new consensus, as a genesis file's consensus object, new bootnodes, or any setting
+    /// governance changes. A new vote replaces this account's old one on the same change. Sign
+    /// with an account governance lets vote: a validator's or signer's account under the
+    /// electorate, a member's under a council.
+    #[command(group = clap::ArgGroup::new("what").required(true).args(["change", "governance", "consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name"]))]
+    VoteChange {
+        /// yes, no or abstain. Abstain counts toward the quorum alone.
+        #[arg(long)]
+        vote: crate::governance::ChangeVote,
+        /// Any change, as GET /governance writes one: one field named for what it changes, such
+        /// as '{"governance":{"threshold":3}}' or '{"fees":{"burn_permille":600}}'. An object
+        /// names only the fields it changes, laid over what stands.
+        #[arg(long)]
+        change: Option<String>,
+        /// Governance's own settings, as a genesis file's governance object, with only what
+        /// changes: '{"members":["ed25519:0x…",…],"threshold":2,"approval_epochs":64,"quorum_permille":500}'.
+        /// The kind stays.
+        #[arg(long)]
+        governance: Option<String>,
         /// The new consensus as JSON, such as '{"type":"staked","slot_ms":2000,"schedule":"draw"}'
         /// or '{"type":"pow","hash":"blake3","target_block_ms":2000,"initial_difficulty":"1000","min_difficulty":"1000"}'.
         #[arg(long)]
@@ -300,7 +315,7 @@ pub enum TxArgs {
     /// Sets the chain's directory, as its admin: on a chain without governance whose genesis names
     /// a directory_admin.
     SetDirectory {
-        /// The whole directory, as approve-change --directory takes it.
+        /// The whole directory, as vote-change --directory takes it.
         #[arg(long)]
         directory: String,
     },
@@ -318,13 +333,18 @@ pub enum TxArgs {
         yes: bool,
     },
     #[cfg(feature = "governance")]
-    /// Takes back the sender's approval of a change under governance, of one kind.
-    WithdrawChange {
-        /// The kind of change it approved: consensus, bootnodes, name_prices, collections,
-        /// federation, directory, fees, reward, limits, upgrade or name. Defaults to the one
-        /// kind it has an approval in.
+    /// Clears the sender's vote on a change under governance, so it has no say on it until it
+    /// votes again.
+    ClearVote {
+        /// The kind of change it voted on: consensus, bootnodes, name_prices, collections,
+        /// federation, directory, fees, reward, limits, upgrade, name or governance. Defaults to
+        /// the one kind it has a vote in.
         #[arg(long)]
         kind: Option<crate::governance::ChangeKind>,
+        /// The change, as GET /governance writes it, when the account voted on more than one of
+        /// the kind.
+        #[arg(long)]
+        change: Option<String>,
         /// The kind's version the approval was for. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -1101,7 +1121,10 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             Tx::WithdrawApproval { version }
         }
         #[cfg(feature = "governance")]
-        TxArgs::ApproveChange {
+        TxArgs::VoteChange {
+            vote,
+            change: given,
+            governance: settings,
             consensus,
             bootnodes,
             name_prices,
@@ -1134,6 +1157,20 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             };
 
             let change = match (consensus, bootnodes, name_prices, collections, federation, directory) {
+                (_, _, _, _, _, _) if given.is_some() => {
+                    let value: Value = serde_json::from_str(given.as_deref().unwrap_or_default()).map_err(|err| format!("--change is not JSON: {err}"))?;
+                    let laid = match value.as_object().map(|object| object.iter().collect::<Vec<_>>()) {
+                        Some(fields) if fields.len() == 1 && fields[0].1.is_object() => json!({ fields[0].0.clone(): crate::params::json::over(&governance["in_force"][fields[0].0.as_str()]["value"], fields[0].1) }),
+                        _ => value,
+                    };
+
+                    crate::params::json::change_from_json(&laid).map_err(|why| format!("--change: {why}"))?
+                }
+                (_, _, _, _, _, _) if settings.is_some() => {
+                    let value: Value = serde_json::from_str(&over("governance", settings.as_deref())).map_err(|err| format!("--governance is not JSON: {err}"))?;
+
+                    crate::params::json::change_from_json(&json!({ "governance": value })).map_err(|why| format!("--governance: {why}"))?
+                }
                 (_, _, _, _, _, _) if fees.is_some() => Change::Fees(super::genesis::fees_from_text(&over("fees", fees.as_deref())).map_err(|why| format!("--fees: {why}"))?),
                 (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(&over("reward", reward.as_deref())).map_err(|why| format!("--reward: {why}"))?),
                 (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(&over("limits", limits.as_deref())).map_err(|why| format!("--limits: {why}"))?),
@@ -1157,13 +1194,10 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 },
                 (Some(consensus), _, _, _, _, _) => {
                     let value: Value = serde_json::from_str(&consensus).map_err(|err| format!("--consensus is not JSON: {err}"))?;
-                    let (consensus, window) = super::genesis::consensus_from_json(&value, "consensus")?;
 
-                    if window.is_some() {
-                        return Err("--consensus: a change keeps the chain's window; leave it out".into());
-                    }
-
-                    crate::governance::Change::Consensus(consensus)
+                    // A proof-of-work consensus may name its window and steps; one that names no
+                    // window keeps genesis's.
+                    crate::params::json::change_from_json(&json!({ "consensus": value })).map_err(|why| format!("--consensus: {why}"))?
                 }
                 (None, Some(bootnodes), _, _, _, _) => {
                     let bootnodes: Vec<String> = match bootnodes.as_slice() {
@@ -1182,7 +1216,10 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                         return Err(format!("--name-prices: {problem}").into());
                     }
 
-                    crate::governance::Change::NamePrices(prices)
+                    // The grace and years stay what stands.
+                    let laid = crate::params::json::over(&governance["in_force"]["names"]["value"], &json!({ "prices": prices.iter().map(u256::to_string).collect::<Vec<_>>() }));
+
+                    crate::params::json::change_from_json(&json!({ "names": laid })).map_err(|why| format!("--name-prices: {why}"))?
                 }
                 (None, None, None, Some(collections), _, _) => {
                     let functions = super::genesis::collections_from_text(&collections).map_err(|why| format!("--collections: {why}"))?;
@@ -1203,38 +1240,41 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 Some(version) => version,
                 None => governance["versions"][change.kind().name()].as_u64().ok_or("the node sent no version for the change's kind")?,
             };
-            match &change {
-                crate::governance::Change::Consensus(consensus) => println!("approving a change to {} consensus, from version {version}", consensus.name()),
-                crate::governance::Change::Bootnodes(bootnodes) => println!("approving {} bootnode{}, from version {version}", bootnodes.len(), if bootnodes.len() == 1 { "" } else { "s" }),
-                crate::governance::Change::NamePrices(prices) => println!("approving {} name price{}, from version {version}", prices.len(), if prices.len() == 1 { "" } else { "s" }),
-                crate::governance::Change::Collections(functions) => println!(
-                    "approving what makes a collection: {} NFT and {} multi-token functions, from version {version}",
+            let what = match &change {
+                crate::governance::Change::Consensus(consensus) => format!("a change to {} consensus", consensus.name()),
+                crate::governance::Change::Bootnodes(bootnodes) => format!("{} bootnode{}", bootnodes.len(), if bootnodes.len() == 1 { "" } else { "s" }),
+                crate::governance::Change::Names(settings) => format!("{} name price{}, {} ms of grace and {} years at most", settings.prices.len(), if settings.prices.len() == 1 { "" } else { "s" }, settings.grace_ms, settings.max_years),
+                crate::governance::Change::TokenFunctions(functions) => format!("what makes a token: {}", functions.join(", ")),
+                crate::governance::Change::EvmSpec { spec, from } => format!("the EVM's {} spec from block {from}", spec.name()),
+                crate::governance::Change::Dex(dex) => format!("a DEX fee of {} basis points", dex.fee_bps),
+                crate::governance::Change::Collections(functions) => format!("what makes a collection: {} NFT and {} multi-token functions",
                     functions.nft.len(),
                     functions.multi.len()
                 ),
-                crate::governance::Change::Federation(federation) => println!(
-                    "approving a federation of {} of {} signers, from version {version}",
+                crate::governance::Change::Federation(federation) => format!("a federation of {} of {} signers",
                     federation.threshold,
                     federation.signers.len()
                 ),
-                crate::governance::Change::Fees(fees) => println!("approving new fees, a block gas limit of {}, from version {version}", fees.block_gas_limit),
-                crate::governance::Change::Reward(reward) => println!("approving a block reward of {}, from version {version}", reward.initial),
-                crate::governance::Change::Limits(limits) => println!("approving limits of {} fuel a transaction, from version {version}", limits.tx_limits.fuel),
-                crate::governance::Change::Finality(finality) => println!("approving {} finality's settings, from version {version}", finality.name()),
-                crate::governance::Change::SwitchFinality { epoch, config } => println!("approving a switch to {} finality from epoch {epoch}, from version {version}", config.name()),
-                crate::governance::Change::Name(name) => println!("approving the name {name} for the chain, from version {version}"),
-                crate::governance::Change::Upgrade(upgrade) => println!("approving an upgrade: nodes older than {} stop at block {}, from version {version}", upgrade.least, upgrade.from),
+                crate::governance::Change::Fees(fees) => format!("new fees, a block gas limit of {}", fees.block_gas_limit),
+                crate::governance::Change::Reward(reward) => format!("a block reward of {}", reward.initial),
+                crate::governance::Change::Limits(limits) => format!("limits of {} fuel a transaction", limits.tx_limits.fuel),
+                crate::governance::Change::Finality(finality) => format!("{} finality's settings", finality.name()),
+                crate::governance::Change::SwitchFinality { epoch, config } => format!("a switch to {} finality from epoch {epoch}", config.name()),
+                crate::governance::Change::Name(name) => format!("the name {name} for the chain"),
+                crate::governance::Change::Upgrade(upgrade) => format!("an upgrade: nodes older than {} stop at block {}", upgrade.least, upgrade.from),
                 crate::governance::Change::Directory(directory) => {
                     let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];
                     let mut listed: Vec<String> = named.iter().filter_map(|(what, address)| address.map(|address| format!("the {what} {address}"))).collect();
                     listed.extend(directory.dex_router.map(|router| format!("the DEX router {}", crate::structs::hex::to_hex(&router))));
                     listed.extend(directory.evm_gateways.iter().map(|evm| format!("Gateway.sol {} on chain {}", crate::structs::hex::to_hex(&evm.gateway), evm.chain_id)));
                     let listed = if listed.is_empty() { "nothing".to_string() } else { listed.join(", ") };
-                    println!("approving a directory of {listed}, from version {version}");
+                    format!("a directory of {listed}")
                 }
-            }
+                crate::governance::Change::Governance(config) => format!("governance's settings: {}", crate::chain::json::governance_json(config)),
+            };
+            println!("voting {} on {what}, from version {version}", vote.name());
 
-            Tx::ApproveChange { version, change }
+            Tx::VoteChange { version, change, vote }
         }
         TxArgs::SetDirectory { directory } => {
             let directory = super::genesis::directory_from_text(&directory).map_err(|why| format!("--directory: {why}"))?;
@@ -1253,30 +1293,37 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             Tx::HandDirectory { to: None }
         }
         #[cfg(feature = "governance")]
-        TxArgs::WithdrawChange { kind, version } => {
-            let kind = match kind {
-                Some(kind) => kind,
-                // The one kind its approval is in, as the node counts it.
+        TxArgs::ClearVote { kind, change, version } => {
+            let change = match change {
+                Some(text) => {
+                    let value: Value = serde_json::from_str(&text).map_err(|err| format!("--change is not JSON: {err}"))?;
+
+                    crate::params::json::change_from_json(&value).map_err(|why| format!("--change: {why}"))?
+                }
+                // The one change of the kind its vote is on, as the node counts it.
                 None => {
                     let weight = ok(agent.get(format!("{node}/governance/weight/{sender}")).call())?;
-                    let kinds: Vec<&str> = weight["approved"].as_array().map(|approved| approved.iter().filter_map(|approval| approval["kind"].as_str()).collect()).unwrap_or_default();
+                    let voted: Vec<&Value> = weight["voted"]
+                        .as_array()
+                        .map(|voted| voted.iter().filter(|cast| kind.is_none_or(|kind| cast["kind"].as_str() == Some(kind.name()))).collect())
+                        .unwrap_or_default();
 
-                    match kinds.as_slice() {
-                        [kind] => kind.parse()?,
-                        [] => return Err("this account has no approval that still counts".into()),
-                        _ => return Err(format!("this account has approvals of {}: name one with --kind", kinds.join(", ")).into()),
+                    match voted.as_slice() {
+                        [cast] => crate::params::json::change_from_json(&cast["change"]).map_err(|why| format!("the node's change: {why}"))?,
+                        [] => return Err("this account has no vote that still counts".into()),
+                        _ => return Err("this account voted on more than one change: name one with --change, or its kind with --kind".into()),
                     }
                 }
             };
             let version = match version {
                 Some(version) => version,
-                None => ok(agent.get(format!("{node}/governance")).call())?["versions"][kind.name()]
+                None => ok(agent.get(format!("{node}/governance")).call())?["versions"][change.kind().name()]
                     .as_u64()
                     .ok_or("the node sent no version for that kind")?,
             };
-            println!("withdrawing this account's approval of a {} change from version {version}", kind.name());
+            println!("clearing this account's vote on a {} change from version {version}", change.name());
 
-            Tx::WithdrawChange { kind, version }
+            Tx::ClearVote { version, change }
         }
         TxArgs::CreateMultisig { members, threshold } => {
             let (members, testnet) = members_of(members)?;

@@ -67,6 +67,8 @@ fn pow_genesis(finality: FinalityConfig) -> Genesis {
             target_block_ms: 1_000,
             initial_difficulty: 1,
             min_difficulty: 1,
+            tuning: None,
+            window: None,
         }),
         reward: Reward::NONE,
         finality: Some(finality),
@@ -148,6 +150,7 @@ mod voting {
                 })
                 .collect(),
             leak: None,
+            slash_permille: None,
         })
     }
 
@@ -1538,10 +1541,10 @@ mod voting {
         use crate::light::{Extended, LightClient, LightRequest};
         use crate::registry::changes::Changes;
 
-        let mut chain = governed(GovernanceConfig::Electorate { approval_epochs: 8 });
+        let mut chain = governed(GovernanceConfig::Electorate { approval_epochs: 8, quorum_permille: 0 });
         let [alice, bob, _] = voters();
         let rules = crate::consensus::Staked::new(SLOT, Schedule::Draw, chain.hash(), INTERVAL);
-        let approve = |version: u64, change: Change| Tx::ApproveChange { version, change };
+        let approve = |version: u64, change: Change| Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version, change };
 
         assert_eq!(chain.consensus_config_at(1).unwrap(), genesis_with(None).consensus);
 
@@ -1549,7 +1552,7 @@ mod voting {
         // Alice's approval alone is a third of the stake.
         let refused = send_as(&mut chain, &dev(), approve(0, to_staked()));
 
-        assert!(matches!(&refused.result, Err(failure) if failure.to_string().contains("governance lets approve")), "{:?}", refused.result);
+        assert!(matches!(&refused.result, Err(failure) if failure.to_string().contains("governance lets vote")), "{:?}", refused.result);
 
         let unfit = send_as(&mut chain, &alice, approve(0, Change::Consensus(ConsensusConfig::Rotating { slot_ms: SLOT })));
 
@@ -1617,7 +1620,7 @@ mod voting {
 
         let genesis = chain.block_at(0).unwrap().unwrap();
         let params = Genesis {
-            governance: Some(GovernanceConfig::Electorate { approval_epochs: 8 }),
+            governance: Some(GovernanceConfig::Electorate { approval_epochs: 8, quorum_permille: 0 }),
             ..genesis_with(Some(ffg()))
         }
         .light_params();
@@ -1678,6 +1681,7 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         };
         let mut chain = governed(council);
         let other = Change::Consensus(ConsensusConfig::Staked {
@@ -1686,23 +1690,100 @@ mod voting {
         });
 
         // Nothing to withdraw yet; one of two approves; moving it leaves the first change empty.
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::WithdrawChange { kind: crate::governance::ChangeKind::Consensus, version: 0 }).result, Err(failure) if failure.to_string().contains("no approval")));
-        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: to_staked() }).result, Ok(Effect::Done));
-        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: other.clone() }).result, Ok(Effect::Done));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ClearVote { version: 0, change: to_staked() }).result, Err(failure) if failure.to_string().contains("no vote")));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: to_staked() }).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: other.clone() }).result, Ok(Effect::Done));
 
         let ballot = Changes::new(&chain.state()).ballot(crate::governance::ChangeKind::Consensus).unwrap();
 
         assert!(ballot.approvers(&to_staked()).is_empty());
         assert_eq!(ballot.approvers(&other), [dev().public().address()]);
-        assert_eq!(send_as(&mut chain, &dev(), Tx::WithdrawChange { kind: crate::governance::ChangeKind::Consensus, version: 0 }).result, Ok(Effect::Done));
-        assert!(Changes::new(&chain.state()).ballot(crate::governance::ChangeKind::Consensus).unwrap().approvals.is_empty());
+        assert_eq!(send_as(&mut chain, &dev(), Tx::ClearVote { version: 0, change: other.clone() }).result, Ok(Effect::Done));
+        assert!(Changes::new(&chain.state()).ballot(crate::governance::ChangeKind::Consensus).unwrap().votes.is_empty());
 
         // A validator's account is no council member here, and a stale version is refused.
         let [alice, ..] = voters();
 
-        assert!(matches!(&send_as(&mut chain, &alice, Tx::ApproveChange { version: 0, change: to_staked() }).result, Err(failure) if failure.to_string().contains("governance lets approve")));
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: to_staked() }).result, Err(failure) if failure.to_string().contains("decided version is 0")));
+        assert!(matches!(&send_as(&mut chain, &alice, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: to_staked() }).result, Err(failure) if failure.to_string().contains("governance lets vote")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 1, change: to_staked() }).result, Err(failure) if failure.to_string().contains("decided version is 0")));
         assert_eq!(Changes::new(&chain.state()).decided().unwrap().version, 0);
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-electorate"))]
+    #[test]
+    fn the_electorate_rejects_a_change_once_the_stake_that_has_not_said_no_falls_short_of_two_thirds() {
+        use crate::governance::{ChangeKind, ChangeVote, GovernanceConfig};
+        use crate::registry::changes::Changes;
+
+        let mut chain = governed(GovernanceConfig::Electorate { approval_epochs: 8, quorum_permille: 0 });
+        let [alice, bob, carol] = voters();
+        let vote = |version: u64, vote: ChangeVote| Tx::VoteChange { version, change: to_staked(), vote };
+
+        // Of three equal stakes, one No leaves two thirds that could still say Yes; Carol's
+        // abstention takes nothing from them.
+        assert_eq!(send_as(&mut chain, &carol, vote(0, ChangeVote::Abstain)).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &alice, vote(0, ChangeVote::No)).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &bob, vote(0, ChangeVote::No)).result, Ok(Effect::Rejected { rejection: 1, kind: ChangeKind::Consensus, version: 0 }));
+
+        let state = chain.state();
+        let changes = Changes::new(&state);
+
+        assert_eq!((changes.version_of(ChangeKind::Consensus).unwrap(), changes.rejections().unwrap(), changes.decided().unwrap().version), (0, 1, 0));
+        assert!(matches!(&send_as(&mut chain, &carol, vote(0, ChangeVote::Yes)).result, Err(failure) if failure.to_string().contains("was rejected")));
+    }
+
+    #[cfg(all(feature = "finality-authority", feature = "governance-electorate"))]
+    #[test]
+    fn signers_reject_a_change_once_too_few_have_not_said_no_to_reach_the_change_threshold() {
+        use crate::governance::{Change, ChangeKind, ChangeVote, GovernanceConfig};
+
+        let genesis = Genesis {
+            governance: Some(GovernanceConfig::Electorate { approval_epochs: 8, quorum_permille: 0 }),
+            ..genesis_with(Some(authority()))
+        };
+        let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+        let [alice, bob, _] = voters();
+        let renamed = Change::Name("second".to_string());
+        let vote = |vote: ChangeVote| Tx::VoteChange { version: 0, change: renamed.clone(), vote };
+
+        // Two of the three signers decide a change; two No leave one.
+        assert_eq!(send_as(&mut chain, &alice, vote(ChangeVote::No)).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &bob, vote(ChangeVote::No)).result, Ok(Effect::Rejected { rejection: 1, kind: ChangeKind::Name, version: 0 }));
+        assert!(matches!(&send_as(&mut chain, &dev(), vote(ChangeVote::Yes)).result, Err(failure) if failure.to_string().contains("governance lets vote")), "the producer signs no votes");
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn a_council_changes_itself_and_counts_votes_by_its_new_members_from_the_next_block() {
+        use crate::governance::{Change, ChangeKind, ChangeVote, GovernanceConfig};
+        use crate::registry::changes::Changes;
+
+        let (old, new) = (key(70), key(71));
+        let mut chain = governed(GovernanceConfig::Council { members: vec![dev().public().address(), old.public().address()], threshold: 2, approval_epochs: 8, quorum_permille: 0 });
+        let renamed = Change::Name("second".to_string());
+        let council = GovernanceConfig::Council { members: vec![dev().public().address(), new.public().address()], threshold: 1, approval_epochs: 4, quorum_permille: 500 };
+        let yes = |version: u64, change: &Change| Tx::VoteChange { version, change: change.clone(), vote: ChangeVote::Yes };
+
+        // A change of kind is refused; the old council's two decide the new one.
+        let electorate = Change::Governance(GovernanceConfig::Electorate { approval_epochs: 8, quorum_permille: 0 });
+        assert!(matches!(&send_as(&mut chain, &dev(), yes(0, &electorate)).result, Err(failure) if failure.to_string().contains("keeps its kind")));
+        assert_eq!(send_as(&mut chain, &dev(), yes(0, &renamed)).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &dev(), yes(0, &Change::Governance(council.clone()))).result, Ok(Effect::Done));
+
+        // The deciding vote and a vote after it in the same block: that one counts by nobody.
+        let deciding = SignedTx::sign(yes(0, &Change::Governance(council.clone())), nonce(&chain, &old), FeeOffer::NONE, &old, &chain.genesis());
+        let late = SignedTx::sign(yes(0, &renamed), nonce(&chain, &dev()), FeeOffer::NONE, &dev(), &chain.genesis());
+        let receipts = advance(&mut chain, vec![deciding, late], Vec::new()).unwrap();
+
+        assert_eq!(receipts[0].result, Ok(Effect::Decided { decision: 1, kind: ChangeKind::Governance, version: 1 }));
+        assert!(matches!(&receipts[1].result, Err(failure) if failure.to_string().contains("changed itself in this block")), "{:?}", receipts[1].result);
+        assert!(Changes::new(&chain.state()).ballots().unwrap().is_empty(), "the old council's open votes are cleared");
+
+        // From the next block the new council counts: the old member may not vote, the new one
+        // decides alone, by its threshold of one, once half of the two have voted.
+        assert!(matches!(&send_as(&mut chain, &old, yes(0, &renamed)).result, Err(failure) if failure.to_string().contains("governance lets vote")));
+        assert_eq!(send_as(&mut chain, &new, yes(0, &renamed)).result, Ok(Effect::Decided { decision: 2, kind: ChangeKind::Name, version: 1 }));
+        assert_eq!(chain.params_in(&chain.state(), chain.tip().height + 1).unwrap().rules.governance.unwrap().config, council);
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council", feature = "names"))]
@@ -1717,9 +1798,10 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         };
         let mut chain = governed(council);
-        let prices = Change::NamePrices(vec![u256::from(7u64)]);
+        let prices = Change::Names(crate::registry::names::NameSettings { prices: vec![u256::from(7u64)], ..NamesConfig::dev().settings() });
         let register = |name: &str| Tx::Name { name: name.to_string(), action: NameAction::Register { years: 2 } };
         let balance = |chain: &Chain| crate::registry::Accounts::new(&chain.state()).get(&dev().public().address()).unwrap().balance;
         let paid = |chain: &mut Chain, name: &str| {
@@ -1733,15 +1815,15 @@ mod voting {
         assert_eq!(paid(&mut chain, "alice"), NamesConfig::dev().prices[2] * u256::from(2u64), "genesis's price for five characters");
 
         // A price list no chain could have is refused; one member is not enough; two decide.
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: Change::NamePrices(Vec::new()) }).result, Err(failure) if failure.to_string().contains("at least one price")));
-        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Done));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Names(crate::registry::names::NameSettings { prices: Vec::new(), ..NamesConfig::dev().settings() }) }).result, Err(failure) if failure.to_string().contains("at least one price")));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: prices.clone() }).result, Ok(Effect::Done));
         assert_eq!(paid(&mut chain, "bobby"), NamesConfig::dev().prices[2] * u256::from(2u64), "not decided yet");
-        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: prices.clone() }).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::NamePrices, version: 1 }));
-        assert_eq!(Changes::new(&chain.state()).name_prices().unwrap(), Some(vec![u256::from(7u64)]));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: prices.clone() }).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Names, version: 1 }));
+        assert_eq!(Changes::new(&chain.state()).names().unwrap().map(|settings| settings.prices), Some(vec![u256::from(7u64)]));
 
         // From the next block on, one price for every length, the shortest too.
         assert_eq!(paid(&mut chain, "car"), u256::from(14u64));
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: prices }).result, Err(failure) if failure.to_string().contains("decided already")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 1, change: prices }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
@@ -1754,22 +1836,23 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         };
         let mut chain = governed(council);
         let decide = |chain: &mut Chain, _: u64, change: Change| {
             let (version, decided) = deciding(chain, &change);
 
             for (member, effect) in [(dev(), Effect::Done), (key(70), decided)] {
-                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
+                assert_eq!(send_as(chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version, change: change.clone() }).result, Ok(effect));
             }
         };
         let refused = |chain: &mut Chain, change: Change, why: &str| {
-            assert!(matches!(&send_as(chain, &dev(), Tx::ApproveChange { version: 0, change }).result, Err(failure) if failure.to_string().contains(why)), "{why}");
+            assert!(matches!(&send_as(chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change }).result, Err(failure) if failure.to_string().contains(why)), "{why}");
         };
 
         // What could not run a chain is refused before anyone counts it.
         refused(&mut chain, Change::Reward(Reward { initial: u256::new(1), halving_interval: Some(0) }), "halves every 1 block");
-        refused(&mut chain, Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10, memory: 1 << 20 }, max_block_bytes: None }), "100,000 fuel");
+        refused(&mut chain, Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10, memory: 1 << 20 }, max_block_bytes: None, contract: None, max_tx_bytes: None, multisig_members: None }), "100,000 fuel");
         refused(&mut chain, Change::Fees(FeeConfig { block_gas_limit: 0, ..FeeConfig::dev() }), "block_gas_limit");
 
         // A reward of 1,000 halving every two blocks, counted from the block after the decision.
@@ -1786,7 +1869,7 @@ mod voting {
         assert_eq!(paid, [u256::new(1_000), u256::new(1_000), u256::new(500), u256::new(500)]);
 
         // Limits: the next block's, and what the node admits by.
-        let limits = BlockLimits { tx_limits: Limits { fuel: 200_000, memory: 2 << 20 }, max_block_bytes: Some(2 << 20) };
+        let limits = BlockLimits { tx_limits: Limits { fuel: 200_000, memory: 2 << 20 }, max_block_bytes: Some(2 << 20), contract: None, max_tx_bytes: None, multisig_members: None };
         decide(&mut chain, 1, Change::Limits(limits));
 
         assert_eq!((chain.next.rules.limits, chain.max_block_bytes()), (limits.tx_limits, limits.max_block_bytes));
@@ -1810,6 +1893,7 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         })
     }
 
@@ -1823,7 +1907,7 @@ mod voting {
         let FinalityConfig::Ffg(genesis) = ffg() else { unreachable!("ffg") };
         let tuned = FinalityConfig::Ffg(FfgConfig { min_bond: u256::new(500), max_proofs_per_block: 2, ..genesis.clone() });
         let refused = |chain: &mut Chain, change: Change, why: &str| {
-            assert!(matches!(&send_as(chain, &dev(), Tx::ApproveChange { version: 0, change }).result, Err(failure) if failure.to_string().contains(why)), "{why}");
+            assert!(matches!(&send_as(chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change }).result, Err(failure) if failure.to_string().contains(why)), "{why}");
         };
 
         // What the epochs, the fixed-ahead sets and the history rest on stays.
@@ -1831,7 +1915,7 @@ mod voting {
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { validators: Vec::new(), ..genesis.clone() })), "keeps checkpoint_interval");
 
         for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Consensus, version: 1 })] {
-            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(effect));
+            assert_eq!(send_as(&mut chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(effect));
         }
 
         // Decided in this epoch, it stands from activation_delay + 1 epochs on, not before.
@@ -1862,6 +1946,7 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         };
         let mut chain = governed(council);
         let federation = |threshold: u32, keys: &[u8]| Federation {
@@ -1870,12 +1955,13 @@ mod voting {
             chain_depth: 20,
             evm_depth: 12,
             bitcoin_depth: 6,
+            btc: None,
         };
         let decide = |chain: &mut Chain, _: u64, change: Change| {
             let (version, decided) = deciding(chain, &change);
 
             for (member, effect) in [(dev(), Effect::Done), (key(70), decided)] {
-                assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
+                assert_eq!(send_as(chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version, change: change.clone() }).result, Ok(effect));
             }
         };
 
@@ -1884,14 +1970,14 @@ mod voting {
         // One that could not sign is refused; two members decide one, then another.
         let broken = Change::Federation(federation(3, &[1, 2]));
 
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("threshold")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("threshold")));
         decide(&mut chain, 0, Change::Federation(federation(2, &[1, 2, 3])));
         let first = Changes::new(&chain.state()).federation().unwrap().unwrap();
 
         assert_eq!((first.version, first.federation.threshold), (1, 2));
         decide(&mut chain, 1, Change::Federation(federation(3, &[1, 2, 3, 4])));
         assert_eq!(Changes::new(&chain.state()).federation().unwrap().map(|decided| decided.version), Some(2));
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 2, change: Change::Federation(federation(3, &[1, 2, 3, 4])) }).result, Err(failure) if failure.to_string().contains("decided already")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 2, change: Change::Federation(federation(3, &[1, 2, 3, 4])) }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council", feature = "secp256k1"))]
@@ -1905,6 +1991,7 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         };
         let mut chain = governed(council);
         let directory = Directory { gateway: Some(Address::Contract([1; 32])), swap: Some(Address::Contract([2; 32])), evm_gateways: vec![EvmGateway { chain_id: 1, gateway: [3; 20] }], ..Directory::default() };
@@ -1914,15 +2001,15 @@ mod voting {
         // A gateway that is no contract is refused; two members decide it.
         let broken = Change::Directory(Directory { gateway: Some(dev().public().address()), ..directory.clone() });
 
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("contracts")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: broken }).result, Err(failure) if failure.to_string().contains("contracts")));
 
         for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Directory, version: 1 })] {
-            assert_eq!(send_as(&mut chain, &member, Tx::ApproveChange { version: 0, change: Change::Directory(directory.clone()) }).result, Ok(effect));
+            assert_eq!(send_as(&mut chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Directory(directory.clone()) }).result, Ok(effect));
         }
 
         assert_eq!(Changes::new(&chain.state()).directory().unwrap(), Some(directory.clone()));
         assert_eq!(Changes::new(&chain.state()).federation().unwrap(), None, "the federation's version never moves");
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: Change::Directory(directory) }).result, Err(failure) if failure.to_string().contains("decided already")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 1, change: Change::Directory(directory) }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
@@ -1937,6 +2024,7 @@ mod voting {
             members: vec![dev().public().address(), key(70).public().address()],
             threshold: 2,
             approval_epochs: 8,
+            quorum_permille: 0,
         };
         let genesis = Genesis {
             governance: Some(council),
@@ -1960,9 +2048,9 @@ mod voting {
         // Lists no chain could have are refused; one member is not enough; two decide.
         let twice = Change::Collections(CollectionFunctions { nft: vec!["a".into(), "a".into()], multi: Vec::new() });
 
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: twice }).result, Err(failure) if failure.to_string().contains("each function once")));
-        assert_eq!(send_as(&mut chain, &dev(), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Done));
-        assert_eq!(send_as(&mut chain, &key(70), Tx::ApproveChange { version: 0, change: standard.clone() }).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Collections, version: 1 }));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: twice }).result, Err(failure) if failure.to_string().contains("each function once")));
+        assert_eq!(send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: standard.clone() }).result, Ok(Effect::Done));
+        assert_eq!(send_as(&mut chain, &key(70), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: standard.clone() }).result, Ok(Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Collections, version: 1 }));
         assert_eq!(Changes::new(&chain.state()).collections().unwrap(), Some(CollectionFunctions::standard()));
 
         // Deploys register from then on; what came before waits for its next upgrade or refresh.
@@ -1970,7 +2058,7 @@ mod voting {
 
         assert_eq!(Collections::new(&chain.state()).get(&after).unwrap().map(|found| found.kind), Some(CollectionKind::Nft));
         assert_eq!(Collections::new(&chain.state()).get(&before).unwrap(), None);
-        assert!(matches!(&send_as(&mut chain, &dev(), Tx::ApproveChange { version: 1, change: standard }).result, Err(failure) if failure.to_string().contains("decided already")));
+        assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 1, change: standard }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 
     /// A chain the council governs, starting with this finality, and its genesis.
@@ -1990,14 +2078,14 @@ mod voting {
         let (version, decided) = deciding(chain, &change);
 
         for (member, effect) in [(dev(), Effect::Done), (key(70), decided)] {
-            assert_eq!(send_as(chain, &member, Tx::ApproveChange { version, change: change.clone() }).result, Ok(effect));
+            assert_eq!(send_as(chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version, change: change.clone() }).result, Ok(effect));
         }
     }
 
     #[cfg(all(feature = "finality-ffg", feature = "finality-authority", feature = "governance-council"))]
     fn refused_change(chain: &mut Chain, change: crate::governance::Change, why: &str) {
         let version = crate::registry::changes::Changes::new(&chain.state()).decided().unwrap().version;
-        let receipt = send_as(chain, &dev(), Tx::ApproveChange { version, change });
+        let receipt = send_as(chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version, change });
 
         assert!(matches!(&receipt.result, Err(failure) if failure.to_string().contains(why)), "{why}: {:?}", receipt.result);
     }

@@ -218,15 +218,15 @@ impl LuaEngine {
 }
 
 impl ScriptEngine for LuaEngine {
-    fn load(&self, code: &[u8], limits: Limits) -> Loading {
-        let Some(fee) = Loading::fee(code, limits) else {
+    fn load_under(&self, code: &[u8], limits: Limits, rules: &crate::params::vm::VmRules) -> Loading {
+        let Some(fee) = Loading::fee(code, limits, rules) else {
             return Loading::failed(limits.fuel, VmError::OutOfFuel);
         };
         let source = match std::str::from_utf8(code) {
             Ok(source) => source,
             Err(err) => return Loading::failed(fee, VmError::Compile(format!("source is not UTF-8: {err}"))),
         };
-        let bytecode = match compiler::compile(source) {
+        let bytecode = match compiler::compile_within(source, rules.limits.source_len as usize) {
             Ok(bytecode) => bytecode,
             Err(err) => return Loading::failed(fee, err),
         };
@@ -537,6 +537,12 @@ fn environment(lua: &Lua) -> mlua::Result<Table> {
     env.set_readonly(true);
 
     Ok(env)
+}
+
+/// What host operations cost in the call's block: the defaults while no call is attached, as
+/// while a deploy loads.
+fn costs(lua: &Lua) -> crate::params::vm::HostCosts {
+    lua.app_data_ref::<Host>().map_or(crate::params::vm::HostCosts::DEFAULT, |host| host.costs())
 }
 
 /// Library functions do work the per-instruction fuel never sees, so they charge for it here.
