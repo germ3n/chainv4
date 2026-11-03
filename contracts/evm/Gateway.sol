@@ -4,8 +4,10 @@
 // and what arrives from chainv4 is minted here as wrapped ERC-20s, ERC-721s and ERC-1155s,
 // which go back burned. A transfer arrives with the federation's signatures over its digest,
 // which anyone relays from chainv4's gateway; the signer set changes only when the one in force
-// signs the next. The wrapped contracts are deployed once, as templates, and each wrapped asset is
-// a minimal proxy of one (EIP-1167), so the gateway stays under the EVM's size limit. Built with
+// signs the next. A transfer refused for good is voided where it was going and only then refunded
+// where it left, each on the federation's signatures, so it can never pay twice. The wrapped contracts
+// are deployed once, as templates, and each wrapped asset is a minimal proxy of one (EIP-1167), so the
+// gateway stays under the EVM's size limit. Built with
 // solc 0.8 for Paris, through the IR pipeline:
 //
 //   solc --evm-version paris --optimize --via-ir --bin --abi Gateway.sol -o build
@@ -255,6 +257,11 @@ contract Gateway {
         string uri;
     }
 
+    struct Left {
+        address sender;
+        uint64 height;
+    }
+
     /// What a wrapped asset here stands for.
     struct Origin {
         uint64 chain;
@@ -284,11 +291,21 @@ contract Gateway {
     mapping(address => Origin) private origins;
     /// Set only while send moves ERC-1155 tokens in, so those sent any other way are refused.
     bool private receiving;
+    /// Who sent each transfer that left and the block it left in: whom a refund pays, and when the
+    /// signers may call it final. One slot, and only what the sender's own call says.
+    mapping(uint64 => Left) public leftBy;
+    /// Where a sender would have its refund go instead, as a contract that cannot take it might.
+    mapping(uint64 => address) public refundTo;
+    mapping(uint64 => bool) public refunded;
+    /// The block a transfer arriving here was voided in, by the key delivered marks it by.
+    mapping(bytes32 => uint256) public voidedAt;
 
     event Sent(uint64 indexed nonce, uint64 indexed target, bytes32 digest);
     event Delivered(uint64 indexed source, uint64 indexed nonce, bytes32 digest);
     event Wrapped(uint64 origin, uint8 kind, bytes asset, address here);
     event SignersChanged(uint64 version, uint256 threshold);
+    event Voided(uint64 indexed source, uint64 indexed nonce, bytes32 transfer);
+    event Refunded(uint64 indexed nonce, address to, bytes32 transfer);
 
     constructor(
         address[] memory signers_,
@@ -331,6 +348,19 @@ contract Gateway {
         return keccak256(abi.encode("chainv4-gateway", head, body));
     }
 
+    /// What the federation signs to void a transfer, at the gateway it was going to, so it can never
+    /// be delivered: its ends, its nonce and its digest. A domain and a layout of its own, as a
+    /// signature over a transfer or a signer set must never pass for one.
+    function voidDigest(bytes memory from, bytes memory to, uint64 source, uint64 target, uint64 which, bytes32 transfer) public pure returns (bytes32) {
+        return keccak256(abi.encode("chainv4-gateway-void", from, to, source, target, which, transfer));
+    }
+
+    /// What the federation signs to refund a transfer, at the gateway it left, once it was voided
+    /// where it was going: as voidDigest, and whom the source gateway says sent it.
+    function refundDigest(bytes memory from, bytes memory to, uint64 source, uint64 target, uint64 which, bytes32 transfer, bytes memory sender) public pure returns (bytes32) {
+        return keccak256(abi.encode("chainv4-gateway-refund", from, to, source, target, which, transfer, sender));
+    }
+
     /// Sends something to recipient on another chain: ETH with the call, or an ERC-20, ERC-721 or
     /// ERC-1155 amount, which this gateway moves in, so approve it, or make it an operator, first.
     /// A wrapped one goes back, burned here; a native one is held here until it comes back.
@@ -359,6 +389,7 @@ contract Gateway {
         require(t.amount > 0, "send something");
         t.nonce = ++nonce;
         sentTransfers[t.nonce] = t;
+        leftBy[t.nonce] = Left(msg.sender, uint64(block.number));
         bytes32 digest = digestOf(t);
         emit Sent(t.nonce, target, digest);
 
@@ -379,6 +410,7 @@ contract Gateway {
         // nonces from 1 again, under a gateway with the same address but set up anew.
         bytes32 key = keccak256(abi.encode(t.source, keccak256(t.from), t.nonce));
         require(!delivered[key], "delivered already");
+        require(voidedAt[key] == 0, "voided: its source refunds it");
         bytes32 digest = digestOf(t);
         check(digest, signatures);
         delivered[key] = true;
@@ -392,6 +424,51 @@ contract Gateway {
         }
 
         emit Delivered(t.source, t.nonce, digest);
+    }
+
+    /// Voids a transfer on its way here, with the federation's signatures over voidDigest: its nonce
+    /// is taken for good, so whatever delivery signatures are public stop counting, and its source may
+    /// then refund it. One delivered cannot be voided, and whichever lands first wins. delivered stays
+    /// false, as it says what arrived, for wallets to show.
+    function voidTransfer(uint64 source, bytes calldata from, uint64 which, bytes32 transfer, bytes[] calldata signatures) external {
+        require(peers[source].length > 0 && keccak256(from) == keccak256(peers[source]), "not from this gateway's peer");
+        bytes32 key = keccak256(abi.encode(source, keccak256(from), which));
+        require(!delivered[key], "delivered already");
+        require(voidedAt[key] == 0, "voided already");
+        check(voidDigest(from, abi.encodePacked(address(this)), source, uint64(block.chainid), which, transfer), signatures);
+        voidedAt[key] = block.number;
+        emit Voided(source, which, transfer);
+    }
+
+    /// Pays a transfer that left here back, with the federation's signatures over refundDigest, which
+    /// its signers give only once they read it voided where it was going: released if it is held
+    /// here, minted again if it was burned. What and to whom are what this gateway recorded, nothing a
+    /// caller says. Marked first and undone with the call, so what cannot be paid is tried again and
+    /// nothing is paid twice.
+    function refund(uint64 which, bytes[] calldata signatures) external {
+        Transfer memory t = sentTransfers[which];
+        require(t.nonce != 0, "no such transfer left here");
+        require(!refunded[which], "refunded already");
+        address sender = leftBy[which].sender;
+        bytes32 transfer = digestOf(t);
+        check(refundDigest(t.from, t.to, t.source, t.target, which, transfer, abi.encodePacked(sender)), signatures);
+        refunded[which] = true;
+        address to = refundTo[which] == address(0) ? sender : refundTo[which];
+
+        if (t.origin == block.chainid) {
+            release(t, to);
+        } else {
+            mintWrapped(t, to);
+        }
+
+        emit Refunded(which, to, transfer);
+    }
+
+    /// Who sent a transfer names where its refund goes, as a contract that cannot take the coin or an
+    /// ERC-1155 might: its own word alone, and nothing the federation signs.
+    function setRefundTo(uint64 which, address to) external {
+        require(msg.sender == leftBy[which].sender && to != address(0), "only who sent it, and to someone");
+        refundTo[which] = to;
     }
 
     /// Takes ERC-1155 tokens only as send moves them in.
@@ -447,7 +524,7 @@ contract Gateway {
         }
     }
 
-    function release(Transfer calldata t, address to) private {
+    function release(Transfer memory t, address to) private {
         if (t.kind == COIN) {
             (bool sentCoin, ) = to.call{value: t.amount}("");
             require(sentCoin, "the coin would not go");
@@ -467,7 +544,7 @@ contract Gateway {
         }
     }
 
-    function mintWrapped(Transfer calldata t, address to) private {
+    function mintWrapped(Transfer memory t, address to) private {
         bytes32 salt = keccak256(abi.encode(t.origin, t.kind <= TOKEN ? TOKEN : t.kind, t.asset));
         address made = wrappedOf[salt];
 

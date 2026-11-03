@@ -163,6 +163,81 @@ the pass goes on to the next. Under `watch` it sits out 1, 2, 4 and so on up to 
 tries, since a dry run or a failed delivery costs something every time, and each pass still lists
 it, `still refused: …`, until it goes through. One EVM chain out of reach stops no other.
 
+## Refunding a transfer refused for good
+
+A transfer its destination will never take, such as coins for a contract that takes none, would leave
+what it moved locked or burned where it left, so the federation can take it back to who sent it. The
+order is what keeps it from paying twice:
+
+1. **Void at the destination.** The federation signs to void it, `Transfer::void_digest`. Its nonce is
+   then taken for good at that gateway: Gateway.sol's `voidTransfer`, relayed from the board, or here
+   once enough posted `attest_void`. Signatures over its delivery are public, and now fail at the
+   contract, whoever relays them. One delivered cannot be voided, and whichever lands first wins.
+2. **Refund at the source.** Only once that is final does the federation sign to refund it,
+   `Transfer::refund_digest`. Its source gateway then pays who sent it, once: here once enough posted
+   `attest_refund`, or Gateway.sol's `refund`, relayed from the board. What it held is released; what
+   it burned, wrapped, is minted again, the same id and URI for an NFT. That goes for the coin, tokens,
+   NFTs and multi-token amounts alike, each gateway having recorded all of it as it left.
+
+```sh
+chainv4 bridge refund 4 --why "the recipient contract takes no coin" --eth-rpc URL --evm-key signer.key --key payer.key   # left here for there
+chainv4 bridge refund 9 --from-evm --eth-rpc URL --evm-key signer.key --key payer.key                                     # left there for here
+chainv4 bridge refund-to 4 ed25519:0x…                                                                                    # its sender names where it goes
+```
+
+**Each signer's operator runs it,** when they decide to: nothing does this by itself. It reads both
+chains, shows what the transfer moved, whom it pays and why, asks for a typed yes unless `--yes`, and
+does the next step, so each operator runs it once for the void, and again for the refund. The one that
+makes the threshold takes the signatures over to the EVM chain and pays its gas, as anyone may with a
+key that is no signer's; a signature already on the board is not posted again.
+
+**What a signer goes by is what it reads,** never what an operator says, as it does for a transfer:
+- to void, that the transfer left its source in a block that is final there, the source's digest being
+  the one worked out from the gateway the [directory](governance.md#directory) names, and that its
+  destination says it was not delivered. A delivery its destination would take now is refused: deliver
+  that instead. With too few signatures on the board to try one, it says so and goes on.
+- to refund, that the destination says it was voided in a block final there: `voidedAt(key)` against
+  the RPC's finalized block or `evm_depth`, or `voided(source, nonce)` against the finalized checkpoint
+  or `chain_depth`. Before that, a reorganization could undo the void and let a delivery land.
+
+**What it signs, and to whom.** Each message has its own domain and layout, in Rust, Lua and Solidity:
+
+```
+void   = keccak256(abi.encode("chainv4-gateway-void", bytes from, bytes to, uint64 source, uint64 target, uint64 nonce, bytes32 digest))
+refund = keccak256(abi.encode("chainv4-gateway-refund", bytes from, bytes to, uint64 source, uint64 target, uint64 nonce, bytes32 digest, bytes sender))
+```
+
+`digest` is the transfer's own, and `sender` whom its source gateway recorded: `sent`'s 13th value here,
+`leftBy(nonce)` there. A signature over a transfer or a signer set passes for neither. The amount, asset
+and sender a refund pays are those the source gateway holds, so none comes from a caller: Gateway.sol's
+`refund` takes only a nonce and signatures, and the gateway here refuses a digest or sender that is not
+what it recorded.
+
+**A sender that cannot take it.** The coin to a contract with no way to receive it, or an ERC-1155 to
+one without its hook, fails, and takes the whole call with it: nothing is marked, it can be tried again,
+and it cannot pay twice, as it is marked before it pays. So a sender may name another address, by its own
+call alone, `set_refund_to` here and `setRefundTo` there, `chainv4 bridge refund-to`: what the federation
+signs is still who sent it. A contract that can neither receive it nor make that call stays as it was
+before this existed, its funds where they are.
+
+**What this adds to what the federation can do.** A threshold could already mint anything here or there
+by signing a transfer no one made, so a refund it signs without a void, or alongside a delivery, is no
+new way to steal: and a refund pays only who sent it what they sent. What is new is censorship: a
+threshold can void what has signatures and was not yet relayed, which before only a relayer's absence
+could hold up. Nothing here checks the void at the source but those signatures.
+
+**Rotations and resets.** A signer in force is all that counts on the board, and each EVM gateway counts
+its own copy of the set, so a refund begun under one federation takes the threshold of the next, and one
+on Gateway.sol waits for `setSigners` as a delivery would. Voids and refunds name both gateways. What left
+for a gateway since replaced is refused by each signer rather than voided: put the peer back to do it, or
+it stays where the caveats say. The gateway here marks what arrived and was voided by source chain and
+nonce, as it always did, and Gateway.sol by the source gateway too.
+
+**Not Bitcoin.** A deposit is a proof of a payment with no sender to pay back, and nothing a signer can
+refuse. A withdrawal has its own path: it stays queued while it cannot go, each reason passing with fees
+or more deposits, and its owner can raise what it may lose, so nothing locks it for good as a refused
+transfer is. A release that cannot be finished is cancelled, as below.
+
 ## Bitcoin
 
 BTC comes here as wBTC, a token of 8 decimals, one for one with satoshis: deposits are proven to a
@@ -264,7 +339,7 @@ signs. A signature says nothing but that one release: not on another chain or ga
 for no vote to cancel, nor for a Bitcoin signature, whose preimages start otherwise. It is good for
 one number, the next, so what proposed a release does not bring it back once the federation cancelled
 it: proposing it again, which is allowed, takes a signer signing again. One signer alone may propose
-at a fee the others refuse: they then pass over it and cancel it, as below.
+at a fee the others refuse: their passes then vote it down, as below.
 
 **The fee** of a release is held between two limits set once, at setup: `fee_cap`, the most it may
 pay in satoshis, and `fee_floor`, the least per virtual byte, so a release cannot hold its inputs
@@ -290,6 +365,39 @@ federation no one can reach, or one signers refuse, such as one paying far past 
   they all conflict, and Bitcoin mines one. The anchor lapses once it is shown spent, as nothing
   holding it can be mined after that. A cancelled release that was finished anyway may still be
   shown with `released`: what it spent and paid is then spent and paid.
+
+**The signers' passes vote by themselves,** rather than a release waiting on people, as one signer can
+propose what the rest refuse, and nothing else ever cancels it:
+- **What a signer refuses for good gets its vote at once:** what is wrong with it, or what pays past its
+  limit. Any failure to read what the gateway says of a release gets none, as nothing is known, and nor
+  does a release past only the fixed limit a signer goes by with no fee rate to read, as that may be the
+  going rate. `check_btc_release` is told apart this way: it runs only on all of it read, and says
+  `Wrong`, `Dead` or `Overpriced`; `btc_release_step` then says what to do.
+- **A signer that signed it** gets no vote on a refusal, as a signature cannot be taken back, and all it
+  usually means is that the rate moved. The gateway would count one, though, and past the age limit it
+  votes all the same, or a release whose other signers went away could never be cancelled; each
+  withdrawal's anchor is what keeps that signature, public, from paying twice.
+- **The age limit** is `--cancel-after`, 6 hours unless told: a release short of its threshold past that
+  gets a vote from each signer, rather than a signature, whether it stands or not. Its age is what the
+  chain says, the tip's block time less that of the block with its `Proposed` event, as the gateway keeps
+  no time of its own; so it takes a node with `--index-events`, and with no index a pass says so and votes
+  on none for its age. No signer's clock has a say.
+- **With every input at its threshold** no vote is sent, as the gateway would refuse it, but for one with
+  an input shown spent, which Bitcoin can no longer mine.
+
+**That does not go round.** Once it is cancelled, its withdrawals are queued, with their anchors, and a
+pass would otherwise propose them again, for the same refusal, every minute, for as long as the network
+asks what some signer refuses:
+- A signer does not propose past what it would itself sign for, so it cannot vote down its own.
+- A withdrawal from a cancelled release is not proposed again until that release is past `--cancel-after`,
+  unless at a rate at least a quarter under what it paid, which is another question to put to the signers.
+  One cancelled for its age has passed that limit already, so it holds nothing up. An age that goes unread
+  errs on the side of waiting. `bridge btc propose --fee` is an operator's word, and goes by none of this.
+
+**A release with all its signatures that is not mined** cannot be cancelled, as anyone could still
+broadcast it. Past `--cancel-after`, again by its proposal's age, each pass logs one line of it, its id,
+its transaction, what it pays against what the network asks, and that it needs child-pays-for-parent: a
+transaction spending one of its outputs, at a fee that pays for both. Nothing bumps it automatically.
 
 **A new federation** takes over the deposit addresses: new ones are made under it, and the old
 ones stay open for the grace period. A **sweep** is a release with no withdrawals, paying what
@@ -345,11 +453,13 @@ is said, and the next goes on.
      next one to pay the rest.
 
    With Esplora out of reach, nothing is proposed, rather than guess a fee a release cannot then change.
-2. **Signs** every open release that stands, as **sign** below.
-3. **Broadcasts** any with all its signatures that Esplora has not heard of, and **shows** any
-   `bitcoin_depth` deep, a cancelled one that was mined anyway among them. This takes no signer's key:
-   anyone may run a pass with no `--evm-key` to do just this, and `relay-sync` is still what keeps the
-   relay able to prove it.
+2. **Signs** every open release that stands, as **sign** below, and [votes](#the-gateway) to cancel what
+   it refuses for good or what is short of its signatures past `--cancel-after`.
+3. **Broadcasts** any with all its signatures that Esplora has not heard of, **shows** any
+   `bitcoin_depth` deep, a cancelled one that was mined anyway among them, and warns of any with all its
+   signatures that Bitcoin has not mined past `--cancel-after`. This takes no signer's key: anyone may run
+   a pass with no `--evm-key` to do just this, and `relay-sync` is still what keeps the relay able to prove
+   it.
 
 How long a withdrawal takes is then one pass of the federation, its threshold's signatures, and
 Bitcoin's own time: usually under an hour to be mined, and a little more to show as `paid`. It waits
@@ -372,18 +482,21 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   input once, pending and held; only change besides, to the federation it was proposed under; the
   fee within its limits; the version, sequence and lock time fixed; and the transaction written as
   Bitcoin writes it, with the id the gateway keeps. One that fails is logged and left unsigned, for
-  the next one, as is one this signer voted to cancel. The check is `check_btc_release`: a fault
-  in the gateway alone should not be enough to take real bitcoin. It then signs each input it has
-  not signed.
+  the next one, as is one this signer voted to cancel: `sign` by hand votes on nothing, and a pass does.
+  The check is `check_btc_release`: a fault in the gateway alone should not be enough to take real
+  bitcoin. It then signs each input it has not signed, unless all hold their threshold already.
 - **A signer refuses what pays too much.** A release past the most a virtual byte this signer signs
-  for is logged and left, each pass going on: `--max-fee-rate` if told, else 3 times the fastest rate
+  for gets its pass's vote, each pass going on: `--max-fee-rate` if told, else 3 times the fastest rate
   Esplora says, at least 25, and never under the gateway's floor, so a quiet network refuses no normal
   fee. Esplora out of reach, or no `--esplora`, should not halt withdrawals, so it goes on signing up
-  to a fixed 200, saying so. A release it refuses, or that falls past the limit as fees calm, is under
-  its threshold, so the federation can cancel it, and fees rising past one proposed earlier refuse
-  nothing; one with all its signatures is left to be mined or bumped, as below. Esplora is trusted for
-  this, and the cap still holds whatever it says: run your own for a limit that does not rest on
-  someone else's.
+  to a fixed 200, saying so, and past that leaves it, with no vote. A release it refuses, or that falls
+  past the limit as fees calm, is under its threshold, so the federation cancels it, and fees rising
+  past one proposed earlier refuse nothing; one with all its signatures is left to be mined or bumped,
+  as above. Esplora is trusted for this, so one that lies could get a good release voted down, which
+  costs a delay, and the cap still holds whatever it says: run your own for a limit that does not rest
+  on someone else's.
+- **`--cancel-after`** takes a time, `6h`, `90m` or `30s`, 6 hours unless told: see
+  [the gateway](#the-gateway). A pass reading a release's age needs a node with `--index-events`.
 - **cancel** is a signer's vote, signed with `--evm-key`.
 
 ## Caveats
@@ -399,10 +512,12 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   that never was: keep it synced, and keep `bitcoin_depth` above what an attacker could mine.
 - **A release that never confirms holds its inputs:** once proposed, they are pending until it is
   shown released or cancelled. One stuck with every signature, as fees rose past what it pays, can
-  no longer be cancelled: it is bumped by a child that pays for it, spending one of its outputs.
+  no longer be cancelled: it is bumped by a child that pays for it, spending one of its outputs. A pass
+  warns of it, and does not do this for you.
 - **What was in flight at a reset stays there.** Whatever left Gateway.sol for a gateway before it
   was set up anew is signed by no one and arrives nowhere, and whatever left before `chainv4 bridge
-  peer` named the new one the same: join them before anyone sends.
+  peer` named the new one the same, and no refund takes it back, as no gateway it was for can void it:
+  join them before anyone sends.
 - **The gateway's owner sets its peers.** A signer vouches for what the peer gateway says left it,
   so an owner who repointed a peer could have fake deposits signed. `chainv4 bridge` refuses to
   sign or relay through a peer other than the Gateway.sol the directory names on that chain, or

@@ -60,6 +60,159 @@ fn a_signature_recovers_its_signer_as_ecrecover_would() {
     assert_eq!(AssetKind::from_number(4), None);
 }
 
+#[test]
+fn a_void_and_a_refund_are_signed_over_their_own_domains_and_every_field_changes_them() {
+    let base = transfer();
+    let (void, refund) = (base.void_digest(), base.refund_digest(&[6; 33]));
+
+    // None passes for another, nor for a signer set.
+    let signers = signers_digest([2; 20], 11155111, 7, &[[4; 20]], 18);
+    let all = [base.digest(), void, refund, signers];
+
+    for (at, one) in all.iter().enumerate() {
+        for other in &all[at + 1..] {
+            assert_ne!(one, other);
+        }
+    }
+
+    // Each ABI encoding starts with where its domain is, a place none shares, so one's bytes could be
+    // no other's whatever the fields say; and its domain, which is its own.
+    let head = |types: &str| crate::abi::parse_signature(types).unwrap().1.len() * 32;
+    let places = [head("(string,bytes32,bytes32)"), head("(string,bytes,bytes,uint64,uint64,uint64,bytes32)"), head("(string,bytes,bytes,uint64,uint64,uint64,bytes32,bytes)"), head("(string,address,uint256,uint64,address[],uint256)")];
+
+    assert_eq!(places, [0x60, 0xe0, 0x100, 0xc0]);
+    assert_eq!((DOMAIN, VOID_DOMAIN, REFUND_DOMAIN), ("chainv4-gateway", "chainv4-gateway-void", "chainv4-gateway-refund"));
+
+    let changed = [
+        Transfer { from: vec![9; 33], ..transfer() },
+        Transfer { to: vec![9; 20], ..transfer() },
+        Transfer { source: 1, ..transfer() },
+        Transfer { target: 1, ..transfer() },
+        Transfer { nonce: 8, ..transfer() },
+        Transfer { amount: u256::from(5_001u64), ..transfer() },
+        Transfer { recipient: vec![5; 20], ..transfer() },
+    ];
+
+    for (index, other) in changed.iter().enumerate() {
+        assert_ne!(other.void_digest(), void, "field {index}");
+        assert_ne!(other.refund_digest(&[6; 33]), refund, "field {index}");
+    }
+
+    assert_ne!(base.refund_digest(&[7; 33]), refund, "whom it pays is signed");
+    assert_eq!(base.attest_void_args(&[1; 65]).len(), 5);
+    assert_eq!(base.attest_refund_args(&[6; 33], &[1; 65]).len(), 6);
+}
+
+#[cfg(feature = "bitcoin")]
+mod stuck_releases {
+    use super::super::*;
+
+    fn standing(refusal: Option<ReleaseRefusal>) -> ReleaseStanding {
+        ReleaseStanding { refusal, blind: false, signed_by_me: false, signed_enough: false, past_limit: Some(false) }
+    }
+
+    fn wrong() -> Option<ReleaseRefusal> {
+        Some(ReleaseRefusal::Wrong("it pays someone else".to_string()))
+    }
+
+    fn overpriced() -> Option<ReleaseRefusal> {
+        Some(ReleaseRefusal::Overpriced("past the limit".to_string()))
+    }
+
+    fn voted(step: ReleaseStep) -> bool {
+        matches!(step, ReleaseStep::Vote(_))
+    }
+
+    #[test]
+    fn a_release_refused_for_good_takes_a_vote_at_once_and_one_that_stands_a_signature() {
+        assert_eq!(btc_release_step(&standing(None)), ReleaseStep::Sign);
+        assert_eq!(btc_release_step(&standing(wrong())), ReleaseStep::Vote("it pays someone else".to_string()));
+        assert_eq!(btc_release_step(&standing(overpriced())), ReleaseStep::Vote("past the limit".to_string()));
+        assert_eq!(btc_release_step(&ReleaseStanding { signed_by_me: true, ..standing(None) }), ReleaseStep::Sign, "for any input it has not");
+    }
+
+    #[test]
+    fn overpriced_by_a_limit_with_no_fee_rate_behind_it_takes_no_vote() {
+        let blind = ReleaseStanding { blind: true, ..standing(overpriced()) };
+
+        assert!(matches!(btc_release_step(&blind), ReleaseStep::Leave(_)), "that may pass once Esplora answers");
+        // What is wrong whatever the fee is still wrong with no fee to go by.
+        assert!(voted(btc_release_step(&ReleaseStanding { blind: true, ..standing(wrong()) })));
+    }
+
+    #[test]
+    fn a_signer_that_signed_a_release_votes_it_down_only_past_the_limit_or_when_it_can_never_be_mined() {
+        let signed = ReleaseStanding { signed_by_me: true, ..standing(overpriced()) };
+
+        assert!(matches!(btc_release_step(&signed), ReleaseStep::Leave(_)));
+        assert!(voted(btc_release_step(&ReleaseStanding { past_limit: Some(true), ..signed.clone() })), "else one left alone by the others could never go");
+        let spent = ReleaseStanding { refusal: Some(ReleaseRefusal::Dead("spent".to_string())), ..signed };
+        assert!(voted(btc_release_step(&spent)));
+    }
+
+    #[test]
+    fn past_the_limit_a_release_short_of_its_signatures_takes_a_vote_rather_than_a_signature() {
+        assert!(voted(btc_release_step(&ReleaseStanding { past_limit: Some(true), ..standing(None) })));
+        assert_eq!(btc_release_step(&ReleaseStanding { past_limit: None, ..standing(None) }), ReleaseStep::Sign, "an age unread says nothing");
+        assert!(voted(btc_release_step(&ReleaseStanding { past_limit: None, ..standing(wrong()) })), "and stops no other reason");
+    }
+
+    #[test]
+    fn a_release_with_all_its_signatures_takes_no_vote_as_the_gateway_would_refuse_it_unless_it_can_never_be_mined() {
+        let held = |refusal, past_limit| ReleaseStanding { signed_enough: true, past_limit, ..standing(refusal) };
+
+        assert_eq!(btc_release_step(&held(None, Some(true))), ReleaseStep::Nothing, "one more would only cost");
+        assert!(matches!(btc_release_step(&held(overpriced(), Some(true))), ReleaseStep::Leave(_)));
+        assert!(matches!(btc_release_step(&held(wrong(), Some(false))), ReleaseStep::Leave(_)));
+        // The gateway takes a vote on one Bitcoin can never mine, however many signed.
+        assert!(voted(btc_release_step(&held(Some(ReleaseRefusal::Dead("spent".to_string())), Some(false)))));
+    }
+
+    #[test]
+    fn an_input_shown_spent_is_told_apart_from_a_release_that_is_wrong_or_only_dear() {
+        let mut facts = ReleaseFacts {
+            raw: vec![1, 2, 3],
+            txid: vec![0; 32],
+            version: 0,
+            withdrawals: Vec::new(),
+            inputs: vec![("aa:0".to_string(), SpentOutput { sats: 1_000, version: 0, state: "spent".to_string(), threshold: 2, script_len: 100 })],
+            change_script: Vec::new(),
+            fee_cap: 50_000,
+            fee_floor: 2,
+            most_rate: 100,
+        };
+
+        assert!(matches!(check_btc_release(&facts), Err(ReleaseRefusal::Dead(_))));
+        facts.inputs[0].1.state = "pending".to_string();
+        assert!(matches!(check_btc_release(&facts), Err(ReleaseRefusal::Wrong(_))));
+    }
+
+    #[test]
+    fn a_cancelled_rate_is_proposed_again_only_well_under_it_or_past_the_limit() {
+        const LIMIT: u64 = BTC_CANCEL_AFTER_MS;
+
+        assert!(!btc_may_propose_again(100, 100, Some(60_000), LIMIT), "the same rate a minute later");
+        assert!(!btc_may_propose_again(200, 100, Some(60_000), LIMIT), "or more");
+        assert!(!btc_may_propose_again(76, 100, Some(60_000), LIMIT), "or a little less, as estimates wander");
+        assert!(btc_may_propose_again(75, 100, Some(60_000), LIMIT), "a quarter less is another question");
+        assert!(btc_may_propose_again(100, 100, Some(LIMIT), LIMIT), "once past the limit, as often as that at most");
+        assert!(btc_may_propose_again(500, 100, Some(LIMIT + 1), LIMIT), "one cancelled for its age holds up nothing");
+        assert!(!btc_may_propose_again(100, 100, None, LIMIT), "an age unread errs towards not going round");
+        assert!(btc_may_propose_again(10, 100, None, LIMIT));
+    }
+
+    #[test]
+    fn the_warning_says_which_what_it_pays_against_what_the_network_asks_and_what_it_needs() {
+        let warning = btc_stuck_warning(7, "abcd", 7 * 3_600_000, 3, Some(40));
+
+        for part in ["release 7", "txid abcd", "after 7 hours", "pays 3 satoshis", "the network asks 40", "cannot be cancelled", "child-pays-for-parent"] {
+            assert!(warning.contains(part), "{part}: {warning}");
+        }
+
+        assert!(btc_stuck_warning(7, "abcd", 0, 3, None).contains("gives no rate"));
+    }
+}
+
 #[cfg(feature = "bitcoin")]
 mod planning {
     use {super::super::*, crate::crypto::bitcoin::tx::p2wpkh};

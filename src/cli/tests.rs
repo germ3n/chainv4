@@ -2019,6 +2019,7 @@ mod send {
                 esplora: Some(esplora.clone()),
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
+                cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
             })
         };
         let tip = || -> (String, u64) {
@@ -2107,6 +2108,7 @@ mod send {
                 esplora: Some(esplora.clone()),
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
+                cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
             })
         };
         run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None, None).unwrap();
@@ -2227,6 +2229,625 @@ mod send {
         running.stop();
     }
 
+    /// A chain with the federation 21, 22 and 23, two to sign, a Bitcoin gateway on a synced relay
+    /// holding three deposits, and a Bitcoin whose network asks what a test says: what the signers'
+    /// own passes over stuck releases are tried on.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    struct StuckReleases {
+        running: Running,
+        node: String,
+        bitcoin: FakeBitcoin,
+        esplora: String,
+        gateway: Address,
+        dir: TempDir,
+    }
+
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    impl StuckReleases {
+        fn start(name: &str) -> StuckReleases {
+            use crate::chain::{IndexKind, KeepFrom};
+            use crate::cli::bridge::btc::BtcAction;
+            use crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut};
+            use crate::crypto::keypair::{Keypair, PrivateKey};
+            use crate::registry::federation::Federation;
+
+            let federation = Federation {
+                signers: [21u8, 22, 23].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+                threshold: 2,
+                chain_depth: 20,
+                evm_depth: 12,
+                bitcoin_depth: 2,
+            };
+            let me = DevAuthority::dev_keypair().public().address();
+            let hash = crate::structs::hash::HashType::default_chain();
+            let running = Running::launch_genesis(true, false, |genesis| Genesis { federation: Some(federation.clone()), ..genesis }, |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap(), Default::default());
+            let node = format!("http://{}", running.api);
+            let bitcoin = FakeBitcoin::start();
+            let dir = TempDir::new(name);
+            let esplora = bitcoin.esplora.url.clone();
+            let (relay, gateway) = (deployed_at(&me, 3, hash), deployed_at(&me, 6, hash));
+            let mut fixture = StuckReleases { running, node, bitcoin, esplora, gateway, dir };
+
+            for secret in [21u8, 22, 23] {
+                let payer = Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).public().address();
+                send(fixture.running.args(TxArgs::Transfer { to: payer.into(), amount: u256::from(10u64).pow(20) })).unwrap();
+            }
+
+            let wasm = fixture.dir.0.join("btc_relay.wasm");
+            fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
+            send(fixture.running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+            fixture.run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }).unwrap();
+            fixture.run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1 }).unwrap();
+            let output = fixture.read("deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
+
+            for sats in [300_000, 300_001, 300_002] {
+                let deposit = Transaction { version: 2, inputs: vec![TxIn { txid: [0x5e; 32], vout: 0, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }], outputs: vec![TxOut { value: sats, script: output.clone() }], lock_time: 0 }.base();
+                fixture.bitcoin.block(std::slice::from_ref(&deposit), false);
+                fixture.bitcoin.block(&[], false);
+                fixture.run(BtcAction::RelaySync { relay, batch: 10 }).unwrap();
+                fixture.run(BtcAction::Deposit { txid: FakeBitcoin::display(&crate::crypto::bitcoin::sha256d(&deposit)), vout: 0, recipient: me }).unwrap();
+            }
+
+            fixture.asks(5);
+
+            fixture
+        }
+
+        /// The network asks this much a virtual byte, however soon.
+        fn asks(&self, rate: u64) {
+            self.bitcoin.esplora.serve("/fee-estimates", format!(r#"{{"1":{rate}.0,"3":{rate}.0}}"#));
+        }
+
+        fn args(&self, action: crate::cli::bridge::btc::BtcAction, secret: Option<u8>) -> crate::cli::bridge::BridgeArgs {
+            use crate::crypto::keypair::{Keypair, PrivateKey};
+
+            let key = secret.map(|secret| {
+                let key = self.dir.0.join(format!("signer-{secret}.key"));
+                fs::write(&key, Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).to_key_file()).unwrap();
+
+                key
+            });
+
+            crate::cli::bridge::BridgeArgs {
+                action: crate::cli::bridge::BridgeAction::Btc { action },
+                node: self.node.clone(),
+                tls: Default::default(),
+                key: key.clone(),
+                gateway: None,
+                eth_rpc: Vec::new(),
+                evm_key: key,
+                btc_gateway: Some(self.gateway),
+                esplora: Some(self.esplora.clone()),
+                evm_gateways: Vec::new(),
+                max_fee_rate: None,
+                cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+            }
+        }
+
+        /// By the dev key, with no signer's.
+        fn run(&self, action: crate::cli::bridge::btc::BtcAction) -> crate::cli::CliResult<()> {
+            crate::cli::bridge::bridge(self.args(action, None))
+        }
+
+        /// One signer's pass, as it is left running.
+        fn pass(&self, secret: u8) {
+            crate::cli::bridge::bridge(self.args(crate::cli::bridge::btc::BtcAction::Pass, Some(secret))).unwrap();
+        }
+
+        /// One signer's pass, past an operator's own limit on what it signs for.
+        fn pass_limited(&self, secret: u8, most: u64) {
+            crate::cli::bridge::bridge(crate::cli::bridge::BridgeArgs { max_fee_rate: Some(most), ..self.args(crate::cli::bridge::btc::BtcAction::Pass, Some(secret)) }).unwrap();
+        }
+
+        /// One signer's pass, with an age limit of this many milliseconds of block time.
+        fn pass_past(&self, secret: u8, cancel_after: u64) {
+            crate::cli::bridge::bridge(crate::cli::bridge::BridgeArgs { cancel_after, ..self.args(crate::cli::bridge::btc::BtcAction::Pass, Some(secret)) }).unwrap();
+        }
+
+        fn propose_by_hand(&self, secret: u8, fee: u64) {
+            crate::cli::bridge::bridge(self.args(crate::cli::bridge::btc::BtcAction::Propose { fee: Some(fee) }, Some(secret))).unwrap();
+        }
+
+        fn withdraw(&self) -> String {
+            let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
+            self.run(crate::cli::bridge::btc::BtcAction::Withdraw { address: to, sats: 200_000, most_fee: Some(100_000) }).unwrap();
+
+            self.count("withdrawal_count")
+        }
+
+        fn read(&self, function: &str, args: serde_json::Value) -> serde_json::Value {
+            let body = serde_json::json!({ "contract": self.gateway.to_string(), "function": function, "args": args });
+
+            serde_json::from_str::<serde_json::Value>(&ureq::post(format!("{}/call", self.node)).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()["values"].clone()
+        }
+
+        fn count(&self, function: &str) -> String {
+            self.read(function, serde_json::json!([]))[0]["value"].as_str().unwrap().to_string()
+        }
+
+        fn proposal(&self, id: &str) -> serde_json::Value {
+            self.read("proposal", serde_json::json!([{ "type": "u64", "value": id }]))
+        }
+
+        fn state(&self, id: &str) -> String {
+            self.proposal(id)[4]["value"].as_str().unwrap().to_string()
+        }
+
+        fn withdrawal_state(&self, id: &str) -> String {
+            self.read("withdrawal", serde_json::json!([{ "type": "u64", "value": id }]))[2]["value"].as_str().unwrap().to_string()
+        }
+
+        fn anchor(&self, id: &str) -> Option<String> {
+            self.read("anchor", serde_json::json!([{ "type": "u64", "value": id }]))[0]["value"].as_str().map(str::to_string)
+        }
+
+        fn voted(&self, id: &str, secret: u8) -> bool {
+            let key = crate::structs::hex::to_hex(&crate::crypto::secp256k1::public_key(&[secret; 32]).unwrap());
+
+            self.read("voted", serde_json::json!([{ "type": "u64", "value": id }, { "type": "bytes", "value": key }]))[0]["value"] == true
+        }
+
+        fn signed(&self, id: &str) -> usize {
+            (self.read("input_signatures", serde_json::json!([{ "type": "u64", "value": id }, { "type": "u64", "value": "0" }])).as_array().unwrap().len() - 2) / 2
+        }
+
+        fn spends(&self, id: &str) -> Vec<String> {
+            let (tx, _) = crate::crypto::bitcoin::tx::Transaction::read(&crate::structs::hex::from_hex(self.proposal(id)[0]["value"].as_str().unwrap()).unwrap()).unwrap();
+
+            tx.inputs.iter().map(|input| format!("{}:{}", crate::structs::hex::to_hex(&input.txid).trim_start_matches("0x"), input.vout)).collect()
+        }
+
+        fn nonce(&self, secret: u8) -> u64 {
+            use crate::crypto::keypair::{Keypair, PrivateKey};
+
+            let of = Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).public().address();
+
+            serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{}/accounts/{of}", self.node)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap()
+        }
+    }
+
+    /// A release one signer proposed at a fee the others refuse: each votes it down at once, it is
+    /// cancelled, and the next pass pays its withdrawal at what the network asks, through its anchor.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_release_refused_as_overpriced_is_voted_down_by_two_signers_and_proposed_again_through_its_anchor() {
+        let fixture = StuckReleases::start("btc-voted-down");
+        let id = fixture.withdraw();
+
+        // About 100 a virtual byte, where signers take up to 25.
+        fixture.propose_by_hand(23, 20_000);
+        fixture.pass(21);
+        assert_eq!((fixture.voted("1", 21), fixture.state("1").as_str(), fixture.signed("1")), (true, "open", 0));
+
+        // Voting again costs nothing, as it does not.
+        let paid = fixture.nonce(21);
+        fixture.pass(21);
+        assert_eq!(fixture.nonce(21), paid);
+
+        // Two is the threshold: its withdrawal goes back, tied to one of what it spent.
+        fixture.pass(22);
+        assert_eq!(fixture.state("1"), "cancelled");
+        assert_eq!(fixture.withdrawal_state(&id), "queued");
+        let anchor = fixture.anchor(&id).expect("anchored as it was cancelled");
+        assert!(fixture.spends("1").contains(&anchor));
+
+        // Next pass: at what the network asks, a lower rate than was refused, spending that anchor, so it
+        // and the cancelled one can never both be mined. The others sign it this time.
+        fixture.pass(21);
+        assert_eq!(fixture.count("proposal_count"), "2");
+        assert!(fixture.spends("2").contains(&anchor), "{:?} spends {anchor}", fixture.spends("2"));
+        assert_eq!(fixture.withdrawal_state(&id), "proposed");
+        fixture.pass(22);
+        assert_eq!((fixture.state("2").as_str(), fixture.signed("2")), ("open", 2));
+        fixture.running.stop();
+    }
+
+    /// The network asks what two signers will not sign for, and the third goes on proposing it. Fixed
+    /// costs each pass are fine; a proposal, refusal and cancel going round every pass are not.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_release_cancelled_for_its_rate_is_not_proposed_again_at_that_rate_until_the_limit() {
+        let fixture = StuckReleases::start("btc-no-flapping");
+        let id = fixture.withdraw();
+        fixture.asks(100);
+
+        // Who would refuse it does not propose it, so it does not vote against itself.
+        fixture.pass_limited(22, 25);
+        assert_eq!(fixture.count("proposal_count"), "0", "past what this signer signs for");
+
+        // The third signer's limit goes by the network, so it proposes and signs; the others vote it down.
+        fixture.pass(21);
+        assert_eq!((fixture.count("proposal_count").as_str(), fixture.signed("1")), ("1", 1));
+        fixture.pass_limited(22, 25);
+        fixture.pass_limited(23, 25);
+        assert_eq!(fixture.state("1"), "cancelled");
+
+        // However many passes go by with the network asking the same, nothing goes round, and no one pays.
+        let paid = [fixture.nonce(21), fixture.nonce(22), fixture.nonce(23)];
+
+        for _ in 0..3 {
+            fixture.pass(21);
+            fixture.pass_limited(22, 25);
+            fixture.pass_limited(23, 25);
+        }
+
+        assert_eq!(fixture.count("proposal_count"), "1");
+        assert_eq!(fixture.withdrawal_state(&id), "queued");
+        assert_eq!([fixture.nonce(21), fixture.nonce(22), fixture.nonce(23)], paid);
+
+        // Estimates wandering a little change nothing; a rate well under it is another question.
+        fixture.asks(90);
+        fixture.pass(21);
+        assert_eq!(fixture.count("proposal_count"), "1");
+        fixture.asks(70);
+        fixture.pass_limited(22, 25);
+        assert_eq!(fixture.count("proposal_count"), "1", "still past what this one signs for");
+        fixture.pass(21);
+        assert_eq!(fixture.count("proposal_count"), "2");
+        assert!(fixture.spends("2").contains(&fixture.anchor(&id).unwrap()));
+        fixture.pass_limited(22, 25);
+        fixture.pass_limited(23, 25);
+        assert_eq!(fixture.state("2"), "cancelled");
+
+        // At the same rate again it waits for the limit, by the chain's time, and goes once past it, its
+        // next try that far off in turn.
+        fixture.pass(21);
+        assert_eq!(fixture.count("proposal_count"), "2");
+        fixture.pass_past(21, 0);
+        assert_eq!(fixture.count("proposal_count"), "3");
+        fixture.running.stop();
+    }
+
+    /// What says nothing of a release gets no vote: a state read failing, and a limit with no fee rate
+    /// behind it. What is refused for good by the same signer a moment later does.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_failure_that_may_be_temporary_takes_no_vote() {
+        let fixture = StuckReleases::start("btc-temporary");
+        fixture.withdraw();
+        // About 400 a virtual byte: past even the fixed 200 of a signer with no fee rate.
+        fixture.propose_by_hand(23, 80_000);
+
+        // Esplora gone: refused, as it is past the fixed limit, but it may be the going rate.
+        let gone = crate::cli::bridge::BridgeArgs { esplora: Some("http://127.0.0.1:1".to_string()), ..fixture.args(crate::cli::bridge::btc::BtcAction::Pass, Some(21)) };
+        crate::cli::bridge::bridge(gone).unwrap();
+        assert_eq!((fixture.voted("1", 21), fixture.signed("1")), (false, 0));
+
+        // The node failing what it is asked of a release: nothing is known, so nothing is said.
+        let flaky = FlakyNode::start(&fixture.node, "utxo_of");
+        let failing = crate::cli::bridge::BridgeArgs { node: flaky.clone(), ..fixture.args(crate::cli::bridge::btc::BtcAction::Pass, Some(21)) };
+        crate::cli::bridge::bridge(failing).unwrap();
+        assert_eq!((fixture.voted("1", 21), fixture.signed("1")), (false, 0));
+
+        // Its age going unread: no vote for its age, and none lost for the rest.
+        let no_index = FlakyNode::start(&fixture.node, "/events");
+        let unaged = crate::cli::bridge::BridgeArgs { node: no_index, cancel_after: 0, max_fee_rate: Some(1_000), ..fixture.args(crate::cli::bridge::btc::BtcAction::Pass, Some(22)) };
+        crate::cli::bridge::bridge(unaged).unwrap();
+        assert_eq!((fixture.voted("1", 22), fixture.signed("1")), (false, 1), "signed, as it stands by what it was told");
+
+        // All of it read again, the same signer votes.
+        fixture.pass(21);
+        assert!(fixture.voted("1", 21));
+        fixture.running.stop();
+    }
+
+    /// A release short of its signatures past the age limit takes a vote, from one who signed it too, or
+    /// it could not be cancelled once the others are gone. One with all its signatures never does, as
+    /// the gateway would refuse it: it is warned about instead.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn past_the_age_limit_a_release_short_of_signatures_is_voted_down_and_one_with_them_is_warned_about() {
+        let fixture = StuckReleases::start("btc-age-limit");
+        let id = fixture.withdraw();
+        // Signer 23 proposed it and went away. It stands, so nothing is refused.
+        fixture.propose_by_hand(23, 1_000);
+        fixture.pass(21);
+        assert_eq!((fixture.signed("1"), fixture.voted("1", 21)), (1, false), "under the limit it is signed as ever");
+
+        // Far under the limit: neither signing nor voting changes for the one who signed.
+        let paid = fixture.nonce(21);
+        fixture.pass(21);
+        assert_eq!(fixture.nonce(21), paid);
+
+        // Past it: no one signs it now, and the one who signed it votes too.
+        fixture.pass_past(21, 0);
+        assert_eq!((fixture.signed("1"), fixture.voted("1", 21)), (1, true));
+        fixture.pass_past(22, 0);
+        assert_eq!(fixture.state("1"), "cancelled");
+        assert_eq!(fixture.withdrawal_state(&id), "queued");
+
+        // Proposed again at what the network asks now, through its anchor, and this time it is signed.
+        let anchor = fixture.anchor(&id).unwrap();
+        fixture.asks(2);
+        fixture.pass(21);
+        assert!(fixture.spends("2").contains(&anchor));
+        fixture.pass(22);
+        assert_eq!(fixture.signed("2"), 2);
+
+        // Past the limit with all its signatures, broadcast and not mined: a vote would be refused, so none
+        // is sent, as none of them pay; and each pass warns, by what the gateway and the network say.
+        let posted = fixture.bitcoin.esplora.posted.lock().unwrap().len();
+        assert!(posted > 0, "broadcast");
+        let txid = FakeBitcoin::display(&crate::structs::hex::from_hex(fixture.proposal("2")[1]["value"].as_str().unwrap()).unwrap());
+        fixture.bitcoin.esplora.serve(&format!("/tx/{txid}/hex"), "00".to_string());
+        fixture.bitcoin.esplora.serve(&format!("/tx/{txid}/status"), serde_json::json!({ "confirmed": false }).to_string());
+        let paid = (fixture.nonce(21), fixture.nonce(22), fixture.nonce(23));
+        fixture.pass_past(21, 0);
+        fixture.pass_past(22, 0);
+        fixture.pass_past(23, 0);
+        assert_eq!((fixture.nonce(21), fixture.nonce(22), fixture.nonce(23)), paid, "no one paid to vote or sign");
+        assert!(!fixture.voted("2", 21) && !fixture.voted("2", 22) && !fixture.voted("2", 23));
+        assert_eq!(fixture.state("2"), "open");
+
+        let bridge = crate::cli::bridge::Bridge::new(crate::cli::bridge::BridgeArgs { cancel_after: 0, ..fixture.args(crate::cli::bridge::btc::BtcAction::Pass, None) }).unwrap();
+        let warning = bridge.stuck_warning(&fixture.gateway, 2, fixture.proposal("2").as_array().unwrap(), Some(40)).unwrap().expect("past the limit");
+        for part in ["release 2", txid.as_str(), "the network asks 40", "cannot be cancelled", "child-pays-for-parent"] {
+            assert!(warning.contains(part), "{part}: {warning}");
+        }
+
+        // Under it, nothing.
+        let quiet = crate::cli::bridge::Bridge::new(fixture.args(crate::cli::bridge::btc::BtcAction::Pass, None)).unwrap();
+        assert_eq!(quiet.stuck_warning(&fixture.gateway, 2, fixture.proposal("2").as_array().unwrap(), Some(40)).unwrap(), None);
+        fixture.running.stop();
+    }
+
+    /// A node that answers everything as the real one does, but what mentions a word, which it fails.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    struct FlakyNode;
+
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    impl FlakyNode {
+        /// Its URL, served for as long as the test runs.
+        fn start(node: &str, word: &str) -> String {
+            use std::io::{BufRead, BufReader, Read, Write};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let (node, word) = (node.to_string(), word.to_string());
+
+            std::thread::spawn(move || {
+                let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut first = String::new();
+                    reader.read_line(&mut first).unwrap();
+                    let mut length = 0;
+
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+
+                        if line.trim().is_empty() {
+                            break;
+                        }
+
+                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let body = String::from_utf8(body).unwrap();
+                    let mut parts = first.split_whitespace();
+                    let (method, path) = (parts.next().unwrap_or_default().to_string(), parts.next().unwrap_or_default().to_string());
+                    let (status, answer) = if body.contains(&word) || path.contains(&word) {
+                        (500, serde_json::json!({ "error": "this node failed it" }).to_string())
+                    } else {
+                        let url = format!("{node}{path}");
+                        let mut response = match method.as_str() {
+                            "POST" => agent.post(&url).header("content-type", "application/json").send(body).unwrap(),
+                            _ => agent.get(&url).call().unwrap(),
+                        };
+
+                        (response.status().as_u16(), response.body_mut().read_to_string().unwrap())
+                    };
+                    let _ = write!(stream, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+                }
+            });
+
+            url
+        }
+    }
+
+    /// A transfer refused for good, both ways: voided where it was going, then, once that is final,
+    /// refunded where it left, each on the threshold of signers that read both chains for themselves.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "ethereum", feature = "finality-ffg"))]
+    #[test]
+    fn a_transfer_refused_for_good_is_voided_there_and_only_then_refunded_here_each_way() {
+        use crate::abi::{AbiType, AbiValue, decode_values, encode_values};
+        use crate::chain::{IndexKind, KeepFrom};
+        use crate::cli::bridge::{Bridge, BridgeAction, BridgeArgs, bridge};
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::registry::federation::Federation;
+        use crate::structs::hex::to_hex;
+        use crate::structs::tx::TxCallArgumentType;
+
+        let federation = Federation {
+            signers: [11u8, 12, 13].iter().map(|byte| crate::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 6,
+        };
+        let finality = FinalityConfig::dev(DevAuthority::dev_keypair().public());
+        let indexed = |node: Node| node.keep_index(IndexKind::Events, Some(KeepFrom::Height(0))).unwrap();
+        let b = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), ..genesis }, |node| node, Default::default());
+        let chain_b = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("http://{}/status", b.api)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["chain_id"].as_u64().unwrap();
+        let a = Running::launch_genesis(true, true, |genesis| Genesis { federation: Some(federation.clone()), finality: finality.clone(), ..genesis }, indexed, Default::default());
+        let (node_a, rpc_b) = (format!("http://{}", a.api), format!("http://{}/rpc", b.api));
+        let dir = TempDir::new("bridge-refund");
+        let key_file = |name: &str, secret: [u8; 32]| {
+            let path = dir.0.join(name);
+            fs::write(&path, Keypair::from_private(PrivateKey::Secp256k1(secret)).to_key_file()).unwrap();
+            path
+        };
+        let relayer = key_file("relayer.key", [0x42; 32]);
+        let (signer_one, signer_two) = (key_file("eleven.key", [11; 32]), key_file("twelve.key", [12; 32]));
+        let relayer_address = from_key(&[0x42; 32]).unwrap();
+
+        // Each signer takes what the board has enough of over there, and pays its gas.
+        for secret in [[0x42; 32], [11; 32], [12; 32]] {
+            send(b.args(TxArgs::Transfer { to: Address::Secp256k1(from_key(&secret).unwrap()).into(), amount: u256::from(10u64).pow(20) })).unwrap();
+        }
+
+        let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
+        let vouched = vec![(chain_b, evm_gateway)];
+        let me = DevAuthority::dev_keypair().public().address();
+        let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
+        let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
+        let args = |action: BridgeAction, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS };
+        let run = |action: BridgeAction, evm_key: Option<PathBuf>| bridge(args(action, evm_key));
+        bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, None) }).unwrap();
+        run(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
+        run(BridgeAction::Peer { evm_gateway: to_hex(&evm_gateway) }, Some(relayer.clone())).unwrap();
+        let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &rpc_b);
+        let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
+            let started = std::time::Instant::now();
+
+            while !done() {
+                assert!(started.elapsed() < std::time::Duration::from_secs(90), "{what} never happened");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        let read = |function: &str, values: serde_json::Value| -> Vec<serde_json::Value> {
+            let body = serde_json::json!({ "contract": gateway.to_string(), "function": function, "args": values });
+            serde_json::from_str::<serde_json::Value>(&ureq::post(format!("{node_a}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()["values"].as_array().cloned().unwrap_or_default()
+        };
+        let there = |signature: &str, values: &[AbiValue], returns: &[AbiType]| {
+            let (_, types) = crate::abi::parse_signature(signature).unwrap();
+            let input = [crate::crypto::hasher::Hasher::digest(crate::structs::hash::HashType::Keccak256, signature.as_bytes()).to_bytes()[..4].to_vec(), encode_values(&types, values).unwrap()].concat();
+
+            decode_values(returns, &rpc.call(&evm_gateway, &input).unwrap()).unwrap()
+        };
+        let refund = |nonce: u64, from_evm: bool, key: &PathBuf| run(BridgeAction::Refund { nonce, from_evm, why: None, yes: true }, Some(key.clone()));
+        let at = |source: u64, nonce: u64| serde_json::json!([{ "type": "u64", "value": source.to_string() }, { "type": "u64", "value": nonce.to_string() }]);
+
+        // --- Leaving there for here. ---
+        // 1,000 of ETH left Gateway.sol for Bob here, and it is decided no delivery shall come.
+        let bob = Address::Ed25519([0xb0; 32]);
+        run(BridgeAction::Send { kind: "coin".into(), recipient: bob.to_string(), amount: u256::new(1_000), asset: None, id: u256::ZERO, from_evm: true }, Some(relayer.clone())).unwrap();
+        assert_eq!(rpc.balance(&evm_gateway).unwrap(), u256::new(1_000));
+
+        // One signer's word for its void, as soon as it left in a final block, and an operator saying no
+        // to the question stops it.
+        wait("it being final where it left", &mut || refund(1, true, &signer_one).is_ok());
+        let refused = Bridge::new(args(BridgeAction::Relay, Some(signer_two.clone()))).unwrap().refund(1, true, None, false, &mut "no\n".as_bytes());
+        assert_eq!(refused.unwrap_err().to_string(), "nothing is signed");
+        assert!(read("voided", at(chain_b, 1))[0]["value"].is_null(), "one signer voids nothing, and no one who said no");
+        let balance_before = rpc.balance(&from_key(&[0x42; 32]).unwrap()).unwrap();
+
+        // A second: voided here. Delivery signatures posted now are refused, by a signer's pass too.
+        refund(1, true, &signer_two).unwrap();
+        assert!(!read("voided", at(chain_b, 1))[0]["value"].is_null());
+        run(BridgeAction::Sign { from_block: 0 }, Some(signer_one.clone())).unwrap();
+        assert_eq!(read("received", at(chain_b, 1))[0]["value"], false);
+
+        // Once that is final, each signs to refund it, and whoever makes the threshold takes it there.
+        wait("the refund", &mut || {
+            for key in [&signer_one, &signer_two] {
+                refund(1, true, key).unwrap();
+            }
+
+            there("refunded(uint64)", &[AbiValue::Uint(u256::new(1))], &[AbiType::Bool]) == [AbiValue::Bool(true)]
+        });
+        assert_eq!(rpc.balance(&evm_gateway).unwrap(), u256::ZERO);
+        assert_eq!(rpc.balance(&from_key(&[0x42; 32]).unwrap()).unwrap(), balance_before + u256::new(1_000), "to who sent it, who paid no gas for this");
+
+        // Run again, it says so, and pays nothing.
+        refund(1, true, &signer_one).unwrap();
+        assert_eq!(rpc.balance(&evm_gateway).unwrap(), u256::ZERO);
+
+        // --- Leaving here for there. ---
+        // Wrapped ETH reaches the dev key here, delivered as usual.
+        run(BridgeAction::Send { kind: "coin".into(), recipient: me.to_string(), amount: u256::new(2_000), asset: None, id: u256::ZERO, from_evm: true }, Some(relayer.clone())).unwrap();
+        let wrapped = || read("wrapped_of", serde_json::json!([{ "type": "u64", "value": chain_b.to_string() }, { "type": "u64", "value": "0" }, { "type": "bytes", "value": "0x" }]));
+        wait("the deposit", &mut || {
+            for key in [&signer_one, &signer_two] {
+                run(BridgeAction::Sign { from_block: 0 }, Some(key.clone())).unwrap();
+            }
+
+            wrapped().first().is_some_and(|value| !value["value"].is_null())
+        });
+        let weth: Address = wrapped()[0]["value"].as_str().unwrap().parse().unwrap();
+        let held = || {
+            let body = serde_json::json!({ "contract": weth.to_string(), "function": "balance_of", "args": [{ "type": "address", "value": me.to_string() }] });
+            let answer: serde_json::Value = serde_json::from_str(&ureq::post(format!("{node_a}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap();
+
+            answer["values"][0]["value"].as_str().unwrap().to_string()
+        };
+        assert_eq!(held(), "2000");
+
+        // 500 back to Gateway.sol itself, which takes no coin: burned here, and refused there for good.
+        let send_back = |amount: u64, recipient: &[u8; 20]| {
+            send(a.args(TxArgs::Call { to: gateway, function: "send".to_string(), amount: u256::ZERO, args: vec![TxCallArgumentType::U64(chain_b), TxCallArgumentType::Bytes(recipient.to_vec()), TxCallArgumentType::U64(1), TxCallArgumentType::Address(weth), TxCallArgumentType::U256(u256::ZERO), TxCallArgumentType::U256(u256::new(u128::from(amount)))] })).unwrap();
+        };
+        send_back(500, &evm_gateway);
+        assert_eq!(held(), "1500");
+        let posted_for = |nonce: u64| {
+            let digest = read("sent", serde_json::json!([{ "type": "u64", "value": nonce.to_string() }]))[11]["value"].clone();
+
+            read("signatures", serde_json::json!([{ "type": "bytes", "value": digest }])).len() - 1
+        };
+        wait("its delivery being signed", &mut || {
+            for key in [&signer_one, &signer_two] {
+                run(BridgeAction::Sign { from_block: 0 }, Some(key.clone())).unwrap();
+            }
+
+            posted_for(1) >= 2
+        });
+
+        // A transfer that would be taken is not refunded: it is delivered, and then there is nothing to refund.
+        send_back(100, &[0xcd; 20]);
+        wait("that one being signed too", &mut || {
+            for key in [&signer_one, &signer_two] {
+                run(BridgeAction::Sign { from_block: 0 }, Some(key.clone())).unwrap();
+            }
+
+            posted_for(2) >= 2
+        });
+        let would = refund(2, false, &signer_one).unwrap_err().to_string();
+        assert!(would.contains("would be taken"), "{would}");
+        run(BridgeAction::Relay, Some(signer_one.clone())).unwrap();
+        let delivered = refund(2, false, &signer_one).unwrap_err().to_string();
+        assert!(delivered.contains("was delivered"), "{delivered}");
+
+        // The other, refused there, is voided there: each signer's word goes on the board, and the one
+        // that makes the threshold takes them over. Its delivery signatures, public as they are, then fail.
+        refund(1, false, &signer_one).unwrap();
+        refund(1, false, &signer_two).unwrap();
+        let here = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/status")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["chain_id"].as_u64().unwrap();
+        let identity = read("identity", serde_json::json!([]))[0]["value"].as_str().and_then(crate::structs::hex::from_hex).unwrap();
+        let voided_key = crate::bridge::Transfer { from: identity, to: evm_gateway.to_vec(), source: here, target: chain_b, nonce: 1, kind: crate::bridge::AssetKind::Coin, origin: chain_b, asset: Vec::new(), id: u256::ZERO, amount: u256::ZERO, recipient: Vec::new(), name: String::new(), symbol: String::new(), decimals: 0, uri: String::new() }.delivered_key();
+        assert_ne!(there("voidedAt(bytes32)", &[AbiValue::FixedBytes(voided_key.clone())], &[AbiType::Uint(256)]), [AbiValue::Uint(u256::ZERO)]);
+        assert_eq!(there("delivered(bytes32)", &[AbiValue::FixedBytes(voided_key)], &[AbiType::Bool]), [AbiValue::Bool(false)]);
+        run(BridgeAction::Relay, Some(signer_one.clone())).unwrap();
+
+        // Once final there, the threshold's refund mints it back here, once.
+        wait("the refund here", &mut || {
+            for key in [&signer_one, &signer_two] {
+                refund(1, false, key).unwrap();
+            }
+
+            read("refund_of", serde_json::json!([{ "type": "u64", "value": "1" }]))[1]["value"] == true
+        });
+        assert_eq!(held(), "1900", "the 500 back, and the 100 that was delivered gone");
+        refund(1, false, &signer_one).unwrap();
+
+        // Its owner repoints the gateway's peer, and a signer's operator vouches for the new one: what
+        // left for the old is no business of that contract's, whose word could say anything.
+        send_back(50, &[0xcd; 20]);
+        let repointed = [0xfa; 20];
+        send(a.args(TxArgs::Call { to: gateway, function: "set_peer".to_string(), amount: u256::ZERO, args: vec![TxCallArgumentType::U64(chain_b), TxCallArgumentType::Bytes(repointed.to_vec())] })).unwrap();
+        let word = bridge(BridgeArgs { evm_gateways: vec![(chain_b, repointed)], ..args(BridgeAction::Refund { nonce: 3, from_evm: false, why: None, yes: true }, Some(signer_one.clone())) }).unwrap_err().to_string();
+        assert!(word.contains("did not leave for the gateway named"), "{word}");
+        a.stop();
+        b.stop();
+    }
+
     /// Signers leaving their passes running: what is queued is proposed, once, however many of them
     /// go at it, signed, broadcast and shown, with no one choosing a fee or anything else. What cannot
     /// go waits and says why, and what costs too much is passed over, by the network's word or, with
@@ -2295,6 +2916,7 @@ mod send {
             esplora: Some(esplora.to_string()),
             evm_gateways: Vec::new(),
             max_fee_rate,
+            cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
         };
         let run = |action: BtcAction, gateway: Option<Address>| bridge(args(action, None, None, &esplora, gateway, None));
         run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None).unwrap();
@@ -2386,17 +3008,15 @@ mod send {
         assert_eq!(nonce(&payer(22)), paid_before);
         assert_eq!(count(), "2");
 
-        // A release that pays far too much, by a signer gone astray. At 5 fastest the others sign for
-        // up to 25 a virtual byte: 20,000 is about 100 of them. They pass over it, and each pass goes on.
+        // A release that pays far too much, by a signer gone astray: at 5 fastest the others sign for up
+        // to 25 a virtual byte, and 20,000 is about 100 of them. Signing by hand, its operator may say
+        // otherwise. (What a pass does about it is shown below, in what votes it down.)
         let hand = |fee: u64| bridge(args(BtcAction::Propose { fee: Some(fee) }, Some(signer(23)), Some(signer(23)), &esplora, Some(gateway), None)).unwrap();
         withdraw(200_000, Some(100_000));
         hand(20_000);
         assert_eq!(count(), "3");
-        pass(21).unwrap();
-        pass(22).unwrap();
-        assert_eq!(signed("3"), 0, "refused, and logged");
-
-        // Its operator may say otherwise.
+        bridge(args(BtcAction::Sign, Some(signer(22)), Some(signer(22)), &esplora, Some(gateway), None)).unwrap();
+        assert_eq!(signed("3"), 0, "refused by hand, logged, and no vote");
         bridge(args(BtcAction::Sign, Some(signer(21)), Some(signer(21)), &esplora, Some(gateway), Some(200))).unwrap();
         assert_eq!(signed("3"), 1);
 
@@ -2460,7 +3080,7 @@ mod send {
         let relayer_address = from_key(&[0x42; 32]).unwrap();
         send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS })
         };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -2477,7 +3097,7 @@ mod send {
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
         assert!(run(BridgeAction::Deploy, None).is_ok());
         let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS })
         };
         with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
@@ -2561,7 +3181,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
-        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways, max_fee_rate: None };
+        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways, max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS };
         bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, Vec::new()) }).unwrap();
 
         // Its owner's own peer, and a coin sent to it.
@@ -2657,7 +3277,7 @@ mod send {
         // This chain has no directory, so each signer vouches for Gateway.sol itself.
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
         let vouched = vec![(rpc.chain_id().unwrap(), evm_gateway)];
-        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None };
+        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS };
         let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
             let started = std::time::Instant::now();
 

@@ -3,9 +3,11 @@
 //! EVM chain under the federation in force; peer joins the two; send moves the coin, a token or an
 //! NFT either way. sign is a federation signer's pass, signing what left either side once it is
 //! final; relay takes what the board has enough signatures for to the EVM chain; watch does both
-//! over and over. btc does Bitcoin's side ([btc]).
+//! over and over. refund takes a transfer refused for good back to who sent it, a signer's operator
+//! at a time ([refund]). btc does Bitcoin's side ([btc]).
 
 pub(crate) mod btc;
+mod refund;
 
 use {
     super::send::{SendArgs, TlsArgs, TxArgs, agent, ok, send},
@@ -68,9 +70,30 @@ pub struct BridgeArgs {
     pub evm_gateways: Vec<(u64, [u8; 20])>,
     /// The most a Bitcoin release may pay for this signer to sign it, in satoshis a virtual byte.
     /// Unless told: 3 times the fastest rate Esplora says, at least 25; with Esplora out of reach,
-    /// 200. What is past it is logged and passed over, for the federation to cancel.
+    /// 200. What is past it is logged and left unsigned, and a pass votes to cancel it, unless all it
+    /// has to go by is that fixed 200.
     #[arg(long, global = true)]
     pub max_fee_rate: Option<u64>,
+    /// How long, by the chain's block time, a Bitcoin release may stay short of its signatures before
+    /// a signer's pass votes to cancel it, and stay unmined with all of them before it warns: 6h, 90m,
+    /// 30s. Reading a release's age takes a node with --index-events.
+    #[arg(long, global = true, default_value = "6h", value_parser = parse_age)]
+    pub cancel_after: u64,
+}
+
+/// A length of time as milliseconds, from a number and its unit: s, m, h or d.
+fn parse_age(text: &str) -> Result<u64, String> {
+    let wrong = || format!("{text} is not a time, such as 6h, 90m or 30s");
+    let number = text.trim_end_matches(|letter: char| !letter.is_ascii_digit());
+    let each = match &text[number.len()..] {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => return Err(wrong()),
+    };
+
+    number.parse::<u64>().ok().and_then(|number| number.checked_mul(each)).ok_or_else(wrong)
 }
 
 fn parse_evm_gateway(text: &str) -> Result<(u64, [u8; 20]), String> {
@@ -130,6 +153,31 @@ pub enum BridgeAction {
     /// Delivers to each EVM chain given what left here for it with enough signatures on the
     /// board, paid with --evm-key.
     Relay,
+    /// Takes a transfer refused for good at its destination back to who sent it, on the word of the
+    /// federation's threshold, each signer's operator running this with its --evm-key. It reads both
+    /// chains and does the next step: signs to void it at its destination; once that is final, signs
+    /// to refund it at its source. Run it again for the next. Asks for yes, unless --yes.
+    Refund {
+        /// The nonce it left its source with.
+        nonce: u64,
+        /// It left the EVM chain of the one --eth-rpc for here, rather than here for there.
+        #[arg(long)]
+        from_evm: bool,
+        /// Why, as this operator knows it, to say beside what the chains say.
+        #[arg(long)]
+        why: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Who sent a transfer names where its refund goes, as a contract that cannot take it might:
+    /// signed here with --key, or with --from-evm there with --evm-key.
+    RefundTo {
+        nonce: u64,
+        /// An address here, or 0x and 40 hex digits there.
+        recipient: String,
+        #[arg(long)]
+        from_evm: bool,
+    },
     /// Bitcoin's side: the light client contract, deposits minting wBTC, and releases.
     Btc {
         #[command(subcommand)]
@@ -236,6 +284,8 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Send { kind, recipient, amount, asset, id, from_evm } => bridge.send_one(kind_of(kind)?, recipient, *amount, asset.as_deref(), *id, *from_evm),
         BridgeAction::Sign { from_block } => bridge.sign(*from_block),
         BridgeAction::Relay => bridge.relay(),
+        BridgeAction::Refund { nonce, from_evm, why, yes } => bridge.refund(*nonce, *from_evm, why.as_deref(), *yes, &mut std::io::stdin().lock()),
+        BridgeAction::RefundTo { nonce, recipient, from_evm } => bridge.refund_to(*nonce, recipient, *from_evm),
         BridgeAction::Btc { action } => bridge.btc(action),
         BridgeAction::Watch { from_block, every } => loop {
             bridge.pass(*from_block);
@@ -324,7 +374,7 @@ impl Bridge {
     fn deploy_lua(&self, me: &Address, name: &str, source: &str) -> CliResult<Address> {
         let account = ok(self.agent.get(format!("{}/accounts/{me}", self.node)).call())?;
         let at = deployed_at(me, account["nonce"].as_u64().unwrap_or(0), HashType::default_chain());
-        let dir = std::env::temp_dir().join(format!("chainv4-bridge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("chainv4-bridge-{}-{:?}", std::process::id(), std::thread::current().id()));
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(name);
         std::fs::write(&path, source)?;
@@ -622,9 +672,15 @@ impl Bridge {
     /// One transfer in an EVM chain's logs, signed if it is for this gateway and has not arrived.
     #[allow(clippy::too_many_arguments)]
     fn sign_one_from_evm(&self, rpc: &Rpc, gateway: &Address, identity: &[u8], evm_gateway: &[u8; 20], here: u64, chain: u64, nonce: u64, secret: &[u8; 32]) -> CliResult<()> {
-        let arrived = self.read(gateway, "received", json!([{ "type": "u64", "value": chain.to_string() }, { "type": "u64", "value": nonce.to_string() }]))?;
+        let at = json!([{ "type": "u64", "value": chain.to_string() }, { "type": "u64", "value": nonce.to_string() }]);
+        let arrived = self.read(gateway, "received", at.clone())?;
 
         if arrived.first().is_some_and(|value| value["value"] == true) {
+            return Ok(());
+        }
+
+        // Voided, as one refused for good is, it never arrives, and the gateway refuses a signature.
+        if self.read(gateway, "voided", at)?.first().is_some_and(|value| !value["value"].is_null()) {
             return Ok(());
         }
 
@@ -758,6 +814,11 @@ impl Bridge {
             return Ok(());
         }
 
+        // Voided, as one refused for good is, its signatures stop counting there.
+        if rpc.call(evm_gateway, &calldata("voidedAt(bytes32)", &[AbiValue::FixedBytes(transfer.delivered_key())])?)?.iter().any(|byte| *byte != 0) {
+            return Ok(());
+        }
+
         println!("delivering transfer {nonce} to chain {chain}, from {}", to_hex(&from_key(secret)?));
         rpc.send(&Call { to: *evm_gateway, value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" }, false, secret)?;
 
@@ -768,6 +829,19 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_age_limit_reads_as_a_number_and_its_unit() {
+        assert_eq!(parse_age("6h"), Ok(21_600_000));
+        assert_eq!(parse_age("90m"), Ok(5_400_000));
+        assert_eq!(parse_age("30s"), Ok(30_000));
+        assert_eq!(parse_age("2d"), Ok(172_800_000));
+        assert_eq!(parse_age("0s"), Ok(0));
+
+        for wrong in ["", "6", "h", "6x", "6é", "-1h", "99999999999999999999h"] {
+            assert!(parse_age(wrong).is_err(), "{wrong}");
+        }
+    }
 
     #[test]
     fn a_gateway_a_signer_vouches_for_reads_as_chain_and_address() {

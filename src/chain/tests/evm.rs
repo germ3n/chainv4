@@ -1346,7 +1346,7 @@ mod gateway {
     use {
         super::*,
         crate::abi::{AbiType, AbiValue, decode_values, encode_values},
-        crate::bridge::{AssetKind, Transfer, WRAPPED_CODES, gateway_constructor, send_input, set_signers_input, sign_digest, signers_digest},
+        crate::bridge::{AssetKind, Transfer, WRAPPED_CODES, gateway_constructor, refund_input, send_input, set_signers_input, sign_digest, signers_digest},
         crate::structs::hex::from_hex,
     };
 
@@ -1509,6 +1509,280 @@ mod gateway {
         let again = Transfer { nonce: 2, ..back.clone() };
         refused(&run(&mut chain, gateway, 0, again.deliver_input(&[again.sign(&[2; 32]), again.sign(&[3; 32])])), "not enough of the federation");
         assert!(run(&mut chain, gateway, 0, again.deliver_input(&[again.sign(&[4; 32]), again.sign(&[5; 32])])).result.is_ok());
+    }
+
+    /// A transfer on its way here from the gateway over there.
+    #[allow(clippy::too_many_arguments)]
+    fn arriving(gateway: [u8; 20], here: u64, nonce: u64, kind: AssetKind, origin: u64, asset: Vec<u8>, id: u64, amount: u64, recipient: [u8; 20]) -> Transfer {
+        Transfer {
+            from: PEER.to_vec(),
+            to: gateway.to_vec(),
+            source: OTHER,
+            target: here,
+            nonce,
+            kind,
+            origin,
+            asset,
+            id: u256::from(id),
+            amount: u256::from(amount),
+            recipient: recipient.to_vec(),
+            name: "Example".to_string(),
+            symbol: "EXT".to_string(),
+            decimals: 18,
+            uri: if id > 0 { "ipfs://example".to_string() } else { String::new() },
+        }
+    }
+
+    /// The first two signers' signatures over a digest: the federation's threshold.
+    fn two(digest: &[u8; 32]) -> Vec<[u8; 65]> {
+        vec![sign_digest(&[1; 32], digest), sign_digest(&[2; 32], digest)]
+    }
+
+    /// Pays back what left at a nonce, as the federation's threshold would.
+    fn refund(chain: &mut Chain, gateway: [u8; 20], nonce: u64) -> Receipt {
+        let left = sent(chain, gateway, nonce);
+        let sender = sender_of(chain, gateway, nonce);
+
+        run(chain, gateway, 0, refund_input(nonce, &two(&left.refund_digest(&sender))))
+    }
+
+    fn sender_of(chain: &mut Chain, gateway: [u8; 20], nonce: u64) -> Vec<u8> {
+        match read(chain, gateway, "leftBy(uint64)", &[AbiValue::Uint(u256::from(nonce))], "(address,uint64)")[..] {
+            [AbiValue::Address(sender), _] => sender.to_vec(),
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    fn holds(chain: &mut Chain, token: [u8; 20], owner: [u8; 20]) -> u256 {
+        match read(chain, token, "balanceOf(address)", &[AbiValue::Address(owner)], "(uint256)")[..] {
+            [AbiValue::Uint(amount)] => amount,
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    fn holds_of(chain: &mut Chain, token: [u8; 20], owner: [u8; 20], id: u64) -> u256 {
+        match read(chain, token, "balanceOf(address,uint256)", &[AbiValue::Address(owner), AbiValue::Uint(u256::from(id))], "(uint256)")[..] {
+            [AbiValue::Uint(amount)] => amount,
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    fn owner_of(chain: &mut Chain, token: [u8; 20], id: u64) -> [u8; 20] {
+        match read(chain, token, "ownerOf(uint256)", &[AbiValue::Uint(u256::from(id))], "(address)")[..] {
+            [AbiValue::Address(owner)] => owner,
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    /// What a transaction calling a function with these values carries.
+    fn input(signature: &str, values: &[AbiValue]) -> Vec<u8> {
+        let (_, types) = crate::abi::parse_signature(signature).unwrap();
+
+        [keccak256(signature.as_bytes())[..4].to_vec(), encode_values(&types, values).unwrap()].concat()
+    }
+
+    #[test]
+    fn a_void_and_a_refund_digest_are_gateway_sol_s_as_they_are_rust_s_and_pass_for_nothing_else() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+        let transfer = arriving(gateway, here, 1, AssetKind::Coin, OTHER, Vec::new(), 0, 10, [0xab; 20]);
+        let ends = [AbiValue::Bytes(transfer.from.clone()), AbiValue::Bytes(transfer.to.clone()), AbiValue::Uint(u256::from(OTHER)), AbiValue::Uint(u256::from(here)), AbiValue::Uint(u256::from(1u64)), AbiValue::FixedBytes(transfer.digest().to_vec())];
+
+        assert_eq!(read(&mut chain, gateway, "voidDigest(bytes,bytes,uint64,uint64,uint64,bytes32)", &ends, "(bytes32)"), [AbiValue::FixedBytes(transfer.void_digest().to_vec())]);
+        let with_sender = [&ends[..], &[AbiValue::Bytes(vec![0xc0; 20])]].concat();
+        assert_eq!(read(&mut chain, gateway, "refundDigest(bytes,bytes,uint64,uint64,uint64,bytes32,bytes)", &with_sender, "(bytes32)"), [AbiValue::FixedBytes(transfer.refund_digest(&[0xc0; 20]).to_vec())]);
+
+        // Signatures over a transfer, or over its void, count for nothing as the other.
+        refused(&run(&mut chain, gateway, 0, transfer.void_input(&[transfer.sign(&[1; 32]), transfer.sign(&[2; 32])])), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, transfer.deliver_input(&two(&transfer.void_digest()))), "not enough of the federation");
+    }
+
+    #[test]
+    fn a_voided_transfer_can_never_be_delivered_however_public_its_signatures() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+        let transfer = arriving(gateway, here, 1, AssetKind::Token, OTHER, vec![0x07; 33], 0, 500, [0xab; 20]);
+        let delivery = [transfer.sign(&[1; 32]), transfer.sign(&[3; 32])];
+        let key = AbiValue::FixedBytes(transfer.delivered_key());
+        let flag = |chain: &mut Chain, signature: &str| read(chain, gateway, signature, std::slice::from_ref(&key), "(uint256)");
+
+        // It takes the threshold, of the federation, from this gateway's peer.
+        refused(&run(&mut chain, gateway, 0, transfer.void_input(&[sign_digest(&[1; 32], &transfer.void_digest())])), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, transfer.void_input(&[sign_digest(&[1; 32], &transfer.void_digest()), sign_digest(&[9; 32], &transfer.void_digest())])), "not enough of the federation");
+        let forged = Transfer { from: vec![2; 33], ..transfer.clone() };
+        refused(&run(&mut chain, gateway, 0, forged.void_input(&two(&forged.void_digest()))), "not from this gateway's peer");
+        let elsewhere = Transfer { to: vec![0xee; 20], ..transfer.clone() };
+        refused(&run(&mut chain, gateway, 0, elsewhere.void_input(&two(&elsewhere.void_digest()))), "not enough of the federation");
+        assert_eq!(flag(&mut chain, "voidedAt(bytes32)"), [AbiValue::Uint(u256::ZERO)]);
+
+        // Voided, once. What signed its delivery, public by then, is refused, and nothing is minted.
+        assert!(run(&mut chain, gateway, 0, transfer.void_input(&two(&transfer.void_digest()))).result.is_ok());
+        assert_ne!(flag(&mut chain, "voidedAt(bytes32)"), [AbiValue::Uint(u256::ZERO)]);
+        refused(&run(&mut chain, gateway, 0, transfer.void_input(&two(&transfer.void_digest()))), "voided already");
+        refused(&run(&mut chain, gateway, 0, transfer.deliver_input(&delivery)), "voided");
+        assert_eq!(flag(&mut chain, "delivered(bytes32)"), [AbiValue::Uint(u256::ZERO)], "it says what arrived, and this did not");
+        let salt = keccak256(encode_values(&[AbiType::Uint(64), AbiType::Uint(8), AbiType::Bytes], &[AbiValue::Uint(u256::from(OTHER)), AbiValue::Uint(u256::from(1u64)), AbiValue::Bytes(vec![0x07; 33])]).unwrap());
+        assert_eq!(read(&mut chain, gateway, "wrappedOf(bytes32)", &[AbiValue::FixedBytes(salt.to_vec())], "(address)"), [AbiValue::Address([0; 20])]);
+
+        // What was delivered cannot be voided: whichever lands first wins.
+        let delivered = Transfer { nonce: 2, ..transfer.clone() };
+        assert!(run(&mut chain, gateway, 0, delivered.deliver_input(&[delivered.sign(&[1; 32]), delivered.sign(&[2; 32])])).result.is_ok());
+        refused(&run(&mut chain, gateway, 0, delivered.void_input(&two(&delivered.void_digest()))), "delivered already");
+
+        // A void signed for one source gateway says nothing of another's same nonce, after a reset.
+        let peer = input("setPeer(uint64,bytes)", &[AbiValue::Uint(u256::from(OTHER)), AbiValue::Bytes(vec![0x02; 33])]);
+        assert!(run(&mut chain, gateway, 0, peer).result.is_ok());
+        let renewed = Transfer { from: vec![0x02; 33], ..transfer.clone() };
+        assert!(run(&mut chain, gateway, 0, renewed.deliver_input(&[renewed.sign(&[1; 32]), renewed.sign(&[2; 32])])).result.is_ok());
+    }
+
+    #[test]
+    fn what_left_held_is_released_back_to_who_sent_it_once() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let gateway = gateway(&mut chain);
+        let me_address = authority().public().address();
+        let me = evm::evm_alias(&me_address);
+        let to = [0x01; 33];
+
+        // The coin. It takes the threshold, and what it signs is whom the gateway says sent it.
+        assert!(run(&mut chain, gateway, 1_000, send_input(OTHER, &to, AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1_000u64))).result.is_ok());
+        let left = sent(&mut chain, gateway, 1);
+        let before = balance(&chain, &me_address);
+        refused(&run(&mut chain, gateway, 0, refund_input(1, &[sign_digest(&[1; 32], &left.refund_digest(&me))])), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, refund_input(1, &two(&left.refund_digest(&[0xd0; 20])))), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, refund_input(1, &two(&left.void_digest()))), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, refund_input(1, &[left.sign(&[1; 32]), left.sign(&[2; 32])])), "not enough of the federation");
+        refused(&run(&mut chain, gateway, 0, refund_input(9, &two(&left.refund_digest(&me)))), "no such transfer");
+        assert!(refund(&mut chain, gateway, 1).result.is_ok());
+        assert_eq!(balance(&chain, &me_address), before + u256::from(1_000u64));
+        assert_eq!(balance(&chain, &Address::Evm(gateway)), u256::ZERO);
+        refused(&refund(&mut chain, gateway, 1), "refunded already");
+        assert_eq!(read(&mut chain, gateway, "refunded(uint64)", &[AbiValue::Uint(u256::from(1u64))], "(bool)"), [AbiValue::Bool(true)]);
+
+        // An ERC-20.
+        let supply = encode_values(&[AbiType::String, AbiType::String, AbiType::Uint(256)], &[AbiValue::String("Test".into()), AbiValue::String("TST".into()), AbiValue::Uint(u256::new(1_000))]).unwrap();
+        let token = create(&mut chain, [from_hex(include_str!("../../../contracts/evm/Token.bin").trim()).unwrap(), supply].concat());
+        assert!(run(&mut chain, token, 0, input("approve(address,uint256)", &[AbiValue::Address(gateway), AbiValue::Uint(u256::new(70))])).result.is_ok());
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &to, AssetKind::Token, token, u256::ZERO, u256::from(70u64))).result.is_ok());
+        assert_eq!(holds(&mut chain, token, me), u256::new(930));
+        assert!(refund(&mut chain, gateway, 2).result.is_ok());
+        assert_eq!(holds(&mut chain, token, me), u256::new(1_000));
+
+        // An ERC-721.
+        let names = encode_values(&[AbiType::String, AbiType::String], &[AbiValue::String("Art".into()), AbiValue::String("ART".into())]).unwrap();
+        let art = create(&mut chain, [from_hex(include_str!("../../../contracts/evm/Collectible.bin").trim()).unwrap(), names].concat());
+        assert!(run(&mut chain, art, 0, input("mint(address)", &[AbiValue::Address(me)])).result.is_ok());
+        assert!(run(&mut chain, art, 0, input("approve(address,uint256)", &[AbiValue::Address(gateway), AbiValue::Uint(u256::new(1))])).result.is_ok());
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &to, AssetKind::Nft, art, u256::new(1), u256::new(1))).result.is_ok());
+        assert_eq!(owner_of(&mut chain, art, 1), gateway);
+        assert!(refund(&mut chain, gateway, 3).result.is_ok());
+        assert_eq!(owner_of(&mut chain, art, 1), me);
+
+        // An amount of an ERC-1155 id.
+        let items = create(&mut chain, from_hex(include_str!("../../../contracts/evm/Items.bin").trim()).unwrap());
+        assert!(run(&mut chain, items, 0, input("mint(address,uint256,uint256)", &[AbiValue::Address(me), AbiValue::Uint(u256::new(9)), AbiValue::Uint(u256::new(50))])).result.is_ok());
+        assert!(run(&mut chain, items, 0, input("setApprovalForAll(address,bool)", &[AbiValue::Address(gateway), AbiValue::Bool(true)])).result.is_ok());
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &to, AssetKind::Multi, items, u256::new(9), u256::new(20))).result.is_ok());
+        assert_eq!(holds_of(&mut chain, items, me, 9), u256::new(30));
+        assert!(refund(&mut chain, gateway, 4).result.is_ok());
+        assert_eq!(holds_of(&mut chain, items, me, 9), u256::new(50));
+    }
+
+    #[test]
+    fn what_left_burned_is_minted_back_to_who_sent_it_once() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+        let me = evm::evm_alias(&authority().public().address());
+        let to = [0x01; 33];
+        let deliver = |chain: &mut Chain, nonce: u64, kind: AssetKind, id: u64, amount: u64| -> [u8; 20] {
+            let asset = vec![0x07 + kind as u8; 33];
+            let transfer = arriving(gateway, here, nonce, kind, OTHER, asset.clone(), id, amount, me);
+            assert!(run(chain, gateway, 0, transfer.deliver_input(&[transfer.sign(&[1; 32]), transfer.sign(&[2; 32])])).result.is_ok());
+            let salt = keccak256(encode_values(&[AbiType::Uint(64), AbiType::Uint(8), AbiType::Bytes], &[AbiValue::Uint(u256::from(OTHER)), AbiValue::Uint(u256::from(kind as u64)), AbiValue::Bytes(asset)]).unwrap());
+
+            match read(chain, gateway, "wrappedOf(bytes32)", &[AbiValue::FixedBytes(salt.to_vec())], "(address)")[..] {
+                [AbiValue::Address(made)] => made,
+                ref other => panic!("{other:?}"),
+            }
+        };
+
+        // A wrapped ERC-20, burned as it left.
+        let token = deliver(&mut chain, 1, AssetKind::Token, 0, 500);
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &to, AssetKind::Token, token, u256::ZERO, u256::new(200))).result.is_ok());
+        assert_eq!(holds(&mut chain, token, me), u256::new(300));
+        assert!(refund(&mut chain, gateway, 1).result.is_ok());
+        assert_eq!(holds(&mut chain, token, me), u256::new(500));
+        refused(&refund(&mut chain, gateway, 1), "refunded already");
+        assert_eq!(holds(&mut chain, token, me), u256::new(500));
+
+        // A wrapped ERC-721 comes back with its URI, the same id.
+        let art = deliver(&mut chain, 2, AssetKind::Nft, 42, 1);
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &to, AssetKind::Nft, art, u256::new(42), u256::new(1))).result.is_ok());
+        assert_eq!(owner_of(&mut chain, art, 42), [0; 20], "burned");
+        assert!(refund(&mut chain, gateway, 2).result.is_ok());
+        assert_eq!(owner_of(&mut chain, art, 42), me);
+        assert_eq!(read(&mut chain, art, "tokenURI(uint256)", &[AbiValue::Uint(u256::new(42))], "(string)"), [AbiValue::String("ipfs://example".into())]);
+
+        // An amount of a wrapped ERC-1155 id.
+        let items = deliver(&mut chain, 3, AssetKind::Multi, 5, 30);
+        assert!(run(&mut chain, gateway, 0, send_input(OTHER, &to, AssetKind::Multi, items, u256::new(5), u256::new(10))).result.is_ok());
+        assert_eq!(holds_of(&mut chain, items, me, 5), u256::new(20));
+        assert!(refund(&mut chain, gateway, 3).result.is_ok());
+        assert_eq!(holds_of(&mut chain, items, me, 5), u256::new(30));
+    }
+
+    #[test]
+    fn a_refund_that_cannot_be_paid_stays_to_try_again_and_its_sender_alone_says_where_else_it_goes() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let gateway = gateway(&mut chain);
+        let friend = [0xf0; 20];
+
+        // Its sender first names a contract that takes no coin: the payment fails, and all of it with it.
+        assert!(run(&mut chain, gateway, 1_000, send_input(OTHER, &[0x01; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1_000u64))).result.is_ok());
+        let name = |to: [u8; 20]| input("setRefundTo(uint64,address)", &[AbiValue::Uint(u256::from(1u64)), AbiValue::Address(to)]);
+        assert!(run(&mut chain, gateway, 0, name(gateway)).result.is_ok());
+        refused(&refund(&mut chain, gateway, 1), "the coin would not go");
+        assert_eq!(read(&mut chain, gateway, "refunded(uint64)", &[AbiValue::Uint(u256::from(1u64))], "(bool)"), [AbiValue::Bool(false)]);
+
+        // No one else may name another, as refused here by one who is not the sender.
+        let stranger = Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1([0x55; 32]));
+        let fund = sign(&chain, &authority(), Tx::Transfer { from: authority().public().address(), to: stranger.public().address(), amount: Amount::U128(1_000_000_000) });
+        advance(&mut chain, vec![fund]);
+        let tx = call(&chain, &stranger, Address::Evm(gateway), 0, name(friend));
+        refused(&advance(&mut chain, vec![tx]).remove(0), "only who sent it");
+
+        // Named well, the same signatures pay it there, once, as what they sign is who sent it.
+        assert!(run(&mut chain, gateway, 0, name(friend)).result.is_ok());
+        assert!(refund(&mut chain, gateway, 1).result.is_ok());
+        assert_eq!(balance(&chain, &Address::Secp256k1(friend)), u256::from(1_000u64));
+        refused(&refund(&mut chain, gateway, 1), "refunded already");
+    }
+
+    #[test]
+    fn a_refund_after_a_rotation_takes_the_signers_now_in_force() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+        assert!(run(&mut chain, gateway, 1_000, send_input(OTHER, &[0x01; 33], AssetKind::Coin, [0; 20], u256::ZERO, u256::from(1_000u64))).result.is_ok());
+        let left = sent(&mut chain, gateway, 1);
+        let sender = sender_of(&mut chain, gateway, 1);
+        let digest = left.refund_digest(&sender);
+        let old = two(&digest);
+        let next = [signer(4), signer(5)];
+        let moved = signers_digest(gateway, here, 1, &next, 2);
+        assert!(run(&mut chain, gateway, 0, set_signers_input(&next, 2, 1, &[sign_digest(&[1; 32], &moved), sign_digest(&[2; 32], &moved)])).result.is_ok());
+
+        refused(&run(&mut chain, gateway, 0, refund_input(1, &old)), "not enough of the federation");
+        assert!(run(&mut chain, gateway, 0, refund_input(1, &[sign_digest(&[4; 32], &digest), sign_digest(&[5; 32], &digest)])).result.is_ok());
     }
 }
 

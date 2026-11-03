@@ -57,6 +57,12 @@ fn a_transfer_out_is_read_back_only_as_the_gateway_signed_it() {
 }
 
 #[test]
+fn a_voided_transfer_says_what_became_of_it_rather_than_offering_a_delivery() {
+    assert_eq!(refund_state(false), "voided, refund to come");
+    assert_eq!(refund_state(true), "refunded");
+}
+
+#[test]
 fn approvals_name_what_each_kind_lets_the_gateway_move() {
     let spender = [0x11; 20];
 

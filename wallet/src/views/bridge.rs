@@ -58,6 +58,7 @@ enum Way {
 pub enum Read {
     /// Whether Gateway.sol took a transfer from here, by its chain and the transfer's digest.
     Delivered { chain_id: u64, digest: String, delivered: Result<bool, String> },
+    Voided { chain_id: u64, digest: String, voided: bool },
 }
 
 /// A deposit's proof, as Esplora gave it: its block, the transaction without its witness, its
@@ -86,6 +87,8 @@ pub struct BridgeState {
     chain: Option<u64>,
     evm: Link<Read>,
     delivered: HashMap<(u64, String), Result<bool, String>>,
+    /// What Gateway.sol says it voided: nothing can then deliver it, and its refund waits.
+    voided: HashMap<(u64, String), bool>,
     delivered_asked: HashMap<(u64, String), f64>,
     withdraw_to: String,
     withdraw_sats: String,
@@ -110,6 +113,7 @@ impl Default for BridgeState {
             chain: None,
             evm: Link::default(),
             delivered: HashMap::new(),
+            voided: HashMap::new(),
             delivered_asked: HashMap::new(),
             withdraw_to: String::new(),
             withdraw_sats: String::new(),
@@ -344,6 +348,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, send: &mut Send
 
     for read in reads {
         match read {
+            Read::Voided { chain_id, digest, voided } => {
+                state.voided.insert((chain_id, digest), voided);
+            }
             Read::Delivered { chain_id, digest, delivered } => {
                 state.delivered.insert((chain_id, digest), delivered);
             }
@@ -628,13 +635,22 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
                 let (chain_id, digest) = key.clone();
                 let to: [u8; 20] = transfer.to.clone().try_into().unwrap_or([0; 20]);
                 state.evm.call(ctx, url, &to, &input, move |answer| Read::Delivered { chain_id, digest, delivered: answer.map(|output| output.last() == Some(&1)) });
+                let input = calldata("voidedAt(bytes32)", &[AbiType::FixedBytes(32)], &[AbiValue::FixedBytes(transfer.delivered_key())]);
+                let (chain_id, digest) = key.clone();
+                state.evm.call(ctx, url, &to, &input, move |answer| Read::Voided { chain_id, digest, voided: answer.is_ok_and(|output| output.iter().any(|byte| *byte != 0)) });
             }
+
+            let refunded = state.read(ctx, &gateway, "refund_of", json!([{ "type": "u64", "value": transfer.nonce.to_string() }])).and_then(Result::ok).is_some_and(|values| values.get(1).is_some_and(|value| value["value"] == true));
+            let voided = state.voided.get(&key).copied().unwrap_or(false);
 
             theme::end_row(ui, |ui| {
                 ui.label(theme::mono(format!("#{}", transfer.nonce)).color(palette.muted));
                 ui.add(egui::Label::new(format!("{} · {} to {}", transfer.symbol, format::units(&transfer.amount.to_string(), transfer.decimals), chain_name(transfer.target))).wrap());
             }, |ui| {
                 match state.delivered.get(&key) {
+                    _ if refunded || voided => {
+                        ui.colored_label(palette.soft, refund_state(refunded));
+                    }
                     Some(Ok(true)) => {
                         ui.colored_label(palette.good, "arrived");
                     }
@@ -659,6 +675,15 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
             });
         }
     });
+}
+
+/// What a transfer that left and was voided says, as nothing can then deliver it: paid back to who
+/// sent it, or waiting for the federation to do so.
+fn refund_state(refunded: bool) -> &'static str {
+    match refunded {
+        true => "refunded",
+        false => "voided, refund to come",
+    }
 }
 
 /// Sending from an EVM chain to here, signed there with the account's Ethereum key.

@@ -789,6 +789,31 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Stuck Bitcoin releases are voted down by the signers' own passes.** Done 2026-11-01. One signer could
+  propose a release the others refuse, and only a threshold of votes cancels one, with nothing voting. In
+  `bridge btc pass`, `watch` and `bridge watch --esplora`, a signer now votes at once on what it refuses for
+  good (`check_btc_release` says `Wrong`, `Dead` or `Overpriced`, `btc_release_step` what to do), never on a
+  read that failed or a limit with no fee rate behind it; votes on anything short of its signatures past
+  `--cancel-after`, 6 hours by block time from `Proposed` events, even if it signed; and warns each pass of
+  one with all its signatures unmined past that, with its rate against the network's, needing
+  child-pays-for-parent. No flapping: a signer does not propose past its own limit, nor a withdrawal again
+  near the rate a young cancelled release paid. No contract change.
+- [x] **A transfer refused for good can be refunded.** Done 2026-11-01. It left its funds locked at the source
+  for good. `chainv4 bridge refund`, each signer's operator's call, with a preview and a typed yes, reads both
+  chains and signs in order: void at the destination, whose nonce is then taken however public its delivery
+  signatures, then, once that is final, refund at the source, to who sent it, of what it recorded, once. Both
+  directions, the coin, tokens, NFTs and multi-tokens, held or burned. `refund-to` lets a sender that cannot
+  take it name another. New domains, `chainv4-gateway-void` and `chainv4-gateway-refund`, kept alike in Rust,
+  Lua and Solidity. Needs a new gateway here and a new Gateway.sol; the Bitcoin gateway has no such path and
+  needs none.
+- [ ] **Fee bumping a stuck Bitcoin release, before real funds.** A pass only warns of a release with all its
+  signatures that is not mined: someone must build the child that pays for it by hand. A federation output
+  to spend for it, or a small anchor output, and signers to agree its fee, are all undecided.
+- [ ] **The explorer shows voided and refunded transfers.** Its Bridge page lists `Sent`, `Attested` and
+  `Received`; `Voided` and `Refunded` are not read yet, so one voided stays "signed, to relay" there. The
+  wallet's own list says so already.
+- [ ] **A refund across a replaced gateway.** What left for a gateway since replaced can be neither delivered
+  nor voided, so it stays where it left unless its peer is put back. A chain's reset leaves that for good.
 - [x] **Only federation signers propose a Bitcoin release, and they do it by themselves.** Done 2026-11-01. Anyone could
   call `propose`, so a griefer could push a release's fee up to each withdrawer's limit, burning it to miners, or tie
   withdrawals up in releases no one signs. It now takes a signature of the federation in force over

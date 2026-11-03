@@ -1029,6 +1029,17 @@ voting finality it now goes back to the checkpoint and follows the node from the
   gateway. The sign and relay passes say why, and `send` refuses such a chain up front.
 - **A signer relaying pays gas with `--evm-key`:** under `watch` too, so fund it on each EVM chain,
   or every delivery stays listed.
+- **`chainv4 bridge refund` takes two runs by each signer's operator:** one signs the void, and once that
+  is voided and final, one signs the refund, each run reading both chains and doing the next step. Never
+  the other way round: the signatures are all a source gateway has to go by, so it is the signers' reading
+  of the void that keeps it from paying twice.
+- **`delivered(key)` stays false for a voided transfer:** it says what arrived, for the apps, and
+  `voidedAt(key)` says the block it was voided in; `deliver` and `voidTransfer` each refuse both. Here,
+  `received` and `voided` are the same two. A signer's and a relayer's passes skip what is voided.
+- **`sent` here has a 14th value now,** the height it left at, and Gateway.sol has `leftBy(nonce)`, who sent
+  it and the block, as a signer may call a transfer final only by those.
+- **The gateway here keys what arrived by source chain and nonce,** not by the source gateway as Gateway.sol
+  does: a new Gateway.sol's nonces, from 1, would find old ones taken. Both are redeployed together.
 - **Signers need the event index:** `chainv4 bridge sign` reads what left here from `Sent` events.
 - **Wrapped coins go back as the coin:** a wrapped ETH token sent back says kind 0, so its gateway
   releases ETH.
@@ -1088,6 +1099,18 @@ voting finality it now goes back to the checkpoint and follows the node from the
   `released` all the same, so the gateway knows.
 - **A signer that voted to cancel stops signing that release,** as its signature would take it to
   the threshold, where no vote stands.
+- **`bridge btc pass`, `watch` and `bridge watch --esplora` vote to cancel by themselves;** `bridge btc sign`
+  by hand never does. A vote cannot be taken back, so a limit lower than the rest of the federation's costs
+  them a release at the next proposal's fee. A failed read, or a limit with no fee rate behind it, gets none.
+- **A release's age is its proposal's block time against the tip's,** from `Proposed` events: the gateway
+  keeps no time for a release, and was not changed for this. No `--index-events`, or an event pruned, and
+  it has no age: no vote for it, no warning for it, and what it paid holds back a new proposal at about
+  that rate for good, short of `propose --fee` by hand.
+- **A signer does not propose what it would refuse,** so with `--max-fee-rate` under what the network asks
+  it proposes nothing, and says so. Nor does anyone propose a withdrawal again near the rate a young
+  cancelled release paid it at: it waits, says why, and goes at a quarter less or past `--cancel-after`.
+- **A stuck release's warning goes by when it was proposed,** not when it got its last signature, so one
+  signed late can warn soon after it is broadcast.
 - **Releases are given without their witnesses:** the gateway reads and checks the base
   transaction, as its txid hashes it; the witnesses are assembled after, from the board.
 

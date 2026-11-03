@@ -169,11 +169,160 @@ pub struct ReleaseFacts {
 
 #[cfg(feature = "bitcoin")]
 #[document(
+    summary = "Why a signer will not sign a release. Each comes from reading all of what the gateway says of it, so none is a read that failed, which never gets this far: what a signer does with one is btc_release_step.",
+    category = "Bridges",
+    see_also = "check_btc_release, btc_release_step",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReleaseRefusal {
+    #[document(summary = "It should never have been proposed: nothing about it changes with time.")]
+    Wrong(String),
+    #[document(summary = "An input was shown spent by another release, so Bitcoin can never mine this one, however many signed it.")]
+    Dead(String),
+    #[document(summary = "It pays past the most a virtual byte this signer signs for now.")]
+    Overpriced(String),
+}
+
+#[cfg(feature = "bitcoin")]
+impl std::fmt::Display for ReleaseRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReleaseRefusal::Wrong(why) | ReleaseRefusal::Dead(why) | ReleaseRefusal::Overpriced(why) => formatter.write_str(why),
+        }
+    }
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "How long a release may stand before its age says something, unless --cancel-after says otherwise, in milliseconds of the chain's block time: 6 hours. Short of its signatures it is then voted down, and with all of them it is warned about.", category = "Bridges")]
+pub const BTC_CANCEL_AFTER_MS: u64 = 6 * 3_600_000;
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "Where a release stands for one signer: what btc_release_step goes by. A read that failed never gets this far, as nothing can be said of a release half read.",
+    category = "Bridges",
+    see_also = "btc_release_step",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseStanding {
+    #[document(summary = "Why check_btc_release refuses it, if it does.")]
+    pub refusal: Option<ReleaseRefusal>,
+    #[document(summary = "Whether this signer has no fee rate to go by, neither Esplora's nor its operator's, so what it refuses as overpriced may be fine.")]
+    pub blind: bool,
+    #[document(summary = "Whether this signer signed any input of it.")]
+    pub signed_by_me: bool,
+    #[document(summary = "Whether every input holds its threshold of signatures: anyone can then finish it, and the gateway refuses a vote.")]
+    pub signed_enough: bool,
+    #[document(summary = "Whether it is older than the limit by the chain's block time; None if that could not be read.")]
+    pub past_limit: Option<bool>,
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(summary = "What a signer's pass does about one open release.", category = "Bridges", see_also = "btc_release_step")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReleaseStep {
+    #[document(summary = "Signs each input it has not.")]
+    Sign,
+    #[document(summary = "Votes to cancel it, for this reason.")]
+    Vote(String),
+    #[document(summary = "Leaves it, for this reason.")]
+    Leave(String),
+    #[document(summary = "Nothing: it holds all its signatures and stands, so one more would only cost.")]
+    Nothing,
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "What a signer does about an open release. Bitcoin can never mine one with an input shown spent, so that takes a vote whoever signed it. One with all its signatures can be finished by anyone and the gateway refuses a vote, so it is left. Past the age limit it takes a vote even from a signer that signed it, or a release whose other signers went away could never be cancelled: the gateway counts that vote, and each withdrawal's anchor is what keeps its public signature from paying twice. Otherwise a refusal takes a vote at once, but for two: one overpriced by a limit with no fee rate behind it, which may be fine, and one this signer signed already, as a signature cannot be taken back and what it would now refuse is usually only the rate having moved, which the age limit settles.",
+    returns = "The step.",
+    category = "Bridges",
+    see_also = "check_btc_release",
+)]
+pub fn btc_release_step(standing: &ReleaseStanding) -> ReleaseStep {
+    match &standing.refusal {
+        Some(ReleaseRefusal::Dead(why)) => ReleaseStep::Vote(why.clone()),
+        Some(why) if standing.signed_enough => ReleaseStep::Leave(format!("{why}; it holds all its signatures, so it cannot be cancelled")),
+        None if standing.signed_enough => ReleaseStep::Nothing,
+        _ if standing.past_limit == Some(true) => ReleaseStep::Vote("it is short of its signatures past the age limit".to_string()),
+        None => ReleaseStep::Sign,
+        Some(why @ ReleaseRefusal::Overpriced(_)) if standing.blind => ReleaseStep::Leave(format!("{why}; with no fee rate to go by that may pass, so it gets no vote")),
+        Some(why) if standing.signed_by_me => ReleaseStep::Leave(format!("{why}; this signer signed it, so it gets a vote only past the age limit")),
+        Some(why) => ReleaseStep::Vote(why.to_string()),
+    }
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "Whether a signer may propose a withdrawal again at a rate, after a release paying it was cancelled at another. Cancelled and proposed again as it was would go round every pass, for as long as the network asks what some signer refuses: so until that release is older than the limit, by the chain's block time, only a rate at least a quarter under the one cancelled goes, which is a different question to put to the signers. A release that was cancelled by its age has passed the limit already, so it holds nothing up.",
+    params = {
+        rate = "The rate it would be proposed at, in satoshis a virtual byte.",
+        cancelled_rate = "What the cancelled release paid.",
+        age = "How old that release is, in milliseconds of block time; None if that could not be read, as when the node keeps no event index.",
+        limit = "--cancel-after.",
+    },
+    category = "Bridges",
+    see_also = "btc_release_step",
+)]
+pub fn btc_may_propose_again(rate: u64, cancelled_rate: u64, age: Option<u64>, limit: u64) -> bool {
+    age.is_some_and(|age| age >= limit) || rate.saturating_mul(4) <= cancelled_rate.saturating_mul(3)
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "What a release pays a virtual byte, reckoned as the gateway reckons its size, each signature at its largest.",
+    returns = "The rate, rounded down, or why it does not read.",
+    category = "Bridges",
+)]
+pub fn btc_release_rate(facts: &ReleaseFacts) -> Result<u64, String> {
+    let (tx, _) = crate::crypto::bitcoin::tx::Transaction::read(&facts.raw)?;
+    let spent = facts.inputs.iter().map(|(_, held)| held.sats).sum::<u64>();
+    let fee = spent.checked_sub(tx.outputs.iter().map(|output| output.value).sum::<u64>()).ok_or("it pays more than it spends")?;
+    let sizes: Vec<(u32, usize)> = facts.inputs.iter().map(|(_, held)| (held.threshold, held.script_len)).collect();
+
+    Ok(fee / btc_release_vbytes(facts.raw.len(), &sizes).max(1))
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "The line a pass logs for a release with all its signatures that Bitcoin has not mined past the age limit: its id, its transaction, what it pays against what the network asks, and what it needs.",
+    params = {
+        id = "The release.",
+        txid = "Its transaction, as explorers write it.",
+        age = "How old it is, in milliseconds of block time.",
+        rate = "What it pays a virtual byte.",
+        asked = "What the network asks to mine it soon, if Esplora says.",
+    },
+    category = "Bridges",
+)]
+pub fn btc_stuck_warning(id: u64, txid: &str, age: u64, rate: u64, asked: Option<u64>) -> String {
+    let asked = asked.map_or("Esplora gives no rate for now".to_string(), |asked| format!("the network asks {asked}"));
+
+    format!("WARNING: release {id}, txid {txid}, has all its signatures and is unconfirmed after {} hours. It pays {rate} satoshis a virtual byte, and {asked}. It cannot be cancelled, as anyone could still broadcast it: it needs child-pays-for-parent, a child spending one of its outputs at a fee that pays for both", age / 3_600_000)
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
     summary = "Whether a federation signer should sign a release. The gateway checks all of this when it is proposed; a signer goes over it again, as what it signs pays real bitcoin and a fault in the contract should not be enough to take it: each withdrawal named once, paid what it burned less its share of the fee, within what it agreed to lose, and still waiting; each input once, held, pending; only change besides, of the size and to the federation it should be; a fee between the floor and the cap, and at no more a virtual byte than this signer takes; and nothing Bitcoin would refuse or delay.",
     returns = "Why not, or nothing when it may sign.",
     category = "Bridges",
+    see_also = "btc_release_step",
 )]
-pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
+pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), ReleaseRefusal> {
+    if let Some((outpoint, _)) = facts.inputs.iter().find(|(_, held)| held.state == "spent") {
+        return Err(ReleaseRefusal::Dead(format!("the gateway says its input {outpoint} is spent: Bitcoin can never mine it")));
+    }
+
+    let (fee, vbytes) = sound_btc_release(facts).map_err(ReleaseRefusal::Wrong)?;
+
+    if fee > vbytes.saturating_mul(facts.most_rate) {
+        return Err(ReleaseRefusal::Overpriced(format!("its fee of {fee} is {} satoshis a virtual byte, past the {} this signer signs for now: give --max-fee-rate to sign it, or the federation cancels it", fee / vbytes.max(1), facts.most_rate)));
+    }
+
+    Ok(())
+}
+
+/// All of check_btc_release that does not change with time: why not, or its fee and size.
+#[cfg(feature = "bitcoin")]
+fn sound_btc_release(facts: &ReleaseFacts) -> Result<(u64, u64), String> {
     use crate::crypto::bitcoin::tx::{Transaction, p2wsh};
 
     let (tx, witnessed) = Transaction::read(&facts.raw)?;
@@ -268,13 +417,7 @@ pub fn check_btc_release(facts: &ReleaseFacts) -> Result<(), String> {
         return Err(format!("its fee of {fee} is not from {least}, the floor for its size, to the cap of {}", facts.fee_cap));
     }
 
-    let vbytes = btc_release_vbytes(facts.raw.len(), &sizes);
-
-    if fee > vbytes.saturating_mul(facts.most_rate) {
-        return Err(format!("its fee of {fee} is {} satoshis a virtual byte, past the {} this signer signs for now: give --max-fee-rate to sign it, or the federation cancels it", fee / vbytes.max(1), facts.most_rate));
-    }
-
-    Ok(())
+    Ok((fee, btc_release_vbytes(facts.raw.len(), &sizes)))
 }
 
 #[cfg(feature = "bitcoin")]
@@ -488,6 +631,12 @@ pub const BTC_DUST: u64 = 546;
 #[document(summary = "What both gateways hash a transfer's digest under.", category = "Bridges")]
 pub const DOMAIN: &str = "chainv4-gateway";
 
+#[document(summary = "What the gateways hash a void's digest under.", category = "Bridges")]
+pub const VOID_DOMAIN: &str = "chainv4-gateway-void";
+
+#[document(summary = "What the gateways hash a refund's digest under.", category = "Bridges")]
+pub const REFUND_DOMAIN: &str = "chainv4-gateway-refund";
+
 #[document(summary = "Gateway.sol's gateway, as solc wrote it for Paris: what chainv4's tools deploy on an EVM chain, its constructor's arguments after it.", category = "Bridges")]
 pub const GATEWAY_CODE: &str = include_str!("../contracts/evm/Gateway.bin");
 
@@ -631,6 +780,51 @@ impl Transfer {
 
     #[document(
         parent = "Transfer",
+        summary = "What the federation signs to void it, at the gateway it was going to, so it can never be delivered: keccak256 of its own domain, its two gateways and chains, its nonce and its digest, as both gateways compute it. Its domain and layout are its own, so no signature over a transfer or a signer set passes for one, or one for them.",
+    )]
+    pub fn void_digest(&self) -> [u8; 32] {
+        self.signed_over(VOID_DOMAIN, None)
+    }
+
+    #[document(
+        parent = "Transfer",
+        summary = "What the federation signs to refund it, at the gateway it left, once its signers read it voided where it was going: as void_digest, under its own domain, and with whom that gateway says sent it, as that chain writes an address.",
+    )]
+    pub fn refund_digest(&self, sender: &[u8]) -> [u8; 32] {
+        self.signed_over(REFUND_DOMAIN, Some(sender))
+    }
+
+    fn signed_over(&self, domain: &str, sender: Option<&[u8]>) -> [u8; 32] {
+        let number = |value: u64| AbiValue::Uint(u256::from(value));
+        let mut layout = vec![AbiType::String, AbiType::Bytes, AbiType::Bytes, AbiType::Uint(64), AbiType::Uint(64), AbiType::Uint(64), AbiType::FixedBytes(32)];
+        let mut values = vec![AbiValue::String(domain.to_string()), AbiValue::Bytes(self.from.clone()), AbiValue::Bytes(self.to.clone()), number(self.source), number(self.target), number(self.nonce), AbiValue::FixedBytes(self.digest().to_vec())];
+
+        if let Some(sender) = sender {
+            layout.push(AbiType::Bytes);
+            values.push(AbiValue::Bytes(sender.to_vec()));
+        }
+
+        keccak(&encode_values(&layout, &values).expect("a void or a refund encodes"))
+    }
+
+    #[document(
+        parent = "Transfer",
+        summary = "The arguments the gateway here's attest_void takes for it, the signature last.",
+    )]
+    pub fn attest_void_args(&self, signature: &[u8; 65]) -> Vec<TxCallArgumentType> {
+        vec![TxCallArgumentType::U64(self.source), TxCallArgumentType::U64(self.target), TxCallArgumentType::U64(self.nonce), TxCallArgumentType::Bytes(self.digest().to_vec()), TxCallArgumentType::Bytes(signature.to_vec())]
+    }
+
+    #[document(
+        parent = "Transfer",
+        summary = "The arguments the gateway here's attest_refund takes for it, whom it says sent it and the signature last.",
+    )]
+    pub fn attest_refund_args(&self, sender: &[u8], signature: &[u8; 65]) -> Vec<TxCallArgumentType> {
+        vec![TxCallArgumentType::U64(self.source), TxCallArgumentType::U64(self.target), TxCallArgumentType::U64(self.nonce), TxCallArgumentType::Bytes(self.digest().to_vec()), TxCallArgumentType::Bytes(sender.to_vec()), TxCallArgumentType::Bytes(signature.to_vec())]
+    }
+
+    #[document(
+        parent = "Transfer",
         summary = "A signer's signature over its digest: r, s and v, 65 bytes, v 27 or 28, as ecrecover takes it and the gateway here recovers.",
     )]
     pub fn sign(&self, secret: &[u8; 32]) -> [u8; 65] {
@@ -736,6 +930,20 @@ impl Transfer {
         })
     }
 
+    #[document(parent = "Transfer", summary = "Calldata voiding it at Gateway.sol with the federation's signatures over void_digest: what a relayer sends.")]
+    pub fn void_input(&self, signatures: &[[u8; 65]]) -> Vec<u8> {
+        let signature = "voidTransfer(uint64,bytes,uint64,bytes32,bytes[])";
+        let values = [
+            AbiValue::Uint(u256::from(self.source)),
+            AbiValue::Bytes(self.from.clone()),
+            AbiValue::Uint(u256::from(self.nonce)),
+            AbiValue::FixedBytes(self.digest().to_vec()),
+            AbiValue::Array(signatures.iter().map(|signature| AbiValue::Bytes(signature.to_vec())).collect()),
+        ];
+
+        [selector(signature), encode_values(&types(signature), &values).expect("a void encodes")].concat()
+    }
+
     #[document(parent = "Transfer", summary = "Calldata delivering it to Gateway.sol with the federation's signatures: what a relayer sends.")]
     pub fn deliver_input(&self, signatures: &[[u8; 65]]) -> Vec<u8> {
         let signature = format!("deliver({TRANSFER_TUPLE},bytes[])");
@@ -743,6 +951,14 @@ impl Transfer {
 
         [selector(&signature), encode_values(&types(&signature), &values).expect("a delivery encodes")].concat()
     }
+}
+
+#[document(summary = "Calldata refunding what left Gateway.sol at a nonce, with the federation's signatures over Transfer::refund_digest: what and to whom are what it recorded, so that is all it takes.", category = "Bridges")]
+pub fn refund_input(nonce: u64, signatures: &[[u8; 65]]) -> Vec<u8> {
+    let signature = "refund(uint64,bytes[])";
+    let values = [AbiValue::Uint(u256::from(nonce)), AbiValue::Array(signatures.iter().map(|signature| AbiValue::Bytes(signature.to_vec())).collect())];
+
+    [selector(signature), encode_values(&types(signature), &values).expect("a refund encodes")].concat()
 }
 
 #[document(

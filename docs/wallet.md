@@ -1080,7 +1080,8 @@ light client:
   letting the gateway take it, then sending, calls the Send page signs. The account's transfers
   out, among the latest 20, show the board's count of signatures and whether Gateway.sol took
   them; one signed and not taken is delivered from here, with the account's Ethereum key, priced
-  and signed as the Swaps page signs there.
+  and signed as the Swaps page signs there. One the federation [voided](bridges.md#refunding-a-transfer-refused-for-good)
+  says so, and refunded once it was; those are the federation's own steps, so it offers no delivery.
 - **From an EVM chain:** letting Gateway.sol take it, then sending, signed there with the
   account's Ethereum key, or by the offline signer. It arrives as the federation signs it.
 - **Bitcoin:** the account's deposit address, with its QR code, computed here from the federation,

@@ -887,14 +887,14 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     let vbytes = crate::bridge::btc_release_vbytes(facts.raw.len(), &[(facts.inputs[0].1.threshold, facts.inputs[0].1.script_len), (facts.inputs[1].1.threshold, facts.inputs[1].1.script_len)]);
     let exact = 2_000 / vbytes;
     assert!(check_btc_release(&ReleaseFacts { most_rate: exact + 1, ..facts.clone() }).is_ok());
-    assert!(check_btc_release(&ReleaseFacts { most_rate: exact, ..facts.clone() }).unwrap_err().contains("past the"), "a release over the rate");
+    assert!(check_btc_release(&ReleaseFacts { most_rate: exact, ..facts.clone() }).unwrap_err().to_string().contains("past the"), "a release over the rate");
 
     assert_eq!(check_btc_release(&facts), Ok(()));
 
     let refused = |change: &dyn Fn(&mut ReleaseFacts), why: &str| {
         let mut changed = facts.clone();
         change(&mut changed);
-        let answer = check_btc_release(&changed).unwrap_err();
+        let answer = check_btc_release(&changed).unwrap_err().to_string();
         assert!(answer.contains(why), "{answer}");
     };
     let with_tx = |tx: Transaction| {
@@ -947,11 +947,11 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     sweep.withdrawals.clear();
     sweep.raw = spending(&[first, second], vec![btc.change(109_000)]).base();
     sweep.txid = sha256d(&sweep.raw).to_vec();
-    assert!(check_btc_release(&sweep).unwrap_err().contains("older federation"));
+    assert!(check_btc_release(&sweep).unwrap_err().to_string().contains("older federation"));
     sweep.version = 1;
     assert_eq!(check_btc_release(&sweep), Ok(()), "its change to its federation, here the same keys");
     sweep.change_script = vec![0x51];
-    assert!(check_btc_release(&sweep).unwrap_err().contains("not change"));
+    assert!(check_btc_release(&sweep).unwrap_err().to_string().contains("not change"));
 }
 
 #[cfg(feature = "bridge")]

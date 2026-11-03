@@ -23,13 +23,24 @@
 -- 0 the coin, 1 a fungible token, 2 an NFT, 3 an amount of a multi-token id; origin is the chain the
 -- asset is native to, and asset its address there.
 --
+-- A transfer refused for good at its destination is refunded in two steps, in this order, or it could
+-- pay twice. The federation signs to void it where it was going, which takes its nonce there for good,
+-- and only once its signers read that does it sign to refund it where it left, which pays back whom
+-- that gateway says sent it, what it says it took, once. Each has its own domain:
+--   void   = keccak256(abi.encode("chainv4-gateway-void", bytes from, bytes to, uint64 source,
+--                                 uint64 target, uint64 nonce, bytes32 digest))
+--   refund = keccak256(abi.encode("chainv4-gateway-refund", bytes from, bytes to, uint64 source,
+--                                 uint64 target, uint64 nonce, bytes32 digest, bytes sender))
+--
 -- Events: Sent(nonce, target, digest, sender), Attested(digest, signer), Received(source, nonce, digest),
--- Wrapped(origin, kind, asset, here).
+-- Wrapped(origin, kind, asset, here), Voided(source, nonce, digest), Refunded(nonce, digest, recipient).
 
 local M = {}
 
 local COIN, TOKEN, NFT, MULTI = 0, 1, 2, 3
 local DOMAIN = "chainv4-gateway"
+local VOID_DOMAIN = "chainv4-gateway-void"
+local REFUND_DOMAIN = "chainv4-gateway-refund"
 local ZERO = u256(0)
 
 local peers = storage.namespace("peers")
@@ -43,6 +54,13 @@ local out = storage.namespace("out")
 local done = storage.namespace("done")
 -- The signatures posted, by digest and signer key.
 local board = storage.namespace("board")
+-- Transfers on their way here that were voided, by source chain and nonce: the transfer's digest and
+-- the height it was voided at, as what a signer reads before it signs a refund must be final.
+local voids = storage.namespace("voids")
+-- Transfers that left and were refunded, by nonce: the height. And where their senders would have
+-- the refund go instead, as a contract that cannot take it might.
+local refunds = storage.namespace("refunds")
+local refund_to = storage.namespace("refund_to")
 
 local function hex(bytes)
     return (bytes:gsub(".", function(byte)
@@ -101,6 +119,16 @@ local function digest(t)
     local body = hash.keccak256(evm.encode("(bytes,uint256,uint256,bytes,string,string,uint8,string)", t.asset, t.id, t.amount, t.recipient, t.name, t.symbol, t.decimals, t.uri))
 
     return hash.keccak256(evm.encode("(string,bytes32,bytes32)", DOMAIN, head:bytes(), body:bytes())):bytes()
+end
+
+-- What the federation signs to void a transfer, at the gateway it was going to.
+local function void_digest(from, to, source, target, nonce, d)
+    return hash.keccak256(evm.encode("(string,bytes,bytes,uint64,uint64,uint64,bytes32)", VOID_DOMAIN, from, to, source, target, nonce, d)):bytes()
+end
+
+-- What the federation signs to refund a transfer, at the gateway it left, once it was voided.
+local function refund_digest(from, to, source, target, nonce, d, sender)
+    return hash.keccak256(evm.encode("(string,bytes,bytes,uint64,uint64,uint64,bytes32,bytes)", REFUND_DOMAIN, from, to, source, target, nonce, d, sender)):bytes()
 end
 
 -- Text the registries keep: printable ASCII, cut to a length, or what to say instead.
@@ -184,6 +212,25 @@ local function signed(d)
     return count, fed.threshold
 end
 
+-- The gateways at the two ends of a transfer between two chains, as it writes them.
+local function ends(source, target)
+    local from, to
+
+    if target == here() then
+        from, to = peers:get(tostring(source)), identity()
+    elseif source == here() then
+        from, to = identity(), peers:get(tostring(target))
+    else
+        error("a transfer to or from another pair of chains")
+    end
+
+    if from == nil or to == nil then
+        error("no gateway on that chain is this one's peer")
+    end
+
+    return from, to
+end
+
 -- A transfer from its fields, as attest and sent take and give them.
 local function transfer(source, target, nonce, kind, origin, asset, id, amount, recipient, name, symbol, decimals, uri)
     local t = {
@@ -206,19 +253,33 @@ local function transfer(source, target, nonce, kind, origin, asset, id, amount, 
         error("kind is 0 the coin, 1 a token, 2 an NFT or 3 a multi-token amount")
     end
 
-    if t.target == here() then
-        t.from, t.to = peers:get(tostring(t.source)), identity()
-    elseif t.source == here() then
-        t.from, t.to = identity(), peers:get(tostring(t.target))
-    else
-        error("a transfer to or from another pair of chains")
-    end
-
-    if t.from == nil or t.to == nil then
-        error("no gateway on that chain is this one's peer")
-    end
+    t.from, t.to = ends(t.source, t.target)
 
     return t
+end
+
+-- A signature of the federation in force over a digest, put on the board: anyone may send it, and
+-- what it recovers to says who signed.
+local function post(d, signature)
+    local fed = federation.get()
+
+    if fed == nil then
+        error("this chain has no federation")
+    end
+
+    local key = crypto.recover(d, signature)
+    local known = false
+
+    for _, signer in ipairs(fed.signers) do
+        known = known or signer == key
+    end
+
+    if not known then
+        error("not signed by a signer of the federation in force")
+    end
+
+    board:set(hex(d) .. ":" .. hex(key), signature)
+    events.emit("Attested", d, key)
 end
 
 -- Run once by the chain: whoever deploys owns the gateway.
@@ -352,7 +413,7 @@ function M.send(target, recipient, kind, asset, id, amount)
     local t = transfer(here(), target, nonce, kind, origin, asset_bytes, id, amount, recipient, name, symbol, decimals, uri)
     local d = digest(t)
 
-    for field, value in pairs({ target = t.target, kind = kind, origin = origin, asset = asset_bytes, id = tostring(id), amount = tostring(amount), recipient = recipient, name = name, symbol = symbol, decimals = decimals, uri = uri, digest = d, from = ctx.sender:text() }) do
+    for field, value in pairs({ target = t.target, kind = kind, origin = origin, asset = asset_bytes, id = tostring(id), amount = tostring(amount), recipient = recipient, name = name, symbol = symbol, decimals = decimals, uri = uri, digest = d, from = ctx.sender:text(), height = ctx.height }) do
         out:set(nonce .. ":" .. field, tostring(value))
     end
 
@@ -366,7 +427,8 @@ function M.sent_count()
 end
 
 -- A transfer that left: its target, kind, origin, asset, id, amount, recipient, name, symbol,
--- decimals, URI and digest, for signers and relayers; and who sent it, for wallets.
+-- decimals, URI and digest, for signers and relayers; who sent it, for wallets and refunds; and the
+-- height it left at, for a signer to tell it is final.
 function M.sent(nonce)
     local at = whole(nonce, "the nonce") .. ":"
 
@@ -379,7 +441,7 @@ function M.sent(nonce)
     end
 
     return tonumber(field("target")), tonumber(field("kind")), tonumber(field("origin")), field("asset"), u256(field("id")), u256(field("amount")),
-        field("recipient"), field("name"), field("symbol"), tonumber(field("decimals")), field("uri"), field("digest"), address.parse(field("from"))
+        field("recipient"), field("name"), field("symbol"), tonumber(field("decimals")), field("uri"), field("digest"), address.parse(field("from")), tonumber(field("height"))
 end
 
 -- A signer of the federation in force posts its signature over a transfer: one coming here, which
@@ -393,27 +455,14 @@ function M.attest(source, target, nonce, kind, origin, asset, id, amount, recipi
         error("no such transfer left this gateway")
     end
 
-    local fed = federation.get()
-
-    if fed == nil then
-        error("this chain has no federation")
-    end
-
-    local key = crypto.recover(d, signature)
-    local known = false
-
-    for _, signer in ipairs(fed.signers) do
-        known = known or signer == key
-    end
-
-    if not known then
-        error("not signed by a signer of the federation in force")
-    end
-
-    board:set(hex(d) .. ":" .. hex(key), signature)
-    events.emit("Attested", d, key)
-
     local at = t.source .. ":" .. t.nonce
+
+    -- Its delivery signatures may be public already, and stop counting here.
+    if t.target == here() and voids:get(at .. ":digest") then
+        error("that transfer was voided: its source refunds it")
+    end
+
+    post(d, signature)
 
     if t.target == here() and done:get(at) == nil then
         local count, threshold = signed(d)
@@ -426,6 +475,133 @@ function M.attest(source, target, nonce, kind, origin, asset, id, amount, recipi
     end
 
     return true
+end
+
+-- A signer of the federation in force posts its signature to void a transfer that has not arrived,
+-- having read for itself that it left its source and is not delivered. Going to a chain over there,
+-- the signatures wait here for a relayer to take them to Gateway.sol's voidTransfer. Coming here,
+-- once enough signed its nonce is taken for good: a delivery cannot then be done, however public its
+-- signatures. One already done cannot be voided, and whichever lands first wins.
+function M.attest_void(source, target, nonce, d, signature)
+    source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
+    local from, to = ends(source, target)
+    local at = source .. ":" .. nonce
+
+    if source == here() and out:get(nonce .. ":digest") ~= d then
+        error("no such transfer left this gateway")
+    end
+
+    if target == here() and done:get(at) then
+        error("that transfer was delivered already")
+    end
+
+    local vd = void_digest(from, to, source, target, nonce, d)
+    post(vd, signature)
+
+    if target == here() and voids:get(at .. ":digest") == nil then
+        local count, threshold = signed(vd)
+
+        if count >= threshold then
+            voids:set(at .. ":digest", d)
+            voids:set(at .. ":height", tostring(ctx.height))
+            events.emit("Voided", source, nonce, d)
+        end
+    end
+
+    return true
+end
+
+-- A signer of the federation in force posts its signature to refund a transfer that was voided where
+-- it was going, having read that for itself once it was final. Leaving a chain over there, the
+-- signatures wait here for a relayer to take them to Gateway.sol's refund. Leaving here, once enough
+-- signed it is paid back: released if this gateway holds it, minted again if it burned it, to whom it
+-- recorded, as the amount and asset it recorded, whatever anyone sends. It is marked before it is paid,
+-- and if paying fails all of this is undone, so it is tried again with nothing paid twice.
+function M.attest_refund(source, target, nonce, d, sender, signature)
+    source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
+    local from, to = ends(source, target)
+
+    if source == here() then
+        if out:get(nonce .. ":digest") ~= d then
+            error("no such transfer left this gateway")
+        end
+
+        if address.parse(out:get(nonce .. ":from")):encode() ~= sender then
+            error("that is not who sent it")
+        end
+
+        if refunds:get(tostring(nonce)) then
+            error("that transfer was refunded already")
+        end
+    end
+
+    local rd = refund_digest(from, to, source, target, nonce, d, sender)
+    post(rd, signature)
+
+    if source == here() then
+        local count, threshold = signed(rd)
+
+        if count >= threshold then
+            refunds:set(tostring(nonce), tostring(ctx.height))
+            local field = function(name)
+                return out:get(nonce .. ":" .. name)
+            end
+            local who = address.parse(refund_to:get(tostring(nonce)) or field("from"))
+            receive(transfer(source, target, nonce, field("kind"), field("origin"), field("asset"), field("id"), field("amount"), who:encode(), field("name"), field("symbol"), field("decimals"), field("uri")))
+            events.emit("Refunded", nonce, d, who)
+        end
+    end
+
+    return true
+end
+
+-- Who sent a transfer names where its refund goes, as a contract that cannot take it might: its own
+-- word alone, and nothing the federation signs.
+function M.set_refund_to(nonce, recipient)
+    nonce = whole(nonce, "the nonce")
+
+    if out:get(nonce .. ":from") ~= ctx.sender:text() then
+        error("only who sent it may")
+    end
+
+    refund_to:set(tostring(nonce), recipient:text())
+    return true
+end
+
+-- Whom a refund of a transfer that left pays: who sent it, or where they said; and whether it was.
+function M.refund_of(nonce)
+    nonce = whole(nonce, "the nonce")
+    local who = refund_to:get(tostring(nonce)) or out:get(nonce .. ":from")
+
+    return who and address.parse(who), refunds:get(tostring(nonce)) ~= nil
+end
+
+-- A transfer on its way here that was voided: its digest and the height it was voided at; nil if not.
+function M.voided(source, nonce)
+    local at = whole(source, "the source") .. ":" .. whole(nonce, "the nonce")
+    local d = voids:get(at .. ":digest")
+
+    if d == nil then
+        return nil
+    end
+
+    return d, tonumber(voids:get(at .. ":height"))
+end
+
+-- What the federation signs to void a transfer: what the tools compare with their own.
+function M.void_digest(source, target, nonce, d)
+    source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
+    local from, to = ends(source, target)
+
+    return void_digest(from, to, source, target, nonce, d)
+end
+
+-- What the federation signs to refund a transfer: what the tools compare with their own.
+function M.refund_digest(source, target, nonce, d, sender)
+    source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
+    local from, to = ends(source, target)
+
+    return refund_digest(from, to, source, target, nonce, d, sender)
 end
 
 -- The signatures the federation in force posted over a digest, in the signers' order, and how

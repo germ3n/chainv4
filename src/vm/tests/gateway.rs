@@ -194,7 +194,7 @@ fn a_deposit_there_mints_its_wrapped_token_here_once_enough_signed() {
     let left = bridge.left(1);
 
     assert_eq!((left.kind, left.origin, left.asset.as_slice(), left.name.as_str(), left.decimals), (AssetKind::Token, THERE, usdt.as_slice(), "Tether", 6));
-    assert_eq!(bridge.read(bridge.gateway, "sent", &[number(1)])[11..], [bytes(&left.digest()), address(alice)], "and who sent it, for wallets");
+    assert_eq!(bridge.read(bridge.gateway, "sent", &[number(1)])[11..], [bytes(&left.digest()), address(alice), TxCallArgumentType::I64(0)], "who sent it, for wallets and refunds, and the height it left at");
     assert_eq!(back.events.last().map(|event| event.data.clone()), Some(vec![TxCallArgumentType::I64(1), TxCallArgumentType::I64(THERE as i64), bytes(&left.digest()), address(alice)]));
 
     // Signatures over it are kept for a relayer, in the signers' order; one over a transfer that
@@ -387,4 +387,285 @@ fn a_token_whose_name_is_not_text_crosses_without_it_so_its_transfer_can_be_sign
 
     assert_eq!((left.name.as_str(), left.symbol.as_str(), left.decimals), ("", "", 8));
     bridge.attest(&left, 1).unwrap();
+}
+
+/// A wide number, as the gateway takes and gives amounts and ids.
+fn wide(value: u64) -> TxCallArgumentType {
+    TxCallArgumentType::U256(u256::from(value))
+}
+
+impl Bridge {
+    fn attest_void(&self, transfer: &Transfer, signer: u8) -> Result<Vec<TxCallArgumentType>, String> {
+        let signature = crate::bridge::sign_digest(&secret(signer), &transfer.void_digest());
+
+        self.world.call(self.gateway, "attest_void", &transfer.attest_void_args(&signature)).result.map_err(|err| err.to_string())
+    }
+
+    fn attest_refund(&self, transfer: &Transfer, sender: &[u8], signer: u8) -> Result<Vec<TxCallArgumentType>, String> {
+        let signature = crate::bridge::sign_digest(&secret(signer), &transfer.refund_digest(sender));
+
+        self.world.call(self.gateway, "attest_refund", &transfer.attest_refund_args(sender, &signature)).result.map_err(|err| err.to_string())
+    }
+
+    /// Who a refund of what left at a nonce pays, and whether it was paid.
+    fn refund_of(&self, nonce: u64) -> (TxCallArgumentType, bool) {
+        match &self.read(self.gateway, "refund_of", &[number(nonce)])[..] {
+            [who, TxCallArgumentType::Bool(paid)] => (who.clone(), *paid),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Enough of the federation's signatures to refund what left at a nonce.
+    fn refund(&self, nonce: u64, sender: Address) -> Result<(), String> {
+        let (left, sender) = (self.left(nonce), sender.to_abi());
+        self.attest_refund(&left, &sender, 1)?;
+        self.attest_refund(&left, &sender, 2)?;
+
+        Ok(())
+    }
+}
+
+#[test]
+fn a_void_a_refund_and_their_digests_are_the_gateway_s_as_they_are_rust_s_and_pass_for_nothing_else() {
+    let bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let deposit = bridge.arriving(1, AssetKind::Token, THERE, &[0x9e; 20], 500, alice);
+    let digest = bytes(&deposit.digest());
+    let sender = [0xc0; 20];
+
+    assert_eq!(bridge.read(bridge.gateway, "void_digest", &[number(THERE), number(HERE), number(1), digest.clone()]), [bytes(&deposit.void_digest())]);
+    assert_eq!(bridge.read(bridge.gateway, "refund_digest", &[number(THERE), number(HERE), number(1), digest, bytes(&sender)]), [bytes(&deposit.refund_digest(&sender))]);
+
+    // What was signed for a delivery is no void, and what was signed for a void delivers nothing.
+    let delivery = deposit.sign(&secret(1));
+    assert!(bridge.world.call(bridge.gateway, "attest_void", &deposit.attest_void_args(&delivery)).result.unwrap_err().to_string().contains("not signed by a signer"));
+    let void = crate::bridge::sign_digest(&secret(1), &deposit.void_digest());
+    assert!(bridge.world.call(bridge.gateway, "attest", &deposit.attest_args(&void)).result.unwrap_err().to_string().contains("not signed by a signer"));
+    assert!(bridge.world.call(bridge.gateway, "attest_refund", &deposit.attest_refund_args(&sender, &void)).result.unwrap_err().to_string().contains("not signed by a signer"));
+}
+
+#[test]
+fn a_transfer_voided_here_can_never_be_delivered_however_public_its_signatures() {
+    let bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let usdt = [0x9e; 20];
+    let deposit = bridge.arriving(1, AssetKind::Token, THERE, &usdt, 500, alice);
+
+    // One signer's word for its delivery is public already, and one's for its void changes nothing.
+    bridge.attest(&deposit, 1).unwrap();
+    bridge.attest_void(&deposit, 1).unwrap();
+    assert_eq!(bridge.read(bridge.gateway, "voided", &[number(THERE), number(1)]), [TxCallArgumentType::Nil]);
+    assert!(bridge.attest_void(&deposit, 9).unwrap_err().contains("not signed by a signer"));
+
+    // The threshold, and its nonce is taken. The other delivery signature now does nothing but fail.
+    bridge.attest_void(&deposit, 2).unwrap();
+    assert_eq!(bridge.read(bridge.gateway, "voided", &[number(THERE), number(1)])[0], bytes(&deposit.digest()));
+    assert!(bridge.attest(&deposit, 2).unwrap_err().contains("voided"));
+    assert!(bridge.attest(&deposit, 3).unwrap_err().contains("voided"));
+    assert_eq!(bridge.read(bridge.gateway, "wrapped_of", &[number(THERE), number(1), bytes(&usdt)]), [TxCallArgumentType::Nil], "nothing was minted");
+    assert_eq!(bridge.read(bridge.gateway, "received", &[number(THERE), number(1)]), [TxCallArgumentType::Bool(false)], "and it says it did not arrive");
+
+    // What arrived cannot be voided, and a void that lost the race goes no further.
+    let arrived = bridge.arriving(2, AssetKind::Token, THERE, &usdt, 500, alice);
+    bridge.attest_void(&arrived, 1).unwrap();
+    bridge.attest(&arrived, 1).unwrap();
+    bridge.attest(&arrived, 2).unwrap();
+    assert!(bridge.attest_void(&arrived, 2).unwrap_err().contains("delivered already"));
+    assert_eq!(bridge.read(bridge.gateway, "voided", &[number(THERE), number(2)]), [TxCallArgumentType::Nil]);
+
+    // Coming from over there, what refunds it waits on the board for a relayer, and pays nothing here.
+    let sender = [0xc0; 20];
+    bridge.attest_refund(&deposit, &sender, 1).unwrap();
+    bridge.attest_refund(&deposit, &sender, 2).unwrap();
+    assert_eq!(
+        bridge.read(bridge.gateway, "signatures", &[bytes(&deposit.refund_digest(&sender))]),
+        [TxCallArgumentType::I64(2), bytes(&crate::bridge::sign_digest(&secret(1), &deposit.refund_digest(&sender))), bytes(&crate::bridge::sign_digest(&secret(2), &deposit.refund_digest(&sender)))]
+    );
+}
+
+#[test]
+fn what_left_here_held_is_released_back_to_who_sent_it_once() {
+    let mut bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let there = bytes(&[0xb0; 20]);
+    bridge.world.fund(alice, 5_000);
+    let balance = |bridge: &Bridge, contract: Address, args: &[TxCallArgumentType]| bridge.read(contract, "balance_of", args);
+
+    // The coin.
+    bridge.world.call_at(alice, bridge.gateway, "send", &[number(THERE), there.clone(), number(0), TxCallArgumentType::Nil, number(0), wide(1_000)], 1_000, 0).result.unwrap();
+    let before = bridge.world.balance(alice);
+    let left = bridge.left(1);
+
+    // One signature pays nothing, nor does one over what it did not record.
+    bridge.attest_refund(&left, &alice.to_abi(), 1).unwrap();
+    assert_eq!(bridge.world.balance(alice), before);
+    assert!(!bridge.refund_of(1).1);
+    let mallory = Address::Ed25519([0xd; 32]);
+    assert!(bridge.attest_refund(&left, &mallory.to_abi(), 2).unwrap_err().contains("not who sent it"));
+    assert!(bridge.attest_refund(&Transfer { amount: u256::from(4_000u64), ..left.clone() }, &alice.to_abi(), 2).unwrap_err().contains("no such transfer"));
+    assert!(bridge.attest_refund(&Transfer { nonce: 9, ..left.clone() }, &alice.to_abi(), 2).unwrap_err().contains("no such transfer"));
+    assert!(bridge.attest_void(&Transfer { nonce: 9, ..left.clone() }, 2).unwrap_err().contains("no such transfer"));
+
+    // The threshold pays it, and never again.
+    bridge.attest_refund(&left, &alice.to_abi(), 2).unwrap();
+    assert_eq!((bridge.world.balance(alice), bridge.world.balance(bridge.gateway)), (before + u256::from(1_000u64), u256::ZERO));
+    assert_eq!(bridge.refund_of(1), (address(alice), true));
+    assert!(bridge.attest_refund(&left, &alice.to_abi(), 3).unwrap_err().contains("refunded already"));
+    assert_eq!(bridge.world.balance(alice), before + u256::from(1_000u64));
+
+    // A token.
+    let token = bridge.world.lua_code(include_str!("../../../contracts/lua/token.lua"));
+    bridge.world.call(token, "transfer", &[address(alice), wide(700)]).result.unwrap();
+    bridge.world.call_as(alice, token, "approve", &[address(bridge.gateway), wide(300)]).result.unwrap();
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there.clone(), number(1), address(token), number(0), wide(300)]).result.unwrap();
+    assert_eq!(balance(&bridge, token, &[address(alice)]), [wide(400)]);
+    bridge.refund(2, alice).unwrap();
+    assert_eq!(balance(&bridge, token, &[address(alice)]), [wide(700)]);
+
+    // An NFT.
+    let art = bridge.world.lua_code(include_str!("../../../contracts/lua/nft.lua"));
+    bridge.world.call(art, "mint", &[address(alice), TxCallArgumentType::String("ipfs://art/1".into())]).result.unwrap();
+    bridge.world.call_as(alice, art, "approve", &[address(bridge.gateway), wide(1)]).result.unwrap();
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there.clone(), number(2), address(art), wide(1), number(0)]).result.unwrap();
+    assert_eq!(bridge.read(art, "owner_of", &[wide(1)]), [address(bridge.gateway)]);
+    bridge.refund(3, alice).unwrap();
+    assert_eq!(bridge.read(art, "owner_of", &[wide(1)]), [address(alice)]);
+
+    // An amount of a multi-token id.
+    let items = bridge.world.lua_code(include_str!("../../../contracts/lua/multi.lua"));
+    bridge.world.call(items, "mint", &[address(alice), wide(9), wide(50)]).result.unwrap();
+    bridge.world.call_as(alice, items, "set_approval_for_all", &[address(bridge.gateway), TxCallArgumentType::Bool(true)]).result.unwrap();
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there, number(3), address(items), wide(9), wide(20)]).result.unwrap();
+    assert_eq!(balance(&bridge, items, &[address(alice), wide(9)]), [wide(30)]);
+    bridge.refund(4, alice).unwrap();
+    assert_eq!(balance(&bridge, items, &[address(alice), wide(9)]), [wide(50)]);
+}
+
+#[test]
+fn what_left_here_burned_is_minted_back_to_who_sent_it_once() {
+    let bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let there = bytes(&[0xb0; 20]);
+    let made = |bridge: &Bridge, kind: u64, asset: &[u8]| match bridge.read(bridge.gateway, "wrapped_of", &[number(THERE), number(kind), bytes(asset)])[..] {
+        [TxCallArgumentType::Address(made)] => made,
+        ref other => panic!("{other:?}"),
+    };
+    let arrive = |transfer: &Transfer| {
+        bridge.attest(transfer, 1).unwrap();
+        bridge.attest(transfer, 2).unwrap();
+    };
+
+    // A wrapped token, burned as it left, comes back.
+    let usdt = [0x9e; 20];
+    arrive(&bridge.arriving(1, AssetKind::Token, THERE, &usdt, 500, alice));
+    let token = made(&bridge, 1, &usdt);
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there.clone(), number(1), address(token), number(0), wide(200)]).result.unwrap();
+    assert_eq!(bridge.read(token, "balance_of", &[address(alice)]), [wide(300)]);
+    bridge.refund(1, alice).unwrap();
+    assert_eq!(bridge.read(token, "balance_of", &[address(alice)]), [wide(500)]);
+    assert_eq!(bridge.read(token, "total_supply", &[]), [wide(500)]);
+
+    // A wrapped coin, which left saying kind 0.
+    arrive(&bridge.arriving(2, AssetKind::Coin, THERE, &[], 90, alice));
+    let coin = made(&bridge, 0, &[]);
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there.clone(), number(1), address(coin), number(0), wide(90)]).result.unwrap();
+    assert_eq!(bridge.left(2).kind, AssetKind::Coin);
+    bridge.refund(2, alice).unwrap();
+    assert_eq!(bridge.read(coin, "balance_of", &[address(alice)]), [wide(90)]);
+
+    // A wrapped NFT comes back with its URI, the same id.
+    let apes = [0xa9; 20];
+    arrive(&bridge.arriving(3, AssetKind::Nft, THERE, &apes, 1, alice));
+    let collection = made(&bridge, 2, &apes);
+    bridge.world.call_as(alice, collection, "approve", &[address(bridge.gateway), wide(42)]).result.unwrap();
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there.clone(), number(2), address(collection), wide(42), number(0)]).result.unwrap();
+    assert!(bridge.world.call(collection, "owner_of", &[wide(42)]).result.is_err(), "burned");
+    bridge.refund(3, alice).unwrap();
+    assert_eq!(bridge.read(collection, "owner_of", &[wide(42)]), [address(alice)]);
+    assert_eq!(bridge.read(collection, "token_uri", &[wide(42)]), [TxCallArgumentType::String("ipfs://ape/42".into())]);
+
+    // An amount of a wrapped multi-token id.
+    let swords = [0xa7; 20];
+    arrive(&Transfer { id: u256::from(5u64), uri: "ipfs://sword".to_string(), ..bridge.arriving(4, AssetKind::Multi, THERE, &swords, 30, alice) });
+    let items = made(&bridge, 3, &swords);
+    bridge.world.call_as(alice, items, "set_approval_for_all", &[address(bridge.gateway), TxCallArgumentType::Bool(true)]).result.unwrap();
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), there, number(3), address(items), wide(5), wide(10)]).result.unwrap();
+    assert_eq!(bridge.read(items, "balance_of", &[address(alice), wide(5)]), [wide(20)]);
+    bridge.refund(4, alice).unwrap();
+    assert_eq!(bridge.read(items, "balance_of", &[address(alice), wide(5)]), [wide(30)]);
+}
+
+/// A token that will not move what it holds until told, as one paused might.
+const STUBBORN: &str = r#"
+    local M = {}
+    function M.name() return "Stubborn" end
+    function M.symbol() return "STB" end
+    function M.decimals() return 0 end
+    function M.transfer_from(from, to, amount) return true end
+    function M.allow() storage.set("allowed", "1") end
+    function M.paid() return storage.get("paid") or "nothing" end
+
+    function M.transfer(to, amount)
+        if storage.get("allowed") == nil then
+            error("it will not move")
+        end
+
+        storage.set("paid", to:text() .. ":" .. tostring(amount) .. ":" .. (storage.get("paid") or ""))
+        return true
+    end
+
+    return M
+"#;
+
+#[test]
+fn a_refund_that_cannot_be_paid_stays_to_try_again_and_its_sender_alone_says_where_else_it_goes() {
+    let mut bridge = Bridge::new();
+    let (alice, bob, mallory) = (Address::Ed25519([0xa; 32]), Address::Ed25519([0xb; 32]), Address::Ed25519([0xd; 32]));
+    let token = bridge.world.lua_code(STUBBORN);
+    bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), bytes(&[0xb0; 20]), number(1), address(token), number(0), wide(5)]).result.unwrap();
+    let left = bridge.left(1);
+
+    // What takes it to the threshold fails with the payment, and nothing is marked.
+    bridge.attest_refund(&left, &alice.to_abi(), 1).unwrap();
+    assert!(bridge.attest_refund(&left, &alice.to_abi(), 2).unwrap_err().contains("will not move"));
+    assert_eq!(bridge.refund_of(1), (address(alice), false));
+
+    // Only who sent it names another, and what it signs is still who sent it.
+    assert!(bridge.world.call_as(mallory, bridge.gateway, "set_refund_to", &[number(1), address(mallory)]).result.unwrap_err().to_string().contains("only who sent it"));
+    bridge.world.call_as(alice, bridge.gateway, "set_refund_to", &[number(1), address(bob)]).result.unwrap();
+    assert_eq!(bridge.refund_of(1), (address(bob), false));
+
+    // Tried again, it goes, once.
+    bridge.world.call(token, "allow", &[]).result.unwrap();
+    bridge.attest_refund(&left, &alice.to_abi(), 2).unwrap();
+    assert_eq!(bridge.refund_of(1), (address(bob), true));
+    assert_eq!(bridge.read(token, "paid", &[]), [TxCallArgumentType::String(format!("{bob}:5:"))]);
+    assert!(bridge.attest_refund(&left, &alice.to_abi(), 3).unwrap_err().contains("refunded already"));
+    assert_eq!(bridge.read(token, "paid", &[]), [TxCallArgumentType::String(format!("{bob}:5:"))]);
+}
+
+#[test]
+fn a_refund_begun_under_one_federation_takes_the_threshold_of_the_next() {
+    let mut bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    bridge.world.fund(alice, 5_000);
+    bridge.world.call_at(alice, bridge.gateway, "send", &[number(THERE), bytes(&[0xb0; 20]), number(0), TxCallArgumentType::Nil, number(0), wide(1_000)], 1_000, 0).result.unwrap();
+    let left = bridge.left(1);
+    let before = bridge.world.balance(alice);
+    bridge.attest_refund(&left, &alice.to_abi(), 1).unwrap();
+
+    // The set rotates, signer 3 alone staying: the old signature stops counting, and so does its signer.
+    let next = Federation {
+        signers: [3, 4, 5].map(|signer| crate::crypto::secp256k1::public_key(&secret(signer)).unwrap()).to_vec(),
+        threshold: 2,
+        chain_depth: 20,
+        evm_depth: 12,
+        bitcoin_depth: 6,
+    };
+    bridge.world.vm = Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_federation(Some(next)).with_chain_id(HERE));
+    assert!(bridge.attest_refund(&left, &alice.to_abi(), 2).unwrap_err().contains("not signed by a signer"));
+    bridge.attest_refund(&left, &alice.to_abi(), 3).unwrap();
+    assert_eq!(bridge.world.balance(alice), before, "one of the new set");
+    bridge.attest_refund(&left, &alice.to_abi(), 4).unwrap();
+    assert_eq!(bridge.world.balance(alice), before + u256::from(1_000u64));
 }

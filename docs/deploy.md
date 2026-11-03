@@ -158,6 +158,17 @@ is in step 6. One signer running it is enough to propose and broadcast; the thre
 `btc sign`, for a release to be signed. A signer's key must hold the coin for what it posts, as with
 `bridge watch`.
 
+**The gateway here and Gateway.sol changed with refunds:** each has `attest_void`, `attest_refund`,
+`voidTransfer` and `refund`, and Gateway.sol records who sent what, so both are new deployments: `bridge
+deploy`, `bridge deploy-evm` (its templates with it), `bridge peer`, and the directory naming both. What
+is in flight through the old ones stays there, so empty them first. The Bitcoin gateway is unchanged and
+need not move for this: its passes' votes and warnings are all in the signer's tool.
+
+A signer's Bitcoin pass reads each release's age from `Proposed` events, so its node keeps
+`--index-events`, as `bridge watch` wants already: without it, it says so, nothing gets a vote for its age,
+and what was cancelled is proposed again only at a much lower rate. Leave `--cancel-after` at 6 hours
+unless you have a reason: every signer should run the same.
+
 The gateway mints only what was mined past the relay's tip when it was set up, and every deposit
 address depends on the chain's id and the gateway, so each new chain gives everyone new ones: see
 [Bridges](bridges.md#the-gateway). After a reset, `bridge peer` joins Gateway.sol to the new gateway
@@ -237,15 +248,15 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0x59f2773a4dccae07…`, 2026-11-01, named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; a block mints 10, halving every 2,000,000 blocks, about 116 days, and a vote 0.01; names under `cv4` |
+| Genesis | `0x2b86ad5c2f22d659…`, 2026-11-01, named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; a block mints 10, halving every 2,000,000 blocks, about 116 days, and a vote 0.01; names under `cv4` |
 | Machines | Public node `66.78.40.94`, others `66.78.40.57` and `65.87.7.168`: 2 cores, 4 GB and 50 GB each, with 4 GB of swap and the [firewall](docker.md#firewall) |
 | Swap contract, `swap.cv4` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.cv4` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
 | NFT factory, `nfts.cv4` | `contract:0x5c352729…4297` |
-| Gateway, `gateway.cv4` | `contract:0xe6912df3…55dc` |
+| Gateway, `gateway.cv4` | `contract:0x4a8fe33e…cacd` |
 | Bitcoin relay, `btcrelay.cv4` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0xb0c23ea9…1ff0`, a key on the public node |
-| Bitcoin gateway, `btcgateway.cv4` | `contract:0xc53df990…04e7` |
+| Bitcoin gateway, `btcgateway.cv4` | `contract:0x034178c0…5e2d`, signers on the servers, one key each, under `chainv4-signer` |
 | Swap.sol | `0xb3f77d55ac803f023df8f4d21fd1d103e5be2d50` |
 | Tokens `gold.cv4`, `silver.cv4`, `tusd.cv4`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin, 1,000 CV4 to 10,000; TETH `0x2625baf4…c4c9`, 100 CV4 to 400 on the EVM DEX |
 | Collections `pixels.cv4`, `items.cv4` | `contract:0x48ae529c…73cd`, 3 NFTs; `contract:0xf915ac76…2406`, ids 1 and 2, 100 each |
@@ -253,4 +264,4 @@ SHA-256s with the link.
 | Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
 | Onion | `njo4fijntpqch73yv4477hhn2vcngnpcxtw2vb4qwjasqdwbdeektuqd.onion` |
 | Mining | An open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`): `chainv4 worker --node https://66-78-40-94.sslip.io --payout ADDRESS`, over `/mining/ws` behind nginx. `66.78.40.94:4002` is the same port over plain TCP, for `--insecure-open-port` alone |
-| Apps | https://gofile.io/d/2FkgWeka |
+| Apps | https://gofile.io/d/QkxlLYsI |
