@@ -270,3 +270,92 @@ fn both_dexes_charge_the_fee_the_chain_sets_and_not_one_of_their_own() {
     let quoted = evm_call(&mut chain, router, "getAmountOut(uint256,uint256,uint256)", &[AbiValue::Uint(u256::new(100_000)), AbiValue::Uint(u256::new(10_000_000)), AbiValue::Uint(u256::new(20_000_000))], &[Uint(256), Uint(256), Uint(256)]);
     assert_eq!(words(&quoted), [expected]);
 }
+
+/// What `chainv4 dex add` sends: the amounts given as the most, and the pair `dex::add_amounts`
+/// works out from the reserves as the least, here with no slippage at all. Each DEX takes that pair
+/// to the unit, off any round ratio and either way round, where asking for at least the amounts
+/// given less a slippage, as the CLI once did, is refused.
+#[test]
+fn both_dexes_take_the_pair_worked_out_for_amounts_off_their_ratio() {
+    use AbiType::{Address as Addr, Uint};
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let me = authority().public().address();
+    let n = u256::new;
+    let worked_out = |held: (u128, u128), most: (u128, u128)| crate::dex::add_amounts(n(held.0), n(held.1), n(most.0), n(most.1)).unwrap();
+    let grown = |held: (u128, u128), put: (u256, u256)| (held.0 + u128::try_from(put.0).unwrap(), held.1 + u128::try_from(put.1).unwrap());
+
+    // The native DEX, a pool of the coin and a token at an awkward price.
+    let token = deploy(&mut chain, Code::Lua(include_str!("../../../contracts/lua/token.lua").to_string()));
+    let template = deploy(&mut chain, Code::Lua(include_str!("../../../contracts/lua/lp_token.lua").to_string()));
+    let dex = deploy(&mut chain, Code::Lua(include_str!("../../../contracts/lua/dex.lua").to_string()));
+    assert!(call(&mut chain, dex, "setup", 0, vec![at(template)]).result.is_ok());
+    assert!(call(&mut chain, token, "approve", 0, vec![at(dex), wide(u128::MAX)]).result.is_ok());
+    assert!(call(&mut chain, dex, "add_liquidity", 7_000_003, vec![at(COIN), at(token), wide(7_000_003), wide(3_000_017), wide(0), wide(0)]).result.is_ok());
+    let held = |chain: &mut Chain, a: Address, b: Address| match returned(&call(chain, dex, "pool", 0, vec![at(a), at(b)])).as_slice() {
+        [TxCallArgumentType::U256(a), TxCallArgumentType::U256(b), _] => (u128::try_from(*a).unwrap(), u128::try_from(*b).unwrap()),
+        other => panic!("{other:?}"),
+    };
+
+    // The old least, the amounts given less 0.5%, is refused off the ratio.
+    refused(&call(&mut chain, dex, "add_liquidity", 1_000_000, vec![at(COIN), at(token), wide(1_000_000), wide(1_000_000), wide(995_000), wide(995_000)]), "the pool's price moved");
+
+    // Too much of the token, too much of the coin, and the same with the pair named the other way.
+    for (a, b, most) in [(COIN, token, (1_000_000, 1_000_000)), (COIN, token, (1_000_000, 100_000)), (token, COIN, (1_000_000, 333_333)), (token, COIN, (10_007, 999_999))] {
+        let (put_a, put_b) = worked_out(held(&mut chain, a, b), most);
+        let coin = if a == COIN { most.0 } else { most.1 };
+        let before = balance(&chain, &me);
+        let added = call(&mut chain, dex, "add_liquidity", coin, vec![at(a), at(b), wide(most.0), wide(most.1), TxCallArgumentType::U256(put_a), TxCallArgumentType::U256(put_b)]);
+        assert_eq!(returned(&added)[..2], [TxCallArgumentType::U256(put_a), TxCallArgumentType::U256(put_b)], "{a} and {b}, at most {most:?}");
+        assert_eq!(before - balance(&chain, &me), if a == COIN { put_a } else { put_b }, "the coin beyond the pair sent back");
+    }
+
+    // The EVM DEX: two ERC-20s, then one against the coin, each at an awkward price.
+    let wdev = create(&mut chain, include_str!("../../../contracts/evm/WDEV.bin"), Vec::new());
+    let factory = create(&mut chain, include_str!("../../../contracts/evm/DexFactory.bin"), Vec::new());
+    let router = create(&mut chain, include_str!("../../../contracts/evm/DexRouter.bin"), encode_values(&[Addr, Addr], &[evm_address(&factory), evm_address(&wdev)]).unwrap());
+    let supply = |symbol: &str| encode_values(&[AbiType::String, AbiType::String, Uint(256)], &[AbiValue::String(symbol.into()), AbiValue::String(symbol.into()), AbiValue::Uint(u256::new(10u128.pow(24)))]).unwrap();
+    let (x, y) = (create(&mut chain, include_str!("../../../contracts/evm/Token.bin"), supply("X")), create(&mut chain, include_str!("../../../contracts/evm/Token.bin"), supply("Y")));
+    let deadline = AbiValue::Uint(u256::from(chain.tip().timestamp / 1_000 + 3_600));
+    let v = AbiValue::Uint;
+
+    for token in [x, y] {
+        evm_send(&mut chain, token, 0, "approve(address,uint256)", &[Addr, Uint(256)], &[evm_address(&router), AbiValue::Uint(u256::MAX)]).unwrap();
+    }
+
+    let add = "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)";
+    let add_types = [Addr, Addr, Uint(256), Uint(256), Uint(256), Uint(256), Addr, Uint(256)];
+    let adding = |first: &Address, second: &Address, most: (u128, u128), least: (u256, u256)| [evm_address(first), evm_address(second), v(n(most.0)), v(n(most.1)), v(least.0), v(least.1), evm_address(&me), deadline.clone()];
+    evm_send(&mut chain, router, 0, add, &add_types, &adding(&x, &y, (7_000_003, 3_000_017), (u256::ZERO, u256::ZERO))).unwrap();
+    let mut pair = (7_000_003u128, 3_000_017u128);
+    let old = evm_send(&mut chain, router, 0, add, &add_types, &adding(&x, &y, (1_000_000, 1_000_000), (n(995_000), n(995_000))));
+    assert!(old.unwrap_err().contains("the pair's price moved"));
+
+    for most in [(1_000_000, 1_000_000), (1_000_000, 100_000)] {
+        let put = worked_out(pair, most);
+        let added = words(&evm_send(&mut chain, router, 0, add, &add_types, &adding(&x, &y, most, put)).unwrap());
+        assert_eq!(added[..2], [put.0, put.1], "at most {most:?}");
+        pair = grown(pair, put);
+    }
+
+    // Y named first, against the order the pair keeps them in.
+    let (put_y, put_x) = worked_out((pair.1, pair.0), (77_777, 1_000_000));
+    let added = words(&evm_send(&mut chain, router, 0, add, &add_types, &adding(&y, &x, (77_777, 1_000_000), (put_y, put_x))).unwrap());
+    assert_eq!(added[..2], [put_y, put_x]);
+
+    // X and the coin: what is sent beyond the pair comes back.
+    let add_dev = "addLiquidityDEV(address,uint256,uint256,uint256,address,uint256)";
+    let dev_types = [Addr, Uint(256), Uint(256), Uint(256), Addr, Uint(256)];
+    evm_send(&mut chain, router, 3_000_001, add_dev, &dev_types, &[evm_address(&x), v(n(4_000_000)), v(u256::ZERO), v(u256::ZERO), evm_address(&me), deadline.clone()]).unwrap();
+    let mut with_coin = (4_000_000u128, 3_000_001u128);
+
+    for (most_x, most_coin) in [(1_000_000u128, 1_000_000u128), (100_000, 1_000_000)] {
+        let put = worked_out(with_coin, (most_x, most_coin));
+        let before = balance(&chain, &me);
+        let added = words(&evm_send(&mut chain, router, most_coin, add_dev, &dev_types, &[evm_address(&x), v(n(most_x)), v(put.0), v(put.1), evm_address(&me), deadline.clone()]).unwrap());
+        assert_eq!(added[..2], [put.0, put.1], "at most {most_x} and {most_coin}");
+        assert_eq!(before - balance(&chain, &me), put.1, "the coin beyond the pair sent back");
+        with_coin = grown(with_coin, put);
+    }
+}

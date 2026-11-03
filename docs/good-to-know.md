@@ -713,6 +713,11 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   bitcoin member, carried by one: "gas limit under its intrinsic cost". `MultisigBundle::probe`
   carries the threshold heaviest members' signatures under the heaviest carrier; the CLI and the
   wallet both price with it, and send no more than threshold signatures (`trimmed`).
+- **A bundle's review shows a deploy's hash, not its code.** `multisig sign` and `approve` list a
+  deploy or upgrade by engine, size, `code_hash` (SHA-256 of the code's bytes: the Lua file, the
+  module, or the init code decoded from its `.bin` hex) and the address it lands at; `--full` shows
+  the code. The API's JSON, `structs::json::tx`, still carries Lua's `source`: the CLI drops it for
+  the review alone. A build without `sha256` names the chain's own hash in `code_hash` instead.
 - **A member's xpub is its words', not its account's.** `Seed::multisig_account` is at
   m/48'/coin'/0'/2' for every account of a phrase, so two accounts of one phrase cannot both be
   members of one multisig on Bitcoin, which names each xpub once. A `bitcoin:` member key, at
@@ -1056,6 +1061,14 @@ voting finality it now goes back to the checkpoint and follows the node from the
   none.
 - **Deploying the DEXes** is `chainv4 dex deploy` (and `--evm`), then naming them to clients:
   the directory's `dex` and `dex_router`, or `--dex-contract` and `--dex-router`.
+- **`dex add` works its pair out with the contracts' own rounding.** Neither contract refunds a
+  token beyond the pool's ratio: each takes the largest pair within the most given, and refuses one
+  under the least. So the CLI's least, the pair less the slippage, is exact only because
+  `dex::add_amounts` rounds each step down in the same order as `dex.lua` and `Dex.sol`'s
+  `_amounts`; change one and change the other. The amounts given go as the most, which is also what
+  it approves, since a price moving within the slippage can take up to that.
+- **The CLI approves only when the allowance is short,** reading it first; an allowance it cannot
+  read counts as none, so it approves rather than fail.
 
 ## Bridges
 
@@ -1102,6 +1115,12 @@ voting finality it now goes back to the checkpoint and follows the node from the
   relay, `bitcoin_depth` deep; run `relay-sync` before `deposit` and `released`.
 - **Start main at a retarget:** the relay needs the period's first block to check the next
   difficulty, so `relay-start` on `main` takes a height divisible by 2016.
+- **The relay is what says which Bitcoin a chain follows:** nothing in the federation or the
+  directory does. `relay-start` takes it from Esplora's genesis block unless `--network` says, and
+  `btc address` writes for the relay's `network_name()`, then Esplora's genesis, then `--network`,
+  then mainnet, saying which on stderr. Testnet4, testnet3 and signet are all `test` to the relay,
+  sharing `tb1…` addresses; regtest's are `bcrt1…`. The same script on another network is another
+  coin, which the relay never sees.
 - **A deposit address is per address, federation, chain and gateway:** `btc_deposit_script` takes
   all of them, in Lua and Rust alike. A new chain or a new gateway makes new ones, so one given out
   before a reset pays what nobody will mint: tell people. Sync the relay before `btc deploy`: a

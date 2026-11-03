@@ -425,10 +425,10 @@ as `btc_gateway`, or `--btc-gateway` before it does:
 
 ```sh
 chainv4 send deploy --wasm btc_relay.wasm                      # the relay
-chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint
+chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint, on the network Esplora serves
 chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since, 25 a tx; run it often
 chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --fee-floor 2 --grace-hours 168
-chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…; --network test for tb1q…
+chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay: bc1q…, tb1q… or bcrt1q…, as the relay follows
 chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL
 chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
 chainv4 bridge btc watch --esplora URL --evm-key signer.key --key payer.key  # each signer, left running
@@ -474,11 +474,24 @@ How long a withdrawal takes is then one pass of the federation, its threshold's 
 Bitcoin's own time: usually under an hour to be mined, and a little more to show as `paid`. It waits
 longer while fees run past what it agreed to lose, or the gateway holds too little.
 
+- **relay-start** starts the relay on the network Esplora serves, known by its genesis block
+  (`/block-height/0`): `main`, `test` for testnet4, testnet3 and signet, or `regtest`. `--network`
+  names it where Esplora's genesis is none of those, and is refused where it is another.
 - **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told. Sync the relay first.
-- **address** writes the deposit address for mainnet, `bc1q…`, unless given `--network test`, whatever
-  network the relay follows: on a relay of testnet4 or signet, give it, for the `tb1q…` a testnet wallet
-  pays. The script is the same either way, so a mainnet wallet would pay the `bc1q…` one, and nothing
-  would be minted for it here. The wallet reads the relay's `network_name()` and writes the right one.
+- **address** writes the deposit address for the Bitcoin the chain follows, and says on stderr which
+  and what said so, the address alone going to stdout:
+  1. the gateway's relay, by its `network_name()`, as it was started: `bc1q…` on `main`, `tb1q…` on
+     `test`, `bcrt1q…` on `regtest`;
+  2. else, for a relay not started, Esplora's genesis block, when `--esplora` is given;
+  3. else `--network`, `main`, `test` or `regtest`;
+  4. else mainnet, saying that nothing said which.
+
+  A `--network` the relay or Esplora contradicts is refused rather than written. The script is the
+  same on every network, so a deposit to the address of another, such as a mainnet wallet paying the
+  `bc1q…` one beside a testnet relay, is never seen here and mints nothing. **Before this,** it wrote
+  mainnet's `bc1q…` unless given `--network test`, whatever the relay followed, as the test chain
+  found. The wallet's Bridge page reads the relay's `network_name()` too: `bc1q…` for `main`, `tb1q…`
+  for anything else, regtest included, where Bitcoin Core wants `bcrt1q…`.
 - **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or another output script Bitcoin's nodes
   relay as `0x…` (a Taproot output as its `5120…` script). `--most-fee` is the most it may lose, a
   tenth of it unless told; **set-most-fee** changes that while it waits.

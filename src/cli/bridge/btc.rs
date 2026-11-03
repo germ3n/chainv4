@@ -29,9 +29,11 @@ pub enum BtcAction {
     RelayStart {
         relay: Address,
         height: u64,
-        /// main, regtest or test.
-        #[arg(long, default_value = "main")]
-        network: String,
+        /// main, regtest or test (testnet4, testnet3 and signet): which rules its headers keep.
+        /// Without it, the one Esplora serves, by its genesis block; refused if Esplora serves
+        /// another.
+        #[arg(long)]
+        network: Option<String>,
     },
     /// Submits to the relay every header Esplora has past the relay's tip, a batch a
     /// transaction. Esplora is asked at an even pace and asked again, waiting longer each time,
@@ -56,12 +58,16 @@ pub enum BtcAction {
         #[arg(long, default_value_t = 168)]
         grace_hours: u64,
     },
-    /// An address's deposit address on Bitcoin, under the federation in force.
+    /// An address's deposit address on Bitcoin, under the federation in force, written for the
+    /// Bitcoin the gateway's relay follows: bc1q… on main, tb1q… on the test networks, bcrt1q…
+    /// on regtest. Which one, and what said so, goes to stderr.
     Address {
         recipient: Address,
-        /// main or test: which addresses to write it as.
-        #[arg(long, default_value = "main")]
-        network: String,
+        /// main, test or regtest: used only when the relay is not started and Esplora (--esplora)
+        /// is not given or serves a Bitcoin it does not know; refused if either says another. Main
+        /// when nothing says.
+        #[arg(long)]
+        network: Option<String>,
     },
     /// Shows a deposit, by its transaction and output, minting its wBTC to the address it pays.
     Deposit { txid: String, vout: u32, recipient: Address },
@@ -142,11 +148,75 @@ fn shown(internal: &[u8]) -> String {
     to_hex(&bytes).trim_start_matches("0x").to_string()
 }
 
-fn network(name: &str) -> CliResult<Network> {
-    match name {
-        "main" => Ok(Network::Main),
-        "test" => Ok(Network::Test),
-        other => Err(format!("{other} is not a network: main or test").into()),
+/// Which Bitcoin a relay follows, by the names its start takes: main, test (testnet4, testnet3 and
+/// signet, which share their addresses and the relay's loose rules) or regtest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Followed {
+    Main,
+    Test,
+    Regtest,
+}
+
+/// Bitcoin's genesis blocks as explorers write their hashes, and whose they are.
+const GENESIS_BLOCKS: [(&str, Followed); 5] = [
+    ("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", Followed::Main),
+    ("00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043", Followed::Test),
+    ("000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943", Followed::Test),
+    ("00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6", Followed::Test),
+    ("0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206", Followed::Regtest),
+];
+
+impl Followed {
+    pub(crate) fn from_name(name: &str) -> CliResult<Followed> {
+        match name.trim() {
+            "main" => Ok(Followed::Main),
+            "test" => Ok(Followed::Test),
+            "regtest" => Ok(Followed::Regtest),
+            other => Err(format!("{other} is not a network: main, test or regtest").into()),
+        }
+    }
+
+    /// The network whose genesis block has this hash, as Esplora's /block-height/0 answers it.
+    pub(crate) fn from_genesis(hash: &str) -> Option<Followed> {
+        GENESIS_BLOCKS.iter().find(|(known, _)| known.eq_ignore_ascii_case(hash.trim())).map(|(_, network)| *network)
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Followed::Main => "main",
+            Followed::Test => "test",
+            Followed::Regtest => "regtest",
+        }
+    }
+
+    /// An output script's address on this network. Regtest's witness programs are bcrt1…, its
+    /// others as the test networks write them.
+    pub(crate) fn address(self, script: &[u8]) -> String {
+        match (self, script) {
+            (Followed::Main, _) => address(script, Network::Main),
+            (Followed::Regtest, [0x00, size @ (0x14 | 0x20), program @ ..]) if program.len() == usize::from(*size) => crate::structs::bech32::encode_segwit("bcrt", program),
+            (Followed::Regtest, [version @ 0x51..=0x60, size @ 2..=40, program @ ..]) if program.len() == usize::from(*size) => crate::structs::bech32::encode_witness("bcrt", version - 0x50, program),
+            _ => address(script, Network::Test),
+        }
+    }
+}
+
+/// Which Bitcoin to write addresses for, and what said so: the relay as it was started, else
+/// Esplora's genesis block, else what was told, else main. One told that the relay or Esplora
+/// contradicts is refused, rather than write an address no deposit here would be proven from.
+pub(crate) fn pick_network(relay: Option<&str>, esplora: Option<&str>, told: Option<&str>) -> CliResult<(Followed, String)> {
+    let told = told.map(Followed::from_name).transpose()?;
+    let (found, why) = match (relay.map(Followed::from_name).transpose()?, esplora.and_then(Followed::from_genesis)) {
+        (Some(network), _) => (Some(network), "the relay follows it"),
+        (None, Some(network)) => (Some(network), "the relay is not started, and Esplora serves it"),
+        (None, None) => (None, ""),
+    };
+
+    match (found, told) {
+        (Some(found), Some(told)) if found != told => Err(format!("--network {} is not the Bitcoin here: {}, as {why}", told.name(), found.name()).into()),
+        (Some(found), _) => Ok((found, why.to_string())),
+        (None, Some(told)) => Ok((told, "--network says so, and neither the relay nor Esplora does".to_string())),
+        (None, None) => Ok((Followed::Main, "nothing says which, as the relay is not started and Esplora was not asked or did not say: give --network test or regtest for another".to_string())),
     }
 }
 
@@ -310,9 +380,16 @@ impl Bridge {
 
         match action {
             BtcAction::RelayStart { relay, height, network } => {
+                let served = Followed::from_genesis(&self.esplora("/block-height/0")?);
+                let network = match (network.as_deref().map(Followed::from_name).transpose()?, served) {
+                    (Some(told), Some(served)) if told != served => return Err(format!("--network {} is not what Esplora serves: {}", told.name(), served.name()).into()),
+                    (Some(network), _) | (None, Some(network)) => network,
+                    (None, None) => return Err("Esplora serves a Bitcoin whose genesis block is none of main's, test's or regtest's: give --network".into()),
+                };
+                eprintln!("starting the relay on Bitcoin's {} network", network.name());
                 let hash = self.esplora(&format!("/block-height/{height}"))?;
                 let header = from_hex(&format!("0x{}", self.esplora(&format!("/block/{}/header", hash.trim()))?.trim())).ok_or("Esplora gave a header that is not hex")?;
-                self.call(*relay, "start", u256::ZERO, vec![bytes(header), number(*height), TxCallArgumentType::String(network.clone())])
+                self.call(*relay, "start", u256::ZERO, vec![bytes(header), number(*height), TxCallArgumentType::String(network.name().to_string())])
             }
             BtcAction::RelaySync { relay, batch } => {
                 let tip = self.read(relay, "tip", json!([]))?;
@@ -362,9 +439,10 @@ impl Bridge {
 
                 Ok(())
             }
-            BtcAction::Address { recipient, network: name } => {
-                let scripts = self.read(&self.btc_gateway()?, "deposit_script", json!([{ "type": "address", "value": recipient.to_string() }]))?;
-                println!("{}", address(&raw(scripts.get(1).ok_or("the gateway gave no deposit script")?), network(name)?));
+            BtcAction::Address { recipient, network: told } => {
+                let (written, network, why) = self.deposit_address(recipient, told.as_deref())?;
+                eprintln!("for Bitcoin's {} network: {why}", network.name());
+                println!("{written}");
 
                 Ok(())
             }
@@ -402,6 +480,32 @@ impl Bridge {
                 self.show_released(*proposal, &found)
             }
         }
+    }
+
+    /// A recipient's deposit address under the federation in force, written for the Bitcoin the
+    /// gateway's relay follows: the address, that network, and what said so.
+    pub(crate) fn deposit_address(&self, recipient: &Address, told: Option<&str>) -> CliResult<(String, Followed, String)> {
+        let gateway = self.btc_gateway()?;
+        let scripts = self.read(&gateway, "deposit_script", json!([{ "type": "address", "value": recipient.to_string() }]))?;
+        let (network, why) = self.followed(&gateway, told)?;
+
+        Ok((network.address(&raw(scripts.get(1).ok_or("the gateway gave no deposit script")?)), network, why))
+    }
+
+    /// Which Bitcoin the gateway's relay follows, as pick_network decides it: Esplora is asked
+    /// only when the relay does not say, and only when given.
+    fn followed(&self, gateway: &Address, told: Option<&str>) -> CliResult<(Followed, String)> {
+        let relay = self.read(gateway, "relay", json!([]))?.first().map(text).and_then(|text| text.parse::<Address>().ok());
+        let name = match relay {
+            Some(relay) => self.read(&relay, "network_name", json!([]))?.first().filter(|value| value["type"].as_str() == Some("string")).map(text),
+            None => None,
+        };
+        let genesis = match (&name, &self.args.esplora) {
+            (None, Some(_)) => self.esplora("/block-height/0").map_err(|why| eprintln!("Esplora did not say which Bitcoin it serves: {why}")).ok(),
+            _ => None,
+        };
+
+        pick_network(name.as_deref(), genesis.as_deref(), told)
     }
 
     /// Shows a release Bitcoin mined, by Esplora's proof of it.
@@ -1155,5 +1259,33 @@ mod tests {
         assert!(failed.contains("web page") && failed.contains("3 times"), "{failed}");
         assert_eq!(waited.len(), 2);
         assert_eq!(asked_again(0, |_| {}, || Ok("1".to_string())), Ok("1".to_string()), "asked once at least");
+    }
+
+    #[test]
+    fn deposit_addresses_are_written_for_the_bitcoin_the_chain_follows() {
+        let mainnet = GENESIS_BLOCKS[0].0;
+        let testnet4 = GENESIS_BLOCKS[1].0;
+
+        // The relay says first, whatever Esplora serves; Esplora says when the relay does not.
+        assert_eq!(pick_network(Some("test"), Some(mainnet), None).unwrap().0, Followed::Test);
+        assert_eq!(pick_network(Some("regtest"), None, None).unwrap().0, Followed::Regtest);
+        assert_eq!(pick_network(None, Some(testnet4), None).unwrap().0, Followed::Test);
+        assert_eq!(pick_network(None, Some(&mainnet.to_uppercase()), None).unwrap().0, Followed::Main);
+        // Told, it goes only where nothing says, and is refused where the chain says another.
+        assert_eq!(pick_network(None, Some("00ff"), Some("test")).unwrap().0, Followed::Test);
+        assert!(pick_network(Some("test"), None, Some("main")).unwrap_err().to_string().contains("not the Bitcoin here"));
+        assert!(pick_network(None, Some(mainnet), Some("regtest")).is_err());
+        assert!(pick_network(None, None, Some("testnet")).is_err(), "the relay's names alone");
+        // Nothing said: main, saying so.
+        let (network, why) = pick_network(None, None, None).unwrap();
+        assert_eq!(network, Followed::Main);
+        assert!(why.contains("nothing says"), "{why}");
+
+        // One deposit script, as each network writes it.
+        let script = p2wsh(&[0x51]);
+        assert!(Followed::Main.address(&script).starts_with("bc1q"));
+        assert!(Followed::Test.address(&script).starts_with("tb1q"));
+        assert!(Followed::Regtest.address(&script).starts_with("bcrt1q"));
+        assert_eq!(crate::structs::bech32::decode_segwit(&Followed::Regtest.address(&script)).map(|(hrp, program)| (hrp, program.len())), Some(("bcrt".to_string(), 32)));
     }
 }

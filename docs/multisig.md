@@ -16,8 +16,9 @@ file cannot be taken back:
   fee, before it even asks for the seed. It refuses a spend it cannot say that of: an input with no
   amount, inputs naming no key or both networks, an output with no address, or one paying more than
   it spends. It reads no node, so it cannot tell change from a payment: look at every line.
-- **`multisig sign`** and **`approve`** show the multisig, its nonce, the transaction in full, every
-  step of a batch, and what it may pay in gas.
+- **`multisig sign`** and **`approve`** show the multisig, its nonce, the transaction, every step
+  of a batch, and what it may pay in gas; a deploy by its engine, size, SHA-256 and address, and its
+  code with `--full` ([a batch](#a-batch)).
 - **`multisig evm sign`** shows each call's chain, contract, whom it calls, value, nonce and data.
 
 ## Making one
@@ -187,6 +188,25 @@ Build one with the wallet's Batch page by picking the multisig under Send as, or
 wallet's bundle, its proposals, the offline signer, and `chainv4 multisig sign` and `approve`, which
 print each before the member's key goes on it.
 
+**A deploy is listed by what identifies it, not its code.** `multisig sign` and `approve` print the
+transaction, or each step of a batch, as the API writes it, but a deploy or upgrade as its engine,
+its size, its code's SHA-256 and, for a deploy, the address it lands at. `send --multisig` lists a
+batch's steps the same way, its deploys' addresses on lines of their own after them, as before:
+
+```
+a batch of 2 steps, all or nothing:
+  step 1: {"type":"deploy","engine":"lua","code_size":14230,"code_hash":"sha256:0x5f…","address":"contract:0x9a…"}
+  step 2: {"type":"contract_call","to":"contract:0x9a…","func":…}
+```
+
+Check the hash against the file you were sent, `shasum -a 256 dex.lua`, or for EVM init code, which
+`.bin` files hold as hex, `xxd -r -p Token.bin | shasum -a 256` (with any constructor arguments
+after it). `sign --full` and `approve --full` print the code whole instead: Lua's source, or a
+WebAssembly module's or init code's hex. The address comes from the multisig's nonce the bundle
+fixes and the chain's hash, which its genesis id is in, so signing still asks no node. **Before
+this,** a batch deploying a contract printed its whole Lua source in the review, once in the
+transaction and again in its step, burying the steps around it.
+
 ## Changing members
 
 `Tx::ChangeMultisig` replaces the members and threshold, checked as at creation. Only a multisig
@@ -221,7 +241,7 @@ wallet still has that limit: propose it again, or with a little more `--gas-limi
 
 ```sh
 chainv4 send --key alice.key --multisig multisig:0x… --out pay.bundle transfer --to ed25519:0x… --amount 1000
-chainv4 multisig --key bob.key sign pay.bundle --submit     # shows it, asks for yes; needs no node to sign; --submit sends it once backed
+chainv4 multisig --key bob.key sign pay.bundle --submit     # shows it, asks for yes; needs no node to sign; --submit sends it once backed; --full shows deploys' code
 chainv4 multisig --key carol.key approve pay.bundle         # on chain, from carol's account; submits once backed
 chainv4 multisig --key anyone.key submit pay.bundle
 chainv4 multisig --key carol.key withdraw multisig:0x… --proposal 0x…

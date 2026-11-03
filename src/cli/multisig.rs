@@ -59,6 +59,10 @@ pub enum MultisigAction {
         /// Sign without asking, for scripts: it still shows what it signs.
         #[arg(long)]
         yes: bool,
+        /// Show each deploy's and upgrade's code whole, Lua source or a module's or init code's
+        /// hex, rather than its engine, size, SHA-256 and address alone.
+        #[arg(long)]
+        full: bool,
     },
     /// Approves a bundle's transaction on chain, from --key's own account at its own cost, and
     /// submits it once the approvals and the bundle's signatures are enough.
@@ -68,6 +72,9 @@ pub enum MultisigAction {
         /// Approve without asking, for scripts: it still shows what it approves.
         #[arg(long)]
         yes: bool,
+        /// Show each deploy's and upgrade's code whole, as sign --full does.
+        #[arg(long)]
+        full: bool,
     },
     /// Takes back --key's approval of an open proposal.
     Withdraw {
@@ -179,9 +186,9 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
 
     match args.action {
         MultisigAction::Show { account } => show(&agent, &node, &account),
-        MultisigAction::Sign { bundle: path, submit, yes } => {
+        MultisigAction::Sign { bundle: path, submit, yes, full } => {
             let mut bundle = read(&path)?;
-            review_bundle(&bundle, "Sign", yes, &mut std::io::stdin().lock())?;
+            review_bundle(&bundle, "Sign", yes, full, &mut std::io::stdin().lock())?;
             bundle.sign(&keypair);
             write(&path, &bundle)?;
             println!("signed as {}: {} signature{} now", keypair.public(), bundle.signatures.len(), plural(bundle.signatures.len()));
@@ -191,10 +198,10 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
                 false => Ok(()),
             }
         }
-        MultisigAction::Approve { bundle: path, yes } => {
+        MultisigAction::Approve { bundle: path, yes, full } => {
             let bundle = read(&path)?;
             let body = &bundle.body;
-            review_bundle(&bundle, "Approve", yes, &mut std::io::stdin().lock())?;
+            review_bundle(&bundle, "Approve", yes, full, &mut std::io::stdin().lock())?;
             let approval = Tx::ApproveMultisig { account: body.account, nonce: body.nonce, fee: body.fee, tx: Box::new(body.tx.clone()) };
             println!("approving {} of {} on chain", body.id(&bundle.genesis), body.account);
             send_own(&agent, &node, &keypair, approval, timeout)?;
@@ -236,11 +243,14 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
     let threshold = multisig["threshold"].as_u64().ok_or("the node sent no threshold")? as usize;
     let keys = member_keys(&multisig)?;
     let tx = transaction(args.tx, account, &agent, node)?;
-    list_steps(&tx);
 
-    // Where its deploys land: the bundle fixes the multisig's nonce, so it is known before anyone
-    // signs, for what comes after to call.
+    // Where its deploys land, a line each after the steps: the bundle fixes the multisig's nonce,
+    // so it is known before anyone signs, for what comes after to call.
     let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+
+    for line in step_lines(&tx, &[], false) {
+        println!("{line}");
+    }
 
     for line in super::send::landings(&tx, &account, nonce, hash) {
         println!("{line}");
@@ -382,27 +392,80 @@ fn show(agent: &Agent, node: &str, account: &Address) -> CliResult<()> {
 
 /// Shows what a bundle has its member agree to, and asks for yes unless told: a signature on one
 /// cannot be taken back once it is out of the file.
-pub(super) fn review_bundle(bundle: &MultisigBundle, what: &str, yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+pub(super) fn review_bundle(bundle: &MultisigBundle, what: &str, yes: bool, full: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
     let body = &bundle.body;
+    // Where its deploys land, by the multisig's nonce the bundle fixes and the chain's hash, which
+    // its genesis id is in: no node is asked.
+    let lands = deploys(&body.tx, &body.account, body.nonce, bundle.genesis.algorithm());
     println!("{}, its transaction {}, on the chain of genesis {}:", body.account, body.nonce, bundle.genesis);
-    println!("  {}", crate::structs::json::tx(&body.tx));
+
+    if body.tx.batch_steps().is_none() {
+        println!("  {}", step_text(&body.tx, lands.first().map(|(_, address)| address), full));
+    }
+
     println!("  paying up to {} gas at {} each, tip {}", body.fee.gas_limit, body.fee.max_price, body.fee.tip);
-    list_steps(&body.tx);
+
+    for line in step_lines(&body.tx, &lands, full) {
+        println!("{line}");
+    }
 
     super::send::typed_yes(&format!("{what} this?"), yes, input, "nothing is signed")
 }
 
-/// A batch's steps, each as the API writes it, before a member's key goes on them: what it agrees to.
-fn list_steps(tx: &Tx) {
-    let Some(steps) = tx.batch_steps() else {
-        return;
-    };
-
-    println!("a batch of {} steps, all or nothing:", steps.len());
-
-    for (place, step) in steps.iter().enumerate() {
-        println!("  step {}: {}", place + 1, crate::structs::json::tx(step));
+/// Where a transaction's deploys land, each with its place among a batch's steps, 0 for a lone one.
+fn deploys(tx: &Tx, sender: &Address, nonce: u64, hash: HashType) -> Vec<(usize, Address)> {
+    match tx {
+        Tx::Batch { steps } => super::send::batch_deploys(steps, sender, nonce, hash),
+        Tx::Deploy { .. } => super::send::batch_deploys(std::slice::from_ref(tx), sender, nonce, hash),
+        _ => Vec::new(),
     }
+}
+
+/// A batch's steps, a line each, before a member's key goes on them: what it agrees to. Each is as
+/// the API writes it, but a deploy or upgrade by its engine, size, SHA-256 and the address in lands
+/// for its place, rather than its code, unless full. Nothing for a transaction that is no batch.
+pub(crate) fn step_lines(tx: &Tx, lands: &[(usize, Address)], full: bool) -> Vec<String> {
+    let Some(steps) = tx.batch_steps() else {
+        return Vec::new();
+    };
+    let lands_at = |place: usize| lands.iter().find(|(at, _)| *at == place).map(|(_, address)| address);
+
+    std::iter::once(format!("a batch of {} steps, all or nothing:", steps.len()))
+        .chain(steps.iter().enumerate().map(|(place, step)| format!("  step {}: {}", place + 1, step_text(step, lands_at(place), full))))
+        .collect()
+}
+
+/// One transaction or step as the API writes it, a deploy's or upgrade's code as its SHA-256 (the
+/// chain's own hash on a build without SHA-256), named code_hash, and a deploy with the address it
+/// lands at when known. With full, the code too: Lua's source, or the hex of a module or EVM init
+/// code.
+pub(crate) fn step_text(tx: &Tx, lands: Option<&Address>, full: bool) -> String {
+    let mut value = crate::structs::json::tx(tx);
+
+    if let Tx::Deploy { code } | Tx::Upgrade { code, .. } = tx {
+        #[cfg(feature = "sha256")]
+        let kind = HashType::Sha256;
+        #[cfg(not(feature = "sha256"))]
+        let kind = HashType::default_chain();
+
+        value["code_hash"] = format!("{}:{}", kind.name(), to_hex(&crate::crypto::hasher::Hasher::digest(kind, code.bytes()).to_bytes())).into();
+
+        if let Some(address) = lands {
+            value["address"] = address.to_string().into();
+        }
+
+        match (full, code) {
+            (false, _) => {
+                if let Some(fields) = value.as_object_mut() {
+                    fields.remove("source");
+                }
+            }
+            (true, crate::structs::code::Code::Lua(_)) => {}
+            (true, other) => value["code"] = to_hex(other.bytes()).into(),
+        }
+    }
+
+    value.to_string()
 }
 
 /// A proposal's id as show prints it, read with the chain's hash.

@@ -131,22 +131,43 @@ Then tell clients:
 ## From the command line
 
 Assets are `coin`, or a token's address: `contract:0x…`, `evm:0x…` or `0x…`. Amounts are in
-smallest units. `--evm` uses the EVM DEX, through the router the node names, or `--router`.
+smallest units.
+- **Which DEX:** the native one the chain's [directory](governance.md#directory) names as `dex`,
+  else the one the node was started with (`--dex-contract`), as `GET /status` says, or `--dex`.
+  `--evm` uses the EVM DEX instead, through the directory's `dex_router`, else the node's
+  `--dex-router`, or `--router`; `--dex` is not used with it.
+- **Quotes** go by the chain's fee, `GET /status`'s `dex_fee_bps`, through `dex::amount_out`.
 
 ```sh
 chainv4 dex pools
 chainv4 dex quote coin contract:0x… 1000000             # the route, what comes out, price impact
-chainv4 dex add coin contract:0x… 1000000 4000000       # approves the token first; opens it if new
+chainv4 dex add coin contract:0x… 1000000 4000000       # at most these, at the pool's ratio; opens it if new
 chainv4 dex swap coin contract:0x… 10000 --slippage 1   # at least the quote less 1%
 chainv4 dex remove coin contract:0x… 500000             # shares out
 chainv4 dex --evm swap coin 0x… 5000
 ```
 
-**Adding to a pool that is open takes amounts at its ratio.** `add` asks for at least each amount
-given less the slippage (`--slippage`, 0.5% unless told), not at least what the pool's ratio would take
-of them, so amounts off the ratio by more than that are refused, as `the pool's price moved: less b
-than the least`, after the approval went out. Work the second amount out from `dex pools`, or widen
-`--slippage`. Each run approves again, whatever is approved already.
+**`add` takes at most the amounts given,** as Uniswap V2's router does:
+- It reads what the pool holds and works out the largest pair at its ratio that fits both
+  (`dex::add_amounts`), rounding each step down as `dex.lua`'s `add_liquidity` and the router's
+  `_amounts` do, so the pair is exactly what the contract takes at those reserves.
+- It says that pair before it sends, with how much of the amount given it leaves, and the least of
+  each it takes should the price move first: the pair less `--slippage` (0.5% unless told, 0 to 50).
+- It sends the amounts given as the most and that least. A pool whose price moved past the slippage
+  refuses it; neither contract takes more than the most, and both send back the coin sent beyond
+  what goes in.
+- A new pool, or one holding nothing, opens at the amounts as given: their ratio is its price.
+
+**Approvals go out only when short.** `swap`, `add` and, on the EVM, `remove` first read what the
+DEX may already move of each token for you: a native token's `allowance(owner, spender)`, an ERC-20's
+`allowance(address,address)` for the native DEX's EVM address or the router. They approve only when
+that is less than the amount (for `add`, the most given), and say so either way. An allowance that
+does not read is taken as none.
+
+**Before this,** `add` asked for at least each amount given less the slippage, so amounts off the
+pool's ratio by more than 0.5% were refused, `the pool's price moved: less b than the least`, after
+its approval had gone out; and each run approved again, whatever was approved already. The test
+chain's notes said to work the second amount out from `dex pools` by hand.
 
 ## In the wallet
 
@@ -202,7 +223,11 @@ MetaMask, the wallet and the CLI all get limits that work.
 - **The EVM DEX, through whole blocks:** wrapping, adding, trading along a path back to the
   coin, shares out, and the router's refusals.
 - **`chainv4 dex` against a running node:** both DEXes deployed and traded on, with no gas
-  given.
+  given; adds far off each pool's ratio, either way, at no slippage, taking the pair worked out;
+  an approval only when the allowance is short, counted by the nonce.
+- **Adding off the ratio, through whole blocks:** each DEX, both ways round and through
+  `addLiquidityDEV`, takes the pair `dex::add_amounts` works out to the unit with that pair as its
+  least, sends back the coin beyond it, and refuses the old least, the amounts given less 0.5%.
 - **The routing and pricing:** `src/dex.rs`.
 - **The Trade page's pieces:** prices from `Sync` events, the router's calldata, the EVM pairs
   read with WDEV as the coin.

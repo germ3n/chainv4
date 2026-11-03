@@ -174,6 +174,28 @@ pub fn least_out(out: u256, slippage: u32) -> u256 {
 }
 
 #[document(
+    summary = "What adding at most desired_a and desired_b to a pool holding reserve_a and reserve_b puts in: the largest pair at its ratio that fits both, rounded down as both DEXes round it (dex.lua's add_liquidity, the router's _amounts, Uniswap V2's _addLiquidity); for a pool holding nothing, the amounts as given, its opening price. None for a pool holding one side alone, or amounts too large to reckon.",
+    category = "DEX",
+    see_also = "least_out",
+)]
+pub fn add_amounts(reserve_a: u256, reserve_b: u256, desired_a: u256, desired_b: u256) -> Option<(u256, u256)> {
+    if reserve_a == u256::ZERO && reserve_b == u256::ZERO {
+        return Some((desired_a, desired_b));
+    }
+
+    // The same two steps as the contracts, in the same order, so the pair is what they take.
+    let optimal_b = desired_a.checked_mul(reserve_b)?.checked_div(reserve_a)?;
+
+    if optimal_b <= desired_b {
+        return Some((desired_a, optimal_b));
+    }
+
+    let optimal_a = desired_b.checked_mul(reserve_a)?.checked_div(reserve_b)?;
+
+    (optimal_a <= desired_a).then_some((optimal_a, desired_b))
+}
+
+#[document(
     summary = "What shares of a pool are worth: their part of what it holds of each asset, as removing them pays.",
     category = "DEX",
 )]
@@ -233,5 +255,21 @@ mod tests {
         assert_eq!(pool.matching(&at(1), u256::new(10u128.pow(18))), Some(u256::new(3_000_000)));
         assert_eq!(pool.other(&at(2)), Some(at(1)));
         assert_eq!(DexPool::from_values(&[at(1).to_string(), at(2).to_string(), "5".into(), "6".into(), at(3).to_string()]).unwrap().reserve_b, u256::new(6));
+    }
+
+    #[test]
+    fn adding_takes_the_largest_pair_at_the_pools_ratio_rounded_as_the_contracts_round() {
+        let n = u256::new;
+
+        // A pool at 1 to 4: too much b offered keeps all of a, too much a keeps all of b.
+        assert_eq!(add_amounts(n(1_000_000), n(4_000_000), n(10_000), n(50_000)), Some((n(10_000), n(40_000))));
+        assert_eq!(add_amounts(n(1_000_000), n(4_000_000), n(20_000), n(40_000)), Some((n(10_000), n(40_000))));
+        // Off any round ratio, each step rounds down, as dex.lua and the router do.
+        assert_eq!(add_amounts(n(7_000_003), n(3_000_017), n(1_000), n(1_000)), Some((n(1_000), n(1_000 * 3_000_017 / 7_000_003))));
+        assert_eq!(add_amounts(n(3_000_017), n(7_000_003), n(1_000), n(1_000)), Some((n(1_000 * 3_000_017 / 7_000_003), n(1_000))));
+        // A new pool opens at the amounts given; one holding a single side cannot be added to.
+        assert_eq!(add_amounts(u256::ZERO, u256::ZERO, n(5), n(7)), Some((n(5), n(7))));
+        assert_eq!(add_amounts(u256::ZERO, n(5), n(5), n(7)), None);
+        assert_eq!(add_amounts(n(2), n(2), u256::MAX, n(1)), None, "too large to reckon");
     }
 }

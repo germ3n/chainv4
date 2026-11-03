@@ -37,6 +37,41 @@ fn a_multisigs_deploys_are_where_its_nonce_puts_them_before_anyone_signs() {
     assert!(crate::cli::send::landings(&Tx::Burn { from: account, amount: crate::structs::amount::Amount::U128(1) }, &account, 4, hash).is_empty());
 }
 
+#[cfg(feature = "sha256")]
+#[test]
+fn a_batchs_steps_show_a_deploy_by_its_engine_size_hash_and_address_not_its_source() {
+    use crate::cli::multisig::{step_lines, step_text};
+    use crate::structs::code::Code;
+    use crate::structs::hash::HashType;
+    use crate::structs::tx::Tx;
+
+    let account = Address::Multisig([6; 32]);
+    let source = format!("-- a long contract\nlocal M = {{}}\n{}return M\n", "function M.f() return 1 end\n".repeat(200));
+    let burn = Tx::Burn { from: account, amount: crate::structs::amount::Amount::U128(1) };
+    let batch = Tx::Batch { steps: vec![burn.clone(), Tx::Deploy { code: Code::Lua(source.clone()) }, Tx::Deploy { code: Code::Wasm(vec![0, 0x61, 0x73, 0x6d]) }] };
+    let lands = crate::cli::send::batch_deploys(batch.batch_steps().unwrap(), &account, 4, HashType::default_chain());
+    let lines = step_lines(&batch, &lands, false);
+    let sha256 = |bytes: &[u8]| crate::structs::hex::to_hex(&crate::crypto::hasher::Hasher::digest(HashType::Sha256, bytes).to_bytes());
+
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(lines[0], "a batch of 3 steps, all or nothing:");
+    assert_eq!(lines[1], format!("  step 1: {}", crate::structs::json::tx(&burn)), "a step that is no deploy, as the API writes it");
+    let deploy: serde_json::Value = serde_json::from_str(lines[2].trim_start_matches("  step 2: ")).unwrap();
+    assert_eq!(deploy, serde_json::json!({ "type": "deploy", "engine": "lua", "code_size": source.len(), "code_hash": format!("sha256:{}", sha256(source.as_bytes())), "address": lands[0].1.to_string() }));
+    assert!(lines.iter().all(|line| !line.contains("function M.f")), "no source: {lines:?}");
+    assert!(lines[3].contains(&lands[1].1.to_string()) && lines[3].contains(r#""engine":"wasm""#) && lines[3].contains(r#""code_size":4"#), "{}", lines[3]);
+
+    // With full, the code whole: Lua's source, a module's hex.
+    let full = step_lines(&batch, &lands, true);
+    assert!(full[2].contains("function M.f") && full[2].contains("code_hash"), "{}", full[2]);
+    assert!(full[3].contains(r#""code":"0x0061736d""#), "{}", full[3]);
+
+    // A lone deploy reads the same, and what is no batch lists no steps.
+    let lone = step_text(&Tx::Deploy { code: Code::Lua(source.clone()) }, Some(&lands[0].1), false);
+    assert!(!lone.contains("function M.f") && lone.contains(&lands[0].1.to_string()), "{lone}");
+    assert!(step_lines(&burn, &[], false).is_empty());
+}
+
 #[test]
 fn a_member_names_an_xpub_an_evm_address_both_or_neither() {
     let key = Keypair::from_seed([1; 32]).public().to_string();
@@ -766,11 +801,11 @@ mod send {
         .unwrap();
         // It shows what it signs, and takes a typed yes.
         let read = crate::registry::multisig::MultisigBundle::from_text(&fs::read_to_string(&bundle).unwrap()).unwrap();
-        assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, &mut "no\n".as_bytes()).unwrap_err().to_string().contains("nothing is signed"));
-        assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, &mut "".as_bytes()).is_err());
-        crate::cli::multisig::review_bundle(&read, "Sign", false, &mut "yes\n".as_bytes()).unwrap();
-        crate::cli::multisig::review_bundle(&read, "Sign", true, &mut "".as_bytes()).unwrap();
-        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true }).unwrap();
+        assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, false, &mut "no\n".as_bytes()).unwrap_err().to_string().contains("nothing is signed"));
+        assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, false, &mut "".as_bytes()).is_err());
+        crate::cli::multisig::review_bundle(&read, "Sign", false, false, &mut "yes\n".as_bytes()).unwrap();
+        crate::cli::multisig::review_bundle(&read, "Sign", true, false, &mut "".as_bytes()).unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false }).unwrap();
         let node = running.stop();
         let held = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap();
 
@@ -814,13 +849,13 @@ mod send {
         });
         propose(&bundle, 10).unwrap();
         let submitted_short = multisig(&files[0], MultisigAction::Submit { bundle: bundle.clone() });
-        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true }).unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false }).unwrap();
 
         // The next one goes by approval on chain: member 2 approves, and that is enough with the
         // proposer's signature, so approving submits it.
         let second = dir.0.join("again.bundle");
         propose(&second, 5).unwrap();
-        multisig(&files[2], MultisigAction::Approve { bundle: second.clone(), yes: true }).unwrap();
+        multisig(&files[2], MultisigAction::Approve { bundle: second.clone(), yes: true, full: false }).unwrap();
         let shown = multisig(&files[0], MultisigAction::Show { account });
         let node = running.stop();
         let balance = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap().balance;
@@ -858,7 +893,7 @@ mod send {
         let bundle = dir.0.join("pay.bundle");
         let to = Address::Ed25519([9; 32]);
         send(SendArgs { key: Some(files[0].clone()), multisig: Some(account), out: Some(bundle.clone()), ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(10) }) }).unwrap();
-        let signed = multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true });
+        let signed = multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false });
         let node = running.stop();
 
         signed.expect("taken, not refused under its intrinsic cost");
@@ -1850,6 +1885,36 @@ mod send {
         let none = run(DexAction::Swap { from: coin.clone(), to: Address::Contract([9; 32]).to_string(), amount: u256::new(1), slippage: 1.0 }, false, Some(contract), None);
         assert!(none.unwrap_err().to_string().contains("no pool"));
 
+        // Amounts far off the pool's ratio, either way: the pair at its ratio within them goes in,
+        // with no slippage allowed at all. The token's allowance is spent, so it is approved first.
+        let reserves = || -> (u256, u256) {
+            let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token.to_string() }]));
+            let number = |at: usize| u256::from_str_radix(pool["values"][at]["value"].as_str().unwrap(), 10).unwrap();
+
+            (number(0), number(1))
+        };
+        for (coin_most, token_most) in [(100_000u128, 5_000_000u128), (5_000_000, 100_000)] {
+            let (coin_held, token_held) = reserves();
+            let (coin_in, token_in) = crate::dex::add_amounts(coin_held, token_held, u256::new(coin_most), u256::new(token_most)).unwrap();
+            let (before, sent) = (held(&me), nonce(&node));
+            let approved_already = read(&token, "allowance", serde_json::json!([{ "type": "address", "value": me.to_string() }, { "type": "address", "value": contract.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap() >= token_most;
+            run(DexAction::Add { a: coin.clone(), b: token_text.clone(), amount_a: u256::new(coin_most), amount_b: u256::new(token_most), slippage: 0.0 }, false, Some(contract), None).unwrap();
+            assert_eq!(reserves(), (coin_held + coin_in, token_held + token_in), "at most {coin_most} and {token_most}");
+            assert_eq!(u256::new(before - held(&me)), token_in);
+            assert_eq!(nonce(&node) - sent, if approved_already { 1 } else { 2 });
+        }
+
+        // Approved for plenty, an add sends the add alone.
+        send(running.args(TxArgs::Call { to: token, function: "approve".into(), amount: u256::ZERO, args: vec![crate::structs::tx::TxCallArgumentType::Address(contract), crate::structs::tx::TxCallArgumentType::U256(u256::new(10u128.pow(12)))] })).unwrap();
+        let sent = nonce(&node);
+        run(DexAction::Add { a: token_text.clone(), b: coin.clone(), amount_a: u256::new(70_000), amount_b: u256::new(9_000_000), slippage: 0.5 }, false, Some(contract), None).unwrap();
+        assert_eq!(nonce(&node) - sent, 1, "no approval: the DEX may move enough already");
+        let plan = crate::cli::dex::plan_add(Some((u256::new(4), u256::new(1))), u256::new(400), u256::new(400), 50).unwrap();
+        assert_eq!((plan.amount_a, plan.amount_b, plan.least_a, plan.least_b, plan.opens), (u256::new(400), u256::new(100), u256::new(398), u256::new(100), false), "the least is the pair less the slippage");
+        assert!(plan.said(&token, &crate::dex::COIN, u256::new(400), u256::new(400), 0.5).contains("100 of the 400 given"));
+        let fresh = crate::cli::dex::plan_add(None, u256::new(5_000), u256::new(7_000), 50).unwrap();
+        assert_eq!((fresh.amount_a, fresh.amount_b, fresh.least_a, fresh.least_b, fresh.opens), (u256::new(5_000), u256::new(7_000), u256::new(5_000), u256::new(7_000), true), "a new pool takes them as given");
+
         // The EVM DEX: WDEV, the factory and the router; an ERC-20 against the coin.
         let start = nonce(&node);
         run(DexAction::Deploy, true, None, None).unwrap();
@@ -1866,7 +1931,16 @@ mod send {
         run(DexAction::Swap { from: coin.clone(), to: erc20.clone(), amount: u256::new(5_000), slippage: 1.0 }, true, None, Some(router.clone())).unwrap();
         run(DexAction::Swap { from: erc20.clone(), to: coin.clone(), amount: u256::new(9_000), slippage: 1.0 }, true, None, Some(router.clone())).unwrap();
         run(DexAction::Pools, true, None, Some(router.clone())).unwrap();
-        let refused = run(DexAction::Swap { from: token.to_string(), to: coin, amount: u256::new(1), slippage: 1.0 }, true, None, Some(router));
+
+        // Off the pair's ratio with no slippage allowed, both ways: the router takes the pair
+        // worked out. The first approves, its allowance spent; the second has plenty left over.
+        let sent = nonce(&node);
+        run(DexAction::Add { a: erc20.clone(), b: coin.clone(), amount_a: u256::new(3_000_000), amount_b: u256::new(10_000), slippage: 0.0 }, true, None, Some(router.clone())).unwrap();
+        assert_eq!(nonce(&node) - sent, 2, "approved, then added");
+        let sent = nonce(&node);
+        run(DexAction::Add { a: coin.clone(), b: erc20.clone(), amount_a: u256::new(5_000_000), amount_b: u256::new(20_000), slippage: 0.0 }, true, None, Some(router.clone())).unwrap();
+        assert_eq!(nonce(&node) - sent, 1, "no approval: the router may move enough already");
+        let refused =run(DexAction::Swap { from: token.to_string(), to: coin, amount: u256::new(1), slippage: 1.0 }, true, None, Some(router));
         assert!(refused.is_err(), "a native token is no ERC-20 on the EVM DEX");
         running.stop();
     }
@@ -2105,7 +2179,7 @@ mod send {
             (FakeBitcoin::display(&hash), answer["values"][1]["value"].as_str().unwrap().parse().unwrap())
         };
 
-        run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }).unwrap();
+        run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }).unwrap();
         bitcoin.block(&[], false);
         let (shared, shared_height) = (bitcoin.tip, bitcoin.height);
         bitcoin.block(&[], false);
@@ -2187,16 +2261,43 @@ mod send {
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
             })
         };
-        run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None, None).unwrap();
+        run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }, None, None).unwrap();
 
         // The gateway, after its wBTC template, on that relay.
         run(BtcAction::Deploy { relay, fee_cap: 10_000, fee_floor: 2, grace_hours: 1 }, None, None).unwrap();
         let gateway = deployed_at(&me, start + 2, hash);
         assert_eq!(gateway, announced);
-        run(BtcAction::Address { recipient: me, network: "main".into() }, None, None).unwrap();
+        run(BtcAction::Address { recipient: me, network: None }, None, None).unwrap();
 
         // 50,000 satoshis to the dev key's deposit address, buried two deep, shown, minted.
         let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
+
+        // The deposit address is written for the Bitcoin the relay follows, regtest here, with or
+        // without Esplora, and whatever --network would say: main is refused, not written.
+        let written = |network: Option<&str>, esplora: Option<String>| {
+            crate::cli::bridge::Bridge::new(BridgeArgs {
+                action: BridgeAction::Btc { action: BtcAction::Pass },
+                node: node.clone(),
+                tls: Default::default(),
+                key: None,
+                gateway: None,
+                eth_rpc: Vec::new(),
+                evm_key: None,
+                btc_gateway: None,
+                esplora,
+                evm_gateways: Vec::new(),
+                max_fee_rate: None,
+                cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+            })
+            .unwrap()
+            .deposit_address(&me, network)
+        };
+        let regtest = crate::cli::bridge::btc::Followed::Regtest;
+        let (address, network, why) = written(None, None).unwrap();
+        assert_eq!((address.as_str(), network), (crate::structs::bech32::encode_segwit("bcrt", &output[2..]).as_str(), regtest), "{why}");
+        assert!(address.starts_with("bcrt1q"), "{address}");
+        assert_eq!(written(Some("regtest"), Some(esplora.clone())).unwrap().0, address);
+        assert!(written(Some("main"), None).unwrap_err().to_string().contains("not the Bitcoin here"));
 
         // What the wallet works out alone is what a real chain's gateway says, under the id it says.
         let chain_id = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/status")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["chain_id"].as_u64().unwrap();
@@ -2353,7 +2454,7 @@ mod send {
             let wasm = fixture.dir.0.join("btc_relay.wasm");
             fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
             send(fixture.running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
-            fixture.run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }).unwrap();
+            fixture.run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }).unwrap();
             fixture.run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1 }).unwrap();
             let output = fixture.read("deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
 
@@ -2998,7 +3099,7 @@ mod send {
             cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
         };
         let run = |action: BtcAction, gateway: Option<Address>| bridge(args(action, None, None, &esplora, gateway, None));
-        run(BtcAction::RelayStart { relay, height: 0, network: "regtest".into() }, None).unwrap();
+        run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }, None).unwrap();
         let gateway = deployed_at(&me, start + 3, hash);
         run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1 }, Some(gateway)).unwrap();
         let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
@@ -3566,7 +3667,7 @@ mod send {
             ..running.args(TxArgs::ChangeMultisig { members: vec![member(0), member(1), member(3)], threshold: 2 })
         })
         .unwrap();
-        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true, yes: true } }).unwrap();
+        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true, yes: true, full: false } }).unwrap();
 
         let sync = dir.0.join("sync.evm");
         multisig(&files[0], EvmAction::Sync { eth_rpc: eth_rpc.clone(), out: sync.clone() }).unwrap();

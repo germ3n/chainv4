@@ -1,15 +1,16 @@
 //! `chainv4 dex`: the chain's DEXes from the command line. deploy sets them up, contracts/lua/dex.lua
 //! with its share token template, or with --evm the EVM's WDEV, DexFactory and DexRouter, from
 //! sources built into the binary. pools lists them, quote prices a trade through the best route,
-//! and swap, add and remove send what the wallet's Trade page sends: to the DEX the name dex
-//! resolves to or the node names, or with --evm to the node's router.
+//! and swap, add and remove send what the wallet's Trade page sends: to the native DEX the chain's
+//! directory names, or else the node, or --dex; with --evm to the router found the same way, or
+//! --router. Each approves a token only when what the DEX may move of it already is short.
 
 use {
     super::send::{SendArgs, TlsArgs, TxArgs, agent, ok, send},
     super::{CliResult, deployed_at, parse_amount, signer},
     crate::abi::{AbiType, AbiValue, decode_values, encode_values, evm_address},
     crate::crypto::hasher::Hasher,
-    crate::dex::{COIN, DexPool, best_route, least_out},
+    crate::dex::{COIN, DexPool, add_amounts, best_route, least_out},
     crate::structs::address::Address,
     crate::structs::hash::HashType,
     crate::structs::hex::{from_hex, to_hex},
@@ -29,7 +30,7 @@ const ROUTER_BIN: &str = include_str!("../../contracts/evm/DexRouter.bin");
 pub struct DexArgs {
     #[command(subcommand)]
     pub action: DexAction,
-    /// The node's HTTP API.
+    /// The node's HTTP API: http://, or https:// behind TLS.
     #[arg(long, global = true, default_value = "http://127.0.0.1:8080")]
     pub node: String,
     #[command(flatten)]
@@ -40,10 +41,12 @@ pub struct DexArgs {
     /// The EVM DEX, through its router, rather than the native one.
     #[arg(long, global = true)]
     pub evm: bool,
-    /// The native DEX to use, rather than the one the name dex resolves to or the node names.
+    /// The native DEX, dex.lua, to use: contract:0x…. Without it, the one the chain's directory
+    /// names as dex, or else the node's --dex-contract, as GET /status says. Not used with --evm.
     #[arg(long, global = true)]
     pub dex: Option<Address>,
-    /// The EVM DEX's router to use, rather than the one the node names: 0x and 40 hex digits.
+    /// The EVM DEX's router to use, with --evm: 0x and 40 hex digits. Without it, the one the
+    /// chain's directory names as dex_router, or else the node's --dex-router.
     #[arg(long, global = true)]
     pub router: Option<String>,
 }
@@ -65,32 +68,47 @@ pub enum DexAction {
         #[arg(value_parser = parse_amount)]
         amount: u256,
     },
-    /// Trades through the best route, approving the DEX to move a token first, for at least the
-    /// quote less the slippage.
+    /// Trades through the best route, for at least the quote less the slippage, approving the DEX
+    /// to move a token first when what it may move already is short.
     Swap {
+        /// The asset paid: coin, or a token's address (contract:0x…, evm:0x… or 0x…).
         from: String,
+        /// The asset got.
         to: String,
+        /// How much is paid, in the paid asset's smallest units.
         #[arg(value_parser = parse_amount)]
         amount: u256,
-        /// The slippage allowed, in percent.
+        /// The slippage allowed, in percent, from 0 to 50: the trade fails rather than pay less
+        /// than the quote by more.
         #[arg(long, default_value_t = 0.5)]
         slippage: f64,
     },
-    /// Adds to a pool, opening it at their ratio if it is new: at most these amounts, approving
-    /// tokens first.
+    /// Adds to a pool at most these amounts: the largest pair at the pool's ratio that fits both,
+    /// worked out from what it holds and said before it is sent, as Uniswap V2's router does. A new
+    /// pool opens at the amounts as given, its price. Approves a token first when what the DEX may
+    /// move of it already is short.
     Add {
+        /// One asset: coin, or a token's address.
         a: String,
+        /// The other.
         b: String,
+        /// The most of a to put in, in its smallest units.
         #[arg(value_parser = parse_amount)]
         amount_a: u256,
+        /// The most of b to put in.
         #[arg(value_parser = parse_amount)]
         amount_b: u256,
+        /// How far the pool's price may move before it lands, in percent, from 0 to 50: it takes
+        /// at least the pair worked out, less this, or nothing.
         #[arg(long, default_value_t = 0.5)]
         slippage: f64,
     },
-    /// Takes shares out of a pool, for its part of each asset.
+    /// Takes shares out of a pool, for its part of each asset. On the EVM, the router takes the
+    /// shares, approved first when what it may move already is short.
     Remove {
+        /// One asset: coin, or a token's address.
         a: String,
+        /// The other.
         b: String,
         /// The shares, in their smallest units.
         #[arg(value_parser = parse_amount)]
@@ -171,13 +189,21 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
         }
         DexAction::Add { a, b, amount_a, amount_b, slippage } => {
             let (a, b, slip) = (asset(a)?, asset(b)?, percent(*slippage)?);
+            let held = dex.pools()?.into_iter().find(|pool| pool.pairs(&a, &b)).and_then(|pool| pool.facing(&a));
+            let plan = plan_add(held, *amount_a, *amount_b, slip)?;
+            println!("{}", plan.said(&a, &b, *amount_a, *amount_b, *slippage));
             dex.approve(&a, *amount_a)?;
             dex.approve(&b, *amount_b)?;
+
+            // The amounts given go as the most, and the pair worked out from the reserves, less
+            // the slippage, as the least: the contract takes that same pair at the same reserves,
+            // and gives back what is sent of the coin beyond it.
+            let (least_a, least_b) = (plan.least_a, plan.least_b);
 
             match dex.args.evm {
                 false => {
                     let coin = if a == COIN { *amount_a } else if b == COIN { *amount_b } else { u256::ZERO };
-                    let args = [a, b].map(TxCallArgumentType::Address).into_iter().chain([*amount_a, *amount_b, least_out(*amount_a, slip), least_out(*amount_b, slip)].map(TxCallArgumentType::U256)).chain([TxCallArgumentType::I64(deadline as i64)]).collect();
+                    let args = [a, b].map(TxCallArgumentType::Address).into_iter().chain([*amount_a, *amount_b, least_a, least_b].map(TxCallArgumentType::U256)).chain([TxCallArgumentType::I64(deadline as i64)]).collect();
                     dex.call(dex.native()?, "add_liquidity", coin, args)?;
                 }
                 true => {
@@ -186,12 +212,12 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
 
                     match (a == COIN, b == COIN) {
                         (false, false) => {
-                            let args = vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), amount_a.to_string(), amount_b.to_string(), least_out(*amount_a, slip).to_string(), least_out(*amount_b, slip).to_string(), me, deadline];
+                            let args = vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), amount_a.to_string(), amount_b.to_string(), least_a.to_string(), least_b.to_string(), me, deadline];
                             dex.evm_call(dex.router()?, "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)", args, u256::ZERO)?;
                         }
                         _ => {
-                            let (token, amount_token, amount_coin) = if a == COIN { (b, *amount_b, *amount_a) } else { (a, *amount_a, *amount_b) };
-                            let args = vec![to_hex(&dex.token(&token)?), amount_token.to_string(), least_out(amount_token, slip).to_string(), least_out(amount_coin, slip).to_string(), me, deadline];
+                            let (token, amount_token, amount_coin, least_token, least_coin) = if a == COIN { (b, *amount_b, *amount_a, least_b, least_a) } else { (a, *amount_a, *amount_b, least_a, least_b) };
+                            let args = vec![to_hex(&dex.token(&token)?), amount_token.to_string(), least_token.to_string(), least_coin.to_string(), me, deadline];
                             dex.evm_call(dex.router()?, "addLiquidityDEV(address,uint256,uint256,uint256,address,uint256)", args, amount_coin)?;
                         }
                     }
@@ -210,7 +236,7 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
                     let pool = dex.pools()?.into_iter().find(|pool| pool.pairs(&a, &b)).ok_or("no such pair")?;
                     let me = to_hex(&evm_address(&signer(dex.args.key.as_deref())?.public().address()));
                     let deadline = (deadline / 1_000).to_string();
-                    dex.evm_call(pool.share, "approve(address,uint256)", vec![to_hex(&dex.router_bytes()?), shares.to_string()], u256::ZERO)?;
+                    dex.approve(&pool.share, *shares)?;
 
                     match (a == COIN, b == COIN) {
                         (false, false) => dex.evm_call(dex.router()?, "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)", vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), shares.to_string(), "0".into(), "0".into(), me, deadline], u256::ZERO)?,
@@ -240,6 +266,65 @@ fn percent(slippage: f64) -> CliResult<u32> {
     match (0.0..=50.0).contains(&slippage) {
         true => Ok((slippage * 100.0).round() as u32),
         false => Err("--slippage is a percent from 0 to 50".into()),
+    }
+}
+
+/// What an add puts in: the pair at the pool's ratio within the amounts given, and the least of
+/// each it takes should the price move before it lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AddPlan {
+    pub(crate) amount_a: u256,
+    pub(crate) amount_b: u256,
+    pub(crate) least_a: u256,
+    pub(crate) least_b: u256,
+    /// Whether the pool holds nothing yet, so this opens it at its price.
+    pub(crate) opens: bool,
+}
+
+/// An add of at most amount_a and amount_b to a pool holding what held says, in a's order then
+/// b's, or nothing for no pool: as Uniswap V2's router does it, the largest pair at the pool's ratio
+/// that fits both, by the contracts' own rounding, at least that less the slippage in parts in
+/// 10,000. A new pool takes the amounts as given.
+pub(crate) fn plan_add(held: Option<(u256, u256)>, amount_a: u256, amount_b: u256, slippage: u32) -> CliResult<AddPlan> {
+    let (reserve_a, reserve_b) = held.unwrap_or((u256::ZERO, u256::ZERO));
+    let (put_a, put_b) = add_amounts(reserve_a, reserve_b, amount_a, amount_b).ok_or("the pool holds one of its assets alone, or the amounts are too large to reckon: nothing is added")?;
+    let opens = reserve_a == u256::ZERO && reserve_b == u256::ZERO;
+
+    if put_a == u256::ZERO || put_b == u256::ZERO {
+        return Err(format!("at the pool's ratio, {reserve_a} to {reserve_b}, those amounts put in {put_a} and {put_b}: add more of each").into());
+    }
+
+    Ok(match opens {
+        true => AddPlan { amount_a: put_a, amount_b: put_b, least_a: put_a, least_b: put_b, opens },
+        false => AddPlan { amount_a: put_a, amount_b: put_b, least_a: least_out(put_a, slippage), least_b: least_out(put_b, slippage), opens },
+    })
+}
+
+impl AddPlan {
+    /// What it says before it sends.
+    pub(crate) fn said(&self, a: &Address, b: &Address, given_a: u256, given_b: u256, slippage: f64) -> String {
+        let name = |asset: &Address| if *asset == COIN { "coin".to_string() } else { asset.to_string() };
+
+        match self.opens {
+            true => format!("opening the pool of {} and {} at {} and {}: its price", name(a), name(b), self.amount_a, self.amount_b),
+            false => {
+                let kept = match (self.amount_a < given_a, self.amount_b < given_b) {
+                    (true, _) => format!(", {} of the {} given", self.amount_a, given_a),
+                    (_, true) => format!(", {} of the {} given", self.amount_b, given_b),
+                    _ => String::new(),
+                };
+
+                format!(
+                    "adding {} {} and {} {} at the pool's ratio{kept}; at least {} and {} should its price move ({slippage}%)",
+                    self.amount_a,
+                    name(a),
+                    self.amount_b,
+                    name(b),
+                    self.least_a,
+                    self.least_b
+                )
+            }
+        }
     }
 }
 
@@ -389,15 +474,50 @@ impl Dex {
         }
     }
 
-    /// Approves the DEX to move a token: a native token by its approve, an ERC-20 at the native
-    /// DEX's EVM address or the router's. Nothing for the coin.
+    /// Approves the DEX to move a token, when what it may move already is short of amount: a native
+    /// token by its approve, an ERC-20 at the native DEX's EVM address or the router's. Nothing for
+    /// the coin. An allowance that cannot be read is taken as none.
     fn approve(&self, asset: &Address, amount: u256) -> CliResult<()> {
+        if *asset == COIN {
+            return Ok(());
+        }
+
+        let allowed = self.allowance(asset).unwrap_or(u256::ZERO);
+
+        if allowed >= amount {
+            println!("{asset}: the DEX may move {allowed} already, no approval sent");
+
+            return Ok(());
+        }
+
         match (asset, self.args.evm) {
-            (asset, _) if *asset == COIN => Ok(()),
             (Address::Evm(_), true) => self.evm_call(*asset, "approve(address,uint256)", vec![to_hex(&self.router_bytes()?), amount.to_string()], u256::ZERO),
             (Address::Evm(_), false) => self.evm_call(*asset, "approve(address,uint256)", vec![to_hex(&evm_address(&self.native()?)), amount.to_string()], u256::ZERO),
             (_, true) => Err(format!("{asset} is no ERC-20: the EVM DEX trades ERC-20s and the coin").into()),
             (token, false) => self.call(*token, "approve", u256::ZERO, vec![TxCallArgumentType::Address(self.native()?), TxCallArgumentType::U256(amount)]),
+        }
+    }
+
+    /// What the DEX in use may move of a token for the signer now.
+    fn allowance(&self, asset: &Address) -> CliResult<u256> {
+        let me = signer(self.args.key.as_deref())?.public().address();
+
+        match (asset, self.args.evm) {
+            (Address::Evm(token), evm) => {
+                let spender = if evm { self.router_bytes()? } else { evm_address(&self.native()?) };
+
+                match self.read(*token, "allowance(address,address)", &[AbiType::Address, AbiType::Address], &[AbiValue::Address(evm_address(&me)), AbiValue::Address(spender)], "(uint256)")?[..] {
+                    [AbiValue::Uint(allowed)] => Ok(allowed),
+                    _ => Err("the token's allowance does not read".into()),
+                }
+            }
+            (_, true) => Err(format!("{asset} is no ERC-20").into()),
+            (token, false) => {
+                let args = json!([{ "type": "address", "value": me.to_string() }, { "type": "address", "value": self.native()?.to_string() }]);
+                let allowed = self.native_read(token, "allowance", args)?;
+
+                Ok(allowed.first().and_then(|text| u256::from_str_radix(text, 10).ok()).ok_or("the token's allowance does not read")?)
+            }
         }
     }
 

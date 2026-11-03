@@ -147,7 +147,7 @@ cargo build --manifest-path contracts/Cargo.toml --target wasm32-unknown-unknown
   --workspace --exclude chainv4-sdk --exclude chainv4-sdk-macros
 $B send --node $N --key $K deploy --wasm contracts/target/wasm32-unknown-unknown/release/btc_relay.wasm
 $B bridge --node $N --key $K --esplora https://mempool.space/testnet4/api \
-  btc relay-start <relay> <testnet4 tip rounded down to 2016> --network test
+  btc relay-start <relay> <testnet4 tip rounded down to 2016>               # test, as Esplora's genesis says
 $B bridge --node $N --key $K --esplora https://mempool.space/testnet4/api \
   btc relay-sync <relay>                                                  # to the tip, before its gateway
 $B bridge --node $N --key $K btc deploy <relay> --fee-floor 2             # Bitcoin gateway
@@ -195,7 +195,8 @@ deploy --eth-rpc $N/rpc`.
 
 **What bit:**
 - `dex add` sometimes stopped after its approval, the pool never opened: run it again, the
-  approval being there already.
+  approval being there already. It now approves only when the allowance is short, so a second run
+  sends the add alone, and takes amounts off the pool's ratio (see [DEX](dex.md#from-the-command-line)).
 - Esplora (mempool.space) throttles a burst of header fetches, answering an HTML page or timing
   out. `relay-sync` now asks at an even pace, asks again waiting longer each time, submits 25
   headers a transaction, and keeps what it fetched when Esplora stops answering midway; the

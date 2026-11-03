@@ -225,6 +225,8 @@ mod tests {
             target_block_ms: 1_000,
             initial_difficulty: 1_000,
             min_difficulty: 1,
+            window: None,
+            tuning: None,
         }, None);
         let parent = header(5, 10_000, 500);
 

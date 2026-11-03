@@ -789,6 +789,29 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Four CLI bugs from the testnet run.** Done 2026-11-03. CLI only: no new genesis, no
+  consensus change, no contract redeployed.
+  - `dex add` takes at most the amounts given, as Uniswap V2's router does: it reads the reserves,
+    works out the largest pair at the pool's ratio within them (`dex::add_amounts`, rounded as
+    `dex.lua` and the router round), says it, and sends the amounts as the most and that pair less
+    `--slippage` as the least. A new pool opens at the amounts as given. Off-ratio amounts were
+    refused before, as the least was the amounts given less the slippage.
+  - `dex swap`, `add` and `--evm remove` approve only when the allowance is short.
+  - `bridge btc address` writes for the Bitcoin the relay follows (`network_name()`), else what
+    Esplora's genesis block says, else `--network`, else main, saying which on stderr; `bcrt1…` on
+    regtest; a contradicting `--network` is refused. `relay-start` takes its network from Esplora's
+    genesis unless told, and refuses one that disagrees.
+  - `dex --dex` and `--router` say where the DEX is found without them (the directory, then the
+    node's `--dex-contract` / `--dex-router`, not a name), and the other `dex` arguments say what
+    they take.
+  - A multisig bundle's review lists a deploy by engine, size, SHA-256 and the address it lands
+    at, not its source; `multisig sign --full` and `approve --full` show the code.
+- [ ] **What the CLI fixes left for the apps.**
+  - The wallet's Bridge page writes `tb1q…` for a relay on regtest, where Bitcoin Core wants
+    `bcrt1q…`, and for a relay it cannot read; `Network` has no regtest.
+  - `bridge btc withdraw` takes any `bc1…`/`tb1…` address whatever network the relay follows: the
+    program is the same either way, but one for the wrong network is likely a mistake worth saying.
+
 - [x] **Governance votes Yes, No or Abstain, rejects what can no longer pass, changes itself, and
   governs what the audit picked.** Done 2026-11-03, from section 1 of `docs/hardcoded-values.md`.
   A consensus change: **a new genesis.**
