@@ -83,6 +83,9 @@ pub struct SwapsState {
     relayed: Option<u64>,
     /// A followed multisig to offer or answer as, rather than the account.
     as_multisig: Option<String>,
+    /// Which of the account's addresses is its part on this chain's legs, for a swap it offers or
+    /// answers: what locks, claims and refunds there.
+    from: Option<Address>,
     /// What the node said of the multisigs swapped as, by address: their Bitcoin side is read
     /// from their members' xpubs.
     multisigs: HashMap<String, Value>,
@@ -126,6 +129,7 @@ impl Default for SwapsState {
             forgetting: false,
             relayed: None,
             as_multisig: None,
+            from: None,
             multisigs: HashMap::new(),
             to_multisig: None,
             shared: None,
@@ -492,13 +496,14 @@ fn bitcoin_key(ctx: &Ctx, holder: &Holder, network: Network) -> Result<[u8; 33],
     }
 }
 
-/// Who an account is on a swap's chains: its first address here, its first Ethereum key's
-/// address on EVM chains, and, when a leg is on Bitcoin, its bitcoin key on that network.
-fn parties(ctx: &Ctx, holder: &Holder, testnet: Option<bool>) -> Result<Parties, String> {
+/// Who an account is on a swap's chains: the address here it picked, else its first, its first
+/// Ethereum key's address on EVM chains, and, when a leg is on Bitcoin, its bitcoin key on that
+/// network.
+fn parties(ctx: &Ctx, holder: &Holder, testnet: Option<bool>, chain: Option<Address>) -> Result<Parties, String> {
     let network = |testnet: bool| if testnet { Network::Test } else { Network::Main };
 
     Ok(Parties {
-        chain: holder.addresses().first().copied(),
+        chain: chain.filter(|chain| holder.addresses().contains(chain)).or_else(|| holder.addresses().first().copied()),
         bitcoin: testnet.map(|testnet| bitcoin_key(ctx, holder, network(testnet))).transpose()?.map(chainv4::swap::BitcoinParty::Key),
         evm: holder.publics.iter().find_map(|public| match public.address() {
             Address::Secp256k1(bytes) => Some(bytes),
@@ -510,9 +515,9 @@ fn parties(ctx: &Ctx, holder: &Holder, testnet: Option<bool>) -> Result<Parties,
 /// Who a swap is made as: the account, or a followed multisig, its address here, on a Bitcoin leg
 /// its members' keys at the swap's own index, and on an EVM leg its contract there, from what the
 /// node said of it.
-fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multisig: Option<&str>, testnet: Option<bool>, hash: &[u8; 32]) -> Result<Parties, String> {
+fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multisig: Option<&str>, testnet: Option<bool>, hash: &[u8; 32], chain: Option<Address>) -> Result<Parties, String> {
     let Some(multisig) = multisig else {
-        return parties(ctx, holder, testnet);
+        return parties(ctx, holder, testnet, chain);
     };
     let address: Address = multisig.parse().map_err(|_| "Not a multisig's address.".to_string())?;
     let value = known.get(multisig).ok_or("Asking the node about the multisig…")?;
@@ -535,12 +540,36 @@ fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multis
 }
 
 /// Picks who to swap as: the account, or one of the multisigs the Multisig page follows.
+/// Which of an account's addresses a swap's legs here name, if any: whichever was picked when it
+/// was offered or answered is the one it locks, claims and refunds from, whatever is picked now.
+fn named_in(terms: &Terms, holder: &Holder) -> Option<Address> {
+    let mine = holder.addresses();
+
+    terms
+        .legs()
+        .into_iter()
+        .flat_map(|(_, leg)| [leg.party(chainv4::swap::Role::Payer), leg.party(chainv4::swap::Role::Receiver)])
+        .flatten()
+        .find_map(|party| match party {
+            chainv4::swap::Party::Chain(address) if mine.contains(&address) => Some(address),
+            _ => None,
+        })
+}
+
 fn as_picker(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, salt: &str) {
+    let palette = *ctx.palette;
+
+    // Any of the account's addresses may be its part here: each signs this chain's calls alike.
+    if state.as_multisig.is_none() && ctx.holder().is_some_and(|holder| holder.addresses().len() > 1) {
+        super::from::pick(ui, ctx, salt, &mut state.from, &|_| None);
+        ui.add(egui::Label::new(RichText::new("Its part on this chain locks, claims and refunds from this address. On Bitcoin and EVM chains it is the account's keys there.").small().color(palette.muted)).wrap());
+        ui.add_space(6.0);
+    }
+
     if ctx.settings.multisigs.is_empty() {
         return;
     }
 
-    let palette = *ctx.palette;
     super::row(ui, &palette, "Swap as", |ui| {
         egui::ComboBox::from_id_salt(salt)
             .selected_text(state.as_multisig.as_deref().map_or("this account".to_string(), |address| format!("the multisig {}", format::short(address))))
@@ -754,7 +783,7 @@ fn offer(ctx: &Ctx, state: &SwapsState) -> Result<SwapRecord, String> {
         _ => None,
     });
     let (secret, hash) = secret()?;
-    let me = parties_as(ctx, &state.multisigs, holder, state.as_multisig.as_deref(), bitcoin, &hash)?;
+    let me = parties_as(ctx, &state.multisigs, holder, state.as_multisig.as_deref(), bitcoin, &hash, state.from)?;
     let terms = Terms::offer(hash, first, second, ctx.now + first_deadline, ctx.now + second_deadline, &me)?;
     terms.check(ctx.now)?;
 
@@ -822,7 +851,7 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
 /// The answer to an offer: its terms with this account's parts in.
 fn answer(ctx: &Ctx, state: &SwapsState, offered: &Terms) -> Result<SwapRecord, String> {
     let holder = ctx.holder().ok_or("pick an account first")?;
-    let me = parties_as(ctx, &state.multisigs, holder, state.as_multisig.as_deref(), testnet(offered), &offered.hash)?;
+    let me = parties_as(ctx, &state.multisigs, holder, state.as_multisig.as_deref(), testnet(offered), &offered.hash, state.from)?;
     let terms = offered.answer(&me)?;
     terms.check(ctx.now)?;
 
@@ -968,7 +997,8 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
             ctx.node.ask(Ask::Multisig(address.clone()));
         }
 
-        let me = match parties_as(ctx, &state.multisigs, &ctx.holders[holder], record.multisig.as_deref(), testnet(&terms), &terms.hash) {
+        let chain = named_in(&terms, &ctx.holders[holder]);
+        let me = match parties_as(ctx, &state.multisigs, &ctx.holders[holder], record.multisig.as_deref(), testnet(&terms), &terms.hash, chain) {
             Ok(me) => me,
             Err(why) => {
                 ui.colored_label(palette.bad, why);

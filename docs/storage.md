@@ -61,6 +61,7 @@ holds addresses that matter.
 | `Light` | For genesis and each checkpoint, the light update: proofs of the voters it fixed, against its state root (see [Light client](light-client.md)). | Node's |
 | `StateTree` | The state tree's nodes, by depth and the path bits above them, kept in step with the chain-state columns block by block (see [Chain](chain.md#the-state-root)). Its root is each header's `state_root`. | Node's |
 | `Addresses` | The address index, on a node started with `--index-addresses`: each transaction under every address it touches, newest first. | Node's |
+| `Members` | The member index, on a node started with `--index-multisigs`: each multisig under the address of every member's key, as the registry says now. | Node's |
 | `Names` | The [name registry](names.md#in-the-state): each name's record by `n` and the name, and each account's primary name by `p` and its address's key. | Yes |
 | `Pools` | Mining pools' claims: each pool block's root by `r` and its height, and what each miner claimed from each pool by `c`, the pool's key and the miner's (see [Mining pools](consensus.md#mining-pools)). | Yes |
 | `Namespaces` | Contract storage in [namespaces](contracts.md#storage-namespaces) and each contract's own space: by the contract's address, the namespace's name with its length in front (none for the own space), then the contract's own key. Which namespaces a contract's code may use is its [layout](contracts.md#storage-layouts), kept in its `Contracts` record. | Yes |
@@ -136,6 +137,31 @@ Once on, the database keeps it on, even without the flag, keeping the same block
 column and its two records in `Meta` in one atomic write, `Database::clear`: a range delete in
 RocksDB, so it is quick however big the index is. The other index stays as it was. A new index
 clears its column the same way first, in case anything was left behind.
+
+### The member index
+
+**The member index** (`--index-multisigs`, `src/chain/members.rs`) finds every
+[multisig](multisig.md) an account is a member of, for `GET /accounts/{address}/multisigs`: what
+the wallet lists its multisigs from. Each multisig sits in `Members` under the address of each of
+its members' keys, then its own address. A member is found by the address its key controls, as a
+member's approval comes from it, so an Ethereum or Bitcoin account, whose address is a hash of its
+key, is found by the address it sends from.
+
+It follows the multisig registry, not the blocks' history, so it takes no window:
+- **Built from the registry:** a node that starts keeping it, on a chain that has run for a while,
+  scans every policy in `Accounts` and writes the index whole, with its mark in `Meta`
+  (`members_kept`), in one atomic write. A node that syncs from a snapshot builds it again from
+  the snapshot's state.
+- **Kept in step:** each block that writes a multisig's policy, making one or changing its
+  members, moves the index in the same commit, from the members before to those after, so a
+  member removed is gone.
+- **Reorgs:** rolling a block back moves the index back with the registry it follows, whether or
+  not the node kept the index when the block ran.
+- **Turning it off:** `--index-multisigs=off` deletes the column and its mark in one atomic write.
+  Once on, the database keeps it on, even without the flag.
+
+It points the way only: the route reads each policy back from state, and a light client proves
+the policy itself.
 
 ## The storage format
 

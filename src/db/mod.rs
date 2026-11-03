@@ -110,6 +110,9 @@ pub enum Column {
     #[document(summary = "Governance's decisions: the id of the approval that decided each change, by the version it made, big-endian so versions sort in order. Not chain state: written as blocks run, as each such approval's receipt says Decided, and taken back with its block.")]
     #[wincode(tag = 24)]
     Decisions,
+    #[document(summary = "The member index, for a node that keeps one: each multisig under the address of every member's key, as the multisig registry names them now, for GET /accounts/{address}/multisigs. Not chain state: built from the registry, kept in step with it as blocks run, and taken back with its block.")]
+    #[wincode(tag = 25)]
+    Members,
 }
 
 impl Hashable for Column {
@@ -117,7 +120,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 25] = [
+    pub const ALL: [Column; 26] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -143,6 +146,7 @@ impl Column {
         Column::History,
         Column::Pools,
         Column::Decisions,
+        Column::Members,
     ];
 
     #[document(
@@ -176,6 +180,7 @@ impl Column {
             Column::History => "history",
             Column::Pools => "pools",
             Column::Decisions => "decisions",
+            Column::Members => "members",
         }
     }
 }

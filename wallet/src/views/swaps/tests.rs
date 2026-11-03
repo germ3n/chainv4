@@ -273,3 +273,18 @@ fn a_wallet_that_needs_biometrics_starts_no_swap_as_its_words_would_not_bring_th
 
     assert!(said.unwrap().err().unwrap().contains("words cannot bring back"));
 }
+
+#[test]
+fn a_swap_is_acted_on_from_the_address_its_terms_name_whatever_is_picked_now() {
+    let holder = crate::keys::open(&crate::views::drawn::two_phrases()).unwrap().remove(0);
+    let mine = holder.addresses();
+    let leg = |amount: u64| Leg::Chain(ChainLeg { item: None, contract: Address::Contract([5; 32]), token: None, amount: u256::from(amount), payer: None, receiver: None });
+    let bitcoin_side = Parties { chain: Some(mine[3]), ..Parties::default() };
+    let terms = Terms::offer([1; 32], leg(10), leg(20), NOW + 7_200_000, NOW + 3_600_000, &bitcoin_side).unwrap();
+
+    assert_eq!(named_in(&terms, &holder), Some(mine[3]), "offered from the Bitcoin address, so it locks and refunds from there");
+
+    let stranger = Terms::offer([1; 32], leg(10), leg(20), NOW + 7_200_000, NOW + 3_600_000, &Parties { chain: Some(Address::Ed25519([9; 32])), ..Parties::default() }).unwrap();
+
+    assert_eq!(named_in(&stranger, &holder), None);
+}

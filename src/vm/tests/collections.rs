@@ -264,6 +264,47 @@ fn conforms_to_the_multi_token_standard(code: Code) {
     }
 }
 
+/// Sends a token from an Ed25519 address to an address of each other key scheme, as the wallet
+/// sends between an account's own addresses: tokens_of lists it there, and where a light client
+/// proves it names that address, as its text reads back.
+fn every_scheme_holds_and_proves_what_it_is_sent(code: Code, multi: bool) {
+    let mut world = World::new();
+    let collection = world.deploy(code);
+    let alice = Address::Ed25519([0xa; 32]);
+    let call = |sender: Address, function: &str, args: &[TxCallArgumentType]| ok(&world, sender, collection, function, args);
+
+    for (n, holder) in [Address::EdBlake([0xb; 32]), Address::Secp256k1([0xc; 20]), Address::Bitcoin([0xd; 20])].into_iter().enumerate() {
+        let token = n as u64 + 1;
+
+        match multi {
+            false => {
+                call(DEPLOYER, "mint", &[address(alice)]);
+                call(alice, "transfer", &[address(holder), id(token)]);
+                let kept = world.state.get(Column::Namespaces, &crate::light::nft_owner_key(&collection, u256::from(token))).unwrap();
+
+                assert_eq!(kept.and_then(|value| crate::light::nft_owner(&value)), Some(holder), "{holder}");
+            }
+            true => {
+                call(DEPLOYER, "mint", &[address(alice), id(token), id(3)]);
+                call(alice, "transfer", &[address(holder), id(token), id(2)]);
+                let kept = world.state.get(Column::Namespaces, &crate::light::multi_balance_key(&collection, u256::from(token), &holder)).unwrap();
+
+                assert_eq!(kept.and_then(|value| crate::light::token_balance(&value)), Some(u256::from(2u64)), "{holder}");
+            }
+        }
+
+        assert_eq!(call(DEPLOYER, "tokens_of", &[address(holder)]).0, [id(token)], "{holder}");
+    }
+}
+
+#[test]
+fn an_nft_sent_to_an_address_of_any_scheme_is_listed_and_proven_there_in_either_engine() {
+    every_scheme_holds_and_proves_what_it_is_sent(Code::Lua(include_str!("../../../contracts/lua/nft.lua").to_string()), false);
+    every_scheme_holds_and_proves_what_it_is_sent(Code::Wasm(example("nft")), false);
+    every_scheme_holds_and_proves_what_it_is_sent(Code::Lua(include_str!("../../../contracts/lua/multi.lua").to_string()), true);
+    every_scheme_holds_and_proves_what_it_is_sent(Code::Wasm(example("multi")), true);
+}
+
 #[test]
 fn the_lua_multi_token_collection_follows_the_standard() {
     conforms_to_the_multi_token_standard(Code::Lua(include_str!("../../../contracts/lua/multi.lua").to_string()));

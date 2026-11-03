@@ -19,6 +19,46 @@ impl Drop for TempDir {
     }
 }
 
+#[test]
+fn a_multisigs_deploys_are_where_its_nonce_puts_them_before_anyone_signs() {
+    use crate::structs::code::Code;
+    use crate::structs::hash::HashType;
+    use crate::structs::tx::Tx;
+
+    let account = Address::Multisig([6; 32]);
+    let hash = HashType::default_chain();
+    let deploy = Tx::Deploy { code: Code::Lua("return {}".to_string()) };
+    let lone = crate::cli::send::landings(&deploy, &account, 4, hash);
+    let batch = crate::cli::send::landings(&Tx::Batch { steps: vec![deploy.clone(), Tx::Burn { from: account, amount: crate::structs::amount::Amount::U128(1) }, deploy] }, &account, 4, hash);
+    let lands = crate::cli::send::batch_deploys(&[Tx::Deploy { code: Code::Lua(String::new()) }, Tx::Deploy { code: Code::Lua(String::new()) }], &account, 4, hash);
+
+    assert_eq!(lone, [format!("contract {}", crate::registry::contracts::contract_address(&account, 4, hash))]);
+    assert_eq!(batch, [format!("step 1 contract {}", lands[0].1), format!("step 3 contract {}", lands[1].1)]);
+    assert!(crate::cli::send::landings(&Tx::Burn { from: account, amount: crate::structs::amount::Amount::U128(1) }, &account, 4, hash).is_empty());
+}
+
+#[test]
+fn a_member_names_an_xpub_an_evm_address_both_or_neither() {
+    let key = Keypair::from_seed([1; 32]).public().to_string();
+    #[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
+    let xpub = {
+        let seed = crate::crypto::mnemonic::Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed("");
+
+        crate::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(0), crate::crypto::bitcoin::tx::Network::Main)
+    };
+
+    for line in [key.clone(), format!("{key},,0x{}", "11".repeat(20))] {
+        assert!(crate::cli::send::parse_member(&line).is_ok(), "{line}");
+    }
+
+    #[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
+    for line in [format!("{key},{xpub}"), format!("{key},{xpub},"), format!("{key},{xpub},0x{}", "11".repeat(20))] {
+        assert!(crate::cli::send::parse_member(&line).is_ok(), "{line}");
+    }
+
+    assert!(crate::cli::send::parse_member(&format!("{key},,0x12")).is_err());
+}
+
 #[cfg(feature = "mnemonic")]
 #[test]
 fn keygen_writes_the_keys_a_seed_phrase_gives() {
@@ -789,6 +829,40 @@ mod send {
         assert_eq!(balance(&to), u256::new(15));
         assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&account).unwrap().nonce, 2);
         shown.unwrap();
+    }
+
+    #[test]
+    fn an_ed25519_members_proposal_signed_and_carried_by_a_secp256k1_member_is_priced_to_run() {
+        use crate::cli::multisig::{MultisigAction, MultisigArgs};
+        use crate::crypto::keypair::PrivateKey;
+
+        let running = Running::start(true);
+        let dir = TempDir::new("mixed-multisig");
+        // The testnet's case: a 2-of-3 of an Ed25519 key, a secp256k1 key, a byte longer, and another.
+        let members = [Keypair::from_seed([51; 32]), Keypair::from_private(PrivateKey::Secp256k1([52; 32])), Keypair::from_seed([53; 32])];
+        let files: Vec<PathBuf> = members.iter().enumerate().map(|(index, keypair)| {
+            let path = dir.0.join(format!("member{index}.key"));
+            write_key(&path, keypair).unwrap();
+
+            path
+        }).collect();
+        let api = format!("http://{}", running.api);
+        let multisig = |key: &PathBuf, action: MultisigAction| crate::cli::multisig(MultisigArgs { node: api.clone(), tls: Default::default(), key: Some(key.clone()), timeout: 10, action });
+        let members_given = members.iter().map(|keypair| crate::cli::send::parse_member(&keypair.public().to_string()).unwrap()).collect();
+        send(running.args(TxArgs::CreateMultisig { members: members_given, threshold: 2 })).unwrap();
+        let creator = DevAuthority::dev_keypair().public().address();
+        let account = crate::structs::address::multisig_address(&creator, 0, crate::structs::hash::HashType::default_chain());
+        send(running.args(TxArgs::Transfer { to: account.into(), amount: u256::new(10u128.pow(18)) })).unwrap();
+
+        // The Ed25519 member proposes; the secp256k1 one signs, and submits it under its own key.
+        let bundle = dir.0.join("pay.bundle");
+        let to = Address::Ed25519([9; 32]);
+        send(SendArgs { key: Some(files[0].clone()), multisig: Some(account), out: Some(bundle.clone()), ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(10) }) }).unwrap();
+        let signed = multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true });
+        let node = running.stop();
+
+        signed.expect("taken, not refused under its intrinsic cost");
+        assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&to).unwrap().balance, u256::new(10));
     }
 
     #[cfg(all(feature = "bitcoin", feature = "mnemonic"))]

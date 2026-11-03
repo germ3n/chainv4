@@ -234,15 +234,23 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
     let multisig = ok(agent.get(format!("{node}/multisig/{account}")).call())?;
     let nonce = multisig["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let threshold = multisig["threshold"].as_u64().ok_or("the node sent no threshold")? as usize;
+    let keys = member_keys(&multisig)?;
     let tx = transaction(args.tx, account, &agent, node)?;
     list_steps(&tx);
 
-    // The probe carries as many signatures as the quorum will, so it costs what the real one will.
-    let mut sized = MultisigBundle { genesis, body: MultisigBody { account, tx: tx.clone(), nonce, fee: FeeOffer::NONE }, signatures: Vec::new() };
-    sized.sign(&keypair);
-    sized.signatures = std::iter::repeat_n(sized.signatures[0].clone(), threshold.max(1)).collect();
+    // Where its deploys land: the bundle fixes the multisig's nonce, so it is known before anyone
+    // signs, for what comes after to call.
+    let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+
+    for line in super::send::landings(&tx, &account, nonce, hash) {
+        println!("{line}");
+    }
+
+    // The probe weighs what the heaviest quorum's envelope will, whichever members sign and
+    // whoever carries it: a member with a larger key than the proposer's may well be one.
+    let probe = MultisigBundle::probe(&genesis, &MultisigBody { account, tx: tx.clone(), nonce, fee: FeeOffer::NONE }, &keys, threshold);
     let chosen = OfferChoice { gas_limit: args.gas_limit, max_price: args.max_price, tip: args.tip };
-    let (fee, failure, _) = offer(&agent, node, &sized.envelope(&keypair), chosen)?;
+    let (fee, failure, _) = offer(&agent, node, &probe, chosen)?;
 
     if let Some(error) = failure {
         if !args.anyway {
@@ -270,6 +278,16 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
     }
 
     Ok(())
+}
+
+/// The members' keys, as the node lists them.
+fn member_keys(multisig: &serde_json::Value) -> CliResult<Vec<crate::crypto::keypair::PublicKey>> {
+    multisig["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|member| member["key"].as_str().and_then(|key| key.parse().ok()).ok_or_else(|| "the node sent a member that is no key".into()))
+        .collect()
 }
 
 /// The members backing a bundle now, its signatures and the approvals on chain together, and
@@ -309,7 +327,9 @@ fn submit_if_backed(agent: &Agent, node: &str, bundle: &MultisigBundle, carrier:
 }
 
 fn submit(agent: &Agent, node: &str, bundle: &MultisigBundle, carrier: &Keypair, timeout: Duration) -> CliResult<()> {
-    let signed = bundle.envelope(carrier);
+    // No more signatures than it needs: the fee was priced for a quorum, not for every member.
+    let needed = ok(agent.get(format!("{node}/multisig/{}", bundle.body.account)).call())?["threshold"].as_u64().ok_or("the node sent no threshold")? as usize;
+    let signed = bundle.trimmed(needed).envelope(carrier);
     println!("submitting {}'s transaction {}", bundle.body.account, bundle.body.nonce);
 
     post_and_wait(agent, node, &signed, timeout)

@@ -36,10 +36,19 @@ deploy's address is made, and `send` prints it. The creator pays and has no say 
 a member.
 
 - **Members:** 1 to 20, CHECKMULTISIG's limit, which a Bitcoin P2WSH multisig relays up to. Each is
-  a key here, any kind the chain takes, named once.
+  a key here, of any scheme the chain has, named once: `ed25519:0x…`, `edblake:0x…`, or an Ethereum
+  or Bitcoin account's public key, `secp256k1:0x…` or `bitcoin:0x…` and 66 hex digits. Not its
+  address: an Ethereum or Bitcoin address is a hash of the key, and the key cannot be read back from
+  it. A multisig may mix them, one member of each.
 - **Their other chains' keys:** a member may name its Bitcoin multisig account xpub, with its
   origin, and its EVM address, `--member KEY,[73c5da0a/48'/0'/0'/2']xpub…,0x…`, each from its own
-  words; or its EVM address alone, `--member KEY,,0x…`. Every member names each, or none does.
+  words; its EVM address alone, `--member KEY,,0x…`; or its xpub alone, `--member
+  KEY,[73c5da0a/48'/0'/0'/2']xpub…`. So a multisig reaches EVM chains, Bitcoin, or both. Every
+  member names an xpub, or none does, and an EVM address, or none does.
+- **A `bitcoin:` member names an xpub too,** from the same words: its key here derives at BIP84's
+  m/84'/0'/0'/0/n, its xpub at BIP48's m/48'/coin'/0'/2', apart. The xpub is the words', not the
+  account's: two accounts of the same words name the same xpub, so they cannot both be members of
+  one multisig on Bitcoin.
 - **Its Bitcoin network:** the members' xpubs say it, xpub for Bitcoin or tpub for its test
   networks, all the same; a test multisig and a real one are separate multisigs.
 - **Threshold:** at least 1, at most the members.
@@ -191,9 +200,24 @@ chainv4 send --key alice.key --multisig multisig:0x… --out change.bundle chang
 ## From the command line
 
 `send --multisig ADDRESS` sends any transaction as the multisig: the transaction is built as the
-multisig's, priced by a dry run that carries as many signatures as the quorum will, and signed by
-`--key` as a member. If that is enough it is submitted at once; otherwise the bundle is written to
-`--out`, or printed, as `chainv4-multisig:0x…` text.
+multisig's, priced by a dry run, and signed by `--key` as a member. If that is enough it is
+submitted at once; otherwise the bundle is written to `--out`, or printed, as
+`chainv4-multisig:0x…` text. A deploy's address, or each of a batch's deploys', is printed first:
+the bundle fixes the multisig's nonce, so it is known before anyone signs.
+
+**Priced for its heaviest quorum.** The probe it prices carries the signatures of the threshold
+members whose keys weigh most, and is carried by the heaviest key the build has, so whichever
+members sign and whoever carries it, the fee covers it (`MultisigBundle::probe`). A secp256k1 or
+bitcoin key is a byte longer than an Ed25519 one; priced for the proposer's key alone, a quorum
+with one of them was refused as under its intrinsic cost. A bundle goes out with no more
+signatures than the threshold, which is all it was priced for (`MultisigBundle::trimmed`).
+
+**Before this, those signatures were all the proposer's,** so the dry run's size was right only when the
+members who signed were of its key's kind. A transaction priced at its intrinsic cost, as a transfer is,
+then ran short when a larger signature joined it, such as a secp256k1 member's beside an Ed25519
+proposer's: the node refused it, `gas limit under its intrinsic cost`, whoever submitted it. On the test
+chain a transfer proposed at 6,000 used 6,020 with such a member. A bundle proposed by an older CLI or
+wallet still has that limit: propose it again, or with a little more `--gas-limit`.
 
 ```sh
 chainv4 send --key alice.key --multisig multisig:0x… --out pay.bundle transfer --to ed25519:0x… --amount 1000
@@ -206,19 +230,27 @@ chainv4 multisig show multisig:0x…
 
 ## In the wallet
 
-The **Multisig** page follows multisigs by address: those made there, those whose bundles it read,
-and those added. For the one picked it shows what the node says of it, its members, the account
-among them, its balance and next transaction, and the proposals open on chain with who approves
-each, to approve, take back an approval from or send.
+The **Multisig** page lists every multisig any account in the wallet is a member of, as the node's
+member index says (`GET /accounts/{address}/multisigs`, asked for each of the wallet's addresses,
+every page to the end), beside those followed by pasting their address, which is for multisigs
+one only watches, or a node that keeps no member index. Each says which of the wallet's accounts
+are its members. The one picked shows its address whole, to copy, and as a QR code; what the node
+says of it, its members, named by account where they are the wallet's, its balance and next
+transaction, and the proposals open on chain with who approves each, to approve, take back an
+approval from or send. With Read from checked blocks on, the node is asked none of it.
 
 - **Make a multisig** goes through four steps, with Back and Cancel, and the page says up front
   what it needs:
-  1. **Who are the members?** A key for each, required. **Add this account** adds the account's;
-     a line Pair or `chainv4 multisig` wrote, pasted in, goes to its fields.
-  2. **Should it reach other chains?** Optional: only this chain, unless it is to hold coins on EVM
-     chains, which asks each member's EVM address, or on Bitcoin too, on its network or its test
-     networks, which asks each member's multisig account key as well. This account's fill in by
-     themselves, for an account its words make.
+  1. **Who are the members?** A key for each, required, of any scheme. **Add one of this wallet's
+     keys** adds any account's, in any scheme: Ed25519, EdBlake, Ethereum's or Bitcoin's. A line
+     Pair or `chainv4 multisig` wrote, pasted in, goes to its fields; one of the wallet's own
+     addresses typed in becomes its key; another Ethereum or Bitcoin address is told it is an
+     address, not a key, and where the member finds its key.
+  2. **Should it reach other chains?** Optional: only this chain, EVM chains too, Bitcoin too, on
+     its network or its test networks, or both. Each member's row then asks plainly what each
+     needs: an EVM address, and a Bitcoin account key, which is not a Bitcoin address, with where a
+     member finds theirs. **Fill in from** fills a row that is one of the wallet's accounts from
+     its own words, in one tap.
   3. **How many must agree?** So many of so many, with what that means: one stolen key, or one lost.
   4. **Review:** who, where, the address it will be at and who pays, then Send to sign.
 - **Change its members** takes the same steps from what the node lists, adding, removing or
@@ -227,13 +259,21 @@ each, to approve, take back an approval from or send.
   account whose keys are there.
 - **Waiting for approval** says of each proposal how many agree, what it needs and who from, and
   once it has enough, that anyone can send it.
-- **Propose a payment:** nothing goes out yet: the node prices it, and the bundle shows what it does,
-  its number, the fee at most, who signed, and what comes next.
-- **Sign** with the account's key, or **Ask the signer** for a watch-only account: the bundle as a
-  `ur:chainv4-multisig` code, animated, and the signer's code read back. **Approve on chain** goes
-  to Send, so a hardware or offline account approves too. **Copy as text** gives what chainv4
-  multisig reads. **Send it** once enough back it, under a key made for the moment: the multisig
-  pays.
+- **Propose:** a payment, the quick default, or **anything else** the Batch page makes, with the
+  same form: token transfers, contract and EVM calls, deploys, names, burns and claims. One step
+  goes out as it is; several as a batch. Nothing goes out yet: the node prices it for its heaviest
+  quorum, and the bundle shows what it does, its number, the fee at most, who signed and approved,
+  named by account where the wallet knows them, and what comes next.
+- **Agree as** picks which key signs and approves: each of the wallet's accounts that is a member,
+  any of its schemes, and an offline signer. It starts at one that has not signed or approved yet,
+  a key held here before one on a signer, and moves on to the next once it signs, so one wallet
+  holding several members' keys signs with each in turn. **Sign as** signs with that key; **Ask
+  the signer**, for a watch-only account or an offline signer, shows the bundle as a
+  `ur:chainv4-multisig` code, animated, and reads the signer's code back. **Approve on chain as**
+  goes to Send as that account, so a hardware or offline account approves too; an offline signer
+  the wallet holds no account of approves once paired under Accounts. **Copy as text** gives what
+  chainv4 multisig reads. **Send it** once enough back it, under a key made for the moment: the
+  multisig pays.
 - **Another member sent you something to sign?** Folded until wanted: paste its text, or read its
   code.
 
@@ -260,8 +300,11 @@ bundle back. It cannot know whether the key is a member's: the chain checks that
 ## Things to keep in mind
 
 - **What the node says of a multisig is not proven** on the page yet: the members, nonce and
-  proposals are its word. Nothing signed rests on it, since a bundle says what it does, and the
-  chain checks the quorum as it runs.
+  proposals are its word, and so is which multisigs an account is in. Nothing signed rests on it,
+  since a bundle says what it does, and the chain checks the quorum as it runs.
+- **Anyone can name your key in a multisig.** Making one needs no member's consent, so the
+  listing may hold multisigs a stranger made naming you; they can do nothing without your
+  signature. The wallet lists every page of them.
 - **A bundle is for one nonce.** Once any other transaction of the multisig runs, its signatures
   and approvals are for a nonce gone; propose it again.
 - **The fee is the multisig's,** at the offer the members signed. A multisig with no coin cannot

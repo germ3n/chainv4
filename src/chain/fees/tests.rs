@@ -651,3 +651,62 @@ fn a_step_left_with_no_fuel_at_all_runs_nothing() {
     }
 }
 
+
+#[test]
+fn a_multisig_s_proposal_is_priced_for_its_heaviest_quorum_whoever_proposes_signs_and_carries_it() {
+    use crate::crypto::keypair::{PrivateKey, PublicKey};
+    use crate::registry::multisig::{MultisigBody, MultisigBundle, MultisigMember};
+    use crate::structs::address::multisig_address;
+
+    let alice = alice();
+    let mut chain = open(FeeConfig::dev());
+    let genesis_id = chain.genesis();
+    // A 2-of-3 of two Ed25519 keys and a secp256k1 one, whose key is a byte longer.
+    let (ed, secp, other) = (key(31), Keypair::from_private(PrivateKey::Secp256k1([32; 32])), key(33));
+    let keys: Vec<PublicKey> = [&ed, &secp, &other].iter().map(|keypair| keypair.public()).collect();
+    let account = multisig_address(&alice.public().address(), nonce(&chain, &alice), chain.hash());
+    let create = Tx::CreateMultisig { members: keys.iter().map(|key| MultisigMember { key: *key, bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
+    let fund = Tx::Transfer { from: alice.public().address(), to: account, amount: Amount::U128(u128::from(COIN) / 10) };
+    let txs = signed(&chain, &alice, vec![create, fund], offer(&chain, 100_000));
+    assert!(advance(&mut chain, txs).1.iter().all(|receipt| receipt.result.is_ok()));
+
+    let body = MultisigBody { account, tx: Tx::Transfer { from: account, to: key(9).public().address(), amount: Amount::U128(1) }, nonce: 0, fee: FeeOffer::NONE };
+    let bundle = |fee: FeeOffer, signers: &[&Keypair]| {
+        let mut bundle = MultisigBundle { genesis: genesis_id, body: MultisigBody { fee, ..body.clone() }, signatures: Vec::new() };
+
+        for signer in signers {
+            bundle.sign(signer);
+        }
+
+        bundle
+    };
+    let schedule = chain.fees().unwrap().schedule();
+    let priced = schedule.intrinsic(&MultisigBundle::probe(&genesis_id, &body, &keys, 2));
+
+    // As it was priced before: the Ed25519 proposer's own signature twice, under its own key.
+    let mut proposer = bundle(FeeOffer::NONE, &[&ed]);
+    proposer.signatures.push(proposer.signatures[0].clone());
+    let before = schedule.intrinsic(&proposer.envelope(&ed));
+
+    // Every quorum, carried by any member, weighs no more than the probe; the secp256k1 member's
+    // signature, carried under its own key, weighs more than the old probe did.
+    for signers in [[&ed, &secp], [&ed, &other], [&secp, &other]] {
+        for carrier in [&ed, &secp, &other] {
+            assert!(schedule.intrinsic(&bundle(FeeOffer::NONE, &signers).envelope(carrier)) <= priced);
+        }
+    }
+
+    let heaviest = bundle(FeeOffer::NONE, &[&ed, &secp]).envelope(&secp);
+    assert!(schedule.intrinsic(&heaviest) > before, "the bug: priced for the proposer's key alone");
+
+    // At the old price the node refuses it; at the new one it runs, every signature in a bundle
+    // signed by all three trimmed to the two it needs.
+    let short = bundle(offer(&chain, before), &[&ed, &secp]).envelope(&secp);
+    assert!(forced(&mut chain, vec![short], |_| {}).is_err());
+
+    let sent = bundle(offer(&chain, priced), &[&ed, &secp, &other]).trimmed(2).envelope(&secp);
+    let (_, receipts) = advance(&mut chain, vec![sent]);
+
+    assert_eq!(receipts.len(), 1, "taken into the block");
+    assert_eq!(receipts[0].result, Ok(Effect::Done));
+}

@@ -220,12 +220,14 @@ where it would alone. Each later one's has the top bit set, then the batch's non
 number no account's nonce reaches, so it never meets a later transaction's. The address follows as
 from any nonce, `contract_address` or `create_address`, so anyone can work it out before signing, and
 the steps after a deploy can call it. `chainv4 send batch` prints each, and the wallet shows each on
-its step. A contract's own `CREATE` goes on from its own nonce, step to step.
+its step. Under `--multisig`, the CLI prints none in the bundle or as members sign it, only each step's
+contract once it ran. A contract's own `CREATE` goes on from its own nonce, step to step.
 
 **What the receipt says.** A batch that went through has status `batch`, with what each step did and
 how many of the receipt's events and payments are its; those lists stay flat and in order, so the
 event index and everything reading them work as they do for anything else. One that failed says which
-step stopped it, counted from 0, and why. Which step is committed to the receipts root
+step stopped it, counted from 0, as the API's `failed_step`, and why; the CLI's messages count steps from
+1, so its `step 8 failed` is `failed_step` 7. Which step is committed to the receipts root
 (`CommittedOutcome::Batch`, `BatchFailed`), so a light client proves it; why is not, as no failure's
 message is. As with any failure, it keeps no events or payments, and keeps its trace.
 

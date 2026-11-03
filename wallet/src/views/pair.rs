@@ -71,21 +71,41 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
 }
 
 /// The account as a native multisig's member: the line a multisig's maker adds for it, its key
-/// here, its Bitcoin multisig xpub and its EVM address, so its keys stay on this signer.
+/// here in the scheme picked, its Bitcoin multisig xpub and its EVM address, so its keys stay on this
+/// signer.
 fn member(ui: &mut Ui, ctx: &mut Ctx) {
     let palette = *ctx.palette;
     let network_id = egui::Id::unique("member network");
+    let scheme_id = egui::Id::unique("member scheme");
     let mut testnet = ui.data(|data| data.get_temp::<bool>(network_id)).unwrap_or(false);
+    let mut picked = ui.data(|data| data.get_temp::<usize>(scheme_id)).unwrap_or(0);
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "As a multisig's member");
         ui.label(RichText::new("Give this to whoever makes the multisig, for the members' list on its Multisig page: it holds this account's public keys alone.").color(palette.soft));
-        ui.checkbox(&mut testnet, "For a multisig on Bitcoin's test networks");
-        ui.data_mut(|data| data.insert_temp(network_id, testnet));
 
-        let Some(line) = ctx.holder().and_then(|holder| super::multisig::member_line(holder, crate::keys::seed_of(ctx.book, holder), testnet)) else {
+        let Some(holder) = ctx.holder() else {
             return;
         };
+        let keys: Vec<(usize, String)> = holder.publics.iter().enumerate().map(|(index, key)| (index, format!("Its {} key", crate::keys::label(key.key_type())))).collect();
+        let options: Vec<(usize, &str)> = keys.iter().map(|(index, name)| (*index, name.as_str())).collect();
+        picked = picked.min(keys.len().saturating_sub(1));
+
+        // Any of its keys signs for it as a member; the first is what most multisigs take.
+        if options.len() > 1 {
+            theme::segmented_rows(ui, &palette, &mut picked, &options);
+        }
+
+        ui.checkbox(&mut testnet, "For a multisig on Bitcoin's test networks");
+        ui.data_mut(|data| {
+            data.insert_temp(network_id, testnet);
+            data.insert_temp(scheme_id, picked);
+        });
+
+        let Some(key) = holder.publics.get(picked) else {
+            return;
+        };
+        let line = super::multisig::member_line_of(holder, key, crate::keys::seed_of(ctx.book, holder), testnet);
         let side = ui.available_width().clamp(200.0, 360.0);
         ui.vertical_centered(|ui| super::receive::qr(ui, &line, side));
         super::text_block(ui, &palette, &line);

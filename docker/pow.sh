@@ -177,6 +177,7 @@ MINE_THREADS=${MINE_THREADS:-1}
 PEERS=
 INDEX_EVENTS=genesis
 INDEX_ADDRESSES=genesis
+INDEX_MULTISIGS=on
 # A VPS's network holds none of your nodes: peers dial it.
 EXTRA_ARGS=--no-mdns
 
@@ -581,7 +582,7 @@ join() {
         --peer "$peer" \
         --reward-to "$address" \
         --http "${API:-127.0.0.1:8090}" \
-        --stream --index-events --index-addresses
+        --stream --index-events --index-addresses --index-multisigs
 
     # The web apps, when they are built: trunk build --release in explorer/ and wallet/.
     if [ -s "$root/explorer/dist/index.html" ]; then set -- "$@" --explorer "$root/explorer/dist"; fi

@@ -422,9 +422,35 @@ impl Explorer {
                     store.names.insert(name, found);
                 }
             }
-            Ask::AccountNames(address) => {
+            Ask::AccountNames { address, cursor } => {
                 if let Some(owned) = parse::<crate::model::OwnedNames>(value) {
-                    store.owned_names.insert(address, owned.names);
+                    let listed = store.owned_names.entry(address.clone()).or_default();
+
+                    // A first page starts the listing over; each after it adds on, to the last.
+                    if cursor.is_none() {
+                        listed.clear();
+                    }
+
+                    listed.extend(owned.names);
+
+                    if let Some(next) = owned.next {
+                        self.api.ask(Ask::AccountNames { address, cursor: Some(next) });
+                    }
+                }
+            }
+            Ask::AccountMultisigs { address, cursor } => {
+                if let Some(page) = parse::<crate::model::MultisigsPage>(value) {
+                    let listed = store.memberships.entry(address.clone()).or_default();
+
+                    if cursor.is_none() {
+                        listed.clear();
+                    }
+
+                    listed.extend(page.multisigs);
+
+                    if let Some(next) = page.next {
+                        self.api.ask(Ask::AccountMultisigs { address, cursor: Some(next) });
+                    }
                 }
             }
             Ask::Contract(address) => {
@@ -438,9 +464,16 @@ impl Explorer {
                 };
                 store.contracts.insert(address, contract);
             }
-            Ask::Collections => {
+            Ask::Collections(cursor) => {
                 if let Some(page) = parse::<CollectionsPage>(value) {
-                    store.collections = Some((page.collections, now));
+                    match (&mut store.collections, cursor.is_some()) {
+                        (Some((listed, _)), true) => listed.extend(page.collections),
+                        _ => store.collections = Some((page.collections, now)),
+                    }
+
+                    if let Some(next) = page.next {
+                        self.api.ask(Ask::Collections(Some(next)));
+                    }
                 }
             }
             Ask::Tokens { symbol, cursor } => {
@@ -710,7 +743,7 @@ impl Explorer {
         let page = match &self.view {
             View::Mempool | View::Tx(_) => vec![Ask::Mempool],
             View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence],
-            View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames(address.clone())].into_iter().chain(self.light.prove(address)).collect(),
+            View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames { address: address.clone(), cursor: None }, Ask::AccountMultisigs { address: address.clone(), cursor: None }].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
             View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),
             // The newest decisions, and the light client's proof of each one read.
@@ -1653,6 +1686,28 @@ pub(crate) mod tests {
         explorer.settings.read_blocks = true;
         explorer.answered(Ask::Status, status, 0);
         assert!(explorer.settings.coins.is_empty());
+    }
+
+    #[test]
+    fn an_account_s_names_multisigs_and_the_collections_are_read_a_page_at_a_time_to_the_end() {
+        let (node, _) = a_node();
+        let mut explorer = an_explorer(&node, false);
+        let address = "ed25519:0x01".to_string();
+        let membership = |multisig: &str| json!({ "address": multisig, "threshold": 2, "members": 3 });
+        explorer.api.sent();
+
+        explorer.answered(Ask::AccountMultisigs { address: address.clone(), cursor: None }, json!({ "multisigs": [membership("multisig:0xaa")], "next": "multisig:0xaa" }), 0);
+        assert!(explorer.api.sent().contains(&Ask::AccountMultisigs { address: address.clone(), cursor: Some("multisig:0xaa".to_string()) }), "the next page is asked");
+
+        explorer.answered(Ask::AccountMultisigs { address: address.clone(), cursor: Some("multisig:0xaa".to_string()) }, json!({ "multisigs": [membership("multisig:0xbb")], "next": null }), 0);
+        let listed: Vec<&str> = explorer.store.memberships[&address].iter().map(|membership| membership.address.as_str()).collect();
+        assert_eq!(listed, ["multisig:0xaa", "multisig:0xbb"]);
+        assert!(explorer.api.sent().is_empty(), "nothing after the last");
+
+        let name = |name: &str| json!({ "name": name, "display": format!("{name}.dev"), "status": "active", "target": null, "expires": 0 });
+        explorer.answered(Ask::AccountNames { address: address.clone(), cursor: None }, json!({ "names": [name("alice")], "next": "alice" }), 0);
+        explorer.answered(Ask::AccountNames { address: address.clone(), cursor: Some("alice".to_string()) }, json!({ "names": [name("bob")], "next": null }), 0);
+        assert_eq!(explorer.store.owned_names[&address].len(), 2);
     }
 
     #[test]

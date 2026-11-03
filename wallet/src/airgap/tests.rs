@@ -374,9 +374,13 @@ fn the_signer_lays_out_what_it_signs() {
     assert_eq!(token.to.as_deref(), Some(someone(0xcd).to_string().as_str()));
     assert_eq!(token.token.as_deref(), Some(Address::Contract([0x11; 32]).to_string().as_str()));
 
-    let unnamed = describe(&Request { token: None, ..token_transfer(&key) });
+    // The same call with no token named may as well send an NFT, whose id is no amount: it is
+    // shown as the call it is, its contract known as neither.
+    let unnamed_request = Request { token: None, ..token_transfer(&key) };
+    let unnamed = describe(&unnamed_request);
 
-    assert_eq!(unnamed.what.as_ref().map(|what| what.1.as_str()), Some("250"), "the raw units, whatever it is called");
+    assert_eq!((unnamed.kind.as_str(), unnamed.what.is_none()), ("Call a contract", true));
+    assert!(laid(&unnamed_request).steps[0].rows.iter().any(|row| row.said == crate::steps::Said::Text(crate::steps::UNKNOWN_CONTRACT.to_string())));
 
     let mut bond = transfer(&key);
     bond.tx = Tx::Bond {

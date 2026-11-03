@@ -233,32 +233,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         return;
     }
 
-    let addresses = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
-
-    if !state.from.is_some_and(|from| addresses.contains(&from)) {
-        state.from = addresses.first().copied();
-    }
-
+    super::from::settle(ctx, &mut state.from, &|_| None);
+    let several = ctx.holder().is_some_and(|holder| holder.addresses().len() > 1);
     let address = state.from.map(|from| from.to_string()).unwrap_or_default();
 
     theme::card(ui, &palette, |ui| {
-        if addresses.len() > 1 {
-            theme::caps(ui, &palette, "From");
-            let before = state.from;
-            egui::ComboBox::from_id_salt("from")
-                .selected_text(paying(ctx, state.from.as_ref()))
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    for from in &addresses {
-                        ui.selectable_value(&mut state.from, Some(*from), paying(ctx, Some(from)));
-                    }
-                });
+        // A token held at one address may not be at another.
+        if super::from::pick(ui, ctx, "send", &mut state.from, &|_| None) {
+            state.token = None;
+        }
 
-            // A token held at one address may not be at another.
-            if state.from != before {
-                state.token = None;
-            }
-
+        if several {
             ui.add_space(10.0);
         }
 
@@ -407,21 +392,6 @@ fn typed_offer(state: &SendState, fee: FeeOffer) -> Option<FeeOffer> {
     let (gas, price, _, _) = state.fee_typed.as_ref()?;
 
     Some(FeeOffer { gas_limit: gas.trim().parse().ok()?, max_price: u256::from_str_radix(price.trim(), 10).ok()?, tip: fee.tip })
-}
-
-/// An address to pay from, as the picker shows it: its scheme, cut short, and its coin.
-fn paying(ctx: &Ctx, from: Option<&Address>) -> String {
-    let Some(from) = from else {
-        return String::new();
-    };
-    let text = from.to_string();
-    let held = ctx.chain.account(&text).map_or_else(|| "…".to_string(), |proven| ctx.brief(None, &proven.value.balance.to_string()));
-
-    // The scheme leads, so the address goes without its kind.
-    let short = format::short(&text);
-    let hex = short.split_once(':').map_or(short.as_str(), |(_, hex)| hex);
-
-    format!("{} · {hex} · {held}", super::scheme(from))
 }
 
 /// What the coin a prepared transaction carries does: a name's price is burned; any other goes
@@ -1286,5 +1256,54 @@ mod tests {
         assert_eq!(recipient(&format!("ed25519:0x{}", "ab".repeat(32))), Some(Address::Ed25519([0xab; 32])));
         assert_eq!(recipient("0x1234"), None);
         assert_eq!(recipient(&format!("0x{}", "ab".repeat(32))), None, "no kind, and not Ethereum's length");
+    }
+
+    /// The review of one call from the first address, on a chain whose registry the light client
+    /// proved lists this collection, or nothing: what it said.
+    fn call_reviewed(listed: Option<chainv4::registry::collections::CollectionKind>, data: Vec<TxCallArgumentType>, size: (f32, f32)) -> String {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let from = holders[0].addresses()[0];
+        let signer = holders[0].public(&from).unwrap();
+        let collection = Address::Contract([4; 32]);
+        let mut world = crate::views::drawn::following(&holders);
+
+        if let Some(kind) = listed {
+            let assurance = chainv4::light::Assurance { block: Hash::zero(HashType::default_chain()), height: 1, final_: true };
+            let entry = chainv4::registry::collections::Collection { address: collection, kind, name: Some("Art".to_string()), symbol: None };
+            world.chain.collections.insert(collection.to_string(), crate::chain::Proven { value: entry, assurance });
+        }
+
+        let tx = Tx::ContractCall { to: collection, func: Hasher::digest(HashType::Xxh3_64, b"transfer"), amount: Amount::U128(0), data };
+        let draft = Draft { from, signer, to: collection.to_string(), tx, nonce: 2, token: None, what: "Send NFT #42".to_string(), coin: u256::ZERO };
+        let fee = FeeOffer { gas_limit: 50_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO };
+        let mut state = SendState { step: Step::Review { draft, fee, warning: None }, ..SendState::default() };
+
+        crate::views::drawn::said_in(&mut world, &mut book, &mut holders, size, |ui, ctx| show(ui, ctx, &mut state))
+    }
+
+    #[test]
+    fn the_review_of_an_nft_s_transfer_names_the_nft_and_never_reads_its_id_as_an_amount_on_every_screen() {
+        use chainv4::registry::collections::CollectionKind;
+
+        let to = Address::Ed25519([9; 32]);
+
+        for size in crate::views::drawn::SCREENS {
+            let nft = call_reviewed(Some(CollectionKind::Nft), vec![TxCallArgumentType::Address(to), TxCallArgumentType::U256(u256::new(42))], (size.0, 4_000.0));
+
+            assert!(nft.contains("Send NFT #42") && nft.lines().any(|line| line == "Art") && nft.lines().any(|line| line == "Id"), "{nft}");
+            assert!(!nft.contains("units") && !nft.lines().any(|line| line == "Token" || line == "Amount"), "{nft}");
+
+            let multi = call_reviewed(Some(CollectionKind::Multi), vec![TxCallArgumentType::Address(to), TxCallArgumentType::U256(u256::new(7)), TxCallArgumentType::U256(u256::new(3))], (size.0, 4_000.0));
+
+            assert!(multi.contains("Send 3 of #7") && multi.contains("How many"), "{multi}");
+
+            // Nothing proven of the contract: the call as it is, said to be of one the wallet does
+            // not know, and no amount.
+            let unknown = call_reviewed(None, vec![TxCallArgumentType::Address(to), TxCallArgumentType::U256(u256::new(42))], (size.0, 4_000.0));
+
+            assert!(unknown.contains("Call transfer") && unknown.contains("neither a token nor a collection"), "{unknown}");
+            assert!(!unknown.contains("units of the token"), "{unknown}");
+        }
     }
 }

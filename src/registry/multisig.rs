@@ -81,7 +81,7 @@ impl Hashable for MultisigPolicy {}
 impl MultisigPolicy {
     #[document(
         parent = "MultisigPolicy",
-        summary = "Why it cannot be a multisig's: no members or more than MAX_MEMBERS, a key, Bitcoin xpub or EVM address named twice, some members naming a Bitcoin xpub or EVM address and others not, an xpub whose key is not a compressed secp256k1 point, a zero EVM address, or a threshold of 0 or more than the members.",
+        summary = "Why it cannot be a multisig's: no members or more than MAX_MEMBERS, a key, Bitcoin xpub or EVM address named twice, some members naming a Bitcoin xpub and others not, or an EVM address and others not, an xpub whose key is not a compressed secp256k1 point, a zero EVM address, or a threshold of 0 or more than the members.",
     )]
     pub fn problem(&self) -> Option<&'static str> {
         let count = self.members.len();
@@ -110,7 +110,7 @@ impl MultisigPolicy {
         let evm: Vec<[u8; 20]> = self.members.iter().filter_map(|member| member.evm).collect();
 
         if !(bitcoin.is_empty() || bitcoin.len() == count) || !(evm.is_empty() || evm.len() == count) {
-            return Some("every member names a Bitcoin xpub and an EVM address, or none does");
+            return Some("every member names a Bitcoin xpub, or none does, and an EVM address, or none does");
         }
 
         if !distinct(bitcoin.iter().map(|key| key.to_vec()).collect()) || !distinct(evm.iter().map(|address| address.to_vec()).collect()) {
@@ -264,8 +264,11 @@ fn evm_start_key(account: &Address) -> Vec<u8> {
     [b"multisig-evm:".as_slice(), &account.hashable_bytes_with_tag()].concat()
 }
 
+/// What every policy's key starts with, in Column::Accounts.
+const POLICY_PREFIX: &[u8] = b"multisig:";
+
 fn policy_key(account: &Address) -> Vec<u8> {
-    [b"multisig:".as_slice(), &account.hashable_bytes_with_tag()].concat()
+    [POLICY_PREFIX, &account.hashable_bytes_with_tag()].concat()
 }
 
 fn proposals_key(account: &Address) -> Vec<u8> {
@@ -281,6 +284,16 @@ impl<'a> Multisigs<'a> {
     #[document(parent = "Multisigs", summary = "Where a multisig's policy is kept, in Column::Accounts: what a light client asks a proof of.")]
     pub fn policy_key(account: &Address) -> Vec<u8> {
         policy_key(account)
+    }
+
+    #[document(parent = "Multisigs", summary = "What every multisig's policy key starts with, in Column::Accounts: what the member index scans to build itself.")]
+    pub fn policy_prefix() -> &'static [u8] {
+        POLICY_PREFIX
+    }
+
+    #[document(parent = "Multisigs", summary = "The multisig a key of Column::Accounts holds the policy of, or None for a key that holds none: what the member index follows a block's changes by.")]
+    pub fn policy_account(key: &[u8]) -> Option<Address> {
+        wincode::deserialize(key.strip_prefix(POLICY_PREFIX)?).ok()
     }
 
     #[document(parent = "Multisigs", summary = "The owners and threshold a multisig's EVM contract starts with: its members' EVM addresses and threshold when they first named them, at its making or a change since; None while they name none.")]
@@ -488,6 +501,25 @@ pub struct MultisigBundle {
 
 impl Hashable for MultisigBundle {}
 
+/// A key of a scheme, from a seed in the source: what a probe's signatures are made with, to weigh
+/// what a real one of that scheme does. Never a key of value.
+fn sample(scheme: crate::crypto::keypair::KeyType) -> crate::crypto::keypair::Keypair {
+    use crate::crypto::keypair::{KeyType, Keypair, PrivateKey};
+
+    let seed = [1; 32];
+
+    Keypair::from_private(match scheme {
+        #[cfg(feature = "ed25519")]
+        KeyType::Ed25519 => PrivateKey::Ed25519(seed),
+        #[cfg(feature = "edblake")]
+        KeyType::EdBlake => PrivateKey::EdBlake(seed),
+        #[cfg(feature = "secp256k1")]
+        KeyType::Secp256k1 => PrivateKey::Secp256k1(seed),
+        #[cfg(feature = "bitcoin")]
+        KeyType::Bitcoin => PrivateKey::Bitcoin(seed),
+    })
+}
+
 /// What a bundle's text starts with, so a paste is told from any other.
 const BUNDLE_PREFIX: &str = "chainv4-multisig:";
 
@@ -508,6 +540,44 @@ impl MultisigBundle {
         let tx = Tx::Multisig { account: self.body.account, tx: Box::new(self.body.tx.clone()), signatures: self.signatures.clone() };
 
         crate::structs::tx::SignedTx::sign(tx, self.body.nonce, self.body.fee, carrier, &self.genesis)
+    }
+
+    #[document(
+        parent = "MultisigBundle",
+        summary = "A probe of a multisig's transaction for POST /offer to price, as heavy as any envelope its quorum can send: it carries the signatures of the threshold members whose keys weigh most, and is carried by the heaviest key this build has. So whichever members sign, and whoever carries it, the fee covers it. Its members' signatures only weigh what theirs will: a dry run never checks them.",
+        params = {
+            genesis = "The chain's genesis id.",
+            body = "The multisig's transaction.",
+            members = "Its members' keys; with none, the heaviest key this build has stands in for each.",
+            threshold = "How many of them it needs.",
+        },
+        see_also = "Fees::offer, MultisigBundle::envelope",
+    )]
+    pub fn probe(genesis: &Hash, body: &MultisigBody, members: &[crate::crypto::keypair::PublicKey], threshold: usize) -> crate::structs::tx::SignedTx {
+        use crate::crypto::keypair::{KeyType, PublicKey};
+        use crate::structs::tx::{MemberSignature, SignedTx};
+
+        // The carrier's key and signature, as the heaviest of every scheme weigh.
+        let heaviest = KeyType::ALL.iter().map(|scheme| sample(*scheme)).max_by_key(|key| key.public().hashable_bytes_with_tag().len() + key.sign(b"").hashable_bytes_with_tag().len()).expect("a build has a scheme");
+        let stand_ins: Vec<PublicKey> = match members.is_empty() {
+            true => vec![heaviest.public(); threshold.max(1)],
+            false => members.to_vec(),
+        };
+        // The members' whose signatures weigh most, as many as it needs.
+        let mut signatures: Vec<MemberSignature> = stand_ins.iter().map(|key| MemberSignature { key: *key, signature: sample(key.key_type()).sign(b"") }).collect();
+        signatures.sort_by_key(|signed| std::cmp::Reverse(signed.hashable_bytes_with_tag().len()));
+        signatures.truncate(threshold.max(1));
+        let tx = Tx::Multisig { account: body.account, tx: Box::new(body.tx.clone()), signatures };
+
+        SignedTx::sign(tx, body.nonce, FeeOffer::NONE, &heaviest, genesis)
+    }
+
+    #[document(parent = "MultisigBundle", summary = "The bundle as it is sent: its first threshold signatures, which are enough, and no more, so it weighs no more than probe priced it for.", params = { threshold = "How many members it needs." })]
+    pub fn trimmed(&self, threshold: usize) -> MultisigBundle {
+        let mut trimmed = self.clone();
+        trimmed.signatures.truncate(threshold.max(1));
+
+        trimmed
     }
 
     #[document(parent = "MultisigBundle", summary = "Its text: chainv4-multisig: and its encoding in hex, to save or paste.")]

@@ -86,7 +86,9 @@ pub struct TradeState {
     reads: HashMap<u64, Read>,
     next_id: u64,
     evm_asked: f64,
-    /// What this account holds of each share token, and each one's supply, by its address text.
+    /// Which of the account's addresses trades, adds and takes out: what it holds is what shows.
+    sender: Option<Address>,
+    /// What that address holds of each share token, and each one's supply, by its address text.
     held: HashMap<String, u256>,
     supply: HashMap<String, u256>,
     from: Address,
@@ -122,6 +124,7 @@ impl Default for TradeState {
             reads: HashMap::new(),
             next_id: RPC_BASE,
             evm_asked: f64::NEG_INFINITY,
+            sender: None,
             held: HashMap::new(),
             supply: HashMap::new(),
             from: COIN,
@@ -209,7 +212,12 @@ impl TradeState {
                 }
             }
             (Some("balance_of"), Some(values)) => {
-                if let Some(held) = values.first().and_then(|held| u256::from_str_radix(held, 10).ok()) {
+                // What another address held, asked before the pick changed, is not this one's.
+                let whose = body["args"][0]["value"].as_str();
+
+                if whose == self.sender.map(|sender| sender.to_string()).as_deref()
+                    && let Some(held) = values.first().and_then(|held| u256::from_str_radix(held, 10).ok())
+                {
                     self.held.insert(contract, held);
                 }
             }
@@ -341,7 +349,7 @@ fn calldata(signature: &str, types: &[AbiType], values: &[AbiValue]) -> Vec<u8> 
 /// Asks the pools again, now and then: the native DEX's through its pool list, the EVM's through
 /// its router's factory, with what this account holds of each.
 fn refresh(ctx: &mut Ctx, state: &mut TradeState, time: f64) {
-    let me = ctx.holder().and_then(|holder| holder.addresses().first().copied());
+    let me = state.sender;
 
     if let Some(dex) = dex(ctx) {
         if time - state.asked > ASK_EVERY {
@@ -444,6 +452,25 @@ fn slippage(state: &TradeState) -> u32 {
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendState) {
     let palette = *ctx.palette;
     theme::title(ui, &palette, "Trade", "One token for another, at the pools' price.");
+
+    // Any scheme trades: a native pool's calls are signed here, and the EVM's pairs see each address
+    // as its own EVM form.
+    let before = state.sender;
+    super::from::settle(ctx, &mut state.sender, &|_| None);
+
+    if ctx.holder().is_some_and(|holder| holder.addresses().len() > 1) {
+        theme::card(ui, &palette, |ui| {
+            super::from::pick(ui, ctx, "trade", &mut state.sender, &|_| None);
+        });
+    }
+
+    // What the last address held is not this one's: asked again at once, and answers on their way
+    // for it let go.
+    if state.sender != before {
+        state.held.clear();
+        state.reads.clear();
+        (state.asked, state.evm_asked) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    }
 
     let time = ui.input(|input| input.time);
     refresh(ctx, state, time);
@@ -583,9 +610,10 @@ fn detail(ui: &mut Ui, palette: &theme::Palette, label: &str, add: impl FnOnce(&
     );
 }
 
-/// What this account holds of an asset, in words, once it is proven; EVM tokens are not followed.
-fn held_of(ctx: &Ctx, asset: &Address) -> Option<(u256, String)> {
-    let me = ctx.holder().and_then(|holder| holder.addresses().first().copied())?.to_string();
+/// What the picked address holds of an asset, in words, once it is proven; EVM tokens are not
+/// followed.
+fn held_of(ctx: &Ctx, me: Option<Address>, asset: &Address) -> Option<(u256, String)> {
+    let me = me?.to_string();
     let raw = match *asset == COIN {
         true => ctx.chain.account(&me).map(|proven| proven.value.balance)?,
         false => ctx.chain.balance(&asset.to_string(), &me).map(|proven| proven.value)?,
@@ -688,7 +716,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
         let amount = parse_amount(ctx, &state.from, &state.amount);
         let same = state.from == to;
         let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount));
-        let held = held_of(ctx, &state.from);
+        let held = held_of(ctx, state.sender, &state.from);
         let wide = ui.available_width() >= SIDE_BY_SIDE;
         let mut flip = false;
 
@@ -714,7 +742,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
                 ui,
                 &palette,
                 "You get, about",
-                held_of(ctx, to).map(|(_, words)| words),
+                held_of(ctx, state.sender, to).map(|(_, words)| words),
                 |ui, _| {
                     theme::fitted(ui, &text, AMOUNT_SIZE, 13.0, egui::FontFamily::Name(theme::SERIF.into()), color);
                 },
@@ -797,7 +825,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
         ui.add_space(10.0);
 
         let (said, goes) = action(amount.is_some(), same, route.is_some());
-        let me = ctx.holder().and_then(|holder| holder.addresses().first().copied());
+        let me = state.sender;
         let token = from != COIN;
 
         if let (Some(amount), Some(me), Some(_), true) = (amount, me, &route, token) {
@@ -918,7 +946,7 @@ fn liquidity(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pools: &[DexPoo
                 state.charted = f64::NEG_INFINITY;
             }
 
-            if open && let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) {
+            if open && let Some(me) = state.sender {
                 ui.add_space(6.0);
                 pool_panel(ui, ctx, state, pool, me, prepared);
             }
@@ -1123,7 +1151,7 @@ fn create(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, prepared: &mut Option<
             let (Some(amount_a), Some(amount_b)) = (parse_amount(ctx, &a, &state.new_amount_a), parse_amount(ctx, &b, &state.new_amount_b)) else {
                 return;
             };
-            let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied()) else {
+            let Some(me) = state.sender else {
                 return;
             };
 

@@ -387,14 +387,13 @@ pub fn describe(request: &Request) -> Described {
     let shown = |raw: u256, asset: &Shown| (format::amount(&raw.to_string(), asset.decimals, &asset.symbol), raw.to_string());
     let (kind, what, to, token) = match &request.tx {
         Tx::Transfer { to, amount, .. } => (format!("Send {}", coin.symbol), Some(shown(amount.to_u256(), coin)), Some(to.to_string()), None),
-        Tx::ContractCall { to: contract, func, amount, data } if is_token_transfer(func, amount.to_u256(), data) => {
-            let [TxCallArgumentType::Address(recipient), TxCallArgumentType::U256(units)] = data.as_slice() else {
-                unreachable!("is_token_transfer looked")
+        // A token's transfer only as the sender names its token: the same call to an NFT collection
+        // sends an id, which no amount is to be read from.
+        Tx::ContractCall { to: contract, func, amount, data } if is_token_transfer(func, amount.to_u256(), data) && request.token.is_some() => {
+            let ([TxCallArgumentType::Address(recipient), TxCallArgumentType::U256(units)], Some(asset)) = (data.as_slice(), &request.token) else {
+                unreachable!("is_token_transfer and the token looked")
             };
-            let asset = request.token.clone().map_or_else(
-                || Shown { symbol: "units of the token".to_string(), decimals: 0 },
-                |asset| Shown { symbol: crate::steps::plain(&asset.symbol), decimals: asset.decimals },
-            );
+            let asset = Shown { symbol: crate::steps::plain(&asset.symbol), decimals: asset.decimals };
 
             (format!("Send {}", asset.symbol), Some(shown(*units, &asset)), Some(recipient.to_string()), Some(contract.to_string()))
         }
@@ -408,7 +407,7 @@ pub fn describe(request: &Request) -> Described {
         Tx::HandDirectory { to: None } => ("Renounce the directory's admin role, for good".to_string(), None, None, None),
         // A token the sender could only name for one: in a batch, its whole units as signed.
         Tx::Batch { steps } => {
-            let laid = crate::steps::of(steps, &request.coin, &|_| None, None);
+            let laid = crate::steps::of(steps, &request.coin, &|_| crate::steps::Known::Unknown, None);
 
             (format!("A batch of {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }), Some(laid.total), None, None)
         }
@@ -425,7 +424,7 @@ pub fn describe(request: &Request) -> Described {
         gas: format!("{} gas at up to {} per gas", request.fee.gas_limit, format::amount(&request.fee.max_price.to_string(), coin.decimals, &coin.symbol)),
         nonce: request.nonce,
         everything: format!("{:#?}", request.tx),
-        steps: request.tx.batch_steps().map(|steps| crate::steps::of(steps, &request.coin, &|_| None, None)),
+        steps: request.tx.batch_steps().map(|steps| crate::steps::of(steps, &request.coin, &|_| crate::steps::Known::Unknown, None)),
         chain: chainv4::crypto::ethereum::chain_id(&request.genesis),
     }
 }
@@ -436,9 +435,12 @@ pub fn describe(request: &Request) -> Described {
 /// rather than a one-line summary that leaves them out. The caller lays a batch out with
 /// `steps::of` on its own steps instead.
 pub fn laid(request: &Request) -> crate::steps::Steps {
-    let token = request.token.clone();
+    let known = match &request.token {
+        Some(token) => crate::steps::Known::Token(token.clone()),
+        None => crate::steps::Known::Unknown,
+    };
 
-    crate::steps::of(std::slice::from_ref(&request.tx), &request.coin, &|_| token.clone(), None)
+    crate::steps::of(std::slice::from_ref(&request.tx), &request.coin, &|_| known.clone(), None)
 }
 
 /// Why the chain would refuse a batch a request or a bundle holds, if it would: said as soon as it

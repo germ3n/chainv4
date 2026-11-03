@@ -1,15 +1,18 @@
 //! Making a multisig, or changing the members of one, as plain steps: who the members are, whether
 //! it reaches other chains, which is optional, how many must agree, and a review. Only a key on this
-//! chain is asked of a member: a Bitcoin account key and an EVM address are asked only of a multisig
-//! that is to hold coins there too.
+//! chain is asked of a member, of any scheme the chain has: Ed25519, EdBlake, or an Ethereum or
+//! Bitcoin account's key. A Bitcoin account key and an EVM address are asked only of a multisig that
+//! is to hold coins there too, on EVM chains, on Bitcoin, or on both; this wallet fills in its own
+//! accounts' from their words.
 
 use {
-    super::{Ctx, follow, member_line},
+    super::{Ctx, follow, member_line_of, other_chains},
     crate::format,
     crate::theme,
     chainv4::crypto::bitcoin::multisig::parse_xpub,
     chainv4::crypto::bitcoin::tx::Network,
     chainv4::crypto::keypair::{KeyType, PublicKey},
+    chainv4::crypto::verifiable::Verifiable,
     chainv4::registry::multisig::{MAX_MEMBERS, MultisigMember, MultisigPolicy},
     chainv4::structs::address::{Address, multisig_address},
     chainv4::structs::hex::from_hex,
@@ -27,7 +30,30 @@ pub enum Reach {
     #[default]
     Here,
     Evm,
+    Bitcoin,
     Both,
+}
+
+impl Reach {
+    /// Whether it asks each member's EVM address.
+    pub fn evm(self) -> bool {
+        matches!(self, Reach::Evm | Reach::Both)
+    }
+
+    /// Whether it asks each member's Bitcoin account key.
+    pub fn bitcoin(self) -> bool {
+        matches!(self, Reach::Bitcoin | Reach::Both)
+    }
+
+    /// Where a multisig whose members name these reaches.
+    fn of(bitcoin: bool, evm: bool) -> Reach {
+        match (bitcoin, evm) {
+            (true, true) => Reach::Both,
+            (true, false) => Reach::Bitcoin,
+            (false, true) => Reach::Evm,
+            (false, false) => Reach::Here,
+        }
+    }
 }
 
 /// The steps, in order.
@@ -112,7 +138,8 @@ pub struct Wizard {
 /// What is wrong with what a step asks, by the row and its field, or None for the step as a whole.
 pub type Errors = BTreeMap<(Option<usize>, &'static str), String>;
 
-/// What the first step asks: one key at least, 20 at most, each one a key, each once.
+/// What the first step asks: one key at least, 20 at most, each one a key of any scheme, on its
+/// curve, each once.
 pub fn member_errors(rows: &[Row]) -> Errors {
     let mut errors = Errors::new();
     let mut seen = Vec::new();
@@ -122,8 +149,16 @@ pub fn member_errors(rows: &[Row]) -> Errors {
             _ if row.key.trim().is_empty() => {
                 errors.insert((Some(index), "key"), "Required: this member's key on this chain.".to_string());
             }
+            // An Ethereum or Bitcoin account's address is a hash of its key, which cannot be read
+            // back from it.
+            Err(_) if row.key.trim().parse::<Address>().is_ok() => {
+                errors.insert((Some(index), "key"), ADDRESS_NOT_KEY.to_string());
+            }
             Err(_) => {
-                errors.insert((Some(index), "key"), "Not a key. It looks like ed25519:0x and 64 hex digits, or a member's whole line.".to_string());
+                errors.insert((Some(index), "key"), "Not a key. It looks like ed25519:0x and 64 hex digits, edblake:0x and 64, secp256k1:0x or bitcoin:0x and 66, or a member's whole line.".to_string());
+            }
+            Ok(key) if key.verify().is_err() => {
+                errors.insert((Some(index), "key"), "Not a key on its curve: check it was copied whole.".to_string());
             }
             Ok(key) if seen.contains(&key) => {
                 errors.insert((Some(index), "key"), "This key is already a member: each member is one key.".to_string());
@@ -143,6 +178,9 @@ pub fn member_errors(rows: &[Row]) -> Errors {
     errors
 }
 
+/// What an address given for a member's key is told.
+const ADDRESS_NOT_KEY: &str = "That is an address, not a key. For an Ethereum or Bitcoin account the member gives its public key, secp256k1:0x… or bitcoin:0x… and 66 hex digits, which its wallet's Pair page shows under As a multisig's member: an address is a hash of its key, and the key cannot be read back from it.";
+
 /// What the second step asks, when it is asked at all: every member's address on the chains it
 /// reaches, each once, and account keys of the network picked.
 pub fn reach_errors(rows: &[Row], reach: Reach, testnet: bool) -> Errors {
@@ -157,6 +195,7 @@ pub fn reach_errors(rows: &[Row], reach: Reach, testnet: bool) -> Errors {
         let evm = row.evm.trim();
 
         match from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()) {
+            _ if !reach.evm() => {}
             _ if evm.is_empty() => {
                 errors.insert((Some(index), "evm"), "Required once it reaches EVM chains, of every member.".to_string());
             }
@@ -172,7 +211,7 @@ pub fn reach_errors(rows: &[Row], reach: Reach, testnet: bool) -> Errors {
             Some(_) => evm_seen.push(evm.to_string()),
         }
 
-        if reach != Reach::Both {
+        if !reach.bitcoin() {
             continue;
         }
 
@@ -181,6 +220,9 @@ pub fn reach_errors(rows: &[Row], reach: Reach, testnet: bool) -> Errors {
         match parse_xpub(xpub) {
             _ if xpub.is_empty() => {
                 errors.insert((Some(index), "xpub"), "Required once it reaches Bitcoin, of every member.".to_string());
+            }
+            Err(_) if xpub.parse::<Address>().is_ok() || xpub.starts_with("bc1") || xpub.starts_with("tb1") || xpub.starts_with('1') || xpub.starts_with('3') => {
+                errors.insert((Some(index), "xpub"), "That is a Bitcoin address. A multisig needs the member's account key, [fingerprint/48h/0h/0h/2h]xpub…, from which its addresses are made with every other member's.".to_string());
             }
             Err(why) => {
                 errors.insert((Some(index), "xpub"), format!("Not a Bitcoin account key with its origin, [73c5da0a/48h/0h/0h/2h]xpub…: {why}"));
@@ -234,19 +276,19 @@ pub fn policy(wizard: &Wizard) -> Result<MultisigPolicy, String> {
 
     let member = |row: &Row| -> Result<MultisigMember, String> {
         let key = row.key.trim().parse::<PublicKey>().map_err(|_| "Not a key.".to_string())?;
-        let evm = match wizard.reach {
-            Reach::Here => None,
-            Reach::Evm | Reach::Both => Some(from_hex(row.evm.trim()).and_then(|bytes| bytes.try_into().ok()).ok_or("Not an EVM address.")?),
+        let evm = match wizard.reach.evm() {
+            false => None,
+            true => Some(from_hex(row.evm.trim()).and_then(|bytes| bytes.try_into().ok()).ok_or("Not an EVM address.")?),
         };
-        let bitcoin = match wizard.reach {
-            Reach::Both => Some(parse_xpub(row.xpub.trim()).map_err(|why| why.to_string())?.0),
-            _ => None,
+        let bitcoin = match wizard.reach.bitcoin() {
+            true => Some(parse_xpub(row.xpub.trim()).map_err(|why| why.to_string())?.0),
+            false => None,
         };
 
         Ok(MultisigMember { key, bitcoin, evm })
     };
     let members = wizard.rows.iter().map(member).collect::<Result<Vec<_>, _>>()?;
-    let policy = MultisigPolicy { members, threshold: wizard.threshold, testnet: wizard.reach == Reach::Both && wizard.testnet };
+    let policy = MultisigPolicy { members, threshold: wizard.threshold, testnet: wizard.reach.bitcoin() && wizard.testnet };
 
     match policy.problem() {
         Some(problem) => Err(format!("Not a multisig: {problem}.")),
@@ -268,11 +310,7 @@ impl Wizard {
     /// Changing a multisig's members: the steps, filled in with what the node lists.
     pub fn changing(account: &str, value: &Value) -> Wizard {
         let rows: Vec<Row> = value["members"].as_array().into_iter().flatten().map(Row::from_listed).collect();
-        let reach = match (rows.iter().any(|row| !row.xpub.is_empty()), rows.iter().any(|row| !row.evm.is_empty())) {
-            (true, _) => Reach::Both,
-            (false, true) => Reach::Evm,
-            _ => Reach::Here,
-        };
+        let reach = Reach::of(rows.iter().any(|row| !row.xpub.is_empty()), rows.iter().any(|row| !row.evm.is_empty()));
 
         Wizard { rows, reach, testnet: value["testnet"].as_bool().unwrap_or(false), threshold: value["threshold"].as_u64().unwrap_or(1) as u32, changing: Some(account.to_string()), ..Wizard::default() }
     }
@@ -280,7 +318,7 @@ impl Wizard {
     /// Whether a change of members changes anything.
     fn same_as(&self, value: &Value) -> bool {
         let listed: Vec<Row> = value["members"].as_array().into_iter().flatten().map(Row::from_listed).collect();
-        let trimmed = |row: &Row| Row { key: row.key.trim().to_string(), evm: if self.reach == Reach::Here { String::new() } else { row.evm.trim().to_string() }, xpub: if self.reach == Reach::Both { row.xpub.trim().to_string() } else { String::new() } };
+        let trimmed = |row: &Row| Row { key: row.key.trim().to_string(), evm: if self.reach.evm() { row.evm.trim().to_string() } else { String::new() }, xpub: if self.reach.bitcoin() { row.xpub.trim().to_string() } else { String::new() } };
 
         self.rows.iter().map(trimmed).eq(listed.iter().map(trimmed)) && u64::from(self.threshold) == value["threshold"].as_u64().unwrap_or(0)
     }
@@ -363,17 +401,17 @@ fn bad(ui: &mut Ui, palette: &theme::Palette, why: Option<&String>) {
 /// The first step: a key for each member.
 fn members(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
     let palette = *ctx.palette;
-    let mine = account_keys(ctx);
+    let mine = wallet_keys(ctx);
 
-    hint(ui, &palette, "Each member is one key on this chain: all a member needs. Ask each for theirs: for most accounts it is the ed25519:0x… address on their Receive page, and an offline signer shows it under Pair.");
+    hint(ui, &palette, "Each member is one key on this chain, of any kind it has: Ed25519, EdBlake, Ethereum's or Bitcoin's. Ask each for theirs: for most accounts it is the ed25519:0x… address on their Receive page. An Ethereum or Bitcoin account is named by its public key, not its address: Pair shows it, under As a multisig's member.");
     ui.add_space(4.0);
 
     let mut gone = None;
 
     for (index, row) in wizard.rows.iter_mut().enumerate() {
         ui.push_id(index, |ui| {
-            let is_mine = mine.iter().any(|key| *key == row.key.trim());
-            let label = format!("Member {}{} · required", index + 1, if is_mine { ", this account" } else { "" });
+            let ours = mine.iter().find(|own| own.key.to_string() == row.key.trim()).map(|own| format!(", {}", own.name)).unwrap_or_default();
+            let label = format!("Member {}{ours} · required", index + 1);
             ui.label(RichText::new(label).small().color(palette.soft));
 
             let remove = theme::beside(
@@ -393,6 +431,11 @@ fn members(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
                 *row = Row::from_line(&row.key);
             }
 
+            // One of this wallet's own addresses typed or pasted: its key is known here.
+            if let Some(own) = mine.iter().find(|own| own.key.address().to_string() == row.key.trim() && own.key.to_string() != row.key.trim()) {
+                row.key = own.key.to_string();
+            }
+
             if !row.key.is_empty() {
                 bad(ui, &palette, errors.get(&(Some(index), "key")));
             }
@@ -403,18 +446,27 @@ fn members(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
         wizard.rows.remove(index);
     }
 
-    ui.horizontal_wrapped(|ui| {
-        if !mine.iter().any(|key| wizard.rows.iter().any(|row| row.key.trim() == key.as_str()))
-            && theme::primary(ui, &palette, "Add this account", true).clicked()
-            && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed_of(ctx.book, holder), wizard.testnet))
-        {
-            wizard.rows.push(Row::from_line(&line));
-        }
+    // Any of this wallet's keys not yet a member, one of each scheme of each account.
+    let open: Vec<&Own> = mine.iter().filter(|own| !wizard.rows.iter().any(|row| row.key.trim() == own.key.to_string())).collect();
+    let mut added = None;
 
-        if theme::quiet(ui, &palette, "Add a member").clicked() {
-            wizard.rows.push(Row::default());
-        }
-    });
+    if !open.is_empty() {
+        egui::ComboBox::from_id_salt("add own key").selected_text("Add one of this wallet's keys…").width(ui.available_width()).show_ui(ui, |ui| {
+            for own in &open {
+                if ui.selectable_label(false, &own.name).clicked() {
+                    added = Some(own.line(ctx, wizard.testnet));
+                }
+            }
+        });
+    }
+
+    if let Some(line) = added {
+        wizard.rows.push(Row::from_line(&line));
+    }
+
+    if theme::quiet(ui, &palette, "Add a member").clicked() {
+        wizard.rows.push(Row::default());
+    }
 
     // None yet is what Next waits for, not a mistake.
     if !wizard.rows.is_empty() {
@@ -422,43 +474,67 @@ fn members(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
     }
 }
 
-/// The account's keys on this chain, as members name them.
-fn account_keys(ctx: &Ctx) -> Vec<String> {
-    let Some(holder) = ctx.holder() else {
-        return Vec::new();
-    };
-
-    holder.addresses().iter().filter_map(|address| holder.public(address)).map(|key| key.to_string()).collect()
+/// One of this wallet's keys, any account's, any scheme's: what a member's row can be filled from.
+pub struct Own {
+    /// Its account, by its place among the holders.
+    pub holder: usize,
+    pub key: PublicKey,
+    /// The account's name and the key's scheme.
+    pub name: String,
 }
 
-/// The second step: whether it reaches other chains, and if so each member's address there.
+impl Own {
+    /// The member's line it makes: the key, and its account's EVM address and words' xpub.
+    fn line(&self, ctx: &Ctx, testnet: bool) -> String {
+        let holder = &ctx.holders[self.holder];
+
+        member_line_of(holder, &self.key, crate::keys::seed_of(ctx.book, holder), testnet)
+    }
+}
+
+/// Every key this wallet holds or watches, account by account, scheme by scheme.
+fn wallet_keys(ctx: &Ctx) -> Vec<Own> {
+    ctx.holders
+        .iter()
+        .enumerate()
+        .flat_map(|(index, holder)| holder.publics.iter().map(move |key| Own { holder: index, key: *key, name: format!("{} · {}", holder.name, crate::keys::label(key.key_type())) }))
+        .collect()
+}
+
+/// The account in use's keys on this chain, as members name them.
+fn account_keys(ctx: &Ctx) -> Vec<String> {
+    ctx.holder().map(|holder| holder.publics.iter().map(PublicKey::to_string).collect()).unwrap_or_default()
+}
+
+/// The second step: whether it reaches other chains, and if so each member's keys there.
 fn reach(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
     let palette = *ctx.palette;
 
     hint(ui, &palette, "Most multisigs need nothing here. A Bitcoin address is not needed to make one.");
     ui.add_space(2.0);
-    theme::segmented_rows(ui, &palette, &mut wizard.reach, &[(Reach::Here, "Only this chain"), (Reach::Evm, "Also EVM chains"), (Reach::Both, "Also Bitcoin and EVM")]);
+    theme::segmented_rows(ui, &palette, &mut wizard.reach, &[(Reach::Here, "Only this chain"), (Reach::Evm, "Also EVM chains"), (Reach::Bitcoin, "Also Bitcoin"), (Reach::Both, "Also Bitcoin and EVM chains")]);
     ui.add_space(2.0);
 
     match wizard.reach {
         Reach::Here => hint(ui, &palette, "It holds coins and tokens here, and sends anything an account sends. Its members can add other chains later, by changing its members."),
-        Reach::Evm => hint(ui, &palette, "Fill these in to hold coins on Ethereum-like chains too: the same members control one contract, at one address on every such chain. Every member gives one, or none does."),
-        Reach::Both => hint(ui, &palette, "Fill these in to hold bitcoin too, in a multisig other Bitcoin wallets can co-sign, as well as on EVM chains. Every member gives both, or none does."),
+        Reach::Evm => hint(ui, &palette, "Each member gives its EVM address, to hold coins on Ethereum-like chains too: the same members control one contract, at one address on every such chain. Every member gives one, or none does."),
+        Reach::Bitcoin => hint(ui, &palette, "Each member gives its Bitcoin account key, to hold bitcoin too, in a multisig other Bitcoin wallets can co-sign. Every member gives one, or none does."),
+        Reach::Both => hint(ui, &palette, "Each member gives its Bitcoin account key and its EVM address, to hold bitcoin in a multisig other Bitcoin wallets co-sign, and coins on EVM chains. Every member gives both, or none does."),
     }
 
-    if wizard.reach == Reach::Both {
+    if wizard.reach.bitcoin() {
         let was = wizard.testnet;
         ui.add_space(2.0);
         theme::segmented(ui, &palette, &mut wizard.testnet, &[(false, "Bitcoin"), (true, "Bitcoin's test networks")]);
 
-        // This account's own key follows the network; others' are their own to give.
-        if was != wizard.testnet
-            && let Some(line) = ctx.holder().and_then(|holder| member_line(holder, crate::keys::seed_of(ctx.book, holder), wizard.testnet))
-        {
-            let mine = Row::from_line(&line);
+        // This wallet's own keys follow the network; others' are their own to give.
+        if was != wizard.testnet {
+            for own in wallet_keys(ctx) {
+                let (_, xpub) = other_chains(&ctx.holders[own.holder], crate::keys::seed_of(ctx.book, &ctx.holders[own.holder]), wizard.testnet);
 
-            for row in wizard.rows.iter_mut().filter(|row| row.key.trim() == mine.key) {
-                row.xpub = mine.xpub.clone();
+                for row in wizard.rows.iter_mut().filter(|row| row.key.trim() == own.key.to_string()) {
+                    row.xpub = xpub.clone().unwrap_or_default();
+                }
             }
         }
     }
@@ -467,23 +543,56 @@ fn reach(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
         return;
     }
 
-    let mine = account_keys(ctx);
+    if wizard.reach.bitcoin() {
+        hint(ui, &palette, "A Bitcoin account key is not a Bitcoin address: it is the member's multisig account key, xpub… (tpub… on the test networks) with its origin, such as [73c5da0a/48h/0h/0h/2h]xpub…, from which the multisig's addresses are made with every other member's. A member finds theirs on this wallet's Pair page, under As a multisig's member, or in Sparrow, Nunchuk or a hardware wallet as its multisig key for native segwit, BIP48. Each member's comes from its own words: two accounts of the same words have the same one.");
+    }
+
+    if wizard.reach.evm() {
+        hint(ui, &palette, "An EVM address is the member's Ethereum account, 0x… and 40 hex digits: its key signs the contract's calls. In this wallet it is an account's Ethereum address on Receive.");
+    }
+
+    let mine = wallet_keys(ctx);
 
     for (index, row) in wizard.rows.iter_mut().enumerate() {
         ui.add_space(6.0);
         ui.push_id(index, |ui| {
-            let name = match mine.iter().any(|key| *key == row.key.trim()) {
-                true => format!("Member {}, this account", index + 1),
-                false => format!("Member {} · {}", index + 1, format::short(row.key.trim())),
+            let ours = mine.iter().find(|own| own.key.to_string() == row.key.trim());
+            let name = match ours {
+                Some(own) => format!("Member {}, {}", index + 1, own.name),
+                None => format!("Member {} · {}", index + 1, format::short(row.key.trim())),
             };
             ui.label(theme::strong(name, 13.0).color(palette.soft));
-            ui.label(RichText::new("EVM address · required for this choice").small().color(palette.soft));
-            ui.add(egui::TextEdit::singleline(&mut row.evm).hint_text("0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
-            bad(ui, &palette, errors.get(&(Some(index), "evm")));
 
-            if wizard.reach == Reach::Both {
-                ui.label(RichText::new("Bitcoin account key · required for this choice").small().color(palette.soft));
-                hint(ui, &palette, "Not a Bitcoin address: the member's multisig account key, with its origin. Bitcoin addresses are made from all the members' keys together.");
+            // This wallet's own: what its words make, in one tap.
+            if let Some(own) = ours {
+                let holder = &ctx.holders[own.holder];
+                let (evm, xpub) = other_chains(holder, crate::keys::seed_of(ctx.book, holder), wizard.testnet);
+                let filled = (!wizard.reach.evm() || evm.as_deref() == Some(row.evm.trim())) && (!wizard.reach.bitcoin() || xpub.as_deref() == Some(row.xpub.trim()));
+                let has = (!wizard.reach.evm() || evm.is_some()) && (!wizard.reach.bitcoin() || xpub.is_some());
+
+                if !filled && has && theme::quiet(ui, &palette, &format!("Fill in from {}", holder.name)).clicked() {
+                    if wizard.reach.evm() {
+                        row.evm = evm.unwrap_or_default();
+                    }
+
+                    if wizard.reach.bitcoin() {
+                        row.xpub = xpub.unwrap_or_default();
+                    }
+                }
+
+                if !has {
+                    hint(ui, &palette, "This account comes from no words this wallet holds, so its keys elsewhere are not known here: fill them in by hand.");
+                }
+            }
+
+            if wizard.reach.evm() {
+                ui.label(RichText::new("EVM address · required for this choice").small().color(palette.soft));
+                ui.add(egui::TextEdit::singleline(&mut row.evm).hint_text("0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                bad(ui, &palette, errors.get(&(Some(index), "evm")));
+            }
+
+            if wizard.reach.bitcoin() {
+                ui.label(RichText::new("Bitcoin account key, not an address · required for this choice").small().color(palette.soft));
                 ui.add(egui::TextEdit::singleline(&mut row.xpub).hint_text("[73c5da0a/48h/0h/0h/2h]xpub…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
                 bad(ui, &palette, errors.get(&(Some(index), "xpub")));
             }
@@ -514,6 +623,7 @@ fn threshold(ui: &mut Ui, palette: &theme::Palette, wizard: &mut Wizard) {
 fn review(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, listed: Option<&Value>) -> Done {
     let palette = *ctx.palette;
     let mine = account_keys(ctx);
+    let own = wallet_keys(ctx);
     let policy = policy(wizard);
 
     super::super::row(ui, &palette, "Who must agree", |ui| {
@@ -521,7 +631,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, listed: Option<&Value
     });
 
     for (index, row) in wizard.rows.iter().enumerate() {
-        let you = if mine.iter().any(|key| *key == row.key.trim()) { " · this account" } else { "" };
+        let you = own.iter().find(|own| own.key.to_string() == row.key.trim()).map(|own| format!(" · {}", own.name)).unwrap_or_default();
         ui.add(egui::Label::new(RichText::new(format!("{}. {}{you}", index + 1, format::short(row.key.trim()))).monospace().color(palette.soft)).wrap());
     }
 
@@ -529,6 +639,8 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, listed: Option<&Value
         ui.label(match (wizard.reach, wizard.testnet) {
             (Reach::Here, _) => "This chain only",
             (Reach::Evm, _) => "This chain and EVM chains",
+            (Reach::Bitcoin, false) => "This chain and Bitcoin",
+            (Reach::Bitcoin, true) => "This chain and Bitcoin's test networks",
             (Reach::Both, false) => "This chain, EVM chains and Bitcoin",
             (Reach::Both, true) => "This chain, EVM chains and Bitcoin's test networks",
         });
@@ -779,5 +891,93 @@ mod tests {
         assert!(!step_errors(&wizard).is_empty(), "no threshold yet");
         wizard.threshold = 2;
         assert!(step_errors(&wizard).is_empty());
+    }
+
+    #[test]
+    fn a_member_of_every_scheme_the_chain_has_is_a_member() {
+        use chainv4::crypto::keypair::PrivateKey;
+
+        let keys: Vec<String> = [PrivateKey::Ed25519([1; 32]), PrivateKey::EdBlake([2; 32]), PrivateKey::Secp256k1([3; 32]), PrivateKey::Bitcoin([4; 32])].into_iter().map(|private| Keypair::from_private(private).public().to_string()).collect();
+        let rows: Vec<Row> = keys.iter().map(|key| Row { key: key.clone(), ..Row::default() }).collect();
+        let wizard = Wizard { rows: rows.clone(), threshold: 3, ..Wizard::default() };
+        let made = policy(&wizard).expect("one of each scheme");
+        let schemes: Vec<KeyType> = made.members.iter().map(|member| member.key.key_type()).collect();
+
+        assert_eq!(schemes, [KeyType::Ed25519, KeyType::EdBlake, KeyType::Secp256k1, KeyType::Bitcoin]);
+
+        // An Ethereum or Bitcoin account's address is told apart from its key, and so is a key off
+        // its curve.
+        let address = Keypair::from_private(PrivateKey::Secp256k1([3; 32])).public().address().to_string();
+        let errors = member_errors(&[Row { key: address, ..Row::default() }]);
+        assert!(errors[&(Some(0), "key")].starts_with("That is an address, not a key"), "{errors:?}");
+
+        let off_curve = format!("secp256k1:0x05{}", "11".repeat(32));
+        assert!(member_errors(&[Row { key: off_curve, ..Row::default() }])[&(Some(0), "key")].contains("Not a key on its curve"));
+    }
+
+    #[test]
+    fn it_reaches_evm_chains_alone_bitcoin_alone_or_both_asking_only_what_each_needs() {
+        let evm = |byte: u8| format!("0x{}", format!("{byte:02x}").repeat(20));
+        let mut rows = rows(&[1, 2]);
+
+        // Bitcoin alone asks each member's account key, and no EVM address.
+        let errors = reach_errors(&rows, Reach::Bitcoin, false);
+        assert!(errors.contains_key(&(Some(0), "xpub")) && !errors.contains_key(&(Some(0), "evm")), "{errors:?}");
+
+        rows[0].xpub = xpub(false);
+        rows[1].xpub = other_xpub(false);
+        assert!(reach_errors(&rows, Reach::Bitcoin, false).is_empty());
+        assert!(reach_errors(&rows, Reach::Both, false).contains_key(&(Some(0), "evm")), "both asks the EVM address too");
+
+        // A Bitcoin address where its account key goes is told apart.
+        let mut addressed = rows.clone();
+        addressed[1].xpub = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq".to_string();
+        assert!(reach_errors(&addressed, Reach::Bitcoin, false)[&(Some(1), "xpub")].starts_with("That is a Bitcoin address"));
+
+        let wizard = Wizard { rows: rows.clone(), threshold: 2, reach: Reach::Bitcoin, testnet: false, ..Wizard::default() };
+        let made = policy(&wizard).expect("on Bitcoin alone");
+        assert!(made.members.iter().all(|member| member.bitcoin.is_some() && member.evm.is_none()));
+
+        rows[0].evm = evm(0x11);
+        rows[1].evm = evm(0x22);
+        let both = policy(&Wizard { rows: rows.clone(), threshold: 2, reach: Reach::Both, ..Wizard::default() }).unwrap();
+        let evm_only = policy(&Wizard { rows, threshold: 2, reach: Reach::Evm, ..Wizard::default() }).unwrap();
+        assert!(both.members.iter().all(|member| member.bitcoin.is_some() && member.evm.is_some()));
+        assert!(evm_only.members.iter().all(|member| member.bitcoin.is_none() && member.evm.is_some()));
+
+        // Changing one on Bitcoin alone starts there.
+        let listed = serde_json::json!({ "threshold": 1, "members": [{ "key": key(1), "bitcoin": xpub(false) }] });
+        assert_eq!(Wizard::changing("multisig:0x03", &listed).reach, Reach::Bitcoin);
+    }
+
+    #[test]
+    fn every_step_and_every_reach_fits_phones_and_a_desktop_and_fills_in_this_wallets_own() {
+        use crate::views::drawn;
+
+        for size in drawn::SCREENS {
+            for reach in [Reach::Here, Reach::Evm, Reach::Bitcoin, Reach::Both] {
+                for step in [Step::Members, Step::Reach, Step::Threshold, Step::Review] {
+                    let mut book = drawn::two_phrases();
+                    let mut holders = crate::keys::open(&book).unwrap();
+                    let own = holders[1].publics[2].to_string();
+                    let mut wizard = Wizard { step, reach, rows: vec![Row { key: own, ..Row::default() }, Row { key: key(9), ..Row::default() }], threshold: 2, ..Wizard::default() };
+                    // Tall enough that nothing is left undrawn for being off the screen.
+                    let (width, _, shown) = drawn::page_shown(&mut book, &mut holders, (size.0, 20_000.0), |ui, ctx| {
+                        show(ui, ctx, &mut wizard, None);
+                    });
+                    let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+
+                    assert!(width <= size.0 + 1.0, "{reach:?} {step:?} on {size:?}: {width}");
+
+                    if step == Step::Reach && reach != Reach::Here {
+                        assert!(texts.iter().any(|text| text.starts_with("Fill in from")), "{reach:?}: {texts:?}");
+                    }
+
+                    if step == Step::Reach && reach.bitcoin() {
+                        assert!(texts.iter().any(|text| text.contains("is not a Bitcoin address")), "{texts:?}");
+                    }
+                }
+            }
+        }
     }
 }

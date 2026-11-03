@@ -129,6 +129,12 @@ chainv4 dex remove coin contract:0x… 500000             # shares out
 chainv4 dex --evm swap coin 0x… 5000
 ```
 
+**Adding to a pool that is open takes amounts at its ratio.** `add` asks for at least each amount
+given less the slippage (`--slippage`, 0.5% unless told), not at least what the pool's ratio would take
+of them, so amounts off the ratio by more than that are refused, as `the pool's price moved: less b
+than the least`, after the approval went out. Work the second amount out from `dex pools`, or widen
+`--slippage`. Each run approves again, whatever is approved already.
+
 ## In the wallet
 
 The **Trade** page, on an online install, with **Native** and **EVM** to switch when the node names

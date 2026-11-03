@@ -7,7 +7,7 @@ use {
     super::{Ctx, decoded},
     crate::airgap::Shown,
     crate::history::{Checked, StepResult},
-    crate::steps::{self, Landing, Said, Steps},
+    crate::steps::{self, Known, Landing, Said, Steps},
     crate::theme,
     chainv4::structs::address::Address,
     chainv4::structs::hex::to_hex,
@@ -28,16 +28,28 @@ pub fn of_one(ctx: &Ctx, tx: &Tx, landing: Option<&Landing>) -> Steps {
     laid(ctx, std::slice::from_ref(tx), landing)
 }
 
-/// The step layout of these transactions, naming the coin and tokens as this wallet proves them.
+/// The step layout of these transactions, naming the coin, tokens and collections as this wallet
+/// proves them.
 fn laid(ctx: &Ctx, txs: &[Tx], landing: Option<&Landing>) -> Steps {
     let coin = Shown { symbol: ctx.coin.symbol.clone(), decimals: ctx.coin.decimals };
-    let tokens = |token: &Address| {
-        let proven = ctx.chain.tokens.get(&token.to_string())?;
 
-        Some(Shown { symbol: proven.value.symbol.clone()?, decimals: proven.value.decimals? })
-    };
+    steps::of(txs, &coin, &|contract| known(ctx, contract), landing)
+}
 
-    steps::of(txs, &coin, &tokens, landing)
+/// What the wallet proved a contract to be: a token by its symbol and decimals, a collection by its
+/// name, symbol or address. A token that says neither is shown in whole units, as signed.
+pub fn known(ctx: &Ctx, contract: &Address) -> Known {
+    match ctx.chain.known(contract) {
+        Some(crate::chain::Known::Token(token)) => Known::Token(Shown {
+            symbol: token.symbol.clone().unwrap_or_else(|| crate::format::short(&contract.to_string())),
+            decimals: token.decimals.unwrap_or(0),
+        }),
+        Some(crate::chain::Known::Collection(collection)) => Known::Collection {
+            kind: collection.kind,
+            title: collection.name.clone().or_else(|| collection.symbol.clone()).unwrap_or_else(|| crate::format::short(&contract.to_string())),
+        },
+        None => Known::Unknown,
+    }
 }
 
 /// Where the deploys of a batch this wallet's account sends land, for the Send page to say: only

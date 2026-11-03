@@ -601,12 +601,7 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     let genesis = chain_to_sign_for(&status, args.genesis.as_deref())?;
     let reads = matches!(args.tx, TxArgs::EvmCall { read: true, .. });
     let tx = transaction(args.tx, sender, &agent, node)?;
-    let deploys = matches!(tx, Tx::Deploy { .. });
-    let deploys_evm = matches!(tx, Tx::Deploy { code: Code::Evm(_) });
-    let steps = match &tx {
-        Tx::Batch { steps } => steps.clone(),
-        _ => Vec::new(),
-    };
+    let deploys = matches!(tx, Tx::Deploy { .. }) || tx.batch_steps().is_some_and(|steps| steps.iter().any(|step| matches!(step, Tx::Deploy { .. })));
     let chosen = OfferChoice {
         gas_limit: args.gas_limit,
         max_price: args.max_price,
@@ -647,24 +642,12 @@ pub fn send(args: SendArgs) -> CliResult<()> {
         println!("multisig {}", crate::structs::address::multisig_address(&sender, nonce, hash));
     }
 
-    if deploys_evm {
-        #[cfg(feature = "evm")]
-        println!("contract {}", crate::vm::evm::create_address(&sender, nonce));
-    } else if deploys {
+    if deploys {
         // Contract addresses are derived with the chain's hash, which the node says.
-        let hash: HashType = status["hash"]
-            .as_str()
-            .ok_or("the node did not say its chain's hash")?
-            .parse()?;
-        println!("contract {}", deployed_at(&sender, nonce, hash));
-    }
-
-    // Each deploy in a batch, where it lands: known before it does, for what the steps after it call.
-    if steps.iter().any(|step| matches!(step, Tx::Deploy { .. })) {
         let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
 
-        for (place, address) in batch_deploys(&steps, &sender, nonce, hash) {
-            println!("step {} contract {address}", place + 1);
+        for line in landings(&signed.tx, &sender, nonce, hash) {
+            println!("{line}");
         }
     }
 
@@ -678,6 +661,18 @@ pub fn send(args: SendArgs) -> CliResult<()> {
     };
     let receipt = wait(&agent, node, id, wanted, Duration::from_secs(args.timeout))?;
     report(&receipt)
+}
+
+/// Where a transaction's deploys land, a line each: a lone deploy's contract, or each of a batch's
+/// with its step. Known before it lands, for what the steps after it, or the next transaction, call.
+pub(super) fn landings(tx: &Tx, sender: &Address, nonce: u64, hash: HashType) -> Vec<String> {
+    match tx {
+        #[cfg(feature = "evm")]
+        Tx::Deploy { code: Code::Evm(_) } => vec![format!("contract {}", crate::vm::evm::create_address(sender, nonce))],
+        Tx::Deploy { .. } => vec![format!("contract {}", deployed_at(sender, nonce, hash))],
+        Tx::Batch { steps } => batch_deploys(steps, sender, nonce, hash).into_iter().map(|(place, address)| format!("step {} contract {address}", place + 1)).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Where a batch's deploys land, each with its place among the steps.
@@ -705,7 +700,8 @@ pub(super) fn batch_deploys(steps: &[Tx], sender: &Address, nonce: u64, hash: Ha
 #[derive(Clone, Debug)]
 pub struct Member(crate::registry::multisig::MultisigMember, Option<bool>);
 
-/// A multisig member as --member takes it: KEY, KEY,,EVM_ADDRESS, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS.
+/// A multisig member as --member takes it: KEY, KEY,,EVM_ADDRESS for EVM chains alone,
+/// KEY,[fingerprint/48'/0'/0'/2']xpub… for Bitcoin alone, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS for both.
 pub(super) fn parse_member(text: &str) -> Result<Member, String> {
     let parts: Vec<&str> = text.split(',').map(str::trim).collect();
     let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a public key", parts[0]))?;
@@ -713,15 +709,20 @@ pub(super) fn parse_member(text: &str) -> Result<Member, String> {
     let evm = |evm: &str| from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{evm} is not an EVM address, 20 bytes in hex"));
 
     match parts[1..] {
-        [] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }, None)),
+        [] | ["", ""] | [""] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }, None)),
         ["", address] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: Some(evm(address)?) }, None)),
+        // On Bitcoin alone, KEY,XPUB or KEY,XPUB, with no EVM address; or on both.
         #[cfg(feature = "bitcoin")]
-        [xpub, address] => {
+        [xpub] | [xpub, _] => {
             let (bitcoin, network) = crate::crypto::bitcoin::multisig::parse_xpub(xpub)?;
+            let evm = match parts.get(2).copied().unwrap_or_default() {
+                "" => None,
+                address => Some(evm(address)?),
+            };
 
-            Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm: Some(evm(address)?) }, Some(network == crate::crypto::bitcoin::tx::Network::Test)))
+            Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm }, Some(network == crate::crypto::bitcoin::tx::Network::Test)))
         }
-        _ => Err("a member is KEY, KEY,,EVM_ADDRESS, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS".to_string()),
+        _ => Err("a member is KEY, KEY,,EVM_ADDRESS, KEY,[fingerprint/48'/0'/0'/2']xpub…, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS".to_string()),
     }
 }
 

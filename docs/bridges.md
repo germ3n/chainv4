@@ -419,7 +419,7 @@ chainv4 send deploy --wasm btc_relay.wasm                      # the relay
 chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint
 chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since, 25 a tx; run it often
 chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --fee-floor 2 --grace-hours 168
-chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…
+chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay, bc1q…; --network test for tb1q…
 chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL
 chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
 chainv4 bridge btc watch --esplora URL --evm-key signer.key --key payer.key  # each signer, left running
@@ -466,6 +466,10 @@ Bitcoin's own time: usually under an hour to be mined, and a little more to show
 longer while fees run past what it agreed to lose, or the gateway holds too little.
 
 - **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told. Sync the relay first.
+- **address** writes the deposit address for mainnet, `bc1q…`, unless given `--network test`, whatever
+  network the relay follows: on a relay of testnet4 or signet, give it, for the `tb1q…` a testnet wallet
+  pays. The script is the same either way, so a mainnet wallet would pay the `bc1q…` one, and nothing
+  would be minted for it here. The wallet reads the relay's `network_name()` and writes the right one.
 - **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or another output script Bitcoin's nodes
   relay as `0x…` (a Taproot output as its `5120…` script). `--most-fee` is the most it may lose, a
   tenth of it unless told; **set-most-fee** changes that while it waits.

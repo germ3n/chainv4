@@ -436,7 +436,11 @@ line and nothing else:
 
 **Activity:** for each address of the account in use, the node's address index lists the
 transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
-first, or oldest with the order turned round. **All**, **Waiting** (not proven yet) and **Failed**
+first, or oldest with the order turned round. Each line says which of the account's addresses it is
+for, by its scheme: received to your Bitcoin, sent from your Ed25519, by your EdBlake. A transfer
+from one of its addresses to another, of the coin, a token or an NFT, shows as **Between your
+addresses**, from which to which, with what moved and no plus or minus, as the account holds as
+much in all but the fee. **All**, **Waiting** (not proven yet) and **Failed**
 narrow what shows, and the search finds a line by its id, a party, a contract, what it did or its
 events. Only the chain the wallet follows now shows: each transaction kept
 records its chain's genesis, as a new chain of the same keys starts its heights again, so one
@@ -593,6 +597,24 @@ The Send page (`wallet/src/views/send.rs`):
 
 A token transfer is the standard's `transfer(to, amount)`, sending no coin.
 
+**What the review reads a call as:** by what the light client proved the contract is, from the
+chain's registries: the token registry's entry, or the collection registry's (`GET /collections`
+says which collections to prove, `Column::Tokens` what each is). `transfer(to, n)` is a token's
+amount only to a proven token. To a proven NFT collection, `transfer` or `safe_transfer(to, id)`
+shows as **Send NFT #id**, with the collection, its id and the recipient, and no amount; to a
+multi-token one, `transfer(to, id, n)` as **Send n of #id**, with how many. To a contract proven as
+neither, the same call shows as the call it is, its numbers unnamed, and says the contract is
+neither a token nor a collection the chain lists. Batch steps and the offline signer read calls the
+same way; the offline signer knows only the token the sender names, so an NFT's transfer shows
+there as a call to a contract it does not know.
+
+**From:** each address holds its own coin, tokens and NFTs, so every page that sends has the same
+From picker (`views/from.rs`): the account's addresses, each by its scheme, its address short and
+the coin it holds. The pick holds across pages for the run: what was picked on Send is where Bridge,
+Trade and Swaps start. A page that cannot use a scheme lists its addresses greyed, with why, and
+says so under the picker. Batch starts from the pick too, but keeps its own once it has steps, as
+changing its sender clears them.
+
 **Dropped transactions:** one no block holds after 10 minutes shows as Not seen, and stops
 holding its nonce, so the next transaction takes that nonce again.
 
@@ -607,8 +629,8 @@ steps under one signature and one fee, all of which go through or none do, such 
 swap that spends it, or several people paid at once. Add any step a batch may hold, move each up or
 down, take any out, up to 32; it shows the count, what they send in all, and where each deploy will
 land, for the steps after it to call. **Review** goes to Send, as anything prepared does, so a
-watch-only account goes on to the offline signer. Pick a multisig this wallet follows under Send as,
-and it goes to the Multisig page as a bundle for its members instead.
+watch-only account goes on to the offline signer. Pick a multisig this wallet's accounts are in, or
+one it follows, under Send as, and it goes to the Multisig page as a bundle for its members instead.
 
 Every screen that signs one, Send's review, the offline signer, a multisig's bundle and its proposals,
 puts the count and all they send in the coin first, then every step, numbered, in a frame of its own,
@@ -657,16 +679,22 @@ period, and which names each address owns; what each name is, the wallet proves.
 ## Multisig
 
 The **Multisig** page makes [multisigs](multisig.md#in-the-wallet) in plain steps, each member
-needing only a key on this chain, a Bitcoin account key and an EVM address being optional, changes
-their members, follows them, and takes their
-transactions round the members: a payment proposed and priced, signed with the account's key or on
-the offline signer from a `ur:chainv4-multisig` code, approved on chain through Send, and submitted
-once enough back it, under a key made for the moment, the multisig paying. What the node says of a
+needing only a key on this chain, of any scheme, Ed25519, EdBlake, Ethereum's or Bitcoin's, a
+Bitcoin account key and an EVM address being optional, for one that reaches EVM chains, Bitcoin or
+both. It lists every multisig any account in the wallet is a member of, from the node's member
+index (`--index-multisigs`), beside those followed by address, each with its address whole, a Copy
+button and its QR code; changes their members; and takes their transactions round the members: a
+payment, or anything the Batch page makes, with its form, one step alone or several as a batch,
+proposed and priced for its heaviest quorum, signed as whichever of the wallet's member keys is
+picked under **Agree as**, one after another, or on the offline signer from a
+`ur:chainv4-multisig` code, approved on chain through Send as the account picked, and submitted
+once enough back it, under a key made for the moment, the multisig paying. The Batch page's Send
+as lists those multisigs too. What the node says of a
 multisig is shown as its word; nothing signed rests on it. The offline signer reads a bundle on
 Sign and shows it back signed. For a multisig on Bitcoin it shows the descriptor and fresh
 addresses, and with an Esplora API makes, combines and broadcasts its PSBTs; the offline signer
 signs a multisig's Bitcoin input at m/48'/coin'/0'/2', and its Pair page shows each account's member
-line. For one on EVM chains it shows its contract, and on a chain Settings reaches what it holds and
+line, for whichever of its keys is picked. For one on EVM chains it shows its contract, and on a chain Settings reaches what it holds and
 its owners; its calls are bundles signed with the account's EVM key or by the offline signer as
 EIP-712 typed data, deployed and sent from the account. The Swaps page swaps as a followed
 multisig too, its EVM locks going to the Multisig page as its contract's calls.
@@ -1052,16 +1080,23 @@ its router, the EVM's, switched with **Native** and **EVM** beside the page's tw
   events, and adding to it or taking your shares out; under them, folded, **Open a new pool**, at
   the price its first deposit sets.
 
-Approving a token, trading, adding and taking out are calls the Send page reviews and signs.
+Approving a token, trading, adding and taking out are calls the Send page reviews and signs,
+from the address the From picker names: what it holds of each asset and each pool's shares is what
+shows, asked again once another is picked.
 
 ### NFTs
 
 The **NFTs** page shows what the account holds of the chain's [collections](nft-standard.md):
 - **Where to look:** the node's collection registry, `GET /collections`, and each collection's
-  `tokens_of` for each of the account's addresses, the first 100 of each.
-- **What it proves:** each NFT's owner, or each multi-token amount, against the tip, by the
-  standards' [provable ownership](nft-standard.md#provable-ownership). An NFT shows only once its
-  proof says it is the account's, with how far that is trusted.
+  `tokens_of` for each of the account's addresses, of every scheme, the first 100 of each. An
+  address whose list did not come, as when the node turned away too many asks at once, is named in
+  a warning, and what it listed before stands until it comes.
+- **What it proves:** each NFT's owner, or each multi-token amount at every one of the account's
+  addresses, against the tip, by the standards' [provable ownership](nft-standard.md#provable-ownership).
+  An NFT shows at whichever of the account's addresses its proof names, compared as an address,
+  whichever of them listed it: one sent from one of the account's addresses to another shows at the
+  one it went to as soon as its proof says so, before that address's own list does. A proof answered
+  late, from a block older than one already taken, is not taken.
 - **Names and pictures:** a token's metadata and picture, where its `token_uri` points. `data:`
   URIs, on the chain, show always. `https://` and `ipfs://` ones only once Settings, **NFTs**,
   lets the wallet fetch them: each fetch tells whoever serves it, the IPFS gateway set there
@@ -1076,6 +1111,9 @@ The **NFTs** page shows what the account holds of the chain's [collections](nft-
 The **Bridge** page moves value through the chain's [bridges](bridges.md), the ones its
 [directory](governance.md#directory) names, under the federation in force, both proven by the
 light client:
+- **From:** the address that sends, receives and has its deposit address shown, picked as on Send:
+  any scheme. What comes from an EVM chain is still signed there with the account's Ethereum key,
+  which the page names.
 - **To an EVM chain:** the coin, a token, an NFT or a multi-token amount, to an address there:
   letting the gateway take it, then sending, calls the Send page signs. The account's transfers
   out, among the latest 20, show the board's count of signatures and whether Gateway.sol took
@@ -1084,8 +1122,10 @@ light client:
   says so, and refunded once it was; those are the federation's own steps, so it offers no delivery.
 - **From an EVM chain:** letting Gateway.sol take it, then sending, signed there with the
   account's Ethereum key, or by the offline signer. It arrives as the federation signs it.
-- **Bitcoin:** the account's deposit address, with its QR code, computed here from the federation,
-  the chain's id and the gateway the directory names, so it holds on this chain alone.
+- **Bitcoin:** the picked address's deposit address, with its QR code, computed here from the
+  federation, the chain's id and the gateway the directory names, so it holds on this chain alone.
+  Each of the account's addresses has its own, and what is paid to it is minted to that address.
+  The light client watches every address's deposit address, of every account, whichever is picked.
   A payment to it, found by the wallet's own [Bitcoin light client](#bitcoin-followed-by-the-wallet-itself)
   and deep enough, is minted as wBTC by its proof from the block it came in; without the light
   client, by Esplora's proof of a transaction typed in. wBTC is withdrawn to a `bc1q…` address or

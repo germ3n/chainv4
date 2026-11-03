@@ -4,6 +4,7 @@
 
 use {
     super::*,
+    crate::crypto::keypair::KeyType,
     crate::registry::multisig::{MultisigBody, MultisigMember, MultisigPolicy, Multisigs},
     crate::structs::address::multisig_address,
     crate::structs::tx::MemberSignature,
@@ -316,4 +317,197 @@ fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
 
     assert_eq!(multisigs.evm_start(&account).unwrap(), Some(start));
     assert_eq!(multisigs.get(&account).unwrap().unwrap().evm().unwrap().owners, [[3; 20], [4; 20]]);
+}
+
+/// A key of a scheme, from a seed: one of each for a multisig whose members use every scheme.
+fn of_scheme(scheme: KeyType, seed: u8) -> Keypair {
+    use crate::crypto::keypair::PrivateKey;
+
+    Keypair::from_private(match scheme {
+        KeyType::Ed25519 => PrivateKey::Ed25519([seed; 32]),
+        KeyType::EdBlake => PrivateKey::EdBlake([seed; 32]),
+        KeyType::Secp256k1 => PrivateKey::Secp256k1([seed; 32]),
+        KeyType::Bitcoin => PrivateKey::Bitcoin([seed; 32]),
+    })
+}
+
+#[test]
+fn a_multisig_of_one_member_of_every_scheme_signs_and_approves_with_each() {
+    let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
+    let creator = authority();
+    let keys: Vec<Keypair> = KeyType::ALL.iter().enumerate().map(|(place, scheme)| of_scheme(*scheme, 51 + place as u8)).collect();
+
+    assert_eq!(keys.len(), 4, "Ed25519, EdBlake, secp256k1 and bitcoin");
+
+    let at = nonce(&chain, &creator);
+    let create = Tx::CreateMultisig { members: keys.iter().map(member).collect(), threshold: 3, testnet: false };
+    let receipts = advance(&mut chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &creator, &genesis_id)]);
+    let account = multisig_address(&creator.public().address(), at, chain.hash());
+
+    assert_eq!(receipts[0].result, Ok(Effect::Deployed(account)));
+    let funding = transfer(&chain, &creator, &account, 1_000);
+    advance(&mut chain, vec![funding]);
+
+    let [ed, blake, ethereum, bitcoin] = [&keys[0], &keys[1], &keys[2], &keys[3]];
+
+    // Each scheme's member signs off chain, and approves on chain from its own account, in turn.
+    for (signers, approvers) in [(vec![ed, blake, ethereum], Vec::new()), (vec![bitcoin], vec![ethereum, blake]), (Vec::new(), vec![bitcoin, ed, ethereum])] {
+        let to = Address::Ed25519([9; 32]);
+        let tx = Tx::Transfer { from: account, to, amount: Amount::U128(1) };
+        let next = multisig_nonce(&chain, &account);
+        let approvals: Vec<SignedTx> = approvers
+            .iter()
+            .map(|keypair| SignedTx::sign(Tx::ApproveMultisig { account, nonce: next, fee: FeeOffer::NONE, tx: Box::new(tx.clone()) }, nonce(&chain, keypair), FeeOffer::NONE, keypair, &genesis_id))
+            .collect();
+
+        for receipt in advance(&mut chain, approvals) {
+            assert!(receipt.result.is_ok(), "{receipt:?}");
+        }
+
+        let body = MultisigBody { account, tx: tx.clone(), nonce: next, fee: FeeOffer::NONE };
+        let signatures = signers.iter().map(|keypair| MemberSignature::sign(&body, keypair, &genesis_id)).collect();
+        let carrier = signers.first().copied().unwrap_or(bitcoin);
+        let receipts = advance(&mut chain, vec![SignedTx::sign(Tx::Multisig { account, tx: Box::new(tx), signatures }, next, FeeOffer::NONE, carrier, &genesis_id)]);
+
+        assert_eq!(receipts.len(), 1, "{} signing, {} approving", signers.len(), approvers.len());
+        assert_eq!(receipts[0].result, Ok(Effect::Done));
+    }
+
+    assert_eq!(multisig_nonce(&chain, &account), 3);
+    assert_eq!(balance(&chain, &Address::Ed25519([9; 32])), u256::new(3));
+}
+
+#[cfg(feature = "bitcoin")]
+#[test]
+fn a_multisig_reaches_here_evm_alone_bitcoin_alone_or_both() {
+    use crate::crypto::mnemonic::Phrase;
+
+    let mut chain = open(&Arc::new(MemoryDb::default()));
+    let creator = authority();
+    let keys = [of_scheme(KeyType::Ed25519, 61), of_scheme(KeyType::Bitcoin, 62)];
+    // Each member's account key on Bitcoin is its own words', apart from its key here, a bitcoin:
+    // one too, which derives elsewhere.
+    let xpub = |words: &str| Phrase::parse(words).unwrap().seed("").multisig_account(0);
+    let xpubs = [xpub("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"), xpub("legal winner thank year wave sausage worth useful legal winner thank yellow")];
+
+    for (bitcoin, evm) in [(false, false), (false, true), (true, false), (true, true)] {
+        let members = keys
+            .iter()
+            .enumerate()
+            .map(|(place, keypair)| MultisigMember { key: keypair.public(), bitcoin: bitcoin.then_some(xpubs[place]), evm: evm.then_some([place as u8 + 1; 20]) })
+            .collect();
+        let at = nonce(&chain, &creator);
+        let create = SignedTx::sign(Tx::CreateMultisig { members, threshold: 2, testnet: false }, at, FeeOffer::NONE, &creator, &chain.genesis());
+        let receipts = advance(&mut chain, vec![create]);
+        let account = multisig_address(&creator.public().address(), at, chain.hash());
+        let policy = Multisigs::new(&chain.state()).get(&account).unwrap().unwrap();
+
+        assert_eq!(receipts[0].result, Ok(Effect::Deployed(account)), "Bitcoin {bitcoin}, EVM {evm}");
+        assert_eq!((policy.members.iter().all(|member| member.bitcoin.is_some()), policy.evm().is_some()), (bitcoin, evm));
+    }
+}
+
+#[test]
+fn the_member_index_lists_each_multisig_under_its_members_through_changes_reorgs_and_a_late_start() {
+    // The same blocks go to a chain that keeps the index from the start, and one that starts late.
+    let live_db = Arc::new(MemoryDb::default());
+    let mut live = Chain::open(live_db.clone(), &pow_genesis()).unwrap();
+    let late_db = Arc::new(MemoryDb::default());
+    let mut late = Chain::open(late_db.clone(), &pow_genesis()).unwrap();
+    let genesis_block = late.block_at(0).unwrap().unwrap();
+    let genesis_id = pow_genesis().block().id();
+    let hash = HashType::default_chain();
+    let creator = authority();
+    let miner = Address::Ed25519([9; 32]);
+    let [alice, bob, carol] = members();
+    let (ethereum, dave) = (of_scheme(KeyType::Secp256k1, 34), Keypair::from_seed([35; 32]));
+    let make = |keys: &[&Keypair], threshold: u32, nonce: u64| {
+        let create = Tx::CreateMultisig { members: keys.iter().map(|keypair| member(keypair)).collect(), threshold, testnet: false };
+
+        SignedTx::sign(create, nonce, FeeOffer::NONE, &creator, &genesis_id)
+    };
+    let (first, second) = (multisig_address(&creator.public().address(), 0, hash), multisig_address(&creator.public().address(), 1, hash));
+    let listed = |chain: &Chain, keypair: &Keypair| {
+        let mut found = stored_multisigs_of(&*chain.db, &keypair.public().address(), None, 10).unwrap().0;
+        found.sort();
+
+        found
+    };
+    let entries = |db: &MemoryDb| {
+        let mut all = Vec::new();
+        db.scan(Column::Members, &[], &[], &mut |key, value| {
+            all.push((key.to_vec(), value.to_vec()));
+
+            true
+        })
+        .unwrap();
+
+        all
+    };
+    let both = |found: [Address; 2]| {
+        let mut found = found.to_vec();
+        found.sort();
+
+        found
+    };
+
+    assert_eq!(live.keep_member_index().unwrap(), Some(0), "nothing to build it from yet");
+    assert_eq!(live.keep_member_index().unwrap(), None, "kept already");
+
+    // Two multisigs: alice is in both, and the Ethereum account is found by its address.
+    let b1 = mine_on(&late, &genesis_block, vec![make(&[&alice, &bob, &carol], 2, 0), make(&[&alice, &ethereum], 1, 1)], miner);
+
+    for chain in [&mut live, &mut late] {
+        extended(chain.import(&b1, LATER));
+    }
+
+    assert_eq!(listed(&live, &alice), both([first, second]));
+    assert_eq!((listed(&live, &bob), listed(&live, &ethereum)), (vec![first], vec![second]));
+
+    // The second's quorum swaps the Ethereum account for dave: the one removed goes.
+    let change = Tx::ChangeMultisig { members: vec![member(&alice), member(&dave)], threshold: 1, testnet: false };
+    let body = MultisigBody { account: second, tx: change.clone(), nonce: 0, fee: FeeOffer::NONE };
+    let signed = SignedTx::sign(Tx::Multisig { account: second, tx: Box::new(change), signatures: vec![MemberSignature::sign(&body, &alice, &genesis_id)] }, 0, FeeOffer::NONE, &alice, &genesis_id);
+    let b2 = mine_on(&late, &b1, vec![signed], miner);
+
+    for chain in [&mut live, &mut late] {
+        extended(chain.import(&b2, LATER));
+    }
+
+    assert!(listed(&live, &ethereum).is_empty(), "no longer a member");
+    assert_eq!((listed(&live, &dave), listed(&live, &alice)), (vec![second], both([first, second])));
+
+    // Pages go on from the last multisig listed.
+    let (page, next) = stored_multisigs_of(&*live_db, &alice.public().address(), None, 1).unwrap();
+    let (rest, after) = stored_multisigs_of(&*live_db, &alice.public().address(), next.as_ref(), 1).unwrap();
+
+    assert_eq!((page.len(), next, after), (1, Some(page[0]), None));
+    assert_eq!(both([page[0], rest[0]]), both([first, second]));
+
+    // Turned on late, on a chain that has run: built whole from the registry as it is now.
+    assert!(entries(&late_db).is_empty());
+    assert_eq!(late.keep_member_index().unwrap(), Some(2));
+    assert_eq!(entries(&late_db), entries(&live_db), "building it builds what following the blocks did");
+
+    // A heavier branch from the first block takes the change off, and what it did to the index.
+    let mut branch = vec![mine_on(&late, &b1, Vec::new(), miner)];
+
+    for _ in 0..2 {
+        for chain in [&mut live, &mut late] {
+            chain.import(branch.last().unwrap(), LATER).unwrap();
+        }
+
+        branch.push(mine_on(&late, branch.last().unwrap(), Vec::new(), miner));
+    }
+
+    assert_eq!(late.tip().id(), branch[1].header.id());
+    assert_eq!((listed(&late, &ethereum), listed(&late, &dave)), (vec![second], Vec::new()));
+    assert_eq!(entries(&late_db), entries(&live_db));
+
+    // Kept across a restart, until dropped.
+    assert!(Chain::open(live_db.clone(), &pow_genesis()).unwrap().member_index());
+    assert!(late.drop_member_index().unwrap());
+    assert!(entries(&late_db).is_empty());
+    assert!(!Chain::open(late_db.clone(), &pow_genesis()).unwrap().member_index());
 }

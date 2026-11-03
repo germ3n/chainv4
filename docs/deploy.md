@@ -96,7 +96,8 @@ which git, images and pushes all leave out. `consensus.target_block_ms` is 5000 
 
 In `docker/.env`: `EXTRA_ARGS=--no-mdns --archive` (every height's state kept),
 `INDEX_EVENTS=genesis` and `INDEX_ADDRESSES=genesis` (events and addresses indexed from the
-start), and no `SWAP_CONTRACT`, `DEX_CONTRACT` or `DEX_ROUTER` left from the old chain: the
+start), `INDEX_MULTISIGS=on` (multisigs by their members, built from the registry at once on a
+chain already running), and no `SWAP_CONTRACT`, `DEX_CONTRACT` or `DEX_ROUTER` left from the old chain: the
 directory names them now.
 
 ```sh

@@ -18,7 +18,7 @@ fn dev() -> Shown {
 }
 
 fn laid(steps: &[Tx]) -> Steps {
-    of(steps, &dev(), &|_| None, None)
+    of(steps, &dev(), &|_| Known::Unknown, None)
 }
 
 const COIN: u128 = 1_000_000_000_000_000_000;
@@ -56,12 +56,7 @@ fn each_kind_says_what_it_does_and_a_token_goes_by_its_name_only_where_it_is_kno
     let token = Address::Contract([3; 32]);
     let transfer = Tx::ContractCall { to: token, func: Hasher::digest(HashType::Xxh3_64, b"transfer"), amount: Amount::U128(0), data: vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(250))] };
 
-    let unknown = laid(std::slice::from_ref(&transfer));
-
-    assert_eq!(unknown.steps[0].kind, "Send a token");
-    assert!(unknown.steps[0].rows.iter().any(|row| row.said == Said::Text("250 units of the token".to_string())), "{:?}", unknown.steps[0].rows);
-
-    let gold = |_: &Address| Some(Shown { symbol: "GOLD".to_string(), decimals: 2 });
+    let gold = |_: &Address| Known::Token(Shown { symbol: "GOLD".to_string(), decimals: 2 });
     let named = of(std::slice::from_ref(&transfer), &dev(), &gold, None);
 
     assert_eq!(named.steps[0].kind, "Send GOLD");
@@ -100,7 +95,7 @@ fn deploys_say_where_they_land_each_apart_and_where_nothing_says_the_chain_s_has
     let evm = || Tx::Deploy { code: Code::Evm(vec![0]) };
     let hash = HashType::default_chain();
     let landing = Landing { sender: me(), nonce: 7, hash };
-    let steps = of(&[code(), Tx::PrimaryName { name: None }, code(), evm()], &dev(), &|_| None, Some(&landing));
+    let steps = of(&[code(), Tx::PrimaryName { name: None }, code(), evm()], &dev(), &|_| Known::Unknown, Some(&landing));
     let lands = |index: usize| steps.steps[index].rows.iter().find(|row| row.label == "Lands at").map(|row| row.said.clone());
 
     assert_eq!(lands(0), Some(Said::Address(contract_address(&me(), 7, hash).to_string())));
@@ -133,7 +128,7 @@ fn a_coin_or_token_named_to_deceive_keeps_to_its_field() {
         Tx::Transfer { from: me(), to: someone(), amount: Amount::U128(5) },
         Tx::ContractCall { to: token, func: Hasher::digest(HashType::Xxh3_64, b"transfer"), amount: Amount::U128(0), data: vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(5))] },
     ];
-    let laid = of(&steps, &lying, &|_| Some(lying.clone()), None);
+    let laid = of(&steps, &lying, &|_| Known::Token(lying.clone()), None);
     let everything = format!("{laid:?}");
 
     assert!(!everything.contains("Step 9 of 9\u{202e}") || everything.contains("\\n"), "{everything}");
@@ -143,3 +138,87 @@ fn a_coin_or_token_named_to_deceive_keeps_to_its_field() {
     assert!(laid.steps[1].rows.iter().all(|row| matches!(&row.said, Said::Address(_)) || matches!(&row.said, Said::Text(text) if text.lines().count() == 1 && !text.contains('\u{202e}'))), "{:?}", laid.steps[1].rows);
 }
 
+
+fn call(to: Address, function: &str, data: Vec<TxCallArgumentType>) -> Tx {
+    Tx::ContractCall { to, func: Hasher::digest(HashType::Xxh3_64, function.as_bytes()), amount: Amount::U128(0), data }
+}
+
+fn texts(step: &Step) -> Vec<(String, String)> {
+    step.rows.iter().map(|row| (row.label.clone(), match &row.said { Said::Text(text) | Said::Address(text) => text.clone() })).collect()
+}
+
+/// What a step says, by the label of the row saying it.
+fn said<'a>(rows: &'a [(String, String)], label: &str) -> Option<&'a str> {
+    rows.iter().find(|(said, _)| said == label).map(|(_, text)| text.as_str())
+}
+
+#[test]
+fn an_nft_s_transfer_names_its_collection_id_and_recipient_and_never_an_amount() {
+    let collection = Address::Contract([4; 32]);
+    let art = |_: &Address| Known::Collection { kind: CollectionKind::Nft, title: "Art".to_string() };
+
+    for function in ["transfer", "safe_transfer"] {
+        let laid = of(&[call(collection, function, vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(42))])], &dev(), &art, None);
+        let rows = texts(&laid.steps[0]);
+
+        assert_eq!(laid.steps[0].kind, "Send NFT #42", "{function}");
+        assert_eq!(said(&rows, "Collection"), Some("Art"));
+        assert_eq!(said(&rows, "Contract"), Some(collection.to_string().as_str()));
+        assert_eq!(said(&rows, "Id"), Some("42"));
+        assert_eq!(said(&rows, "To"), Some(someone().to_string().as_str()));
+        assert!(rows.iter().all(|(label, text)| label != "Amount" && !text.contains("units")), "no amount: {rows:?}");
+        assert_eq!(laid.total.1, "0", "it sends none of the coin");
+    }
+}
+
+#[test]
+fn a_multi_token_s_transfer_says_which_id_and_how_many() {
+    let collection = Address::Contract([5; 32]);
+    let items = |_: &Address| Known::Collection { kind: CollectionKind::Multi, title: "Items".to_string() };
+    let laid = of(&[call(collection, "transfer", vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(7)), TxCallArgumentType::U256(u256::new(3))])], &dev(), &items, None);
+    let rows = texts(&laid.steps[0]);
+
+    assert_eq!(laid.steps[0].kind, "Send 3 of #7");
+    assert_eq!((said(&rows, "Collection"), said(&rows, "Id"), said(&rows, "How many")), (Some("Items"), Some("7"), Some("3")));
+    assert_eq!(said(&rows, "To"), Some(someone().to_string().as_str()));
+
+    // An NFT's shape sent to a multi-token collection is no transfer of it the wallet can name.
+    let short = of(&[call(collection, "transfer", vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(7))])], &dev(), &items, None);
+
+    assert_eq!(short.steps[0].kind, "Call transfer");
+}
+
+#[test]
+fn a_token_s_transfer_says_its_amount_in_the_token_s_units() {
+    let token = Address::Contract([3; 32]);
+    let gold = |_: &Address| Known::Token(Shown { symbol: "GOLD".to_string(), decimals: 2 });
+    let laid = of(&[call(token, "transfer", vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(250))])], &dev(), &gold, None);
+    let rows = texts(&laid.steps[0]);
+
+    assert_eq!(laid.steps[0].kind, "Send GOLD");
+    assert_eq!(said(&rows, "Amount"), Some("2.5 GOLD · 250 units"));
+    assert_eq!(said(&rows, "To"), Some(someone().to_string().as_str()));
+}
+
+#[test]
+fn a_transfer_to_a_contract_known_as_neither_says_so_and_calls_no_number_an_amount() {
+    let stranger = Address::Contract([6; 32]);
+
+    for data in [
+        vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(42))],
+        vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(7)), TxCallArgumentType::U256(u256::new(3))],
+    ] {
+        let laid = laid(&[call(stranger, "transfer", data)]);
+        let rows = texts(&laid.steps[0]);
+
+        assert_eq!(laid.steps[0].kind, "Call transfer");
+        assert_eq!(said(&rows, "Known as"), Some(UNKNOWN_CONTRACT));
+        assert!(said(&rows, "Argument 2").is_some(), "its number shows, unnamed: {rows:?}");
+        assert!(rows.iter().all(|(label, text)| label != "Amount" && !text.contains("units of the token")), "{rows:?}");
+    }
+
+    // Another call to it says only what it is.
+    let other = laid(&[call(stranger, "approve", vec![TxCallArgumentType::Address(someone()), TxCallArgumentType::U256(u256::new(1))])]);
+
+    assert!(said(&texts(&other.steps[0]), "Known as").is_none());
+}

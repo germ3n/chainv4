@@ -9,6 +9,7 @@ pub mod bridge;
 mod contracts;
 mod decoded;
 mod faucet;
+pub mod from;
 pub mod dapp;
 #[cfg(feature = "swap")]
 pub mod evm;

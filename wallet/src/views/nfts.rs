@@ -63,6 +63,7 @@ enum Media {
 #[derive(Default)]
 pub struct NftsState {
     collections: Vec<Listed>,
+    /// The registry's pages so far, while it comes a page at a time, and the cursor of the next.
     asked: f64,
     /// The ids each address holds of each collection, as tokens_of said: where to look, the proof
     /// says what is so.
@@ -73,6 +74,10 @@ pub struct NftsState {
     media: HashMap<String, Media>,
     /// The NFT open, by collection and id, with the address holding it.
     open: Option<(String, String, String)>,
+    /// The account's addresses, as the page last drew: whose amounts of each multi-token id to prove.
+    addresses: Vec<String>,
+    /// Why tokens_of was not answered for an address, by its text, until it is.
+    unasked: HashMap<String, String>,
     to: String,
     amount: String,
     trouble: Option<String>,
@@ -109,11 +114,10 @@ fn values(result: &Result<Value, crate::node::Failure>) -> Option<Vec<String>> {
 }
 
 impl NftsState {
-    /// Takes the registry's list.
-    pub fn collections(&mut self, result: &Result<Value, crate::node::Failure>) {
-        if let Ok(value) = result {
-            self.collections = listed(value);
-        }
+    /// Takes the collection registry's entries, as the light client's whole listing of it holds
+    /// them: the chain asks it a page at a time, for its proofs and this page both.
+    pub fn collections(&mut self, entries: &[Value]) {
+        self.collections = listed(&serde_json::json!({ "collections": entries }));
     }
 
     /// Takes the collections' answers; false for anyone else's.
@@ -134,7 +138,17 @@ impl NftsState {
 
         match (body["function"].as_str(), values(result)) {
             (Some("tokens_of"), Some(ids)) => {
+                self.unasked.remove(&first);
                 self.held.insert((contract, first), ids);
+            }
+            // What it held before stands until it is answered: a list lost on the way must not take
+            // an NFT off the page, nor leave the page saying nothing of it.
+            (Some("tokens_of"), None) => {
+                let why = match result {
+                    Ok(value) => value["error"].as_str().unwrap_or("the collection would not say").to_string(),
+                    Err(failure) => failure.message.clone(),
+                };
+                self.unasked.insert(first, why);
             }
             (Some("token_uri"), Some(uri)) => {
                 if let Some(uri) = uri.into_iter().next() {
@@ -160,17 +174,54 @@ impl NftsState {
         }
     }
 
-    /// What the page wants proven: the owner of each NFT the addresses hold, or each amount.
+    /// What the page wants proven: the owner of each NFT any of the account's addresses was listed
+    /// as holding, or each of its addresses' amount of each multi-token id any of them was. The
+    /// proof says where it is now, which may be another of the account's addresses than the list
+    /// said, as when it was sent from one to another since.
     pub fn wanted(&self) -> Vec<Held> {
-        let kinds: HashMap<&str, CollectionKind> = self.collections.iter().map(|listed| (listed.address.as_str(), listed.kind)).collect();
+        let mut wanted = Vec::new();
 
-        self.held
-            .iter()
-            .filter_map(|((collection, holder), ids)| Some((collection, holder, ids, *kinds.get(collection.as_str())?)))
-            .flat_map(|(collection, holder, ids, kind)| {
-                ids.iter().map(move |id| Held { collection: collection.clone(), id: id.clone(), multi: kind == CollectionKind::Multi, holder: holder.clone() })
-            })
-            .collect()
+        for listed in &self.collections {
+            for id in self.ids(listed) {
+                match listed.kind {
+                    CollectionKind::Nft => wanted.push(Held { collection: listed.address.clone(), id, multi: false, holder: String::new() }),
+                    CollectionKind::Multi => {
+                        for holder in &self.addresses {
+                            wanted.push(Held { collection: listed.address.clone(), id: id.clone(), multi: true, holder: holder.clone() });
+                        }
+                    }
+                }
+            }
+        }
+
+        wanted
+    }
+
+    /// The ids of a collection any of the account's addresses was listed as holding, each once.
+    fn ids(&self, listed: &Listed) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+
+        for holder in &self.addresses {
+            for id in self.held.get(&(listed.address.clone(), holder.clone())).into_iter().flatten() {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+
+        ids
+    }
+
+    /// Keeps each card's id listed under the address the proof found it at, so it stays followed
+    /// there until that address's own list says otherwise.
+    fn follow(&mut self, cards: &[Card]) {
+        for card in cards {
+            let listed = self.held.entry((card.listed.address.clone(), card.holder.clone())).or_default();
+
+            if !listed.contains(&card.id) {
+                listed.push(card.id.clone());
+            }
+        }
     }
 }
 
@@ -222,12 +273,14 @@ fn want(ctx: &mut Ctx, state: &mut NftsState, uri: &str) {
 }
 
 fn refresh(ctx: &mut Ctx, state: &mut NftsState, time: f64) {
+    state.addresses = ctx.addresses();
+
     if time - state.asked < ASK_EVERY {
         return;
     }
 
+    // The registry's collections come from the light client's listing of it, which it proves.
     state.asked = time;
-    ctx.node.ask(Ask::Collections);
 
     for listed in state.collections.clone() {
         for address in ctx.addresses() {
@@ -260,29 +313,31 @@ struct Card {
     assurance: chainv4::light::Assurance,
 }
 
-/// The NFTs proven held by the account's addresses.
+/// The NFTs proven held by the account's addresses: each at the address its proof names, whichever
+/// of them listed it, so one sent between the account's own addresses shows at the one it went to.
+/// The owner proven is compared as an address, not as text.
 fn cards(ctx: &Ctx, state: &NftsState) -> Vec<Card> {
+    let mine = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
     let mut cards = Vec::new();
 
     for listed in &state.collections {
-        for holder in ctx.addresses() {
-            for id in state.held.get(&(listed.address.clone(), holder.clone())).into_iter().flatten() {
-                let proven = match listed.kind {
-                    CollectionKind::Nft => ctx.chain.nft_owners.get(&(listed.address.clone(), id.clone())).and_then(|proven| {
-                        let owner = proven.value.map(|owner| owner.to_string());
+        for id in state.ids(listed) {
+            match listed.kind {
+                CollectionKind::Nft => {
+                    let owned = ctx.chain.nft_owners.get(&(listed.address.clone(), id.clone())).and_then(|proven| Some((proven.value.filter(|owner| mine.contains(owner))?, proven.assurance)));
 
-                        (owner.as_deref() == Some(holder.as_str())).then(|| (u256::from(1u64), proven.assurance))
-                    }),
-                    CollectionKind::Multi => ctx
-                        .chain
-                        .multi_balances
-                        .get(&(listed.address.clone(), id.clone(), holder.clone()))
-                        .filter(|proven| proven.value > u256::ZERO)
-                        .map(|proven| (proven.value, proven.assurance)),
-                };
+                    if let Some((owner, assurance)) = owned {
+                        cards.push(Card { listed: listed.clone(), id, holder: owner.to_string(), amount: u256::from(1u64), assurance });
+                    }
+                }
+                CollectionKind::Multi => {
+                    for holder in &mine {
+                        let held = ctx.chain.multi_balances.get(&(listed.address.clone(), id.clone(), holder.to_string())).filter(|proven| proven.value > u256::ZERO);
 
-                if let Some((amount, assurance)) = proven {
-                    cards.push(Card { listed: listed.clone(), id: id.clone(), holder: holder.clone(), amount, assurance });
+                        if let Some(proven) = held {
+                            cards.push(Card { listed: listed.clone(), id: id.clone(), holder: holder.to_string(), amount: proven.value, assurance: proven.assurance });
+                        }
+                    }
                 }
             }
         }
@@ -305,7 +360,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
     }
 
     let cards = cards(ctx, state);
-    let waiting = state.wanted().len() > cards.len();
+    state.follow(&cards);
+    let waiting = cards.is_empty() && !state.wanted().is_empty();
 
     for card in &cards {
         if let Some(uri) = state.uris.get(&(card.listed.address.clone(), card.id.clone())).cloned() {
@@ -332,6 +388,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Held");
+
+        // What a list that did not come leaves out is not known to be gone: say whose.
+        for (address, why) in state.unasked.iter().filter(|(address, _)| state.addresses.contains(address)) {
+            let label = ctx.holder().and_then(|holder| holder.addresses().into_iter().find(|mine| mine.to_string() == *address)).map_or("An address", |mine| super::scheme(&mine));
+            ui.add(egui::Label::new(RichText::new(format!("{label} {}: what it holds was not listed ({why}). Asked again in a moment.", format::short(address))).small().color(palette.warn)).wrap());
+        }
 
         if cards.is_empty() {
             match (state.collections.is_empty(), waiting) {
@@ -370,6 +432,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
     });
 
     if let Some(prepared) = prepared {
+        // Back from sending, the lists are asked again at once: the NFT has moved.
+        state.asked = f64::NEG_INFINITY;
         send.prepare(prepared);
         *ctx.page = Page::Send;
     }

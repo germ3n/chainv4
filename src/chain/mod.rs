@@ -41,6 +41,7 @@ pub mod fees;
 mod finality;
 pub(crate) use finality::switch;
 mod index;
+mod members;
 #[cfg(feature = "json")]
 pub mod json;
 pub mod migrate;
@@ -51,6 +52,7 @@ mod receipt;
 pub use addresses::{AddressScan, IndexedTx, address_txs_from, scan_address_txs, stored_address_txs, touched};
 pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
+pub use members::{stored_member_index, stored_multisigs_of};
 pub use range::{RangeLimits, RangeProblem, stored_block_range};
 pub use execute::{BlockContext, Effect, Failure, GovernanceRules, Receipt, Rules, SignerRules, StakingRules, TxError};
 pub use fees::{FeeConfig, Fees};
@@ -1087,6 +1089,8 @@ pub struct Chain {
     /// The event index and the address index, when this node keeps them.
     events: Option<IndexWindow>,
     addresses: Option<IndexWindow>,
+    /// Whether this node keeps the member index, which follows the multisig registry whole.
+    members: bool,
     /// The height this node took state at, when it synced from a snapshot: it has headers only
     /// below it, and never rolls back past it.
     snapshot: Option<u64>,
@@ -1242,6 +1246,7 @@ impl Chain {
         };
         let events = index::events_up_to_date(&db, index::stored_index(&*db, IndexKind::Events)?, tip.header.height)?;
         let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
+        let members = members::stored_member_index(&*db)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
         let bad_order: VecDeque<Hash> = read_value::<BadBlocks>(&*db, Column::Meta, BAD_KEY)?.unwrap_or_default().blocks.into();
         // A database from before history begins it at its tip.
@@ -1279,6 +1284,7 @@ impl Chain {
             workers,
             events,
             addresses,
+            members,
             snapshot,
             state_history: Some(DEFAULT_STATE_HISTORY),
             next: BlockParams { rules: genesis.rules(), reward: (genesis.reward, 0), max_block_bytes: genesis.max_block_bytes },
@@ -1424,6 +1430,40 @@ impl Chain {
         *self.window(kind) = Some(window);
 
         Ok(window.from != lowest)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Keeps the member index: each multisig under the address of every member's key, for GET /accounts/{address}/multisigs. One the database does not keep yet is built whole from the multisig registry at once, in one atomic write, however long the chain has run; from then on each block moves it as it changes a multisig's members. Once on, it stays on until drop_member_index.",
+        returns = "How many multisigs it was built from, or None when the database kept it already.",
+        see_also = "Chain::drop_member_index, stored_multisigs_of",
+    )]
+    pub fn keep_member_index(&mut self) -> Result<Option<usize>, DbError> {
+        if self.members {
+            return Ok(None);
+        }
+
+        let built = members::rebuild(&self.db)?;
+        self.members = true;
+
+        Ok(Some(built))
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Stops keeping the member index, deleting it in one atomic write.",
+        returns = "Whether there was one to drop.",
+        see_also = "Chain::keep_member_index",
+    )]
+    pub fn drop_member_index(&mut self) -> Result<bool, DbError> {
+        members::forget(&self.db)?;
+
+        Ok(std::mem::take(&mut self.members))
+    }
+
+    #[document(parent = "Chain", summary = "Whether this node keeps the member index.")]
+    pub fn member_index(&self) -> bool {
+        self.members
     }
 
     #[document(parent = "Chain", summary = "What one of the indexes holds and keeps, when this node keeps it.")]
@@ -1680,7 +1720,7 @@ impl Chain {
         for height in (fork_height + 1..=self.tip.height).rev() {
             let undone: Hash = read_value(&*state, Column::Heights, &height.to_be_bytes())?
                 .ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
-            revert(&state, &undone)?;
+            revert(&state, &undone, false)?;
         }
 
         for block in branch.iter().rev() {
@@ -1856,6 +1896,11 @@ impl Chain {
         state.put_value(Column::Meta, HISTORY_FROM_KEY.to_vec(), &HistoryFrom { height: pivot.header.height });
         self.db.commit(state.take_changes())?;
         log::info!("[chain] installed a snapshot at height {} {id}", pivot.header.height);
+
+        // The member index follows the registry, which the snapshot's state replaced whole.
+        if self.members {
+            members::rebuild(&self.db)?;
+        }
 
         self.tip = pivot.header.clone();
         self.tip_work = work;
@@ -2396,7 +2441,7 @@ impl Chain {
         for height in (fork_height + 1..=self.tip.height).rev() {
             let id: Hash = read_value(&*state, Column::Heights, &height.to_be_bytes())?
                 .ok_or_else(|| DbError::Corrupt(format!("no main-chain block at height {height}")))?;
-            revert(&state, &id)?;
+            revert(&state, &id, self.members)?;
             undone.push(self.block(&id)?.ok_or_else(|| missing(&id))?);
         }
 
@@ -2554,6 +2599,11 @@ impl Chain {
             }
         }
 
+        // Whoever the block made or changed a multisig's members, as the registry now says.
+        if self.members {
+            members::follow(&layer, &**below)?;
+        }
+
         layer.put_value(Column::Heights, height.to_be_bytes().to_vec(), &id);
         layer.put_value(Column::Meta, TIP_KEY.to_vec(), &id);
         let changes = layer.take_changes();
@@ -2650,16 +2700,25 @@ impl Chain {
 }
 
 /// Takes a main-chain block back off, restoring every value it replaced.
-fn revert(state: &Arc<State>, id: &Hash) -> Result<(), DbError> {
+fn revert(state: &Arc<State>, id: &Hash, members: bool) -> Result<(), DbError> {
     let undo: Undo = read_value(&**state, Column::Undo, &id_key(id))?
         .ok_or_else(|| DbError::Corrupt(format!("no undo record for {id}")))?;
+    let layer = State::new(state.clone());
 
     for entry in undo.entries {
         match entry.value {
-            Some(value) => state.put(entry.column, entry.key, value),
-            None => state.delete(entry.column, entry.key),
+            Some(value) => layer.put(entry.column, entry.key, value),
+            None => layer.delete(entry.column, entry.key),
         }
     }
+
+    // The member index goes back with the registry it follows, built late or not: a block run
+    // before the node kept it left nothing of it in its undo record.
+    if members {
+        members::follow(&layer, &**state)?;
+    }
+
+    state.merge(layer.take_changes());
 
     Ok(())
 }

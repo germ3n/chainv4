@@ -789,6 +789,54 @@ offline; these would make that hold up as a treasury.
 
 ### Node, API and tooling
 
+- [x] **Multisigs in the wallet: every one you are in, anything to propose, any key to sign with.**
+  Done 2026-11-03, from the user's reports and a testnet run. In the node: a member index,
+  `--index-multisigs` (`Column::Members`, `src/chain/members.rs`), each multisig under the address
+  of each member's key, built from the registry when turned on, on a chain already running too, and
+  moved by every block that writes a policy, a removed member's going, and back on a rollback;
+  `GET /accounts/{address}/multisigs`, by address or key, a page at a time. Proposals are priced
+  for their heaviest quorum under the heaviest carrier (`MultisigBundle::probe`), in the CLI and the
+  wallet, and sent with no more than threshold signatures (`trimmed`): a secp256k1 member signing
+  an Ed25519 member's proposal was refused under its intrinsic cost. `send --multisig` prints its
+  deploys' addresses, and `--member KEY,XPUB` makes one on Bitcoin alone. In the wallet: the
+  Multisig page lists every multisig any account is in, merged with those followed, each with its
+  address whole, Copy and its QR; proposes anything the Batch page makes, through its own step form,
+  one step as it is; picks which of the wallet's member keys signs and approves, or an offline
+  signer, starting at one that has not, and moving on after each; names who signed; takes members of
+  every scheme, with its own keys one pick away and its own addresses turned into keys; reaches EVM
+  chains, Bitcoin, or both, each row saying what it needs, filled from the wallet's own words in a
+  tap. Pair shows a member line for any of the account's keys. The explorer's account page lists
+  the multisigs an address is in. Listings the apps read a page at a time (the token and collection
+  registries, an account's names, its multisigs) now follow each page's cursor to the end, where
+  they stopped at 100 or 500.
+- [ ] **A multisig's listing is the node's word.** The member index and the policy it points to are
+  not proven on the Multisig page; proving the policy (`Multisigs::policy_key`) as a balance is
+  proven would make the page as sure as the rest.
+- [ ] **Per-account Bitcoin multisig xpubs.** Every account of one phrase names the same BIP48
+  xpub, at account 0', so two of them cannot be members of one multisig on Bitcoin. Deriving at
+  m/48'/coin'/n'/2' for account n would let them, once the offline signer signs there too.
+- [x] **Wallet pages send from any of the account's addresses, and read NFTs' transfers as NFTs.** Done
+  2026-11-03. The review read every `transfer(to, n)` with no coin as a token's, so sending an NFT
+  showed its id as "n units of the token". Steps now read a call by what the light client proved its
+  contract is: the wallet proves the collection registry's entries as it proves tokens', and shows a
+  collection's `transfer`/`safe_transfer` as the NFT, or the amount of an id, with its collection;
+  one to a contract proven as neither says so and names no amount. Send, Bridge, Trade, Swaps and
+  Batch share one From picker (`views/from.rs`) that holds across pages, where Bridge, Trade and
+  Swaps took the account's first address alone, and the light client watches every address's
+  Bitcoin deposit address. Activity says which address each line is for, and a transfer between the
+  account's own addresses shows as **Between your addresses** with its amount: before, it showed a
+  bare Transfer and only the fee. The NFTs page shows an NFT at whichever of the account's addresses
+  its proof names, compared as an address, keeps it there before that address's own list says so,
+  names an address whose list did not come, and takes no proof answered late from an older block,
+  so one sent between the account's addresses no longer drops off the page. The node and both
+  example collections write and prove every scheme's holders alike, a bitcoin `bc1q…` too (a test in
+  each engine now says so). No node or contract change.
+- [ ] **The offline signer names the collection of an NFT it signs for.** It knows only the token the
+  sender names in its request, so an NFT's transfer shows there as a call to a contract it does not
+  know, honestly but bare. The request could carry the collection, the sender's word as its token
+  is, which changes the airgap format; and the NFTs page could prove `tokens_of`'s ids rather than
+  ask a node for them, which a node may leave short.
+
 - [x] **Stuck Bitcoin releases are voted down by the signers' own passes.** Done 2026-11-01. One signer could
   propose a release the others refuse, and only a threshold of votes cancels one, with nothing voting. In
   `bridge btc pass`, `watch` and `bridge watch --esplora`, a signer now votes at once on what it refuses for
@@ -1375,15 +1423,10 @@ maybe add ability to use u128 for amounts if not too mcuh effort
 evm
 
 tighten lua sandbox
-make sure contract addresses start with contract:, then limit which keys can call into it potentailly
 add a thing to storage (At least lua), where we dont have to save addresses as text but can just save it directly
-make a native ens type thing, with fees/params that are from genesis or voted on i guess
 make sure max supply is configurable
 storage seems to save strings only, make it save raw types to save space, etc
-add voting for proposals, like consensus change, etc, upgrades, what not
 scan whole project in order -> scan docs -> go section by section and verify theres nothing that shouldnt be there/stale -> go through each subsytem nad find bugs, stuff that would be good to change -> go through each subsystems tests (all of them), and see if theres something that doesnt make sense/should be added or removed.
-find more hardcoded values that maybe should be confiruable and like be able to be changed, voted on, yada yada
-nice governance, voting visuals in explorer
 
 
 On running the PoW consensus on a real network: the protocol side is complete and tested: a configurable secure work hash, Bitcoin-style windowed retargeting with median-time-past and clamped intervals, fork choice by work bounded by max_reorg_depth, optional FFG checkpoints on top, GPU mining, and a VPS-plus-home run from the earlier batch. What I would not call ready: it has had no outside audit, sync pulls from one peer at a time, there is no selfish-mining mitigation beyond what Bitcoin has, and without finality a partition longer than max_reorg_depth blocks never heals on its own. Usable for a test network or a small launch; treat value on it as at risk until audited.
@@ -1392,19 +1435,4 @@ On running the PoW consensus on a real network: the protocol side is complete an
 What I'd prioritize next, over new features:
 1. A real testnet: 4 to 6 nodes on separate machines and networks, a couple of miners, running for weeks, with restarts, partitions and clock skew. Most of what broke today would have shown up there.
 2. Multi-node scenario tests in CI: in-process networks that fork, partition, rejoin and race miners. Today's two fixes now have tests; the class of bug needs more.
-3. Fuzzing: block, transaction and gossip decoding, and block import, with cargo-fuzz. Anything peers can send you is attack surface.
-4. The network-hardening items in your todo: persistent peer ids, connection limits, bans, gossip validation before relay. A public chain gets probed quickly.
-5. Protocol versioning: this session alone made two network-breaking changes (protocol names; the old genesis rule). Fine before launch, but you'll want version negotiation and a stability policy before others run nodes.
 6. An outside security review before anything has real value: consensus, finality, the VM and the wallet's key handling.
-
-
-evm cant interact with lua/wasm yet
-pentest reentrancy
-transfer from ed25519 to btc wallet just shows transfer in activity, without amounts, noly fee
-
-sending nfts says sending x units, but no selection how many. maybe unclear?
-do some pages not show assets of all accounts? ed25519 shows nfts but sending to btc for example doesnt show it anymore
-cant add bitcoin/ethereum address to multisig when creating
-can only propose a payment, no other tx
-when approving on chain, cant sign with another key
-doesnt show multisig address when in multisig tab and having it list every single one one is part of

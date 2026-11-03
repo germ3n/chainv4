@@ -583,6 +583,11 @@ cores runs blocks slower, and links slower than a laptop's loopback carry fewer 
   it on. `=off` deletes one at startup, in one atomic write however big it is, and leaves the
   other. `GET /events` and `GET /accounts/{address}/txs` answer 404 on nodes without the index
   they need.
+- **`--index-multisigs` keeps the member index,** each multisig under its members, for
+  `GET /accounts/{address}/multisigs`. It follows the multisig registry, so it takes no window: a
+  node turning it on, on a chain already running, builds it from the registry at startup, in one
+  write, and needs no new genesis. `--index-multisigs=off` deletes it. The Docker image keeps it
+  on, as `INDEX_MULTISIGS=on`.
 - **An event index from before EVM logs' topics starts over** the first time the node opens it,
   and reads its blocks back as below. It is the node's own: blocks, state and consensus do not
   change, so nodes upgrade one at a time. See [Storage](storage.md#the-indexes).

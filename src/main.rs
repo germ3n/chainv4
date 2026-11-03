@@ -391,6 +391,13 @@ struct NodeArgs {
     /// --index-events, and it is kept, and dropped, the same way.
     #[arg(long, value_name = "FROM", num_args = 0..=1, require_equals = true, default_missing_value = "genesis")]
     index_addresses: Option<Indexing>,
+    /// Keep an index of multisigs by their members, for the API's GET
+    /// /accounts/{address}/multisigs: what a wallet lists every multisig its accounts belong to
+    /// from. It follows the multisig registry whole, so it takes no FROM: on a chain already
+    /// running it is built from the registry at once. Once on, the database keeps it on; off
+    /// deletes it.
+    #[arg(long, value_name = "on|off", num_args = 0..=1, require_equals = true, default_missing_value = "on", value_parser = on_or_off)]
+    index_multisigs: Option<bool>,
     /// On a database that holds only genesis, sync from a snapshot: check every header peers have,
     /// take the state of a block 16 below the best tip from them, and run only the blocks after
     /// it. The node then keeps headers alone for the blocks before it.
@@ -697,6 +704,13 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    match args.index_multisigs {
+        Some(false) => node = node.drop_member_index()?,
+        Some(true) => node = node.keep_member_index()?,
+        None if node.chain().member_index() => node = node.keep_member_index()?,
+        None => {}
+    }
+
     #[cfg(feature = "http")]
     if let Some(address) = args.http {
         #[cfg(feature = "faucet")]
@@ -784,6 +798,16 @@ fn start_again(binary: &std::path::Path) -> Result<(), Box<dyn std::error::Error
 #[cfg(all(feature = "node", any(feature = "pool", feature = "updates")))]
 fn beside(db: &std::path::Path, name: &str) -> std::path::PathBuf {
     db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")).join(name)
+}
+
+/// A switch as --index-multisigs takes it: on, or off to drop what is kept.
+#[cfg(feature = "node")]
+fn on_or_off(text: &str) -> Result<bool, String> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(format!("{other} is not on or off")),
+    }
 }
 
 #[cfg(not(feature = "node"))]

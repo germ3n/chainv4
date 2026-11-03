@@ -717,6 +717,36 @@ impl Node {
         Ok(self)
     }
 
+    #[document(
+        parent = "Node",
+        summary = "Makes the node keep the member index, each multisig under the address of every member's key: built whole from the multisig registry now if the database does not keep it yet, then kept in step block by block. Once on, the database keeps it on.",
+        returns = "The node, or the database failure that kept it from starting.",
+        see_also = "Chain::keep_member_index",
+    )]
+    pub fn keep_member_index(mut self) -> Result<Node, NodeError> {
+        match self.chain.keep_member_index()? {
+            Some(built) => log::info!("[node] built the member index from the {built} multisigs the chain holds"),
+            None => log::info!("[node] keeping the member index"),
+        }
+
+        Ok(self)
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Makes the node keep no member index, deleting the one its database holds.",
+        returns = "The node, or the database failure that kept it from starting.",
+        see_also = "Chain::drop_member_index",
+    )]
+    pub fn drop_member_index(mut self) -> Result<Node, NodeError> {
+        match self.chain.drop_member_index()? {
+            true => log::info!("[node] dropped the member index"),
+            false => log::info!("[node] there is no member index to drop"),
+        }
+
+        Ok(self)
+    }
+
     #[document(parent = "Node", summary = "The chain this node follows.")]
     pub fn chain(&self) -> &Chain {
         &self.chain

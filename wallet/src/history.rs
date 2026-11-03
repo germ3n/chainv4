@@ -310,9 +310,18 @@ impl Checked {
         self.moves.iter().filter_map(move |moved| match (ours(&moved.from), ours(&moved.to)) {
             (false, true) => Some((true, moved)),
             (true, false) => Some((false, moved)),
-            // Between two of its addresses, or none: nothing moved, as far as it is concerned.
+            // Between two of its addresses, or none: nothing came in or left, as far as it is
+            // concerned. What moved between them is between's.
             _ => None,
         })
+    }
+
+    /// What it moved from one of these addresses to another: an account sending to itself, which
+    /// adds nothing to it and takes nothing from it but the fee, and is still a move to show.
+    pub fn between<'a>(&'a self, addresses: &'a [String]) -> impl Iterator<Item = &'a Move> + 'a {
+        let ours = move |party: &Option<String>| party.as_ref().is_some_and(|party| addresses.contains(party));
+
+        self.moves.iter().filter(move |moved| ours(&moved.from) && ours(&moved.to))
     }
 }
 

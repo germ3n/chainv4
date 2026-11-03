@@ -3163,3 +3163,58 @@ fn ethereum_tools_see_a_batch_s_logs_in_order_and_never_as_one_call() {
     assert_eq!(rpc("eth_getTransactionCount", json!([to_hex(&crate::vm::evm::evm_alias(&me)), "latest"])), "0x3", "one nonce a batch");
 }
 
+
+#[test]
+fn an_address_s_multisigs_are_listed_from_the_member_index_by_its_address_or_its_key() {
+    use crate::registry::multisig::MultisigMember;
+    use crate::structs::address::multisig_address;
+
+    let authority = DevAuthority::dev_keypair();
+    let me = authority.public().address();
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &free()).unwrap();
+    let genesis_id = chain.genesis();
+    let address = start(db.clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let alice = Keypair::from_seed([41; 32]);
+    let ethereum = Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1([42; 32]));
+    let make = |keys: &[&Keypair], nonce: u64| {
+        let members = keys.iter().map(|keypair| MultisigMember { key: keypair.public(), bitcoin: None, evm: None }).collect();
+
+        SignedTx::sign(Tx::CreateMultisig { members, threshold: 1, testnet: false }, nonce, FeeOffer::NONE, &authority, &genesis_id)
+    };
+    let alice_at = alice.public().address();
+
+    assert_eq!(get(address, &format!("/accounts/{alice_at}/multisigs")).0, 404, "no index yet");
+
+    chain.keep_member_index().unwrap();
+    produce(&mut chain, vec![make(&[&alice], 0), make(&[&alice, &ethereum], 1)]);
+    let (first, second) = (multisig_address(&me, 0, HashType::default_chain()), multisig_address(&me, 1, HashType::default_chain()));
+    let listing = ok(address, &format!("/accounts/{alice_at}/multisigs"));
+    let mut found: Vec<&str> = listing["multisigs"].as_array().unwrap().iter().map(|multisig| multisig["address"].as_str().unwrap()).collect();
+    found.sort();
+    let mut made = vec![first.to_string(), second.to_string()];
+    made.sort();
+
+    assert_eq!(found, made);
+    assert_eq!((listing["member"].clone(), listing["next"].clone()), (json!(alice_at.to_string()), Value::Null));
+
+    // An Ethereum account's key is no address: found by either.
+    let by_key = ok(address, &format!("/accounts/{}/multisigs", ethereum.public()));
+    let by_address = ok(address, &format!("/accounts/{}/multisigs", ethereum.public().address()));
+
+    assert_eq!(by_key, by_address);
+    assert_eq!(by_key["multisigs"], json!([{ "address": second.to_string(), "threshold": 1, "members": 2, "bitcoin": false, "evm": false }]));
+
+    // A page at a time.
+    let page = ok(address, &format!("/accounts/{alice_at}/multisigs?limit=1"));
+    let cursor = page["next"].as_str().unwrap();
+    let rest = ok(address, &format!("/accounts/{alice_at}/multisigs?limit=1&cursor={cursor}"));
+
+    assert_eq!((page["multisigs"].as_array().unwrap().len(), rest["multisigs"].as_array().unwrap().len(), rest["next"].clone()), (1, 1, Value::Null));
+    assert_ne!(page["multisigs"][0], rest["multisigs"][0]);
+    assert_eq!(ok(address, &format!("/accounts/{me}/multisigs"))["multisigs"], json!([]), "the maker is no member");
+
+    for bad in ["/accounts/nope/multisigs".to_string(), format!("/accounts/{alice_at}/multisigs?cursor=zz"), format!("/accounts/{alice_at}/multisigs?limit=x")] {
+        assert_eq!(get(address, &bad).0, 400, "{bad}");
+    }
+}

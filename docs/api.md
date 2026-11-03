@@ -273,6 +273,27 @@ curl 'localhost:8080/accounts/ed25519:0x…/txs?kind=transfer&direction=in&from=
 A batch is listed under everyone any step names, and everyone contracts paid. `kind` passes it for
 being a `batch` and for what any of its steps is; `token` and `direction` go by all its steps.
 
+### `GET /accounts/{address}/multisigs`
+
+The [multisigs](multisig.md) an address's key is a member of, from the node's member index: each
+with its `address`, `threshold`, how many `members` it has, and whether its members name a Bitcoin
+xpub (`bitcoin`) and an EVM address (`evm`). `member` is the address it listed them for. A member
+is found by the address its key controls, so `address` may be an address, or a member's key as a
+multisig names it, `secp256k1:0x…` or `bitcoin:0x…`, whose address it stands for. Each listed is
+read back from the registry, so the listing is the members as they are now: one the address was
+removed from is gone.
+
+**Pages:** `limit` of them (50 by default, at most 200), in the order of the multisigs' addresses.
+`next` is the `cursor` for the next page, the last multisig of this one, or `null`.
+
+Only a node started with `--index-multisigs` keeps the index; on any other, 404 (see
+[Storage](storage.md#the-member-index)).
+
+```sh
+curl 'http://127.0.0.1:8080/accounts/ed25519:0x3b6a…/multisigs'
+# {"member":"ed25519:0x3b6a…","multisigs":[{"address":"multisig:0x…","threshold":2,"members":3,"bitcoin":false,"evm":true}],"next":null}
+```
+
 ### `GET /contracts/{address}`
 
 What a contract is:

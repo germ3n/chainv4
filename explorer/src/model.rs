@@ -469,6 +469,25 @@ pub struct OwnedName {
 #[derive(Clone, Debug, Deserialize)]
 pub struct OwnedNames {
     pub names: Vec<OwnedName>,
+    /// Where the next page starts, when there is one.
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+/// GET /accounts/{address}/multisigs: the multisigs an address's key is a member of.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MultisigsPage {
+    pub multisigs: Vec<Membership>,
+    #[serde(default)]
+    pub next: Option<String>,
+}
+
+/// One multisig an address is a member of: its address, and how many of how many must agree.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct Membership {
+    pub address: String,
+    pub threshold: u64,
+    pub members: u64,
 }
 
 /// One name of GET /names/list: the directory, sorted by name.
@@ -663,6 +682,9 @@ impl RegisteredCollection {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CollectionsPage {
     pub collections: Vec<RegisteredCollection>,
+    /// Where the next page starts, when there is one.
+    #[serde(default)]
+    pub next: Option<String>,
 }
 
 /// GET /tokens.

@@ -123,8 +123,9 @@ pub enum Ask {
     /// to it, shown as included but not final until the reading reaches it. The node has that
     /// transaction already, as the wallet sent it there.
     SentReceipt(String),
-    /// The token registry's first page, to know which tokens to prove.
-    Tokens,
+    /// A page of the token registry, the first or the one after a cursor, to know which tokens to
+    /// prove: each page's cursor is followed to the end.
+    Tokens(Option<String>),
     /// The transactions touching an address, newest first, from the node's address index: where
     /// the history looks.
     History(String),
@@ -138,8 +139,9 @@ pub enum Ask {
     /// The chain's names: their suffix, prices and grace period, as the node says. Nothing proven
     /// rests on them but whether a name is in its grace period.
     Names,
-    /// The names the node says an address owns: where the Names page looks, each one proven.
-    OwnedNames(String),
+    /// A page of the names the node says an address owns, the first or the one after a cursor:
+    /// where the Names page looks, each one proven, every page followed to the end.
+    OwnedNames { address: String, cursor: Option<String> },
     /// A contract's record, as the node says it: its engine, and a native contract's functions.
     Contract(String),
     /// A native contract's function run read-only, with the body of POST /call.
@@ -162,6 +164,11 @@ pub enum Ask {
     /// A multisig's members, nonce and open proposals, as the node says: what the Multisig page
     /// shows and counts approvals by. Nothing it signs rests on it: a bundle says what it does.
     Multisig(String),
+    /// The multisigs an address's key is a member of, from the node's member index, a page at a
+    /// time, the first or the one after a cursor: what the Multisig page lists each of this
+    /// wallet's multisigs by, following each page's cursor to the end. Nothing signed rests on it:
+    /// each is asked of again, and a bundle says what it does.
+    Memberships { address: String, cursor: Option<String> },
     /// What a mining pool owes an address, with the Merkle path a claim takes, as the pool's node
     /// says: what the Mining page claims with. Nothing rests on it but the fee: the chain checks
     /// the path against the root the pool's block committed to.
@@ -178,9 +185,10 @@ pub enum Ask {
     /// committed to, as the wallet's own node says: what a claim kept on this device is checked
     /// against before it is sent, the pool's node no matter.
     Claims { pool: String, to: String, height: u64 },
-    /// The collection registry's first page, for the NFTs page to look through.
+    /// A page of the collection registry, the first or the one after a cursor, for the NFTs page to
+    /// look through, every page followed to the end.
     #[cfg_attr(not(feature = "nft"), allow(dead_code))]
-    Collections,
+    Collections(Option<String>),
     /// Governance as the node says it: its kind, the version an approval names, what a change
     /// needs, the open proposals with their approvals, and every setting as it stands. What the
     /// Governance page shows; nothing signed rests on it but the version, which the chain checks.
@@ -195,6 +203,11 @@ pub enum Ask {
     Release,
 }
 
+/// A cursor as a page's query goes on with it, for the page after the one it ended.
+fn after(cursor: &Option<String>) -> String {
+    cursor.as_ref().map_or_else(String::new, |cursor| format!("&cursor={cursor}"))
+}
+
 impl Ask {
     fn path(&self) -> String {
         match self {
@@ -207,8 +220,8 @@ impl Ask {
             Ask::Checkpoint(None) => "/light/checkpoint".to_string(),
             Ask::Proof { column, key, block } | Ask::ScanProof { column, key, block } => format!("/proofs/{column}/{key}?block={block}"),
             Ask::Receipt(id) | Ask::SentReceipt(id) => format!("/proofs/receipts/{id}"),
-            Ask::Tokens => "/tokens?limit=100".to_string(),
-            Ask::Collections => "/collections?limit=500".to_string(),
+            Ask::Tokens(cursor) => format!("/tokens?limit=500{}", after(cursor)),
+            Ask::Collections(cursor) => format!("/collections?limit=500{}", after(cursor)),
             Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
             Ask::Filtered { address, query, cursor } => {
                 let cursor = cursor.as_ref().map_or_else(String::new, |cursor| format!("&cursor={cursor}"));
@@ -218,9 +231,14 @@ impl Ask {
             Ask::Events(address) => format!("/events?address={address}&limit=50"),
             Ask::Named { contract, name } => format!("/events?contract={contract}&name={name}&limit=200"),
             Ask::Names => "/names".to_string(),
-            Ask::OwnedNames(address) => format!("/accounts/{address}/names?limit=100"),
+            Ask::OwnedNames { address, cursor } => format!("/accounts/{address}/names?limit=200{}", after(cursor)),
             Ask::Contract(address) => format!("/contracts/{address}"),
             Ask::Multisig(address) => format!("/multisig/{address}"),
+            Ask::Memberships { address, cursor } => {
+                let cursor = cursor.as_ref().map_or_else(String::new, |cursor| format!("&cursor={cursor}"));
+
+                format!("/accounts/{address}/multisigs?limit=100{cursor}")
+            }
             Ask::PoolClaim(address) => format!("/pool/claim/{address}"),
             Ask::Pool(address) => format!("/pool/{address}"),
             Ask::Mining => "/mining".to_string(),
@@ -272,12 +290,12 @@ impl Ask {
             | Ask::Finalized
             | Ask::Proof { .. }
             | Ask::Receipt(_)
-            | Ask::Tokens
+            | Ask::Tokens(_)
             | Ask::History(_)
             | Ask::Filtered { .. }
             | Ask::Events(_)
             | Ask::Names
-            | Ask::OwnedNames(_)
+            | Ask::OwnedNames { .. }
             | Ask::Contract(_)
             | Ask::Call(_)
             | Ask::Read(_)
@@ -286,11 +304,12 @@ impl Ask {
             | Ask::Named { .. }
             | Ask::Rpc(_)
             | Ask::Multisig(_)
+            | Ask::Memberships { .. }
             | Ask::PoolClaim(_)
             | Ask::Pool(_)
             | Ask::Mining
             | Ask::Claims { .. }
-            | Ask::Collections
+            | Ask::Collections(_)
             | Ask::Governance
             | Ask::GovernanceHistory { .. }
             | Ask::GovernanceWeight(_) => true,
@@ -736,22 +755,22 @@ mod tests {
     fn what_failed_is_held_back_for_a_moment_and_retry_clears_it_and_asks_at_once() {
         let mut node = unreachable();
 
-        node.ask(Ask::Tokens);
+        node.ask(Ask::Tokens(None));
         assert_eq!(node.answers().len(), 1);
 
         let (failure, failed) = node.trouble().expect("the way to the node is in trouble");
         assert!(failure.sentence().starts_with("Could not reach the node"));
-        assert_eq!(failed, [Ask::Tokens]);
+        assert_eq!(failed, [Ask::Tokens(None)]);
 
         // The page goes on asking, as pages do each frame: nothing goes out for now.
-        node.ask(Ask::Tokens);
+        node.ask(Ask::Tokens(None));
         assert_eq!(node.answers().len(), 0, "held back");
-        assert!(!node.asking(&Ask::Tokens));
-        assert_eq!(node.sent(), [Ask::Tokens], "the first ask alone went out");
+        assert!(!node.asking(&Ask::Tokens(None)));
+        assert_eq!(node.sent(), [Ask::Tokens(None)], "the first ask alone went out");
 
         // Retry goes past the hold, and clears what failed until it comes back.
-        node.retry(Ask::Tokens);
-        assert_eq!(node.sent(), [Ask::Tokens]);
+        node.retry(Ask::Tokens(None));
+        assert_eq!(node.sent(), [Ask::Tokens(None)]);
         assert_eq!(node.answers().len(), 1);
         assert!(node.trouble().is_some(), "and failed again");
     }
@@ -849,12 +868,12 @@ mod tests {
             Ask::ScanProof { column: "accounts", key: "0x00".to_string(), block: "0x01".to_string() },
             Ask::Receipt(text()),
             Ask::SentReceipt(text()),
-            Ask::Tokens,
+            Ask::Tokens(None),
             Ask::History(text()),
             Ask::Filtered { address: text(), query: text(), cursor: None },
             Ask::Events(text()),
             Ask::Names,
-            Ask::OwnedNames(text()),
+            Ask::OwnedNames { address: text(), cursor: None },
             Ask::Contract(text()),
             Ask::Call(text()),
             Ask::Read(text()),
@@ -864,11 +883,12 @@ mod tests {
             Ask::Named { contract: text(), name: text() },
             Ask::Rpc(text()),
             Ask::Multisig(text()),
+            Ask::Memberships { address: text(), cursor: None },
             Ask::PoolClaim(text()),
             Ask::Pool(text()),
             Ask::Mining,
             Ask::Claims { pool: text(), to: text(), height: 0 },
-            Ask::Collections,
+            Ask::Collections(None),
             Ask::Governance,
             Ask::GovernanceHistory { before: None },
             Ask::GovernanceWeight(text()),

@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        DryRun, RangeLimits, RangeProblem, Rules, dry_run, stored_block_range, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, RangeLimits, RangeProblem, Rules, dry_run, stored_block_range, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_member_index, stored_multisigs_of, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, stored_split, StartProblem,
     },
@@ -457,7 +457,7 @@ pub struct ApiOptions {
         options = "Who else it answers, and what it serves besides the chain.",
     },
     returns = "The address it listens on, which tells you the port when address asked for port 0.",
-    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /blocks/range?from=height&entry=n&count=n, blocks with what checks them and proofs of the state entries they changed, in binary, a BlockRange; GET /accounts/{address}; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
+    note = "Routes: GET /status, which includes the fees and the base price a transaction sent now must offer; GET /blocks, newest first, paged with ?before=height&limit=n (20 by default, at most 100); GET /blocks/{block}, where block is latest, a height or a 0x block id; GET /blocks/range?from=height&entry=n&count=n, blocks with what checks them and proofs of the state entries they changed, in binary, a BlockRange; GET /accounts/{address}; GET /accounts/{address}/multisigs, the multisigs its key is a member of, on a node started with --index-multisigs; GET /contracts/{address}; GET /txs/{id}, a transaction's block, height, confirmations, whether it is final, result and events once it is on the main chain, 404 before; GET /validators, every registered validator and the current epoch's set; GET /validators/{voter}; GET /evidence, conflicting votes this node has seen, encoded for Tx::Slash; POST /txs with {\"tx\": \"0x…\"}, a SignedTx encoded as the chain encodes it, which answers 202 with its id; POST /offer with the same body, signed with any offer, which answers the fee offer sure to cover it now; GET /forks, the side branches; GET /events, indexed events, on a node started with --index-events; GET /tokens, the token registry by symbol; GET /collections, the NFT and multi-token collections by symbol; GET /node and GET /mempool, from the running node; GET /stream, server-sent events from a node started with --stream; GET /faucet and POST /faucet, on a node run with --faucet-key. Addresses are written as their kind and hex, such as ed25519:0x3b6a…. Amounts, and integers that can pass 2^53, are decimal strings; hashes are 0x hex. Errors are {\"error\": message} with status 400, 404, 409 for a nonce already used or waiting, 429 for a faucet asked again too soon, 500, or 503 when the node cannot take transactions.",
     see_also = "Node, Address, NodeHandle",
 )]
 pub fn start(
@@ -578,6 +578,7 @@ fn router(api: Api) -> Router {
         .route("/blocks/{block}", get(block))
         .route("/accounts/{address}", get(account))
         .route("/accounts/{address}/txs", get(account_txs))
+        .route("/accounts/{address}/multisigs", get(account_multisigs))
         .route("/contracts/{address}", get(contract))
         .route("/light", get(light))
         .route("/light/updates/{block}", get(light_update))
@@ -1965,6 +1966,46 @@ async fn account_names(Shared(api): Shared<Api>, Path(address): Path<String>, Qu
     }
 
     Ok(Json(json!({ "names": listed, "next": next })))
+}
+
+/// The multisigs an address's key is a member of, a page at a time, from the member index, for a
+/// node that keeps one. The address may be given as the key itself, as a multisig names its
+/// members. Each is read back from the registry, as it is now, so one whose members changed since
+/// the index listed it is left out rather than shown wrong.
+async fn account_multisigs(Shared(api): Shared<Api>, Path(address): Path<String>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let db = api.db;
+
+    if !stored_member_index(&*db)? {
+        return Err(ApiError::NotFound("this node keeps no member index; start it with --index-multisigs".to_string()));
+    }
+
+    // An Ethereum or Bitcoin account's key is not its address, which is a hash of it.
+    let member = match address.parse::<crate::crypto::keypair::PublicKey>() {
+        Ok(key) => key.address(),
+        Err(_) => parse_address(&address)?,
+    };
+    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_ACCOUNT_TXS).clamp(1, MAX_ACCOUNT_TXS) as usize;
+    let after = query.get("cursor").map(|cursor| parse_address(cursor)).transpose()?;
+    let (found, next) = stored_multisigs_of(&*db, &member, after.as_ref(), limit)?;
+    let state = State::new(db);
+    let registry = crate::registry::Multisigs::new(&state);
+    let mut listed = Vec::new();
+
+    for multisig in found {
+        if let Some(policy) = registry.get(&multisig)?
+            && policy.member_at(&member).is_some()
+        {
+            listed.push(json!({
+                "address": multisig.to_string(),
+                "threshold": policy.threshold,
+                "members": policy.members.len(),
+                "bitcoin": policy.members.iter().all(|member| member.bitcoin.is_some()),
+                "evm": policy.members.iter().all(|member| member.evm.is_some()),
+            }));
+        }
+    }
+
+    Ok(Json(json!({ "member": member.to_string(), "multisigs": listed, "next": next.map(|next| next.to_string()) })))
 }
 
 /// The transactions touching an address, newest first, a page at a time: from the address index,

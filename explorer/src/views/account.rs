@@ -171,6 +171,21 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         });
     }
 
+    // The multisigs its key is a member of, as the node's member index says.
+    if let Some(memberships) = store.memberships.get(address).filter(|memberships| !memberships.is_empty()) {
+        super::section(ui, look, "Member of", |ui| {
+            for membership in memberships {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.link(RichText::new(format::short(&membership.address)).monospace()).on_hover_text(&membership.address).clicked() {
+                        ctx.go(View::Multisig(membership.address.clone()));
+                    }
+
+                    ui.label(RichText::new(format!("{} of {} must agree", membership.threshold, membership.members)).small().color(look.palette.muted));
+                });
+            }
+        });
+    }
+
     if let Some(contract) = &contract {
         super::section(ui, look, "Contract", |ui| {
             super::facts(ui, look, "contract", |facts| {

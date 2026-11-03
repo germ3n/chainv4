@@ -45,6 +45,7 @@
 #   BOOTNODES        this node's own bootnodes, beside the chain's, separated by spaces
 #   INDEX_EVENTS     which blocks the event index keeps: genesis (the default), a height,
 #   INDEX_ADDRESSES  latest-N, or off; the same for the address index
+#   INDEX_MULTISIGS  on (the default) or off: the index of multisigs by their members
 #   FAUCET_KEY       a faucet's key file, for a dev or test chain: /config/faucet.key when
 #                    there is one. With one, the API serves POST /faucet, paying from it
 #   FAUCET_AMOUNT    each drip, in whole coins: 10 unless set
@@ -102,7 +103,8 @@ set -- --db "$data/chain.db" \
     --explorer /opt/chainv4/explorer \
     --wallet /opt/chainv4/wallet \
     --index-events="${INDEX_EVENTS:-genesis}" \
-    --index-addresses="${INDEX_ADDRESSES:-genesis}"
+    --index-addresses="${INDEX_ADDRESSES:-genesis}" \
+    --index-multisigs="${INDEX_MULTISIGS:-on}"
 
 if [ -n "${PROTOCOL:-}" ]; then set -- "$@" --protocol "$PROTOCOL"; fi
 

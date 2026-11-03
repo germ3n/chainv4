@@ -783,9 +783,16 @@ impl Wallet {
                     self.views.swaps.multisig_answered(&ask, &result);
                     self.views.multisig.answered(&ask, &result);
                 }
+                (Ask::Memberships { .. }, _) => {
+                    self.views.multisig.answered(&ask, &result);
+                }
                 (Ask::Offer(_) | Ask::Submit(_), _) if self.views.multisig.answered(&ask, &result) => {}
-                #[cfg(feature = "nft")]
-                (Ask::Collections, _) => self.views.nfts.collections(&result),
+                // One listing, a page at a time, for the proofs and the NFTs page both.
+                (Ask::Collections(cursor), _) => {
+                    self.chain.list_collections(cursor.is_some(), &result);
+                    #[cfg(feature = "nft")]
+                    self.views.nfts.collections(&self.chain.collection_entries);
+                }
                 (Ask::Offer(_) | Ask::Submit(_), _) => {
                     if let Some(mut sent) = self.views.send.answered(&ask, &result, now) {
                         sent.genesis = self.chain.genesis.map(|genesis| genesis.to_string()).unwrap_or_default();

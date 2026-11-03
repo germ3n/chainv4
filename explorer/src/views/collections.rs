@@ -34,7 +34,7 @@ pub fn registry(ctx: &mut Ctx) -> Option<Vec<RegisteredCollection>> {
     let stale = ctx.store.collections.as_ref().is_none_or(|(_, when)| ctx.now.saturating_sub(*when) > REFRESH);
 
     if stale {
-        ctx.api.ask(Ask::Collections);
+        ctx.api.ask(Ask::Collections(None));
     }
 
     ctx.store.collections.as_ref().map(|(collections, _)| collections.clone())
@@ -82,7 +82,7 @@ pub fn list(ui: &mut Ui, ctx: &mut Ctx) {
     }
 
     let Some(collections) = registry(ctx) else {
-        super::waiting(ui, ctx, &Ask::Collections);
+        super::waiting(ui, ctx, &Ask::Collections(None));
 
         return;
     };
@@ -149,7 +149,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut CollectionsState, address: &
 
         match ctx.store.collections.is_some() {
             true => super::note(ui, look, "The collection registry does not list this contract."),
-            false => super::waiting(ui, ctx, &Ask::Collections),
+            false => super::waiting(ui, ctx, &Ask::Collections(None)),
         }
 
         return;

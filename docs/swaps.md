@@ -388,7 +388,9 @@ The swap contracts say which block a swap was locked in, `get`'s last value, to 
 - **An EVM leg needs that chain's coin for gas,** on both sides: the claim is a transaction there.
 - **Testnet keys are other keys,** so a testnet Bitcoin leg needs an account of the wallet's
   words; accounts watched from the signer swap on mainnet, by their paired bitcoin key.
-- **Not yet finality-aware:** a lock in the state may still be reorged away. See the todo.
+- **The shortest deadlines** the CLI makes are minutes for the second lock and four hours more
+  for the first, as `--second 6m --first 246m`: a span is one number and one unit, so `4h6m` is
+  refused. On chainv4 and its EVM, finality takes a minute or so, so leave the second lock a few.
 
 ## Tested
 

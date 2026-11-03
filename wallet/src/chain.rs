@@ -14,6 +14,7 @@ use {
     chainv4::registry::names::{FoundName, NameRecord, NameStatus, NamesConfig, PrimaryName, lineage, name_problem, primary_key, record_key, standing},
     chainv4::registry::directory::{DIRECTORY_KEY, Directory},
     chainv4::registry::federation::{DecidedFederation, FEDERATION_KEY},
+    chainv4::registry::collections::{Collection, collection_key},
     chainv4::registry::tokens::{Token, token_key},
     chainv4::structs::account::Account,
     chainv4::structs::address::Address,
@@ -50,6 +51,8 @@ pub struct Proven<T> {
 enum Target {
     Account(String),
     Token(String),
+    /// A collection's registry entry, by address text.
+    Collection(String),
     Balance { token: String, holder: String },
     /// A name's record, by name without the suffix.
     Name(String),
@@ -75,6 +78,20 @@ pub struct Held {
     pub id: String,
     pub multi: bool,
     pub holder: String,
+}
+
+/// What a contract is, by the registry entry proven for it.
+pub enum Known<'a> {
+    Token(&'a Token),
+    Collection(&'a Collection),
+}
+
+/// Keeps what was proven at the higher block: proofs answer out of order, and one asked before an
+/// NFT moved must not bring back who held it then.
+fn newest<K: std::hash::Hash + Eq, T>(proven: &mut HashMap<K, Proven<T>>, key: K, new: Proven<T>) {
+    if proven.get(&key).is_none_or(|old| old.assurance.height <= new.assurance.height) {
+        proven.insert(key, new);
+    }
 }
 
 /// A name looked up from proven records: where it stands at the tip, and how far that is trusted.
@@ -235,7 +252,20 @@ pub struct Chain {
     pub accounts: HashMap<String, Vec<Proven<Account>>>,
     /// The tokens the registry lists, by address text: the node says which, the proof what.
     pub listed: Vec<String>,
+    /// The registry's pages so far, while a listing of it comes in a page at a time: what listed
+    /// becomes once the last arrives, so no token drops out while the rest are on their way.
+    listing: Vec<String>,
+    /// The pages of a listing still to ask, after the one that came.
+    more: Vec<Ask>,
     pub tokens: HashMap<String, Proven<Token>>,
+    /// The collections the registry lists, by address text, as GET /collections said: the node
+    /// says which, the proof of each one's entry what it is.
+    pub listed_collections: Vec<String>,
+    /// Each collection's entry as the registry's last whole listing wrote it, its kind, name and
+    /// symbol: what the NFTs page looks through. And the pages so far while one comes in.
+    pub collection_entries: Vec<Value>,
+    collections_listing: Vec<Value>,
+    pub collections: HashMap<String, Proven<Collection>>,
     /// Token balances by token and holder.
     pub balances: HashMap<(String, String), Vec<Proven<u256>>>,
     /// Transactions proven with their receipts since the app last took them, by transaction id.
@@ -250,6 +280,8 @@ pub struct Chain {
     pub has_names: Option<bool>,
     /// The names the node says each address owns, by address text: where to look.
     pub owned: HashMap<String, Vec<String>>,
+    /// An address's owned names so far, while they come a page at a time.
+    owning: HashMap<String, Vec<String>>,
     /// Name records proven, by name without the suffix: None where there is none.
     pub records: HashMap<String, Proven<Option<NameRecord>>>,
     /// Primary names proven, by address text, as chosen: whether each still resolves to its
@@ -415,8 +447,11 @@ impl Chain {
     /// The proofs due for these holders: each account, every listed token's entry, and each
     /// holder's balance of it, at the tip and at the final block.
     pub fn proofs_due(&mut self, holders: &[Address], time: f64) -> Vec<Ask> {
+        // The next pages of a listing go out as soon as the page before them came.
+        let more = std::mem::take(&mut self.more);
+
         if !self.caught_up() || time - self.proved < PROVE_EVERY.max(self.prove_gap) {
-            return Vec::new();
+            return more;
         }
 
         self.proved = time;
@@ -431,7 +466,7 @@ impl Chain {
             blocks.insert(0, final_block);
         }
 
-        let mut wanted = vec![Ask::Tokens];
+        let mut wanted = vec![Ask::Tokens(None)];
         let mut targets = Vec::new();
 
         if self.has_names != Some(false) {
@@ -442,7 +477,7 @@ impl Chain {
             targets.push((Column::Accounts, address_key(holder), Target::Account(holder.to_string()), blocks.clone()));
 
             if self.has_names == Some(true) {
-                wanted.push(Ask::OwnedNames(holder.to_string()));
+                wanted.push(Ask::OwnedNames { address: holder.to_string(), cursor: None });
                 targets.push((Column::Names, primary_key(holder), Target::Primary(holder.to_string()), vec![tip]));
             }
 
@@ -464,10 +499,21 @@ impl Chain {
             }
         }
 
+        // What each collection is, so a review reads an NFT's transfer as one rather than as a
+        // token's: an id is no amount.
+        wanted.push(Ask::Collections(None));
+
+        for collection in &self.listed_collections {
+            if let Ok(parsed) = collection.parse::<Address>() {
+                targets.push((Column::Tokens, collection_key(&parsed), Target::Collection(collection.clone()), vec![tip]));
+            }
+        }
+
         targets.push((Column::Validators, DIRECTORY_KEY.to_vec(), Target::Directory, vec![tip]));
         targets.push((Column::Validators, FEDERATION_KEY.to_vec(), Target::Federation, vec![tip]));
 
         wanted.extend(self.not_proven_yet(&blocks, targets));
+        wanted.extend(more);
         self.prove_gap = wanted.len() as f64 / PROOFS_A_SECOND;
 
         wanted
@@ -633,13 +679,13 @@ impl Chain {
                 | Ask::Proof { .. }
                 | Ask::Receipt(_)
                 | Ask::SentReceipt(_)
-                | Ask::Tokens
+                | Ask::Tokens(_)
                 | Ask::History(_)
                 | Ask::Filtered { .. }
                 | Ask::Finalized
                 | Ask::Events(_)
                 | Ask::Names
-                | Ask::OwnedNames(_)
+                | Ask::OwnedNames { .. }
         );
 
         if !mine {
@@ -712,7 +758,7 @@ impl Chain {
                 Ask::Receipt(tx) | Ask::SentReceipt(tx) => {
                     self.refused.insert(tx.clone(), why);
                 }
-                Ask::Tokens | Ask::History(_) | Ask::Filtered { .. } | Ask::Events(_) | Ask::Names | Ask::OwnedNames(_) => {}
+                Ask::Tokens(_) | Ask::History(_) | Ask::Filtered { .. } | Ask::Events(_) | Ask::Names | Ask::OwnedNames { .. } => {}
                 _ => self.trouble = Some(why),
             },
         }
@@ -848,13 +894,20 @@ impl Chain {
 
                 self.with_client(|client| client.deliver_finality(*from, steps).map(|_| ()).map_err(|err| err.to_string()))
             }
-            Ask::Tokens => {
-                self.listed = value["tokens"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|token| token["address"].as_str().map(str::to_string))
-                    .collect();
+            Ask::Tokens(cursor) => {
+                let page = value["tokens"].as_array().into_iter().flatten().filter_map(|token| token["address"].as_str().map(str::to_string));
+
+                // A first page starts the listing over; each after it adds on, until the last.
+                if cursor.is_none() {
+                    self.listing.clear();
+                }
+
+                self.listing.extend(page);
+
+                match value["next"].as_str() {
+                    Some(next) => self.more.push(Ask::Tokens(Some(next.to_string()))),
+                    None => self.listed = std::mem::take(&mut self.listing),
+                }
 
                 Ok(())
             }
@@ -880,9 +933,23 @@ impl Chain {
 
                 Ok(())
             }
-            Ask::OwnedNames(address) => {
-                let owned = value["names"].as_array().into_iter().flatten().filter_map(|name| name["name"].as_str().map(str::to_string)).collect();
-                self.owned.insert(address.clone(), owned);
+            Ask::OwnedNames { address, cursor } => {
+                let page = value["names"].as_array().into_iter().flatten().filter_map(|name| name["name"].as_str().map(str::to_string));
+                let owning = self.owning.entry(address.clone()).or_default();
+
+                if cursor.is_none() {
+                    owning.clear();
+                }
+
+                owning.extend(page);
+
+                match value["next"].as_str() {
+                    Some(next) => self.more.push(Ask::OwnedNames { address: address.clone(), cursor: Some(next.to_string()) }),
+                    None => {
+                        let owned = self.owning.remove(address).unwrap_or_default();
+                        self.owned.insert(address.clone(), owned);
+                    }
+                }
 
                 Ok(())
             }
@@ -944,6 +1011,21 @@ impl Chain {
                         let entry: Token = wincode::deserialize(&bytes).map_err(|_| "a token entry that does not decode")?;
                         self.tokens.insert(token, Proven { value: entry, assurance });
                     }
+                    Target::Collection(collection) => {
+                        let Some(bytes) = held else {
+                            self.collections.remove(&collection);
+
+                            return Ok(());
+                        };
+                        let entry: Collection = wincode::deserialize(&bytes).map_err(|_| "a collection entry that does not decode")?;
+
+                        // An entry is kept by its address: one under another's key is no proof of this one.
+                        if entry.address.to_string() != collection {
+                            return Err("a collection entry for another address".to_string());
+                        }
+
+                        self.collections.insert(collection, Proven { value: entry, assurance });
+                    }
                     Target::Balance { token, holder } => {
                         let balance = match held {
                             Some(bytes) => token_balance(&bytes).ok_or("a balance that does not read")?,
@@ -965,14 +1047,14 @@ impl Chain {
                     }
                     Target::NftOwner { collection, id } => {
                         let owner = held.map(|bytes| nft_owner(&bytes).ok_or("an NFT owner that does not read")).transpose()?;
-                        self.nft_owners.insert((collection, id), Proven { value: owner, assurance });
+                        newest(&mut self.nft_owners, (collection, id), Proven { value: owner, assurance });
                     }
                     Target::MultiBalance { collection, id, holder } => {
                         let amount = match held {
                             Some(bytes) => token_balance(&bytes).ok_or("an amount that does not read")?,
                             None => u256::ZERO,
                         };
-                        self.multi_balances.insert((collection, id, holder), Proven { value: amount, assurance });
+                        newest(&mut self.multi_balances, (collection, id, holder), Proven { value: amount, assurance });
                     }
                     Target::Directory => {
                         let directory: Option<Directory> = held
@@ -1071,6 +1153,41 @@ impl Chain {
     /// The newest proven balance of a token.
     pub fn balance(&self, token: &str, holder: &str) -> Option<&Proven<u256>> {
         self.balances.get(&(token.to_string(), holder.to_string()))?.last()
+    }
+
+    /// Takes a page of the registry's list of collections, as GET /collections answered: which to
+    /// prove, and what the NFTs page lists. The first page starts the listing over, each after it
+    /// adds on, the next is asked as soon as one comes, and what was listed stands until the last.
+    pub fn list_collections(&mut self, later: bool, result: &Result<Value, Failure>) {
+        let Ok(value) = result else {
+            return;
+        };
+
+        if !later {
+            self.collections_listing.clear();
+        }
+
+        self.collections_listing.extend(value["collections"].as_array().into_iter().flatten().cloned());
+
+        match value["next"].as_str() {
+            Some(next) => self.more.push(Ask::Collections(Some(next.to_string()))),
+            None => {
+                self.collection_entries = std::mem::take(&mut self.collections_listing);
+                self.listed_collections = self.collection_entries.iter().filter_map(|found| found["address"].as_str().map(str::to_string)).collect();
+            }
+        }
+    }
+
+    /// What the chain's registries say a contract is, as proven: a token, a collection, or
+    /// neither as far as the wallet knows.
+    pub fn known(&self, contract: &Address) -> Option<Known<'_>> {
+        let text = contract.to_string();
+
+        match (self.tokens.get(&text), self.collections.get(&text)) {
+            (Some(token), _) => Some(Known::Token(&token.value)),
+            (None, Some(collection)) => Some(Known::Collection(&collection.value)),
+            (None, None) => None,
+        }
     }
 
     /// The proven final account, when the newest is not final.
@@ -1593,6 +1710,49 @@ mod tests {
     }
 
     #[test]
+    fn the_token_registry_and_owned_names_are_read_a_page_at_a_time_to_the_end() {
+        let mut chain = Chain::default();
+        let mut pinned = HashMap::new();
+        let (checkpoints, saved) = (HashMap::new(), HashMap::new());
+        let mut take = |chain: &mut Chain, ask: Ask, answer: Value| {
+            let trust = Trust { node: "http://node", pinned: &mut pinned, checkpoints: &checkpoints, saved: &saved, fast_resume: false };
+
+            assert!(chain.take(&ask, &Ok(answer), trust, 0, 0.0));
+        };
+        let tokens = |addresses: &[&str], next: Option<&str>| json!({ "tokens": addresses.iter().map(|address| json!({ "address": address })).collect::<Vec<_>>(), "next": next });
+
+        chain.listed = vec!["contract:0x01".to_string()];
+        take(&mut chain, Ask::Tokens(None), tokens(&["contract:0x02"], Some("0xaa")));
+
+        assert_eq!(chain.listed, ["contract:0x01"], "what was listed stands until the last page comes");
+        assert_eq!(chain.proofs_due(&[], 0.0), [Ask::Tokens(Some("0xaa".to_string()))], "the next page goes out at once");
+
+        take(&mut chain, Ask::Tokens(Some("0xaa".to_string())), tokens(&["contract:0x03"], None));
+        assert_eq!(chain.listed, ["contract:0x02", "contract:0x03"], "past the first page");
+
+        let names = |listed: &[&str], next: Option<&str>| json!({ "names": listed.iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(), "next": next });
+        let address = "ed25519:0x01".to_string();
+        take(&mut chain, Ask::OwnedNames { address: address.clone(), cursor: None }, names(&["alice"], Some("alice")));
+        assert_eq!(chain.proofs_due(&[], 0.0), [Ask::OwnedNames { address: address.clone(), cursor: Some("alice".to_string()) }]);
+        take(&mut chain, Ask::OwnedNames { address: address.clone(), cursor: Some("alice".to_string()) }, names(&["bob"], None));
+
+        assert_eq!(chain.owned[&address], ["alice", "bob"]);
+        assert!(chain.more.is_empty(), "nothing after the last");
+
+        // The collection registry the same way, for its proofs and the NFTs page both.
+        let collections = |addresses: &[&str], next: Option<&str>| Ok(json!({ "collections": addresses.iter().map(|address| json!({ "address": address, "kind": "nft" })).collect::<Vec<_>>(), "next": next }));
+        chain.list_collections(false, &collections(&["contract:0xaa"], None));
+        chain.list_collections(false, &collections(&["contract:0xbb"], Some("0x01")));
+
+        assert_eq!(chain.listed_collections, ["contract:0xaa"], "until the last page comes");
+        assert_eq!(chain.proofs_due(&[], 0.0), [Ask::Collections(Some("0x01".to_string()))]);
+
+        chain.list_collections(true, &collections(&["contract:0xcc"], None));
+        assert_eq!(chain.listed_collections, ["contract:0xbb", "contract:0xcc"]);
+        assert_eq!(chain.collection_entries.len(), 2, "each entry whole, for the NFTs page");
+    }
+
+    #[test]
     fn an_older_nodes_listing_says_nothing_of_filters_and_a_new_ones_does() {
         assert_eq!(answered(&json!({ "txs": [], "next": null, "indexed_from": 0 })), Answered::default());
         assert_eq!(answered(&json!({ "txs": [], "applied": [], "scanned": 7, "limited": false })), Answered { filtered: true, scanned: 7, limited: false });
@@ -1753,5 +1913,43 @@ mod mention_tests {
         assert_eq!(heights(together(Some(&by_address), None)), [9, 2], "a node with one index lists what it lists");
         assert_eq!(heights(together(None, Some(&by_event))), [11, 9, 5]);
         assert!(together(None, None).is_empty());
+    }
+
+    fn at(height: u64) -> Assurance {
+        Assurance { block: Hash::zero(chainv4::structs::hash::HashType::default_chain()), height, final_: true }
+    }
+
+    #[test]
+    fn an_nft_s_owner_proven_at_an_older_block_does_not_undo_a_newer_one() {
+        let mut owners: HashMap<(String, String), Proven<Option<Address>>> = HashMap::new();
+        let key = ("contract:0x01".to_string(), "9".to_string());
+        let (before, after) = (Address::Ed25519([1; 32]), Address::Bitcoin([2; 20]));
+        newest(&mut owners, key.clone(), Proven { value: Some(after), assurance: at(8) });
+        newest(&mut owners, key.clone(), Proven { value: Some(before), assurance: at(7) });
+
+        assert_eq!(owners[&key].value, Some(after), "the answer that came late was older");
+
+        newest(&mut owners, key.clone(), Proven { value: None, assurance: at(9) });
+
+        assert_eq!(owners[&key].value, None);
+    }
+
+    #[test]
+    fn a_contract_is_known_by_the_registry_entry_proven_for_it() {
+        use chainv4::registry::collections::CollectionKind;
+
+        let mut chain = Chain::default();
+        let (token, collection, stranger) = (Address::Contract([1; 32]), Address::Contract([2; 32]), Address::Contract([3; 32]));
+        chain.list_collections(false, &Ok(serde_json::json!({ "collections": [{ "address": collection.to_string(), "kind": "nft" }] })));
+
+        assert_eq!(chain.listed_collections, [collection.to_string()], "which to prove, as the node said");
+        assert!(chain.known(&collection).is_none(), "and nothing known of it until proven");
+
+        chain.tokens.insert(token.to_string(), Proven { value: Token { address: token, name: None, symbol: Some("GOLD".to_string()), decimals: Some(2) }, assurance: at(1) });
+        chain.collections.insert(collection.to_string(), Proven { value: Collection { address: collection, kind: CollectionKind::Nft, name: None, symbol: None }, assurance: at(1) });
+
+        assert!(matches!(chain.known(&token), Some(Known::Token(found)) if found.symbol.as_deref() == Some("GOLD")));
+        assert!(matches!(chain.known(&collection), Some(Known::Collection(found)) if found.kind == CollectionKind::Nft));
+        assert!(chain.known(&stranger).is_none());
     }
 }

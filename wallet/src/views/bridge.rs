@@ -76,6 +76,8 @@ pub struct Proof {
 
 pub struct BridgeState {
     way: Way,
+    /// Which of the account's addresses sends, receives, and has its deposit address shown.
+    from: Option<Address>,
     /// What the gateways answered, by contract, function and arguments.
     answers: HashMap<String, Result<Vec<Value>, String>>,
     asked: HashMap<String, f64>,
@@ -103,6 +105,7 @@ impl Default for BridgeState {
     fn default() -> BridgeState {
         BridgeState {
             way: Way::Out,
+            from: None,
             answers: HashMap::new(),
             asked: HashMap::new(),
             kind: AssetKind::Coin,
@@ -295,8 +298,9 @@ pub fn deposit_output(recipient: &Address, chain_id: u64, gateway: &Address, fed
     p2wsh(&btc_deposit_script(recipient, chain_id, gateway, federation.federation.threshold, &federation.federation.signers))
 }
 
-/// Every account's deposit output, for the light client to watch, once the chain proves its
-/// directory names a Bitcoin gateway and its federation.
+/// Every deposit output of every address of every account, for the light client to watch, once the
+/// chain proves its directory names a Bitcoin gateway and its federation: each address has its own,
+/// and a deposit paid to any of them is shown, whichever is picked on the page.
 #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
 pub fn deposit_outputs(chain: &crate::chain::Chain, holders: &[crate::keys::Holder]) -> Vec<Vec<u8>> {
     let (Some(gateway), Some(federation), Some(genesis)) = (chain.announced().and_then(|directory| directory.btc_gateway), chain.federation_in_force(), chain.genesis.as_ref()) else {
@@ -304,7 +308,7 @@ pub fn deposit_outputs(chain: &crate::chain::Chain, holders: &[crate::keys::Hold
     };
     let chain_id = chainv4::crypto::ethereum::chain_id(genesis);
 
-    holders.iter().filter_map(|holder| holder.addresses().first().map(|address| deposit_output(address, chain_id, &gateway, federation))).collect()
+    holders.iter().flat_map(|holder| holder.addresses()).map(|address| deposit_output(&address, chain_id, &gateway, federation)).collect()
 }
 
 /// A call to a contract here, for the Send page.
@@ -376,6 +380,28 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, send: &mut Send
     };
 
     overview(ui, ctx, &directory, federation.as_ref());
+
+    // Every scheme here signs and holds alike: the EVM side alone takes the account's Ethereum key,
+    // which the page says where it needs it.
+    let before = state.from;
+    super::from::settle(ctx, &mut state.from, &|_| None);
+
+    if ctx.holder().is_some_and(|holder| holder.addresses().len() > 1) {
+        theme::card(ui, &palette, |ui| {
+            super::from::pick(ui, ctx, "bridge", &mut state.from, &|_| None);
+            ui.add(egui::Label::new(RichText::new("What is sent here goes from this address; what comes from an EVM chain or as wBTC comes to it.").small().color(palette.muted)).wrap());
+        });
+    }
+
+    // What comes in followed the pick, unless another address was typed.
+    if state.from != before && before.is_some_and(|before| state.recipient.trim() == before.to_string()) {
+        state.recipient.clear();
+    }
+
+    let Some(me) = state.from else {
+        return;
+    };
+
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut state.way, Way::Out, "To an EVM chain");
         ui.selectable_value(&mut state.way, Way::In, "From an EVM chain");
@@ -384,12 +410,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, send: &mut Send
     theme::section_gap(ui);
 
     let prepared = match state.way {
-        Way::Out => out(ui, ctx, state, &directory),
+        Way::Out => out(ui, ctx, state, &directory, me),
         Way::In => {
-            into(ui, ctx, state, &directory);
+            into(ui, ctx, state, &directory, me);
             None
         }
-        Way::Bitcoin => bitcoin(ui, ctx, state, &directory, federation.as_ref()),
+        Way::Bitcoin => bitcoin(ui, ctx, state, &directory, federation.as_ref(), me),
     };
 
     if state.evm.pending.is_some() {
@@ -502,14 +528,13 @@ fn id_and_amount(ctx: &Ctx, state: &BridgeState, decimals: u8) -> Option<(u256, 
 }
 
 /// Sending from here to an EVM chain, and the account's transfers on their way.
-fn out(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directory) -> Option<Prepared> {
+fn out(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directory, me: Address) -> Option<Prepared> {
     let palette = *ctx.palette;
     let Some(gateway) = directory.gateway else {
         ui.label(RichText::new("The directory names no gateway here.").color(palette.soft));
 
         return None;
     };
-    let me = ctx.holder().and_then(|holder| holder.addresses().first().copied())?;
     let mut prepared = None;
 
     if state.recipient.is_empty()
@@ -687,15 +712,13 @@ fn refund_state(refunded: bool) -> &'static str {
 }
 
 /// Sending from an EVM chain to here, signed there with the account's Ethereum key.
-fn into(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directory) {
+fn into(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directory, me: Address) {
     let palette = *ctx.palette;
     let Some(here) = here(ctx) else {
         return;
     };
 
-    if state.recipient.trim().parse::<Address>().is_err()
-        && let Some(me) = ctx.holder().and_then(|holder| holder.addresses().first().copied())
-    {
+    if state.recipient.trim().parse::<Address>().is_err() {
         state.recipient = me.to_string();
     }
 
@@ -714,6 +737,8 @@ fn into(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
 
             return;
         };
+        // There, whichever address is picked here, it is the Ethereum key that signs.
+        ui.add(egui::Label::new(RichText::new(format!("Signed on {} with this account's Ethereum key, {}, whichever address it comes to here.", chain_name(chain_id), format::short(&to_hex(&from)))).small().color(palette.muted)).wrap());
         let asset: Option<[u8; 20]> = from_hex(state.asset.trim()).and_then(|bytes| bytes.try_into().ok());
         // A token's decimals there are its own: the form takes its smallest units, as the coin's 18.
         let decimals = if state.kind == AssetKind::Coin { 18 } else { 0 };
@@ -754,14 +779,13 @@ fn into(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
 }
 
 /// Bitcoin in and out: the deposit address, deposits to show, withdrawals.
-fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directory, federation: Option<&DecidedFederation>) -> Option<Prepared> {
+fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directory, federation: Option<&DecidedFederation>, me: Address) -> Option<Prepared> {
     let palette = *ctx.palette;
     let (Some(gateway), Some(federation)) = (directory.btc_gateway, federation) else {
         ui.label(RichText::new("The directory names no Bitcoin gateway, or there is no federation yet.").color(palette.soft));
 
         return None;
     };
-    let me = ctx.holder().and_then(|holder| holder.addresses().first().copied())?;
     let chain_id = here(ctx)?;
     let relay = state.read(ctx, &gateway, "relay", json!([])).and_then(|answer| answer.ok()?.first().map(text)).and_then(|text| text.parse::<Address>().ok());
     let network_name = relay.and_then(|relay| state.read(ctx, &relay, "network_name", json!([]))).and_then(|answer| answer.ok()?.first().map(text));
@@ -786,7 +810,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Deposit bitcoin");
-        ui.label(RichText::new("Pay this address from any Bitcoin wallet. Once it is buried deep enough, show it here, and its value is minted to this account as wBTC.").color(palette.soft));
+        ui.label(RichText::new(format!("Pay this address from any Bitcoin wallet. Once it is buried deep enough, show it here, and its value is minted as wBTC to {} {}: each of the account's addresses has a deposit address of its own.", super::scheme(&me), format::short(&me.to_string()))).color(palette.soft));
         ui.add_space(6.0);
         super::receive::qr(ui, &deposit_address, 200.0);
         chainv4_ui::widgets::copy_on_click(ui, &palette, egui::Label::new(theme::mono(deposit_address.as_str()).color(palette.ink)), &deposit_address);

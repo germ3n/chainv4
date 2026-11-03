@@ -13,6 +13,7 @@ use {
     crate::history::function,
     chainv4::abi::{evm_address, evm_create_address},
     chainv4::crypto::hasher::Hasher,
+    chainv4::registry::collections::CollectionKind,
     chainv4::structs::address::{Address, contract_address},
     chainv4::structs::code::Code,
     chainv4::structs::hash::{Hash, HashType},
@@ -102,6 +103,18 @@ pub struct Steps {
     pub steps: Vec<Step>,
 }
 
+/// What the wallet knows a contract to be, from the chain's registries as the light client proved
+/// them: a token, a collection, or neither. A call's numbers mean what the contract makes of them,
+/// so a transfer's is an amount only of a token, an id of an NFT collection, and nothing the
+/// wallet can name of a contract it does not know.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Known {
+    Token(Shown),
+    /// A collection of either standard, by its name, symbol or address, short.
+    Collection { kind: CollectionKind, title: String },
+    Unknown,
+}
+
 /// What a request or a page knows of where it will land, which says where its deploys go: its
 /// sender and nonce, and the chain's hash. A signer offline knows the first two and no hash.
 #[derive(Clone, Copy, Debug)]
@@ -121,9 +134,10 @@ pub fn lands_at(code: &Code, landing: &Landing, before: u32) -> Address {
     }
 }
 
-/// A batch's steps in words. Tokens are named by what tokens says of them, where it knows; a token
-/// it does not is shown in whole units, as signed.
-pub fn of(steps: &[Tx], coin: &Shown, tokens: &dyn Fn(&Address) -> Option<Shown>, landing: Option<&Landing>) -> Steps {
+/// A batch's steps in words. Contracts are read by what known says of them: a token's transfer in
+/// its units, a collection's as the NFT or the amount of an id it moves, and the same call to a
+/// contract known as neither as just that, its numbers unnamed.
+pub fn of(steps: &[Tx], coin: &Shown, known: &dyn Fn(&Address) -> Known, landing: Option<&Landing>) -> Steps {
     // On the offline signer the coin's name is the sender's word, like anything else it says.
     let coin = &Shown { symbol: plain(&coin.symbol), decimals: coin.decimals };
     let mut total = u256::ZERO;
@@ -138,7 +152,7 @@ pub fn of(steps: &[Tx], coin: &Shown, tokens: &dyn Fn(&Address) -> Option<Shown>
         let sends = sent(tx);
         deploys += u32::from(matches!(tx, Tx::Deploy { .. }));
         total = total.saturating_add(sends);
-        laid.push(step(tx, coin, tokens, lands));
+        laid.push(step(tx, coin, known, lands));
     }
 
     Steps {
@@ -160,7 +174,7 @@ pub fn sent(tx: &Tx) -> u256 {
     }
 }
 
-fn step(tx: &Tx, coin: &Shown, tokens: &dyn Fn(&Address) -> Option<Shown>, lands: Option<Address>) -> Step {
+fn step(tx: &Tx, coin: &Shown, known: &dyn Fn(&Address) -> Known, lands: Option<Address>) -> Step {
     let shown = |raw: u256| (format::amount(&raw.to_string(), coin.decimals, &coin.symbol), raw.to_string());
     let sends = |raw: u256| (raw != u256::ZERO).then(|| shown(raw));
     let mut laid = Step { kind: String::new(), coin: None, rows: Vec::new(), evm: None, allowed: true };
@@ -178,19 +192,27 @@ fn step(tx: &Tx, coin: &Shown, tokens: &dyn Fn(&Address) -> Option<Shown>, lands
         Tx::ContractCall { to, func, amount, data } => {
             laid.coin = sends(amount.to_u256());
 
-            match token_transfer(func, amount.to_u256(), data) {
-                Some((recipient, units)) => {
-                    let asset = tokens(to);
-                    laid.kind = format!("Send {}", asset.as_ref().map_or("a token".to_string(), |asset| plain(&asset.symbol)));
+            match moved(func, amount.to_u256(), data, known(to)) {
+                Some(Moved::Token { asset, to: recipient, units }) => {
+                    laid.kind = format!("Send {}", plain(&asset.symbol));
                     laid.rows.push(Row::address("Token", to));
                     laid.rows.push(Row::address("To", recipient));
-                    laid.rows.push(Row::text(
-                        "Amount",
-                        match &asset {
-                            Some(asset) => format!("{} · {units} units", format::amount(&units.to_string(), asset.decimals, &plain(&asset.symbol))),
-                            None => format!("{units} units of the token"),
-                        },
-                    ));
+                    laid.rows.push(Row::text("Amount", format!("{} · {units} units", format::amount(&units.to_string(), asset.decimals, &plain(&asset.symbol)))));
+                }
+                Some(Moved::Nft { title, to: recipient, id }) => {
+                    laid.kind = format!("Send NFT #{id}");
+                    laid.rows.push(Row::text("Collection", plain(&title)));
+                    laid.rows.push(Row::address("Contract", to));
+                    laid.rows.push(Row::text("Id", id.to_string()));
+                    laid.rows.push(Row::address("To", recipient));
+                }
+                Some(Moved::Multi { title, to: recipient, id, count }) => {
+                    laid.kind = format!("Send {count} of #{id}");
+                    laid.rows.push(Row::text("Collection", plain(&title)));
+                    laid.rows.push(Row::address("Contract", to));
+                    laid.rows.push(Row::text("Id", id.to_string()));
+                    laid.rows.push(Row::text("How many", count.to_string()));
+                    laid.rows.push(Row::address("To", recipient));
                 }
                 None => {
                     laid.kind = match function(func) {
@@ -201,6 +223,12 @@ fn step(tx: &Tx, coin: &Shown, tokens: &dyn Fn(&Address) -> Option<Shown>, lands
 
                     if function(func).is_none() {
                         laid.rows.push(Row::text("Function", func.to_string()));
+                    }
+
+                    // A transfer's shape to a contract the wallet cannot name: what its numbers are
+                    // is the contract's to say, so none of them is called an amount.
+                    if known(to) == Known::Unknown && sends_like_a_standard(func, data) {
+                        laid.rows.push(Row::text("Known as", UNKNOWN_CONTRACT));
                     }
 
                     for (index, argument) in data.iter().enumerate() {
@@ -280,10 +308,46 @@ fn argument_row(index: usize, argument: &TxCallArgumentType) -> Row {
     }
 }
 
-/// Whether a call is the token standard's transfer: whom to, and how much.
-fn token_transfer<'a>(func: &Hash, value: u256, data: &'a [TxCallArgumentType]) -> Option<(&'a Address, u256)> {
-    match data {
-        [TxCallArgumentType::Address(to), TxCallArgumentType::U256(units)] if *func == Hasher::digest(HashType::Xxh3_64, b"transfer") && value == u256::ZERO => Some((to, *units)),
+/// What a step says of a contract the wallet knows as neither a token nor a collection, where it
+/// takes the shape of their transfers.
+pub const UNKNOWN_CONTRACT: &str = "neither a token nor a collection the chain lists, as far as the wallet has proven: what its numbers are, an amount or an id, is the contract's to say";
+
+/// What a call moves by a standard the wallet knows its contract follows.
+enum Moved<'a> {
+    Token { asset: Shown, to: &'a Address, units: u256 },
+    Nft { title: String, to: &'a Address, id: u256 },
+    Multi { title: String, to: &'a Address, id: u256, count: u256 },
+}
+
+/// The functions that move a token, or a collection's tokens, to whom the call names.
+const MOVES: [&str; 2] = ["transfer", "safe_transfer"];
+
+fn named(func: &Hash, name: &str) -> bool {
+    *func == Hasher::digest(HashType::Xxh3_64, name.as_bytes())
+}
+
+/// Whether a call takes the shape of a standard's transfer: to an address, then numbers.
+fn sends_like_a_standard(func: &Hash, data: &[TxCallArgumentType]) -> bool {
+    MOVES.iter().any(|name| named(func, name))
+        && matches!(data, [TxCallArgumentType::Address(_), TxCallArgumentType::U256(_)] | [TxCallArgumentType::Address(_), TxCallArgumentType::U256(_), TxCallArgumentType::U256(_)])
+}
+
+/// What a call moves, read by the standard its contract is known to follow: a token's transfer, an
+/// NFT collection's transfer or safe_transfer of an id, or a multi-token one's of an amount of an
+/// id. None for anything else, a contract known as neither among them.
+fn moved<'a>(func: &Hash, value: u256, data: &'a [TxCallArgumentType], known: Known) -> Option<Moved<'a>> {
+    if value != u256::ZERO {
+        return None;
+    }
+
+    match (known, data) {
+        (Known::Token(asset), [TxCallArgumentType::Address(to), TxCallArgumentType::U256(units)]) if named(func, "transfer") => Some(Moved::Token { asset, to, units: *units }),
+        (Known::Collection { kind: CollectionKind::Nft, title }, [TxCallArgumentType::Address(to), TxCallArgumentType::U256(id)]) if MOVES.iter().any(|name| named(func, name)) => {
+            Some(Moved::Nft { title, to, id: *id })
+        }
+        (Known::Collection { kind: CollectionKind::Multi, title }, [TxCallArgumentType::Address(to), TxCallArgumentType::U256(id), TxCallArgumentType::U256(count)]) if MOVES.iter().any(|name| named(func, name)) => {
+            Some(Moved::Multi { title, to, id: *id, count: *count })
+        }
         _ => None,
     }
 }

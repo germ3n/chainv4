@@ -72,8 +72,9 @@ pub enum Ask {
     AccountTxs { address: String, query: String, cursor: Option<String> },
     /// A page of the token registry: tokens whose symbol starts with this, or every one for "".
     Tokens { symbol: String, cursor: Option<String> },
-    /// The collection registry, every NFT and multi-token collection, up to the node's most.
-    Collections,
+    /// A page of the collection registry, the first or the one after a cursor: every NFT and
+    /// multi-token collection, each page's cursor followed to the end.
+    Collections(Option<String>),
     /// A read-only call, with its arguments already written as JSON.
     Call { contract: String, function: String, args: String },
     /// A fee offer for a signed probe, with the sender's own choices, as POST /offer's body.
@@ -96,8 +97,12 @@ pub enum Ask {
     Proof { column: String, key: String, block: Option<String> },
     /// A name, such as alice.dev, at the tip.
     Name(String),
-    /// The names an address owns.
-    AccountNames(String),
+    /// A page of the names an address owns, the first or the one after a cursor: each page's cursor
+    /// is followed to the end.
+    AccountNames { address: String, cursor: Option<String> },
+    /// A page of the multisigs an address's key is a member of, from the node's member index, the
+    /// first or the one after a cursor, every page followed to the end.
+    AccountMultisigs { address: String, cursor: Option<String> },
     /// A JSON-RPC request to POST /rpc, as its body: what EVM reads go through.
     Rpc(String),
     /// A request to the node's faucet, with its proof of work: the body of POST /faucet.
@@ -132,6 +137,11 @@ pub enum Ask {
     DirectProof { column: String, key: String, block: String },
 }
 
+/// A cursor as a page's query goes on with it, for the page after the one it ended.
+fn after(cursor: &Option<String>) -> String {
+    cursor.as_ref().map_or_else(String::new, |cursor| format!("&cursor={cursor}"))
+}
+
 impl Ask {
     pub(crate) fn path(&self) -> String {
         match self {
@@ -145,7 +155,8 @@ impl Ask {
             Ask::Tx(id) => format!("/txs/{id}"),
             Ask::Account(address) => format!("/accounts/{address}"),
             Ask::Name(name) => format!("/names/{}", encode(name)),
-            Ask::AccountNames(address) => format!("/accounts/{address}/names?limit=100"),
+            Ask::AccountNames { address, cursor } => format!("/accounts/{address}/names?limit=200{}", after(cursor)),
+            Ask::AccountMultisigs { address, cursor } => format!("/accounts/{address}/multisigs?limit=200{}", after(cursor)),
             Ask::Rpc(_) => "/rpc".to_string(),
             Ask::Faucet(_) => "/faucet".to_string(),
             Ask::Pool => "/pool".to_string(),
@@ -201,7 +212,7 @@ impl Ask {
 
                 path
             }
-            Ask::Collections => "/collections?limit=500".to_string(),
+            Ask::Collections(cursor) => format!("/collections?limit=500{}", after(cursor)),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
             Ask::Finality { from, count } => format!("/light/finality?from={from}&count={count}"),
@@ -261,12 +272,13 @@ impl Ask {
             | Ask::Signers
             | Ask::Evidence
             | Ask::Tokens { .. }
-            | Ask::Collections
+            | Ask::Collections(_)
             | Ask::Call { .. }
             | Ask::Offer(_)
             | Ask::Proof { .. }
             | Ask::Name(_)
-            | Ask::AccountNames(_)
+            | Ask::AccountNames { .. }
+            | Ask::AccountMultisigs { .. }
             | Ask::Rpc(_)
             | Ask::Faucet(_)
             | Ask::Pool
@@ -672,7 +684,7 @@ mod tests {
             Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None },
             Ask::AccountTxs { address: text(), query: String::new(), cursor: None },
             Ask::Tokens { symbol: String::new(), cursor: None },
-            Ask::Collections,
+            Ask::Collections(None),
             Ask::Call { contract: text(), function: "f".to_string(), args: "[]".to_string() },
             Ask::Offer("{}".to_string()),
             Ask::Submit("{}".to_string()),
@@ -683,7 +695,8 @@ mod tests {
             Ask::Checkpoint(None),
             Ask::Proof { column: "accounts".to_string(), key: text(), block: None },
             Ask::Name("alice.dev".to_string()),
-            Ask::AccountNames(text()),
+            Ask::AccountNames { address: text(), cursor: None },
+            Ask::AccountMultisigs { address: text(), cursor: None },
             Ask::Rpc("{}".to_string()),
             Ask::Faucet("{}".to_string()),
             Ask::Pool,
@@ -958,7 +971,9 @@ mod tests {
     #[test]
     fn token_searches_become_paths() {
         assert_eq!(Ask::Tokens { symbol: String::new(), cursor: None }.path(), "/tokens?limit=100");
-        assert_eq!(Ask::Collections.path(), "/collections?limit=500");
+        assert_eq!(Ask::Collections(None).path(), "/collections?limit=500");
+        assert_eq!(Ask::Collections(Some("0x01".to_string())).path(), "/collections?limit=500&cursor=0x01");
+        assert_eq!(Ask::AccountMultisigs { address: "ed25519:0x01".to_string(), cursor: Some("multisig:0x02".to_string()) }.path(), "/accounts/ed25519:0x01/multisigs?limit=200&cursor=multisig:0x02");
         assert_eq!(
             Ask::Tokens { symbol: "a b".to_string(), cursor: Some("0x01".to_string()) }.path(),
             "/tokens?limit=100&symbol=a%20b&cursor=0x01"

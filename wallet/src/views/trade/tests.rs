@@ -128,3 +128,17 @@ fn slippage_offered_or_typed_reads_as_it_did() {
     assert!(slippage_reads("50") && slippage_reads(" 0 ") && !slippage_reads("51") && !slippage_reads("x"));
     assert!(SLIPPAGE_OFFERED.iter().all(|(value, _)| slippage_reads(value)));
 }
+
+#[test]
+fn what_a_share_token_says_another_address_holds_is_not_taken_as_the_picked_one_s() {
+    let (picked, other, share) = (Address::Bitcoin([1; 20]), Address::Ed25519([2; 32]), Address::Contract([0x55; 32]));
+    let mut state = TradeState { sender: Some(picked), ..TradeState::default() };
+    let held = |holder: &Address| call_ask(&share, "balance_of", json!([{ "type": "address", "value": holder.to_string() }]));
+    let answer = Ok(json!({ "status": "returned", "values": [{ "type": "u256", "value": "70" }] }));
+
+    assert!(state.answered(&held(&other), &answer));
+    assert!(state.held.is_empty(), "asked for the address picked before");
+
+    assert!(state.answered(&held(&picked), &answer));
+    assert_eq!(state.held.get(&share.to_string()), Some(&u256::from(70u64)));
+}

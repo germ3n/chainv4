@@ -183,6 +183,17 @@ other pages explain each part in full; this one is the short list to keep in min
   transactions, so an Ethereum wallet can hold the key yet not sign for chainv4, and a
   secp256k1 address cannot be checked as a curve point: a mistyped one takes coins for good.
   See [Crypto](crypto.md#keys-and-signatures).
+- **A wallet page sends from the address picked, not the first.** Send, Bridge, Trade, Swaps and
+  Batch share one From picker, and Activity lists every address's together, each line saying which
+  address it is for. A transfer between two of the account's own addresses shows as **Between your
+  addresses**, with what moved and its fee; before, it showed as a bare Transfer, as if nothing had
+  moved. An NFT sent from one of its addresses to another shows at the one it went to, by its proof.
+  See [Wallet](wallet.md#sending).
+- **The review reads a contract by what the registries prove it is.** `transfer(to, n)` is an
+  amount only to a proven token: to a proven NFT collection it sends NFT #n, to a multi-token one
+  `transfer(to, id, n)` sends n of #id, and to a contract proven as neither it is a call whose
+  numbers the wallet does not name. The wallet proves each listed collection's entry, as it proves
+  tokens'. See [Wallet](wallet.md#sending).
 - **bitcoin addresses are Bitcoin's.** `bc1q…`, alone, with no `kind:` before it: the HASH160 of a
   key at BIP84's `m/84'/0'/0'/0/n`, the address Bitcoin's wallets show for the same words. Every
   chain writes it with mainnet's `bc`. The key signs chainv4's transactions over double SHA-256,
@@ -670,8 +681,25 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **The regtest tests each take their own port and directory,** so they run side by side; two
   `bitcoind`s on one port hang the second.
 - **Multisig policies live in `Column::Accounts`** beside the accounts, under `multisig:`,
-  `proposals:` and `multisig-evm:` prefixes, which no account key starts with; nothing scans the
-  column.
+  `proposals:` and `multisig-evm:` prefixes, which no account key starts with. Only the member
+  index scans the `multisig:` prefix, once, when a node starts keeping it.
+- **The member index follows state, not blocks.** `--index-multisigs` keeps `Column::Members`, each
+  multisig under the address of each member's key, built whole from the registry when turned on and
+  moved by each block that writes a policy, from the members before to those after. A rollback
+  moves it back by the same rule (`revert` follows the registry), so it is right after a reorg even
+  for a block run before the node kept it. It needs no new genesis: it is not chain state.
+- **A member is found by its key's address.** An Ethereum or Bitcoin account's address is a hash
+  of its key, so `GET /accounts/{address}/multisigs` takes the address, or the key, and the policy
+  names the key; nobody can turn an address back into a key to make a member of it.
+- **A multisig proposal is priced for its heaviest quorum.** Keys are 32 or 33 bytes and gas counts
+  bytes, so a probe of the proposer's key alone under-priced a quorum holding a secp256k1 or
+  bitcoin member, carried by one: "gas limit under its intrinsic cost". `MultisigBundle::probe`
+  carries the threshold heaviest members' signatures under the heaviest carrier; the CLI and the
+  wallet both price with it, and send no more than threshold signatures (`trimmed`).
+- **A member's xpub is its words', not its account's.** `Seed::multisig_account` is at
+  m/48'/coin'/0'/2' for every account of a phrase, so two accounts of one phrase cannot both be
+  members of one multisig on Bitcoin, which names each xpub once. A `bitcoin:` member key, at
+  m/84'/…, gives an xpub from the same words all the same.
 - **A multisig's EVM contract address commits to its first EVM owners.** `Multisigs::evm_start`
   keeps the owners and threshold from when the members first named EVM addresses, written once at
   creation or the first change that names them, never after, since `multisig_contract` hashes them

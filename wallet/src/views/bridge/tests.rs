@@ -138,3 +138,78 @@ fn the_deposit_address_is_the_federation_s_under_the_account() {
     assert_ne!(output, deposit_output(&alice, 1338, &gateway, &federation(&[21, 22, 23])), "each chain its own");
     assert_ne!(output, deposit_output(&alice, 1337, &Address::Contract([8; 32]), &federation(&[21, 22, 23])), "each gateway its own");
 }
+
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+#[test]
+fn every_address_of_every_account_has_its_deposit_watched() {
+    use chainv4::registry::federation::Federation;
+
+    let federation = DecidedFederation {
+        version: 0,
+        federation: Federation {
+            signers: [21u8, 22, 23].iter().map(|byte| chainv4::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 2,
+        },
+    };
+    let gateway = Address::Contract([7; 32]);
+    let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height: 1, final_: true };
+    let genesis = chainv4::structs::hash::Hash::zero(HashType::default_chain());
+    let mut chain = crate::chain::Chain::default();
+    chain.genesis = Some(genesis);
+    chain.directory = Some(crate::chain::Proven { value: Some(Directory { btc_gateway: Some(gateway), ..Directory::default() }), assurance });
+    chain.federation = Some(crate::chain::Proven { value: Some(federation.clone()), assurance });
+    let holders = crate::keys::open(&crate::views::drawn::two_phrases()).unwrap();
+    let watched = deposit_outputs(&chain, &holders);
+    let chain_id = chainv4::crypto::ethereum::chain_id(&genesis);
+
+    assert_eq!(watched.len(), holders.iter().map(|holder| holder.addresses().len()).sum::<usize>());
+
+    for address in holders.iter().flat_map(crate::keys::Holder::addresses) {
+        assert!(watched.contains(&deposit_output(&address, chain_id, &gateway, &federation)), "{address}'s deposit address");
+    }
+}
+
+#[test]
+fn the_bridge_offers_every_address_and_shows_the_deposit_address_of_the_one_picked_on_every_screen() {
+    use chainv4::registry::federation::Federation;
+
+    let federation = DecidedFederation {
+        version: 0,
+        federation: Federation {
+            signers: [21u8, 22, 23].iter().map(|byte| chainv4::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 2,
+        },
+    };
+    let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height: 1, final_: true };
+    let mut book = crate::views::drawn::two_phrases();
+    let mut holders = crate::keys::open(&book).unwrap();
+    let mine = holders[0].addresses();
+
+    for size in crate::views::drawn::SCREENS {
+        for (picked, scheme) in [(None, "Ed25519"), (Some(mine[3]), "Bitcoin")] {
+            let mut world = crate::views::drawn::following(&holders);
+            world.chain.directory = Some(crate::chain::Proven { value: Some(Directory { btc_gateway: Some(Address::Contract([7; 32])), ..Directory::default() }), assurance });
+            world.chain.federation = Some(crate::chain::Proven { value: Some(federation.clone()), assurance });
+            let mut state = BridgeState { way: Way::Bitcoin, from: picked, ..BridgeState::default() };
+            let mut send = SendState::default();
+            let mut draw = |ui: &mut Ui, ctx: &mut Ctx| {
+                if let Some(picked) = picked {
+                    crate::views::from::remember(ctx.wake, picked);
+                }
+                show(ui, ctx, &mut state, &mut send);
+            };
+            let (width, _) = crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (size.0, 4_000.0), &mut draw);
+            let said = crate::views::drawn::said_in(&mut world, &mut book, &mut holders, (size.0, 4_000.0), &mut draw);
+
+            assert!(width <= size.0 + 1.0, "{width} on {size:?}");
+            assert!(said.contains("FROM"), "the picker: {said}");
+            assert!(said.contains(&format!("minted as wBTC to {scheme}")), "{scheme} on {size:?}: {said}");
+        }
+    }
+}

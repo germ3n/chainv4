@@ -549,9 +549,10 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said)
         ui,
         |ui| {
             let mark = match incoming {
-                Some(true) => palette.good,
-                Some(false) => palette.accent,
-                None => palette.muted,
+                Way::In => palette.good,
+                Way::Out => palette.accent,
+                Way::Between => palette.soft,
+                Way::Unsaid => palette.muted,
             };
             theme::dot(ui, mark);
             ui.vertical(|ui| {
@@ -565,10 +566,12 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said)
 
                 if let Some((brief, full)) = &amount {
                     let (sign, color) = match incoming {
-                        Some(true) => ("+", palette.good),
-                        Some(false) => ("−", palette.ink),
+                        Way::In => ("+", palette.good),
+                        Way::Out => ("−", palette.ink),
+                        // From one of its addresses to another: neither more nor less in all.
+                        Way::Between => ("", palette.ink),
                         // Only claimed: it is not said to have added to anything.
-                        None => ("", palette.soft),
+                        Way::Unsaid => ("", palette.soft),
                     };
                     let (text, family) = (format!("{sign}{brief}"), egui::FontFamily::Name(theme::SEMIBOLD.into()));
 
@@ -597,7 +600,7 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said)
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 
-    let moves = || entry.checked.into_iter().flat_map(|checked| checked.for_account(addresses)).map(|(_, moved)| moved);
+    let moves = || entry.checked.into_iter().flat_map(|checked| checked.for_account(addresses).map(|(_, moved)| moved).chain(checked.between(addresses)));
     let mut wanted: Vec<String> = match ui.is_rect_visible(response.rect) {
         true => moves().take(1).filter_map(|moved| to_ask_of(ctx, moved)).cloned().collect(),
         false => Vec::new(),
@@ -614,9 +617,44 @@ fn line(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said)
     wanted
 }
 
+/// Which way a line's amount went for the account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Way {
+    In,
+    Out,
+    /// From one of its addresses to another.
+    Between,
+    /// Neither said: only a contract's claim, or no amount at all.
+    Unsaid,
+}
+
+impl Way {
+    fn of(incoming: Option<bool>) -> Way {
+        match incoming {
+            Some(true) => Way::In,
+            Some(false) => Way::Out,
+            None => Way::Unsaid,
+        }
+    }
+}
+
+/// Which of the account's addresses a party is, by its scheme: "your Bitcoin". An EVM alias of one
+/// is that address's. None for anyone else's.
+fn yours(ctx: &Ctx, party: &str) -> Option<String> {
+    let mine = ctx.holder()?.addresses();
+    let found = mine.iter().find(|address| address.to_string() == party || chainv4::structs::hex::to_hex(&chainv4::abi::evm_address(address)) == party)?;
+
+    Some(format!("your {}", super::scheme(found)))
+}
+
+/// A party in a line: which of the account's addresses it is, or the address, short.
+fn party(ctx: &Ctx, address: &str) -> String {
+    yours(ctx, address).unwrap_or_else(|| format::short(address))
+}
+
 /// A line's title, what it says under it, the amount it moved for this account, cut short and in
-/// full, and whether that came in.
-fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said) -> (String, String, Option<(String, String)>, Option<bool>) {
+/// full, and which way that went.
+fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said) -> (String, String, Option<(String, String)>, Way) {
     let when = |checked: &Checked| match checked.time {
         0 => format!("block {}", format::thousands(&checked.height.to_string())),
         time => format::ago(time, ctx.now),
@@ -624,44 +662,56 @@ fn summary(ctx: &Ctx, addresses: &[String], entry: &Entry, said: Said) -> (Strin
 
     match (entry.checked, entry.sent) {
         // Its steps, each with its own amount and party, show when it is opened.
-        (Some(checked), _) if !checked.steps.is_empty() => (checked.action.clone(), when(checked), None, None),
-        (Some(checked), _) => match checked.for_account(addresses).next() {
-            Some((true, moved)) => {
+        (Some(checked), _) if !checked.steps.is_empty() => (checked.action.clone(), format!("{}{}", by_whom(ctx, checked), when(checked)), None, Way::Unsaid),
+        (Some(checked), _) => match (checked.for_account(addresses).next(), checked.between(addresses).next()) {
+            (Some((true, moved)), _) => {
                 let from = moved.from.as_deref().map_or_else(|| "minted".to_string(), |from| format!("from {}", format::short(from)));
+                let at = moved.to.as_deref().and_then(|to| yours(ctx, to)).map_or_else(String::new, |at| format!(" · to {at}"));
                 let (title, sign) = moved_title(ctx, moved, "Received", "Says you received", true);
 
-                (title, format!("{from} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved, said)), sign)
+                (title, format!("{from}{at} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved, said)), Way::of(sign))
             }
-            Some((false, moved)) => {
+            (Some((false, moved)), _) => {
                 let to = moved.to.as_deref().map_or_else(|| "burned".to_string(), |to| format!("to {}", format::short(to)));
+                let at = moved.from.as_deref().and_then(|from| yours(ctx, from)).map_or_else(String::new, |at| format!(" · from {at}"));
                 let (title, sign) = moved_title(ctx, moved, "Sent", "Says you sent", false);
 
-                (title, format!("{to} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved, said)), sign)
+                (title, format!("{to}{at} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved, said)), Way::of(sign))
             }
-            None => {
-                let by = match addresses.contains(&checked.sender) {
-                    true => String::new(),
-                    false => format!("by {} · ", format::short(&checked.sender)),
-                };
+            // Between the account's own addresses: what moved and where, not a bare transfer.
+            (None, Some(moved)) => {
+                let (from, to) = (party(ctx, moved.from.as_deref().unwrap_or_default()), party(ctx, moved.to.as_deref().unwrap_or_default()));
+                let (title, sign) = moved_title(ctx, moved, "Between your addresses", "Says it moved between your addresses", false);
+                let way = if sign.is_some() { Way::Between } else { Way::Unsaid };
+
+                (title, format!("from {from} to {to} · {}{}", when(checked), read_as(moved)), Some(moved_amount(ctx, moved, said)), way)
+            }
+            (None, None) => {
                 let (title, read_by) = did(ctx, checked);
                 let read_by = read_by.map_or_else(String::new, |read_by| format!(" · {read_by}"));
 
-                (title, format!("{by}{}{read_by}", when(checked)), None, None)
+                (title, format!("{}{}{read_by}", by_whom(ctx, checked), when(checked)), None, Way::Unsaid)
             }
         },
         (None, Some(sent)) => (
             "Sending".to_string(),
-            format!("to {} · {}", format::short(&sent.to), format::ago(sent.at, ctx.now)),
+            format!("to {} · from {} · {}", format::short(&sent.to), party(ctx, &sent.from), format::ago(sent.at, ctx.now)),
             Some((sent.what.clone(), sent.what.clone())),
-            Some(false),
+            Way::Out,
         ),
         (None, None) => (
             "Checking…".to_string(),
             entry.height.map_or_else(String::new, |height| format!("block {}", format::thousands(&height.to_string()))),
             None,
-            None,
+            Way::Unsaid,
         ),
     }
+}
+
+/// Who sent a line's transaction, before the rest of what it says: which of the account's addresses,
+/// or another's address, short.
+fn by_whom(ctx: &Ctx, checked: &Checked) -> String {
+    format!("by {} · ", party(ctx, &checked.sender))
 }
 
 /// What a line says of a move, and which way it went: a claim's says neither that it happened nor
@@ -746,6 +796,14 @@ fn details(ui: &mut Ui, ctx: &Ctx, addresses: &[String], entry: &Entry, said: Sa
             if brief.ends_with(UNVERIFIED) {
                 ui.label(RichText::new("Its name and decimals are only what the contract says of itself, through the node. Nothing proves them, and any contract can say any name.").small().color(palette.muted));
             }
+        }
+
+        for moved in checked.between(addresses) {
+            let (_, full) = moved_amount(ctx, moved, said);
+            let (from, to) = (party(ctx, moved.from.as_deref().unwrap_or_default()), party(ctx, moved.to.as_deref().unwrap_or_default()));
+            super::row(ui, &palette, "Moved", |ui| {
+                ui.label(format!("{full} from {from} to {to}{}", read_as(moved)));
+            });
         }
 
         if addresses.contains(&checked.sender) {
@@ -918,7 +976,7 @@ mod tests {
 
         assert_eq!(title, "Says you received");
         assert!(detail.contains("read as ERC-20"), "{detail}");
-        assert_eq!(incoming, None, "so it gets no plus, and nothing says it came in");
+        assert_eq!(incoming, Way::Unsaid, "so it gets no plus, and nothing says it came in");
         assert!(amount.unwrap().1.starts_with("1,500 "), "a plain whole number, in no decimals");
 
         let (_, text) = with_ctx(&crate::chain::Chain::default(), Vec::new(), |ui, ctx| details(ui, ctx, &me, &entry(&moved), Said::default()));
@@ -934,7 +992,7 @@ mod tests {
         chain.tokens.insert(TOKEN.to_string(), listed_token());
         let ((title, detail, amount, incoming), _) = with_ctx(&chain, Vec::new(), |_, ctx| summary(ctx, &me, &entry(&moved), Said::default()));
 
-        assert_eq!((title.as_str(), incoming), ("Received", Some(true)));
+        assert_eq!((title.as_str(), incoming), ("Received", Way::In));
         assert!(detail.contains("read as ERC-20"), "still says what read it: {detail}");
         assert_eq!(amount.unwrap().1, "15 TKN", "in its decimals");
     }
@@ -1187,7 +1245,7 @@ mod tests {
         });
 
         assert_eq!(amount.unwrap(), ("1.5 \"USDC\" (unverified)".to_string(), "1.5 \"USDC\" (unverified)".to_string()));
-        assert_eq!((title.as_str(), incoming), ("Says you received", None), "named or not, it does not say it came in");
+        assert_eq!((title.as_str(), incoming), ("Says you received", Way::Unsaid), "named or not, it does not say it came in");
         assert!(text.contains("1.5 \"USDC\" (unverified)\n"), "drawn whole: {text}");
         assert!(!text.contains('+'), "and with no plus: {text}");
 
@@ -1210,7 +1268,7 @@ mod tests {
             let ((title, _, amount, incoming), _) = with_ctx(&chain, Vec::new(), |_, ctx| summary(ctx, &me, &entry(&moved), Said::on(&names, unlisted::tests::GENESIS)));
 
             assert_eq!(amount.unwrap().0, format!("15 \"{symbol}\" (unverified)"));
-            assert_eq!((title.as_str(), incoming), ("Says you received", None));
+            assert_eq!((title.as_str(), incoming), ("Says you received", Way::Unsaid));
         }
     }
 
@@ -1225,7 +1283,7 @@ mod tests {
         let ((title, _, amount, incoming), _) = with_ctx(&chain, Vec::new(), |_, ctx| summary(ctx, &me, &entry(&moved), said));
 
         assert_eq!(amount.unwrap(), ("15 TKN".to_string(), "15 TKN".to_string()));
-        assert_eq!((title.as_str(), incoming), ("Received", Some(true)));
+        assert_eq!((title.as_str(), incoming), ("Received", Way::In));
 
         let (wanted, text) = with_ctx(&chain, Vec::new(), |ui, ctx| line(ui, ctx, &me, &entry(&moved), said));
 
@@ -1458,5 +1516,89 @@ mod tests {
                 assert!(!source.contains(word), "{page} mentions {word}");
             }
         }
+    }
+
+    /// A transfer of 40 of the coin, or of a listed token, from one address to another.
+    fn moved_between(from: &Address, to: &Address, token: Option<&str>) -> Checked {
+        let mut moved = checked(&from.to_string(), &to.to_string(), true);
+        moved.action = "Transfer".to_string();
+        moved.kinds = vec!["transfer".to_string()];
+        moved.moves[0].token = token.map(str::to_string);
+        moved.fee = "21000".to_string();
+
+        moved
+    }
+
+    #[test]
+    fn a_transfer_between_the_account_s_own_addresses_shows_what_moved_and_where_for_every_pair_of_schemes() {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let mine = holders[0].addresses();
+        let addresses = with_evm_forms(&mine.iter().map(Address::to_string).collect::<Vec<_>>());
+        let token = "contract:0x0303030303030303030303030303030303030303030303030303030303030303";
+        let mut world = crate::views::drawn::following(&holders);
+        world.chain.listed.push(token.to_string());
+        world.chain.tokens.insert(token.to_string(), crate::chain::Proven {
+            value: chainv4::registry::tokens::Token { address: token.parse().unwrap(), symbol: Some("GOLD".to_string()), name: None, decimals: Some(0) },
+            assurance: chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()), height: 1, final_: true },
+        });
+
+        for from in &mine {
+            for to in mine.iter().filter(|to| *to != from) {
+                for (asset, shown) in [(None, "DEV"), (Some(token), "GOLD")] {
+                    let moved = moved_between(from, to, asset);
+                    let mut summed = None;
+                    crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| summed = Some(summary(ctx, &addresses, &entry(&moved), Said::default())));
+                    let (title, detail, amount, way) = summed.unwrap();
+                    let (from_said, to_said) = (super::super::scheme(from), super::super::scheme(to));
+
+                    assert_eq!((title.as_str(), way), ("Between your addresses", Way::Between), "{from_said} to {to_said}");
+                    assert!(detail.starts_with(&format!("from your {from_said} to your {to_said}")), "{detail}");
+                    assert!(amount.as_ref().is_some_and(|(brief, full)| brief.contains(shown) && full.contains(shown)), "{amount:?} of {shown}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_transfer_between_the_account_s_addresses_draws_its_amount_and_fee_on_every_screen() {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let mine = holders[0].addresses();
+        let addresses = with_evm_forms(&mine.iter().map(Address::to_string).collect::<Vec<_>>());
+        let mut moved = moved_between(&mine[0], &mine[3], None);
+        moved.moves[0].amount = "1500000000000000000".to_string();
+
+        for size in crate::views::drawn::SCREENS {
+            let mut world = crate::views::drawn::following(&holders);
+            let said = crate::views::drawn::said_in(&mut world, &mut book, &mut holders, size, |ui, ctx| {
+                line(ui, ctx, &addresses, &entry(&moved), Said::default());
+                details(ui, ctx, &addresses, &entry(&moved), Said::default());
+            });
+
+            assert!(said.contains("Between your addresses"), "{size:?}: {said}");
+            assert!(said.lines().any(|line| line.contains("1.5 DEV")), "the amount on {size:?}: {said}");
+            assert!(said.contains("from your Ed25519 to your Bitcoin"), "{said}");
+            assert!(said.contains("Fee"), "and the fee: {said}");
+        }
+    }
+
+    #[test]
+    fn each_line_says_which_of_the_account_s_addresses_it_is_for() {
+        let mut book = crate::views::drawn::two_phrases();
+        let mut holders = crate::keys::open(&book).unwrap();
+        let mine = holders[0].addresses();
+        let addresses = with_evm_forms(&mine.iter().map(Address::to_string).collect::<Vec<_>>());
+        let stranger = "ed25519:0x0909090909090909090909090909090909090909090909090909090909090909";
+        let came = checked(stranger, &mine[2].to_string(), true);
+        let left = checked(&mine[1].to_string(), stranger, true);
+        let mut world = crate::views::drawn::following(&holders);
+        let mut said = Vec::new();
+        crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| {
+            said = vec![summary(ctx, &addresses, &entry(&came), Said::default()).1, summary(ctx, &addresses, &entry(&left), Said::default()).1];
+        });
+
+        assert!(said[0].contains("to your Ethereum"), "{}", said[0]);
+        assert!(said[1].contains("from your EdBlake"), "{}", said[1]);
     }
 }

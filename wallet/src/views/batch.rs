@@ -3,6 +3,9 @@
 //! paid at once. Nothing is signed here: it goes to the Send page, prepared, for the same review
 //! and signing as anything else, on to the offline signer for a watch-only account; or, from a
 //! multisig, to the Multisig page, as a bundle for its members.
+//!
+//! The steps and the form that adds them are the Multisig page's too, for proposing anything a
+//! multisig sends: there one step is sent as it is, and several as a batch.
 
 use {
     super::send::{Destination, Prepared, SendState, destination, next_nonce},
@@ -312,6 +315,25 @@ impl BatchState {
         }
     }
 
+    /// What its steps make as a proposal: the one step as it is, or several as a batch, as the
+    /// chain will check them from this sender.
+    pub fn proposal(&self, from: &Address) -> Result<Tx, String> {
+        match self.steps.as_slice() {
+            [one] => {
+                self.batch(from)?;
+
+                Ok(one.clone())
+            }
+            _ => self.batch(from),
+        }
+    }
+
+    /// Drops the steps, as once they went out.
+    pub fn clear(&mut self) {
+        self.steps.clear();
+        self.trouble = None;
+    }
+
     /// The transaction its steps make, as the chain will check it from this sender.
     pub fn batch(&self, from: &Address) -> Result<Tx, String> {
         let tx = Tx::Batch { steps: self.steps.clone() };
@@ -332,21 +354,21 @@ impl BatchState {
     }
 }
 
-/// Who may send a batch: the account's addresses, and the multisigs it follows.
-fn senders(ctx: &Ctx) -> Vec<Address> {
+/// Who may send a batch: the account's addresses, and the multisigs this wallet's accounts are
+/// members of or that it follows.
+fn senders(ctx: &Ctx, multisig: &super::multisig::MultisigState) -> Vec<Address> {
     let mine = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
 
-    mine.into_iter().chain(ctx.settings.multisigs.iter().filter_map(|multisig| multisig.parse().ok())).collect()
+    mine.into_iter().chain(multisig.known(ctx).iter().filter_map(|known| known.address.parse().ok())).collect()
 }
 
-/// What a sender goes by in the picker.
-fn sender_name(from: &Address) -> String {
-    let kind = match from {
-        Address::Multisig(_) => "Multisig",
-        address => super::scheme(address),
-    };
-
-    format!("{kind} · {}", format::short(&from.to_string()))
+/// What a sender goes by in the picker: a multisig by its address, one of the account's as the
+/// other pages' From picker lists it, with the coin it holds.
+fn sender_name(ctx: &Ctx, from: &Address) -> String {
+    match from {
+        Address::Multisig(_) => format!("Multisig · {}", format::short(&from.to_string())),
+        address => super::from::label(ctx, address),
+    }
 }
 
 /// What a name step costs, where the chain's prices are known: what the review checks the balance for.
@@ -374,10 +396,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendS
         state.trouble = None;
     }
 
-    let senders = senders(ctx);
+    multisig.ask_memberships(ctx);
+    let senders = senders(ctx, multisig);
 
+    // Started from the address picked on another page; once steps are in, they keep their sender
+    // until it is changed here, as changing it clears them.
     if !state.from.is_some_and(|from| senders.contains(&from)) {
-        state.from = senders.first().copied();
+        state.from = super::from::remembered(ctx.wake).filter(|picked| senders.contains(picked)).or_else(|| senders.first().copied());
         state.steps.clear();
     }
 
@@ -389,15 +414,19 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendS
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, "Send as");
             let before = state.from;
-            egui::ComboBox::from_id_salt("batch-from").selected_text(sender_name(&from)).width(ui.available_width()).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("batch-from").selected_text(sender_name(ctx, &from)).width(ui.available_width()).show_ui(ui, |ui| {
                 for sender in &senders {
-                    ui.selectable_value(&mut state.from, Some(*sender), sender_name(sender));
+                    ui.selectable_value(&mut state.from, Some(*sender), sender_name(ctx, sender));
                 }
             });
 
             // Each step that moves coin says whom it takes from.
             if state.from != before {
                 state.steps.clear();
+
+                if let Some(picked) = state.from.filter(|picked| !matches!(picked, Address::Multisig(_))) {
+                    super::from::remember(ctx.wake, picked);
+                }
             }
         });
     }
@@ -408,6 +437,34 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendS
 
 /// The steps so far, each to move or take out, and the button that goes on to review them.
 fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendState, multisig: &mut super::multisig::MultisigState, from: &Address) {
+    let Some((tx, coin, count)) = steps_card(ui, ctx, state, from, "Review", false) else {
+        return;
+    };
+    let prepared = Prepared {
+        from: *from,
+        tx,
+        what: format!("A batch of {count} step{}", if count == 1 { "" } else { "s" }),
+        about: "its steps".to_string(),
+        coin,
+    };
+
+    match from {
+        // The members agree to it as they do to anything their multisig sends.
+        Address::Multisig(_) => {
+            multisig.propose(prepared);
+            *ctx.page = Page::Multisig;
+        }
+        _ => {
+            send.prepare(prepared);
+            *ctx.page = Page::Send;
+        }
+    }
+}
+
+/// The steps so far, each to move or take out, and a button that goes on with them: once pressed,
+/// the transaction they make, what they send in all, the coin and names together, and how many
+/// they are. A batch of them, or, as a proposal, one step alone as it is.
+pub(super) fn steps_card(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, from: &Address, button: &str, proposal: bool) -> Option<(Tx, u256, usize)> {
     let palette = *ctx.palette;
     let tx = Tx::Batch { steps: state.steps.clone() };
     let nonce = ctx.chain.account(&from.to_string()).map(|proven| next_nonce(proven.value.nonce, &ctx.settings.sent, &from.to_string(), ctx.now));
@@ -415,10 +472,9 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendState
         Address::Multisig(_) => None,
         _ => steps::landing_of(ctx, &tx, *from, nonce),
     });
-    let Some(laid) = steps::of_tx(ctx, &tx, landing.as_ref()) else {
-        return;
-    };
+    let laid = steps::of_tx(ctx, &tx, landing.as_ref())?;
     let mut change = None;
+    let mut made = None;
 
     theme::card(ui, &palette, |ui| {
         match laid.count {
@@ -459,30 +515,14 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendState
             ui.colored_label(palette.bad, why.as_str());
         }
 
-        if theme::primary(ui, &palette, "Review", laid.count > 0 && !by_metamask).clicked() {
-            match state.batch(from) {
-                Ok(tx) => {
-                    let cost = name_cost(ctx, &state.steps);
-                    let prepared = Prepared {
-                        from: *from,
-                        tx,
-                        what: format!("A batch of {} step{}", laid.count, if laid.count == 1 { "" } else { "s" }),
-                        about: "its steps".to_string(),
-                        coin: laid.coin.saturating_add(cost),
-                    };
+        if theme::primary(ui, &palette, button, laid.count > 0 && !by_metamask).clicked() {
+            let made_up = match proposal {
+                true => state.proposal(from),
+                false => state.batch(from),
+            };
 
-                    match from {
-                        // The members agree to it as they do to anything their multisig sends.
-                        Address::Multisig(_) => {
-                            multisig.propose(prepared);
-                            *ctx.page = Page::Multisig;
-                        }
-                        _ => {
-                            send.prepare(prepared);
-                            *ctx.page = Page::Send;
-                        }
-                    }
-                }
+            match made_up {
+                Ok(tx) => made = Some((tx, laid.coin.saturating_add(name_cost(ctx, &state.steps)), laid.count)),
                 Err(why) => state.trouble = Some(why),
             }
         }
@@ -494,10 +534,12 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendState
         Some((index, _)) => state.remove(index),
         None => {}
     }
+
+    made
 }
 
 /// The form that adds a step.
-fn add_form(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, from: &Address) {
+pub(super) fn add_form(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, from: &Address) {
     let palette = *ctx.palette;
 
     if let Some(picked) = state.picked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
@@ -859,5 +901,31 @@ mod tests {
         assert_eq!(state.wanted_name(), None);
         state.form.to = format!("0x{}", "ab".repeat(20));
         assert_eq!(state.wanted_name(), None);
+    }
+
+    #[test]
+    fn a_proposal_of_one_step_is_that_step_and_of_several_a_batch() {
+        let token = format!("contract:0x{}", "11".repeat(32));
+        let evm = format!("0x{}", "ab".repeat(20));
+        let mut state = BatchState::default();
+        let token_step = read(&Form { kind: Kind::Token, token, to: someone().to_string(), amount: "2".to_string(), ..Form::default() }).unwrap();
+
+        state.add(token_step.clone()).unwrap();
+        assert_eq!(state.proposal(&me()), Ok(token_step), "one step goes as it is, not as a batch of one");
+
+        for form in [
+            Form { kind: Kind::Evm, to: evm, data: "0x01020304".to_string(), ..Form::default() },
+            Form { kind: Kind::Deploy, code: "return {}".to_string(), ..Form::default() },
+            Form { kind: Kind::Name, name: "alice.dev".to_string(), ..Form::default() },
+            Form { kind: Kind::Burn, amount: "1".to_string(), ..Form::default() },
+        ] {
+            state.add(read(&form).unwrap()).unwrap();
+        }
+
+        assert!(matches!(state.proposal(&me()), Ok(Tx::Batch { steps }) if steps.len() == 5));
+        assert!(state.proposal(&someone()).unwrap_err().contains("takes from whom it is sent as"));
+
+        state.clear();
+        assert!(state.proposal(&me()).is_err(), "nothing to propose");
     }
 }

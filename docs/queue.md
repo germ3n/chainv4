@@ -174,6 +174,11 @@ exploit goes anywhere but the owner's sight until fixed.
 - **The meters themselves:** whether Lua's fuel, in the germ3n Luau fork, can be escaped by long-running library
   calls, string operations, metamethods, `pcall` or coroutines. The same for Wasm, and gas in the EVM.
 - **Reentry across engines:** Lua into Wasm into the EVM and back, with state and balance checks at each step.
+- **Reentrancy within each engine:** a contract called back before it writes its state down, in Lua, Wasm and the
+  EVM. Use hostile receivers on every callback the chain's own contracts make: `safe_transfer` to a contract, token
+  and NFT hooks, the DEXes' swaps and liquidity, the swap contract's claim and refund, the gateways' withdrawals and
+  refunds, the multisig's execution, and batches. Each is attacked through a receiver that calls back in to take
+  twice, break a pool's invariant, or leave a balance its storage no longer matches.
 - **State after a revert:** what a failed call or a failed batch step leaves behind, in storage, balances, logs,
   nonces, deployed contracts and names, and every cache between them.
 - **Sandbox:** in Lua, what is reachable through `string`, `getmetatable`, `load` and the rest. In Wasm, imports,

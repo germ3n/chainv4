@@ -105,7 +105,8 @@ the node failing.
 `PROTOCOL` names the chain's protocols (see [Node](node.md#networking)).
 
 **More:** `PEERS` (multiaddrs to dial), `MINE_THREADS`, `REWARD_TO`, `INDEX_EVENTS` and
-`INDEX_ADDRESSES` (`genesis`, a height, `latest-N` or `off`), and `EXTRA_ARGS` for anything else
+`INDEX_ADDRESSES` (`genesis`, a height, `latest-N` or `off`), `INDEX_MULTISIGS` (`on`, the default,
+or `off`), and `EXTRA_ARGS` for anything else
 `chainv4` takes. `docker/entrypoint.sh` has them all.
 
 ### Firewall

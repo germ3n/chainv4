@@ -237,6 +237,9 @@ pub struct Store {
     pub names: HashMap<String, crate::model::NameView>,
     /// The names each address owns.
     pub owned_names: HashMap<String, Vec<crate::model::OwnedName>>,
+    /// The multisigs each address's key is a member of, as the node's member index says, by
+    /// address; none for a node that keeps no such index.
+    pub memberships: HashMap<String, Vec<crate::model::Membership>>,
     /// The mining pool the node runs, as it last answered; None before then, and for a node that
     /// runs none.
     pub pool: Option<crate::model::PoolView>,

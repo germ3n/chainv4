@@ -26,7 +26,7 @@ fn what_is_held_is_asked_then_proven_by_kind() {
     let mut state = NftsState { collections: listed(&json!({ "collections": [
         { "address": "contract:0xaa", "kind": "nft" },
         { "address": "contract:0xbb", "kind": "multi" },
-    ] })), ..NftsState::default() };
+    ] })), addresses: vec!["ed25519:0x01".to_string()], ..NftsState::default() };
     let ask = |contract: &str, function: &str, first: &str| call_ask(contract, function, json!([{ "type": "address", "value": first }]));
     let id = |id: &str| json!({ "type": "u256", "value": id });
 
@@ -119,4 +119,109 @@ fn the_tiles_of_a_row_share_one_top_and_one_height_whatever_they_are_called() {
     assert!((tiles[0].top() - tiles[1].top()).abs() < 0.5, "one top line: {tiles:?}");
     assert!((tiles[0].height() - tiles[1].height()).abs() < 0.5, "one height: {tiles:?}");
     assert!((tiles[0].width() - SIDE).abs() < 0.5 && (tiles[1].width() - SIDE).abs() < 0.5, "a long name stays in its tile: {tiles:?}");
+}
+
+const COLLECTION: &str = "contract:0xc5d33df18482280dbf43177286f3e395e7d7493efe180ff1c7b5707ea9811c7b";
+
+fn tokens_of(holder: &str) -> Ask {
+    call_ask(COLLECTION, "tokens_of", json!([{ "type": "address", "value": holder }, { "type": "u256", "value": "0" }, { "type": "u256", "value": PAGE.to_string() }]))
+}
+
+fn proven<T>(value: T, height: u64) -> crate::chain::Proven<T> {
+    crate::chain::Proven { value, assurance: chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height, final_: true } }
+}
+
+/// Each card the page would draw, by the address it is held at, for the test words' account.
+fn drawn_cards(world: &mut crate::views::drawn::World, state: &mut NftsState) -> Vec<(String, String)> {
+    let mut book = crate::views::drawn::two_phrases();
+    let mut holders = crate::keys::open(&book).unwrap();
+    let mut found = Vec::new();
+    crate::views::drawn::page_in(world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| {
+        state.addresses = ctx.addresses();
+        found = cards(ctx, state).into_iter().map(|card| (card.id, card.holder)).collect();
+    });
+
+    found
+}
+
+fn account() -> Vec<Address> {
+    crate::keys::open(&crate::views::drawn::two_phrases()).unwrap()[0].addresses()
+}
+
+#[test]
+fn an_nft_is_shown_at_whichever_of_the_account_s_addresses_holds_it_whatever_its_scheme() {
+    let addresses = account();
+    let holders = crate::keys::open(&crate::views::drawn::two_phrases()).unwrap();
+
+    assert_eq!(addresses.iter().map(|address| crate::views::scheme(address)).collect::<Vec<_>>().len(), 4, "ed25519, edblake, secp256k1 and bitcoin");
+
+    let mut state = NftsState { collections: listed(&json!({ "collections": [{ "address": COLLECTION, "kind": "nft" }] })), ..NftsState::default() };
+    let mut world = crate::views::drawn::following(&holders);
+
+    for (n, address) in addresses.iter().enumerate() {
+        let id = (n + 1).to_string();
+        assert!(state.answered(&tokens_of(&address.to_string()), &returned(&[json!({ "type": "u256", "value": id })])));
+        world.chain.nft_owners.insert((COLLECTION.to_string(), id), proven(Some(*address), 1));
+    }
+
+    let found = drawn_cards(&mut world, &mut state);
+
+    assert_eq!(found, addresses.iter().enumerate().map(|(n, address)| ((n + 1).to_string(), address.to_string())).collect::<Vec<_>>());
+}
+
+#[test]
+fn an_nft_sent_to_another_of_the_account_s_addresses_stays_on_the_page_before_its_list_says_so() {
+    let addresses = account();
+    let holders = crate::keys::open(&crate::views::drawn::two_phrases()).unwrap();
+    let (ed25519, bitcoin) = (addresses[0], addresses[3]);
+    let mut state = NftsState { collections: listed(&json!({ "collections": [{ "address": COLLECTION, "kind": "nft" }] })), ..NftsState::default() };
+    let mut world = crate::views::drawn::following(&holders);
+
+    // Listed at the Ed25519 address, then sent to the Bitcoin one: the proof says so first, and the
+    // Bitcoin address's list has not come, refused as too many asked at once.
+    assert!(state.answered(&tokens_of(&ed25519.to_string()), &returned(&[json!({ "type": "u256", "value": "9" })])));
+    assert!(state.answered(&tokens_of(&bitcoin.to_string()), &Err(crate::node::Failure { status: 429, message: "too many requests from this address".to_string() })));
+    world.chain.nft_owners.insert((COLLECTION.to_string(), "9".to_string()), proven(Some(bitcoin), 5));
+
+    assert_eq!(drawn_cards(&mut world, &mut state), [("9".to_string(), bitcoin.to_string())], "at the Bitcoin address");
+    assert!(state.unasked.contains_key(&bitcoin.to_string()), "and the page says whose list did not come");
+
+    // The Ed25519 address's list no longer has it: followed at the Bitcoin one, it stays.
+    let mut found = drawn_cards(&mut world, &mut state);
+    state.follow(&found.iter().map(|(id, holder)| Card { listed: state.collections[0].clone(), id: id.clone(), holder: holder.clone(), amount: u256::from(1u64), assurance: proven((), 5).assurance }).collect::<Vec<_>>());
+    assert!(state.answered(&tokens_of(&ed25519.to_string()), &returned(&[])));
+    found = drawn_cards(&mut world, &mut state);
+
+    assert_eq!(found, [("9".to_string(), bitcoin.to_string())]);
+
+    // Once the Bitcoin address's own list answers, it is that list that counts.
+    assert!(state.answered(&tokens_of(&bitcoin.to_string()), &returned(&[json!({ "type": "u256", "value": "9" })])));
+    assert!(state.unasked.is_empty());
+    assert_eq!(drawn_cards(&mut world, &mut state), [("9".to_string(), bitcoin.to_string())]);
+}
+
+#[test]
+fn an_nft_proven_at_an_address_of_no_account_here_is_not_shown() {
+    let holders = crate::keys::open(&crate::views::drawn::two_phrases()).unwrap();
+    let ed25519 = account()[0];
+    let mut state = NftsState { collections: listed(&json!({ "collections": [{ "address": COLLECTION, "kind": "nft" }] })), ..NftsState::default() };
+    let mut world = crate::views::drawn::following(&holders);
+    assert!(state.answered(&tokens_of(&ed25519.to_string()), &returned(&[json!({ "type": "u256", "value": "3" })])));
+    world.chain.nft_owners.insert((COLLECTION.to_string(), "3".to_string()), proven(Some(Address::Bitcoin([1; 20])), 5));
+
+    assert!(drawn_cards(&mut world, &mut state).is_empty());
+}
+
+#[test]
+fn a_multi_token_id_one_address_lists_is_proven_at_every_address_of_the_account() {
+    let addresses = account();
+    let mut state = NftsState { collections: listed(&json!({ "collections": [{ "address": COLLECTION, "kind": "multi" }] })), addresses: addresses.iter().map(Address::to_string).collect(), ..NftsState::default() };
+    assert!(state.answered(&tokens_of(&addresses[0].to_string()), &returned(&[json!({ "type": "u256", "value": "7" })])));
+
+    let mut holders: Vec<String> = state.wanted().into_iter().map(|held| held.holder).collect();
+    holders.sort();
+    let mut expected: Vec<String> = addresses.iter().map(Address::to_string).collect();
+    expected.sort();
+
+    assert_eq!(holders, expected);
 }
