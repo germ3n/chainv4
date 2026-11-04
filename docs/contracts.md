@@ -367,6 +367,7 @@ what its storage or calls cost (`vm::cost`).
 | Event | 200, plus 1 per 16 bytes of name and data |
 | Copying between a module's memory and the host | 1 per 64 bytes |
 | Loading code at deploy or upgrade | 1 per byte of it, plus a Lua script's top level as it runs |
+| Loading a WebAssembly module for a call | 1 per byte of it, every call, cached on the node or not |
 | Asking a token's name, symbol and decimals at deploy or upgrade | What those functions burn |
 | Asking for that again, with `tokens.refresh` or `refresh_token` | 100, and what the questions burn once the call succeeds |
 | Resolving a name, or an address's primary name | 500, plus 1 per 64 bytes of name from WebAssembly |
@@ -391,6 +392,28 @@ what its storage or calls cost (`vm::cost`).
   fresh state, so the same work is charged again. It runs before the call is attached, so it
   sees nothing of the call: `ctx`, `storage`, `contracts`, `accounts`, `events`, `tokens` and `collections` are
   not there yet. It is the same code doing the same work every time.
+- **Every WebAssembly call pays for its module,** 1 fuel a byte at `load_byte`, whether the node
+  had it compiled already or not. A node keeps compiled modules in a cache of its own, which no
+  call may depend on: so a module evicted by many others, which the node must compile again,
+  costs the call the same, and pays for that compiling.
+
+**Lua's libraries pay for what they go over,** in the forked Luau, as instructions alone would let
+one call do a great deal for nothing. Each is the same on every platform:
+- **Patterns:** `string.find`, `match`, `gmatch` and `gsub` pay 1 fuel for every step of the
+  matcher and 1 for every 8 characters a repetition or `%b` scans, so a pattern that backtracks
+  runs out of fuel rather than for hours. A plain search pays 1 per 64 bytes searched.
+- **Building strings:** `string.rep`, `sub`, `reverse`, `lower`, `upper`, `format`, `gsub`'s
+  result, `table.concat` and `..` pay 1 per 64 bytes they make; `string.split` 1 per 64 bytes
+  times the separator's length.
+- **Tables:** `table.sort` pays one fuel for each comparison it is expected to make, n times
+  log2 n, on top of a comparator's own instructions; `insert` and `remove` in the middle, `move`,
+  `create`, `find`, `clear`, `clone` and `maxn` 1 per 8 elements they go over.
+- **utf8:** `utf8.len` 1 per 64 bytes, `codepoint` 1 per 8 values.
+
+**Powers take a whole exponent.** `^` and `math.pow` compute by repeated squaring, which every
+platform rounds alike, where the C library's `pow()` need not: so `x ^ 2` and `2 ^ -3` work, and a
+fractional exponent such as `2 ^ 0.5` fails, as no node may answer it differently. The compiler
+folds a constant power the same way, and leaves a fractional one for the VM to refuse.
 
 A call that runs out of fuel fails with `OutOfFuel`. On a chain with fees, fuel costs gas, and the
 gas limit bounds the fuel too (see [Fees](fees.md)).

@@ -6,6 +6,20 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 
 ## Todo
 
+### Keys to rotate after the malware
+
+The development Mac ran a stealer for about an hour on 2026-11-03 (removed the same day). No misuse
+was seen, but whatever it could read is taken as copied. Queued next, 2026-11-04, after the pentest's
+fixes: the new genesis carries them, as the Luau fork's fuel charges, powers and the Wasm call's load
+fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork's commit first
+(`germ3n/luau-src-rs` 325972b) and point Cargo.lock at it, so the servers build the same engine.
+
+- [ ] **Rotate the devnet's SSH key.** A new key on all three servers, checked to log in, then the
+  old one removed from each, so access is never lost.
+- [ ] **A new genesis with fresh chain keys.** New owner, EVM, relay, faucet, validator, voter and
+  network keys, and new validator words; Gateway.sol on Sepolia deployed again under the new EVM
+  key, with the Sepolia ETH moved over.
+
 ### Once every queued batch is done
 
 - [ ] **A review pass, feature by feature.** Once every queued batch is in, before the fresh test
@@ -454,6 +468,24 @@ with.
   stopping with a clear error at that height.
 
 ### Script layer
+
+- [ ] **Check that memory limits and fuel metering come out the same on every OS and machine.**
+  Asked about 2026-11-04, during the pentest. A transaction that runs out of fuel or memory on one
+  node and not another splits the chain, and the devnet already mixes x86-64 Linux servers with
+  arm64 macOS laptops and Android phones. For each engine, run the same contracts and blocks on
+  each kind of node and compare the fuel used, where each one fails, and the state root:
+  - **Lua:** whether the Luau fork's fuel counts the same instructions everywhere, and whether
+    its memory limit counts the same bytes: allocator sizes, string and table overhead, and GC
+    timing differ by platform and pointer size, so a script near the limit may pass on one and
+    fail on another.
+  - **WebAssembly:** whether wasmi's fuel and its memory and stack limits give the same results
+    across builds and targets.
+  - **The EVM:** whether revm's gas and its memory limit (`memory_limit`) agree everywhere.
+  - **The host:** anything charged by size in memory rather than by encoded bytes.
+
+  Run it in CI on Linux x86-64, macOS arm64 and an Android or arm64 Linux target, and turn
+  whatever disagrees into a deterministic rule. Related: the pentest's finding that Lua's `^`
+  calls the platform's `pow()`.
 
 - [x] **The EVM.** revm runs Solidity and Vyper contracts beside Lua and WebAssembly (`evm`
   feature, `evm` in genesis's `engines`): `Code::Evm` deploys, `Tx::EvmCall` calls or pays,
@@ -1189,10 +1221,49 @@ with.
   multisig holding a multisig, a few megabytes of it, ran the decoder out of stack and aborted the node.
   Decoding stops two levels down now, the deepest a valid transaction goes.
 - [x] **An offline signer forgot what it had signed.** It keeps a history now, sealed with its keys, that Settings turns off and clears.
-- [ ] **Pentest the chain with malicious contracts and calls,** in Lua, Wasm and the EVM: resource exhaustion
+- [x] **Pentest the chain with malicious contracts and calls,** in Lua, Wasm and the EVM: resource exhaustion
   (memory, fuel, stack, nesting, huge returns and logs), reentry across engines, escaping the sandbox, state left
-  behind by reverts, and hostile calldata. On a chain of its own, never the public one. The ABI decoder's blow-up
-  was found by reading: this looks for the rest on purpose.
+  behind by reverts, and hostile calldata. On a chain of its own, never the public one. First run 2026-11-04; a
+  second is queued for after this list is done (`docs/queue.md`). Its tests are `src/chain/tests/pentest_lua.rs`,
+  `pentest_wasm.rs`, `pentest_contracts.rs`, `src/pentest_decoders.rs`, and two in `evm.rs`; an ignored test is a
+  finding, failing until fixed. What it found, worst first:
+  - [x] **A pattern that backtracks stalls every node.** Fixed 2026-11-04 in the Luau fork (325972b), with the
+    two below; needs the new genesis, as old blocks would replay with other fuel. `string.find(s, ".-.-.-.-b")` on 160 bytes ran 24 s for 77
+    fuel, about 16 times longer for each doubling: the C matcher charges nothing for its steps. Consensus: charge fuel
+    per match step in the Luau fork, deterministic everywhere (`a_pattern_that_backtracks_is_paid_for_by_its_steps`).
+  - [x] **Library calls that do work by size cost a flat few fuel.** `table.sort` of 200,000 numbers 50 times took
+    1.9 s for 700 fuel; a plain `string.find` over 4 MB, `table.insert` at the front of a big table and their kin
+    alike, and no memory limit stops a loop of them. Consensus: charge each by the bytes or elements it goes over
+    (`sorting_and_scanning_are_paid_for_by_their_size`).
+  - [x] **`^` computes with the platform's `pow()`.** Whole exponents by repeated squaring now; fractional refused. `2 ^ 0.5` runs and can be stored; Linux on x86-64 and macOS on
+    arm64 need not round it alike, splitting the chain. Consensus: refuse a fractional exponent, or compute powers by
+    a deterministic routine (`a_power_with_a_fractional_exponent_is_refused`).
+  - [x] **A Wasm call that misses the module cache recompiles it unpaid.** Fixed 2026-11-04: every call pays
+    `load_byte` a byte of its module, cached or not (consensus, with the new genesis). wasmi cannot save
+    compiled modules, and its lazy translation charges fuel as it translates, which would make fuel depend on
+    the cache. Deploying more large modules than the
+    cache holds and calling them in turn makes every node compile on every call. Node-local: keep compiled modules on
+    disk by code hash, or keep more (`calls_recompile_uncached_modules_as_unpaid_work`).
+  - [x] **The DEX leans on the engine's reentry rule alone.** Fixed 2026-11-04 in `dex.lua`: reserves are
+    written before paying out, and a native token's arrival is checked by its balance; deploy the new DEX. `remove_liquidity` writes the reserves after paying out,
+    and adding a native token does not check what arrived, so a token that takes a fee or lies leaves its pool owing
+    more than it holds. Not exploitable while no DEX function is reentrant; a `dex.lua` change and redeploy.
+  - [x] **The EVM's trace copied each call's whole input, and kept every native call's hops.** A contract passing a
+    megabyte to 280,000 cheap calls made every node copy about 280 GB; thousands of native calls each kept a trace.
+    Fixed 2026-11-04: the selector is read in place, and frames and hops past what a trace holds are only counted.
+
+  Found sound: Wasm deploy checks, memory, recursion and fill; every decoder (transactions, blocks, gossip, sync,
+  ranges, the ABI, API bodies); the DEX, NFTs and multi-tokens under reentry; the gateways' and swap's ordering, by
+  reading; the native precompile's gas, static calls and value; in Lua, building strings stopping at the memory limit,
+  hashing paid by its bytes, every call starting fresh, the libraries unchangeable, and nesting without end failing
+  cleanly. Not driven through a running federation yet: the gateways, `btc_gateway.lua` and the swap's claim and refund.
+- [ ] **Pentest the gateways and the swap contracts with a running federation.** Queued 2026-11-04. The first run
+  read them only. On a chain of its own, with a federation of test signers, a Bitcoin relay fed regtest headers
+  and an EVM chain in process, drive every path of `gateway.lua`, `btc_gateway.lua`, `Gateway.sol`, `swap.lua` and
+  `Swap.sol` with hostile parties: a signer short of the threshold, a replayed or reordered signature, a transfer
+  delivered, voided and refunded in every order, a deposit shown twice or on a branch that lost, a release proposed,
+  replaced and bumped against itself, withdrawals that agree to lose less than their share, claims and refunds raced
+  and twice, a recipient contract that refuses or re-enters, and an owner changing peers or the coin mid-flight.
 - [x] **The wallet's Activity names unlisted tokens** by what they say of themselves, labelled, like `1.5 "USDC" (unverified)`. Still only a claim: never on signing screens, and never in balances.
 - [x] **Small things seen on the emulator:** an error from a failed import stayed on Accounts after a later success, and an offline signer's accounts said "not proven yet" for good.
 - [x] **A small call could make every node allocate far more than it paid for.** `evm.decode` and its kin
@@ -1291,6 +1362,21 @@ with.
   through certbot, or a self-signed one.
 - [ ] **No published image.** CI does not build or push the Docker image; it is built where it
   runs.
+- [ ] **A deploy compiles on every server.** `docker/pow.sh up` builds the image on each VPS, so a
+  redeploy of the devnet's three takes about 75 minutes, most of it the same build three times.
+  Asked about 2026-11-04; queued after the pentest. In order of effort:
+  1. **Build once, copy the image (first).** Build on the first server, as `staged.sh` already
+     checks .57 first, then `podman save | ssh … podman load` the tested node and nginx images
+     (about 170 MB and 70 MB compressed) to the others and restart them on it: no registry, no
+     credentials, about 25 minutes in all. Keep building where it runs as the fallback, a flag on
+     `pow.sh up`, for a server alone.
+  2. **A registry,** GHCR, private as the repository is: one server or CI pushes, every node pulls.
+     Worth it once there are more nodes, or other people's; each server then holds a pull token.
+  3. **CI builds and pushes,** so no server compiles: spends runner minutes, and the workflows are
+     manual only to save them.
+
+  The images are x86_64, as the servers are; this Mac is arm64 and would build them under
+  emulation, so a server stays the builder.
 - [ ] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
   `send` at a node across the internet.
 - [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold

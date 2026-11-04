@@ -127,7 +127,14 @@ local function take(asset, amount, coin)
             error("the token moved less than the amount: tokens that take a fee are not traded")
         end
     else
+        -- What arrived, not what was asked: a token that keeps a fee, or lies, would leave the
+        -- pool's reserves above what it holds.
+        local held = contracts.call(asset, "balance_of", ctx.contract)
         contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, amount)
+
+        if contracts.call(asset, "balance_of", ctx.contract) - held ~= amount then
+            error("the token moved less than the amount: tokens that take a fee are not traded")
+        end
     end
 end
 
@@ -322,16 +329,19 @@ function M.remove_liquidity(a, b, shares, least_a, least_b, deadline)
         error("the pool's price moved: less than the least")
     end
 
+    -- The shares burned and the reserves written down before anything is paid out, so whatever a
+    -- payment calls finds the pool as it is after this, not before.
     contracts.call(lp, "burn", ctx.sender, shares)
-    give(a, ctx.sender, amount_a)
-    give(b, ctx.sender, amount_b)
-    events.emit("Burn", a, b, ctx.sender, amount_a, amount_b, shares)
 
     if flipped then
         sync(salt, b, a, reserve_b - amount_b, reserve_a - amount_a)
     else
         sync(salt, a, b, reserve_a - amount_a, reserve_b - amount_b)
     end
+
+    give(a, ctx.sender, amount_a)
+    give(b, ctx.sender, amount_b)
+    events.emit("Burn", a, b, ctx.sender, amount_a, amount_b, shares)
 
     return amount_a, amount_b
 end

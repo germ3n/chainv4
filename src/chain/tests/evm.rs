@@ -2075,3 +2075,76 @@ fn the_calldata_an_evm_tool_sends_calls_a_native_contract_straight_from_its_acco
     assert!(crate::abi::call_native_input(&counter, "add", &[TxCallArgumentType::Nil]).is_err());
     assert!(crate::abi::call_native_input(&authority().public().address(), "add", &[]).is_err());
 }
+
+/// Pentest, work not paid for: a contract that expands its memory to 1 MiB once, then makes
+/// CALLS calls passing all of it as input, each for about a hundred gas. Tracing each frame must
+/// not cost what its input is long, nor keep more frames than a trace holds.
+#[test]
+fn many_cheap_calls_with_a_megabyte_of_input_each_cost_the_trace_no_more_than_it_keeps() {
+    const CALLS: u16 = 20_000;
+    let [high, low] = CALLS.to_be_bytes();
+    // MSTORE at 1 MiB less 32 grows memory once; then CALLS times CALL(gas, 0x1234, 0, 0, 1 MiB, 0, 0).
+    let runtime = [
+        &[0x60, 0x00, 0x62, 0x0f, 0xff, 0xe0, 0x52, 0x61, high, low, 0x5b][..],
+        &[0x60, 0x00, 0x60, 0x00, 0x62, 0x10, 0x00, 0x00, 0x60, 0x00, 0x60, 0x00, 0x61, 0x12, 0x34, 0x5a, 0xf1, 0x50],
+        &[0x60, 0x01, 0x90, 0x03, 0x80, 0x60, 0x0a, 0x57, 0x00],
+    ]
+    .concat();
+    let length = u8::try_from(runtime.len()).unwrap();
+    let init = [&[0x60, length, 0x80, 0x60, 0x0b, 0x60, 0x00, 0x39, 0x60, 0x00, 0xf3][..], &runtime].concat();
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let caller = evm::create_address(&authority().public().address(), nonce(&chain, &authority()));
+    let deploy = sign(&chain, &authority(), Tx::Deploy { code: Code::Evm(init) });
+    assert_eq!(advance(&mut chain, vec![deploy])[0].result, Ok(Effect::Deployed(caller)));
+
+    let calling = call(&chain, &authority(), caller, 0, Vec::new());
+    let started = std::time::Instant::now();
+    let receipt = advance(&mut chain, vec![calling]).remove(0);
+    let took = started.elapsed();
+
+    assert!(receipt.result.is_ok(), "{:?}", receipt.result);
+    assert_eq!(receipt.trace.hops.len(), crate::structs::trace::MAX_HOPS, "as many as a trace holds");
+    assert_eq!(receipt.trace.dropped as usize, 1 + usize::from(CALLS) - crate::structs::trace::MAX_HOPS, "the rest only counted");
+    // Copying each call's megabyte would be 20 GB; reading its selector is nothing.
+    assert!(took < std::time::Duration::from_secs(10), "{took:?}");
+}
+
+/// Pentest, work not paid for: a contract calling the native precompile in a loop, each native
+/// call with a trace of its own. Past what a trace holds, the native calls' hops are only counted,
+/// not kept until the transaction ends and thrown away.
+#[test]
+fn many_native_calls_from_the_evm_keep_no_more_hops_than_a_trace_holds() {
+    const CALLS: u16 = 1_000;
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (_, counter, _) = bridged(&mut chain);
+    let (_, data) = crate::abi::call_native_input(&counter, "total", &[]).unwrap();
+    let len = u16::try_from(data.len()).unwrap().to_be_bytes();
+    let calls = CALLS.to_be_bytes();
+    // CODECOPY the calldata to memory, then CALLS times CALL(gas, 0x4e43, 0, 0, len, 0, 0).
+    let runtime = [
+        &[0x61, len[0], len[1], 0x61, 0x00, 0x27, 0x60, 0x00, 0x39, 0x61, calls[0], calls[1], 0x5b][..],
+        &[0x60, 0x00, 0x60, 0x00, 0x61, len[0], len[1], 0x60, 0x00, 0x60, 0x00, 0x61, 0x4e, 0x43, 0x5a, 0xf1, 0x50],
+        &[0x60, 0x01, 0x90, 0x03, 0x80, 0x60, 0x0c, 0x57, 0x00],
+        &data,
+    ]
+    .concat();
+    let size = u16::try_from(runtime.len()).unwrap().to_be_bytes();
+    let init = [&[0x61, size[0], size[1], 0x80, 0x60, 0x0c, 0x60, 0x00, 0x39, 0x60, 0x00, 0xf3][..], &runtime].concat();
+    let caller = evm::create_address(&authority().public().address(), nonce(&chain, &authority()));
+    let deploy = sign(&chain, &authority(), Tx::Deploy { code: Code::Evm(init) });
+    assert_eq!(advance(&mut chain, vec![deploy])[0].result, Ok(Effect::Deployed(caller)));
+
+    let calling = call(&chain, &authority(), caller, 0, Vec::new());
+    let receipt = advance(&mut chain, vec![calling]).remove(0);
+
+    assert!(receipt.result.is_ok(), "{:?}", receipt.result);
+    let max = crate::structs::trace::MAX_HOPS;
+    assert_eq!(receipt.trace.hops.len(), max);
+    // The top frame, a frame for each call to the precompile, and each native call's own hop.
+    assert_eq!(receipt.trace.dropped as usize, 1 + 2 * usize::from(CALLS) - max);
+    assert_eq!(receipt.trace.hops[1].to, Address::Evm(crate::vm::evm::NATIVE_PRECOMPILE));
+    assert_eq!((receipt.trace.hops[2].to, receipt.trace.hops[2].function.as_str()), (counter, "total"));
+}

@@ -44,8 +44,9 @@ function M.spin()
     while true do end
 end
 
+-- Past the 16 MiB memory limit, for less fuel than the call has: building it is paid by its bytes.
 function M.hog()
-    return string.rep("x", 64 * 1024 * 1024)
+    return string.rep("x", 20 * 1024 * 1024)
 end
 
 function M.boom()

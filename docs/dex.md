@@ -54,8 +54,12 @@ One contract holds every pool. A side of a pool is:
   The zero key, `ed25519:0x00…00`, is no valid key, and transactions refuse to name it;
 - **a token-standard token,** moved with `transfer_from`: approve the DEX first;
 - **an ERC-20 on chainv4's EVM,** by its `evm:0x…` address, moved with `transferFrom` through
-  `evm.call`: approve the DEX's EVM address, which the EVM sees it at. A token that moves less
-  than asked, by a fee on transfer, is refused.
+  `evm.call`: approve the DEX's EVM address, which the EVM sees it at.
+
+Either kind of token that moves less than asked, by a fee on transfer or a balance that lies, is
+refused: the DEX reads its own balance before and after, and a pool's reserves are what arrived.
+`remove_liquidity` writes the pool's new reserves before it pays anything out, so whatever a
+payment calls finds the pool as it stands after (since 2026-11-04, a DEX deployed from then).
 
 | Function | What it does |
 | --- | --- |

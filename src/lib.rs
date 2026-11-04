@@ -39,3 +39,6 @@ pub mod nft;
 pub mod bridge;
 #[cfg(feature = "vm")]
 pub mod vm;
+
+#[cfg(test)]
+mod pentest_decoders;

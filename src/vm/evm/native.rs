@@ -119,6 +119,8 @@ pub(super) struct NativeAt<'a> {
     pub frames: std::rc::Rc<std::cell::RefCell<super::payments::Frames>>,
     /// Every native call's hops, in order, for the trace.
     pub hops: RefCell<Vec<NativeHops>>,
+    /// How many of those hops are kept so far.
+    pub kept_hops: std::cell::Cell<usize>,
 }
 
 enum Answer {
@@ -243,9 +245,20 @@ impl NativeAt<'_> {
         };
         let host = Host::from_evm(layer.clone(), caller, self.block, limits.memory, self.bridge.vm.clone(), self.bridge.stack.clone());
         let outcome = host.call(&target, &name, &native, value, limits.fuel);
-        // Its hops, whatever came of it, under the frame calling the precompile.
+        // Its hops, whatever came of it, under the frame calling the precompile; past what a trace
+        // holds, only counted, as a run making thousands of native calls would otherwise keep
+        // thousands of traces to throw nearly all of them away.
         let hops_at = self.hops.borrow().len();
-        self.hops.borrow_mut().push(NativeHops { under: self.frames.borrow().current(), trace: host.take_trace(), first: self.bridge.stack.len() + 1, crossed: None });
+        let mut trace = host.take_trace();
+        let kept = self.frames.borrow().frames.len() + self.kept_hops.get();
+
+        if kept >= crate::structs::trace::MAX_HOPS {
+            trace = crate::structs::trace::Trace { hops: Vec::new(), dropped: trace.dropped.saturating_add(trace.hops.len() as u32) };
+        }
+
+        self.kept_hops.set(self.kept_hops.get() + trace.hops.len());
+
+        self.hops.borrow_mut().push(NativeHops { under: self.frames.borrow().current(), trace, first: self.bridge.stack.len() + 1, crossed: None });
         let used = gas.saturating_add(outcome.fuel_used.div_ceil(fuel_per_gas)).min(inputs.gas_limit);
         let returned = match outcome.result {
             Ok(returned) => returned,

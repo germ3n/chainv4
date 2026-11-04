@@ -2087,6 +2087,11 @@ mod evm;
 #[cfg(feature = "names")]
 mod names;
 mod multisig;
+mod pentest_lua;
+#[cfg(feature = "wasm")]
+mod pentest_wasm;
+#[cfg(all(feature = "evm", feature = "secp256k1"))]
+mod pentest_contracts;
 mod batch;
 mod range;
 // A council governs them, on the dev chain, whose finality votes only under FFG.

@@ -421,6 +421,7 @@ pub fn run(
         paid: paid.clone(),
         frames: traced.clone(),
         hops: Default::default(),
+        kept_hops: Default::default(),
     });
     let eth = evm.precompiles.clone();
     let mut evm = evm.with_precompiles(precompiles::ChainPrecompiles::new(
@@ -584,7 +585,7 @@ fn traced_run(state: &State, frames: &payments::Frames, native_hops: Vec<native:
         }
     }
 
-    let mut trace = Trace::default();
+    let mut trace = Trace { hops: Vec::new(), dropped: frames.dropped };
     let graft = |trace: &mut Trace, hops: native::NativeHops, depth: usize| {
         let mut sub = hops.trace;
         sub.hops.iter_mut().for_each(|hop| hop.depth = hop.depth.saturating_sub(u8::try_from(hops.first).unwrap_or(u8::MAX)));

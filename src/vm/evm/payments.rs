@@ -12,10 +12,10 @@
 
 use {
     super::NATIVE_PRECOMPILE,
-    crate::structs::trace::HopKind,
-    revm::context_interface::{ContextTr, JournalTr},
+    crate::structs::trace::{HopKind, MAX_HOPS},
+    revm::context_interface::{ContextTr, JournalTr, LocalContextTr},
     revm::inspector::Inspector,
-    revm::interpreter::{CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome},
+    revm::interpreter::{CallInput, CallInputs, CallOutcome, CallScheme, CreateInputs, CreateOutcome},
     revm::primitives::{Address as Word, Log, U256},
     std::cell::RefCell,
     std::rc::Rc,
@@ -37,9 +37,13 @@ pub(super) struct Frame {
 }
 
 /// The run's frames so far, shared with the native precompile, which reads the frame calling it.
+/// Only the first MAX_HOPS are kept, as many as a trace holds: past them a frame is only counted,
+/// so a run making many cheap calls costs no more to trace than the trace keeps.
 #[derive(Default)]
 pub(super) struct Frames {
     pub frames: Vec<Frame>,
+    /// Frames past MAX_HOPS, only counted.
+    pub dropped: u32,
     /// The frames open now, innermost last.
     open: Vec<usize>,
     /// Each log that stands so far, by the frame that emitted it: a frame that fails takes its
@@ -52,6 +56,15 @@ pub(super) struct Frames {
 impl Frames {
     fn begin(&mut self, frame: Frame) {
         self.logs_at.push(self.logs.len());
+
+        // Past what a trace holds: open, so depth and logs keep their place, but not kept.
+        if self.frames.len() >= MAX_HOPS {
+            self.dropped = self.dropped.saturating_add(1);
+            self.open.push(usize::MAX);
+
+            return;
+        }
+
         self.open.push(self.frames.len());
         self.frames.push(frame);
     }
@@ -65,7 +78,9 @@ impl Frames {
             self.logs.truncate(logs_at);
         }
 
-        let frame = &mut self.frames[at];
+        let Some(frame) = self.frames.get_mut(at) else {
+            return;
+        };
         frame.gas = gas;
         frame.error = error;
 
@@ -74,9 +89,24 @@ impl Frames {
         }
     }
 
-    /// The innermost frame running now: the one calling the native precompile, when it runs.
+    /// The innermost frame running now and kept: the one calling the native precompile, when it
+    /// runs. None past MAX_HOPS.
     pub fn current(&self) -> Option<usize> {
-        self.open.last().copied()
+        self.open.last().copied().filter(|at| *at != usize::MAX)
+    }
+}
+
+/// A call's selector in hex, its first four bytes: read where the input lies, never copying the
+/// rest, as a call can pass megabytes of memory it paid to expand once, each time for a few gas.
+fn selector<CTX: ContextTr>(context: &CTX, input: &CallInput) -> String {
+    match input {
+        CallInput::Bytes(bytes) => bytes.get(..4).map(crate::structs::hex::to_hex).unwrap_or_default(),
+        CallInput::SharedBuffer(range) if range.len() >= 4 => context
+            .local()
+            .shared_memory_buffer_slice(range.start..range.start + 4)
+            .map(|four| crate::structs::hex::to_hex(&four))
+            .unwrap_or_default(),
+        CallInput::SharedBuffer(_) => String::new(),
     }
 }
 
@@ -140,7 +170,7 @@ impl<CTX: ContextTr> Inspector<CTX> for Payments {
             self.pay(inputs.caller, inputs.target_address, value);
         }
 
-        let input = inputs.input.bytes(context);
+        let function = selector(context, &inputs.input);
         let (kind, to) = match inputs.scheme {
             CallScheme::DelegateCall | CallScheme::CallCode => (HopKind::Delegate, inputs.bytecode_address),
             CallScheme::Call | CallScheme::StaticCall => (HopKind::Call, inputs.target_address),
@@ -150,7 +180,7 @@ impl<CTX: ContextTr> Inspector<CTX> for Payments {
             kind,
             from: inputs.caller.into_array(),
             to: to.into_array(),
-            function: input.get(..4).map(crate::structs::hex::to_hex).unwrap_or_default(),
+            function,
             value: inputs.transfer_value().unwrap_or_default(),
             gas: 0,
             error: None,
@@ -182,10 +212,9 @@ impl<CTX: ContextTr> Inspector<CTX> for Payments {
 
     fn log(&mut self, _: &mut CTX, _: Log) {
         let mut frames = self.traced.borrow_mut();
-
-        if let Some(at) = frames.current() {
-            frames.logs.push(at);
-        }
+        // A frame past MAX_HOPS still holds its place among the logs, its own going to none.
+        let at = frames.open.last().copied().unwrap_or(usize::MAX);
+        frames.logs.push(at);
     }
 
     fn create_end(&mut self, context: &mut CTX, inputs: &CreateInputs, outcome: &mut CreateOutcome) {

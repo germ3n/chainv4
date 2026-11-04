@@ -150,6 +150,9 @@ silently.
 
 ## Pentest the chain
 
+**Twice:** the first run started 2026-11-04; a second, the same brief over again, is queued for after every
+item in `docs/todo.md` is in, as that work will have changed most of what this covers.
+
 Attack the chain with malicious contracts and calls, in Lua, Wasm and the EVM, looking on purpose for what
 review has only found by luck: the ABI decoder's blow-up, where a small call made every node allocate far more
 than it paid for, and bytes nesting without end, which crashed whoever decoded them.

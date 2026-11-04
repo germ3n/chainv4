@@ -304,11 +304,21 @@ impl ScriptEngine for WasmEngine {
     }
 
     fn run(&self, code: &[u8], function: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
+        // Loading the code is paid on every call, at the deploy's rate a byte, whether this node had
+        // it compiled already or not: what a call costs is the same on every node, and a module no
+        // node has cached, as one evicted by many others, pays for its compiling.
+        let load = (code.len() as u64).saturating_mul(host.costs().load_byte);
+
+        if load > limits.fuel {
+            return Outcome { fuel_used: limits.fuel, ..Outcome::failed(VmError::OutOfFuel) };
+        }
+
         let module = match self.module(code) {
             Ok(module) => module,
-            Err(err) => return Outcome::failed(err),
+            Err(err) => return Outcome { fuel_used: load, ..Outcome::failed(err) },
         };
         let input = wincode::serialize(&args.to_vec()).expect("arguments always encode");
+        let limits = Limits { fuel: limits.fuel - load, ..limits };
         let mut store = self.store(Some(host), input, limits);
         let result = self
             .linker
@@ -327,7 +337,7 @@ impl ScriptEngine for WasmEngine {
         };
 
         Outcome {
-            fuel_used: limits.fuel - remaining,
+            fuel_used: load + limits.fuel - remaining,
             result,
             events: Vec::new(),
             trace: Trace::default(),
