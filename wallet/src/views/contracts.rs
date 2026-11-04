@@ -65,6 +65,9 @@ pub struct ContractsState {
     values: HashMap<(String, String), String>,
     /// What each read came to, by contract and function.
     results: HashMap<(String, String), Result<String, String>>,
+    /// A native function's call as an EVM tool sends it, once asked for: the precompile's
+    /// address and the calldata, in hex.
+    calldata: HashMap<(String, String), (String, String)>,
     /// Which function each read out is for.
     asked: HashMap<Ask, (String, String)>,
     /// Native contracts' records, by address: None while asked, or for no contract.
@@ -372,6 +375,22 @@ fn native_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from
                 ctx.node.ask(ask);
             }
 
+            // The same call for an EVM tool, MetaMask or cast: sent to the native precompile.
+            if theme::quiet(ui, &palette, "EVM calldata").clicked() {
+                let encoded = args.clone().and_then(|args| chainv4::abi::call_native_input(&address, function, &args));
+
+                match encoded {
+                    Ok((precompile, input)) => {
+                        state.calldata.insert(key.clone(), (to_hex(&precompile), to_hex(&input)));
+                        state.results.remove(&key);
+                    }
+                    Err(why) => {
+                        state.calldata.remove(&key);
+                        state.results.insert(key.clone(), Err(why));
+                    }
+                }
+            }
+
             if theme::quiet(ui, &palette, "Send").clicked() {
                 match (&args, &sent) {
                     (Ok(args), Ok(sent)) => {
@@ -391,9 +410,28 @@ fn native_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from
         });
 
         result(ui, &palette, state.results.get(&key));
+
+        if let Some((to, input)) = state.calldata.get(&key) {
+            calldata(ui, &palette, to, input);
+        }
     }
 
     prepared
+}
+
+/// A native call as an EVM tool sends it: to the native precompile, with this calldata, from any
+/// account, which the contract then sees as its sender; the coin to send goes as the value.
+fn calldata(ui: &mut Ui, palette: &theme::Palette, to: &str, input: &str) {
+    ui.label(RichText::new("For EVM tools, MetaMask or cast: send this to the native precompile, with what to send as the value. The contract sees the sending account as its sender.").small().color(palette.muted));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("To").small().color(palette.soft));
+        chainv4_ui::widgets::copy_on_click(ui, palette, egui::Label::new(theme::mono(to).color(palette.ink)), to);
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Data").small().color(palette.soft));
+        let shown = match input.len() > 74 { true => format!("{}…{}", &input[..42], &input[input.len() - 16..]), false => input.to_string() };
+        chainv4_ui::widgets::copy_on_click(ui, palette, egui::Label::new(theme::mono(shown.as_str()).color(palette.ink)), input).on_hover_text("Click to copy all of it");
+    });
 }
 
 fn evm_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &Address, contract: &SavedContract, address: Address) -> Option<Prepared> {
@@ -662,6 +700,34 @@ mod tests {
 
     fn kept(address: &str) -> Vec<SavedContract> {
         vec![SavedContract { address: address.to_string(), name: "Counter".to_string(), abi: COUNTER_ABI.to_string() }]
+    }
+
+    #[test]
+    fn a_native_function_s_call_reads_as_the_calldata_an_evm_tool_sends() {
+        use chainv4::abi::{AbiType, AbiValue, decode_values};
+
+        let counter = Address::Contract([7; 32]);
+        // As typed on the page: one argument a line.
+        let args: Vec<TxCallArgumentType> = ["u64:5", "string:hi", "address:ed25519:0x0101010101010101010101010101010101010101010101010101010101010101"]
+            .into_iter()
+            .map(TxCallArgumentType::parse_typed)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let (to, input) = chainv4::abi::call_native_input(&counter, "add", &args).unwrap();
+
+        assert_eq!(to_hex(&to), "0x0000000000000000000000000000000000004e43", "the native precompile");
+        let call = [AbiType::FixedBytes(32), AbiType::String, AbiType::String, AbiType::Bytes];
+        let fields = decode_values(&call, &input[4..]).unwrap();
+        assert_eq!(fields[0], AbiValue::FixedBytes(vec![7; 32]));
+        assert_eq!(fields[1], AbiValue::String("add".to_string()));
+        assert_eq!(fields[2], AbiValue::String("u64,string,address".to_string()), "each argument's native type, named");
+        let AbiValue::Bytes(packed) = &fields[3] else { panic!("{:?}", fields[3]) };
+        let values = decode_values(&[AbiType::Uint(64), AbiType::String, AbiType::Address], packed).unwrap();
+        assert_eq!(values[1], AbiValue::String("hi".to_string()));
+        assert_eq!(values[2], AbiValue::Address(chainv4::abi::evm_address(&Address::Ed25519([1; 32]))), "an account as its alias inside the EVM");
+
+        // An EVM contract has no native functions to call this way.
+        assert!(chainv4::abi::call_native_input(&Address::Evm([1; 20]), "add", &[]).is_err());
     }
 
     #[test]

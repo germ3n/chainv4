@@ -430,6 +430,7 @@ fn hop(hop: &Hop) -> Value {
         HopKind::Delegate => "delegate",
         HopKind::Transfer => "transfer",
         HopKind::Clone => "clone",
+        HopKind::Create => "create",
     };
 
     json!({

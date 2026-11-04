@@ -1938,3 +1938,140 @@ fn a_contract_made_where_coin_waited_takes_it_over_and_none_is_made_or_lost() {
 }
 
 mod batch;
+
+/// A hop as depth, kind, from, to, function, whether it failed, and its events, for comparing.
+type Seen = (u8, crate::structs::trace::HopKind, Address, Address, String, bool, Vec<u32>);
+
+fn hops(receipt: &crate::chain::execute::Receipt) -> Vec<Seen> {
+    receipt.trace.hops.iter().map(|hop| (hop.depth, hop.kind, hop.from, hop.to, hop.function.clone(), hop.error.is_some(), hop.events.clone())).collect()
+}
+
+/// The selector of a Solidity signature, in hex, as an EVM hop names its function.
+fn selector_hex(signature: &str) -> String {
+    crate::structs::hex::to_hex(&calldata(signature, &[])[..4])
+}
+
+#[test]
+fn an_evm_transaction_s_trace_has_its_frames_and_the_native_calls_under_them() {
+    use crate::structs::trace::HopKind::Call;
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, counter, other) = bridged(&mut chain);
+    let me = authority().public().address();
+    let precompile = Address::Evm(crate::vm::evm::NATIVE_PRECOMPILE);
+    let call_native = selector_hex("callNative(bytes32,string,string,bytes)");
+
+    // The EVM's frame, its call to the native precompile, and the native call under that: each
+    // event where it landed, the native one first as it ran first.
+    let add = call(&chain, &authority(), bridge, 300, calldata("add(bytes32,uint64)", &[contract_word(&counter), word(5)]));
+    let receipt = advance(&mut chain, vec![add]).remove(0);
+    assert_eq!(
+        hops(&receipt),
+        [
+            (0, Call, me, bridge, selector_hex("add(bytes32,uint64)"), false, vec![1]),
+            (1, Call, bridge, precompile, call_native.clone(), false, vec![]),
+            (2, Call, bridge, counter, "add".to_string(), false, vec![0]),
+        ]
+    );
+    assert_eq!(receipt.trace.hops[2].value, u256::new(300), "the coin it carried");
+    assert!(receipt.trace.hops[0].fuel_used >= receipt.trace.hops[1].fuel_used && receipt.trace.hops[2].fuel_used > 0);
+
+    // From Lua: the EVM's frames under the call into it, whose own frame that is, and the native
+    // call they make under them, so the tree reads across all three.
+    let round = lua_call(&chain, counter, "round_trip", vec![TxCallArgumentType::Address(bridge), TxCallArgumentType::Address(other), TxCallArgumentType::U64(4)]);
+    let receipt = advance(&mut chain, vec![round]).remove(0);
+    assert_eq!(
+        hops(&receipt),
+        [
+            (0, Call, me, counter, "round_trip".to_string(), false, vec![]),
+            (1, Call, counter, bridge, "evm".to_string(), false, vec![1]),
+            (2, Call, bridge, precompile, call_native.clone(), false, vec![]),
+            (3, Call, bridge, other, "add".to_string(), false, vec![0]),
+        ]
+    );
+
+    // Reverted after its native call: the frames are all there, failing where it failed, and no
+    // hop keeps an event, as none was kept.
+    let revert = call(&chain, &authority(), bridge, 0, calldata("addThenRevert(bytes32,uint64)", &[contract_word(&counter), word(7)]));
+    let receipt = advance(&mut chain, vec![revert]).remove(0);
+    assert_eq!(
+        hops(&receipt),
+        [
+            (0, Call, me, bridge, selector_hex("addThenRevert(bytes32,uint64)"), true, vec![]),
+            (1, Call, bridge, precompile, call_native, false, vec![]),
+            (2, Call, bridge, counter, "add".to_string(), false, vec![]),
+        ]
+    );
+    assert_eq!(receipt.trace.hops[0].error.as_deref(), Some("reverted: changed my mind"));
+}
+
+/// A token whose add renames it and asks to be asked again: what the bridge's add calls.
+const RENAMING_TOKEN: &str = r#"
+local M = {}
+function M.total_supply() return 0 end
+function M.balance_of(owner) return 0 end
+function M.transfer(to, amount) return true end
+function M.approve(spender, amount) return true end
+function M.allowance(owner, spender) return 0 end
+function M.transfer_from(from, to, amount) return true end
+function M.name() return storage.get("name") or "First" end
+
+function M.add(by)
+    storage.set("name", "Renamed " .. tostring(by))
+    tokens.refresh()
+    return by
+end
+
+return M
+"#;
+
+#[test]
+fn a_token_the_evm_calls_that_asks_to_be_asked_again_is() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (bridge, counter, _) = bridged(&mut chain);
+    let token = deploy_lua(&mut chain, RENAMING_TOKEN);
+    let named = |chain: &Chain| crate::registry::Tokens::new(&chain.state()).get(&token).unwrap().and_then(|token| token.name);
+    assert_eq!(named(&chain).as_deref(), Some("First"));
+
+    // An EVM transaction calls it through the native precompile.
+    let add = call(&chain, &authority(), bridge, 0, calldata("add(bytes32,uint64)", &[contract_word(&token), word(5)]));
+    let receipt = advance(&mut chain, vec![add]).remove(0);
+    assert!(receipt.result.is_ok(), "{:?}", receipt.result);
+    assert_eq!(named(&chain).as_deref(), Some("Renamed 5"));
+
+    // Lua, then the EVM, then the token: asked again all the same.
+    let round = lua_call(&chain, counter, "round_trip", vec![TxCallArgumentType::Address(bridge), TxCallArgumentType::Address(token), TxCallArgumentType::U64(9)]);
+    let receipt = advance(&mut chain, vec![round]).remove(0);
+    assert!(receipt.result.is_ok(), "{:?}", receipt.result);
+    assert_eq!(named(&chain).as_deref(), Some("Renamed 9"));
+
+    // A native call the EVM reverted after asks nothing: its rename is undone, and so is the ask.
+    let revert = call(&chain, &authority(), bridge, 0, calldata("addThenRevert(bytes32,uint64)", &[contract_word(&token), word(7)]));
+    assert!(advance(&mut chain, vec![revert])[0].result.is_err());
+    assert_eq!(named(&chain).as_deref(), Some("Renamed 9"));
+}
+
+#[test]
+fn the_calldata_an_evm_tool_sends_calls_a_native_contract_straight_from_its_account() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let (_, counter, _) = bridged(&mut chain);
+    let precompile = Address::Evm(crate::vm::evm::NATIVE_PRECOMPILE);
+    let (to, input) = crate::abi::call_native_input(&counter, "add", &[TxCallArgumentType::U64(6)]).unwrap();
+    assert_eq!(to, crate::vm::evm::NATIVE_PRECOMPILE);
+
+    // As the precompile's own interface encodes it, so Solidity and the tools agree.
+    assert_eq!(input[..4], calldata("callNative(bytes32,string,string,bytes)", &[])[..4]);
+
+    let sent = call(&chain, &authority(), precompile, 0, input);
+    let receipt = advance(&mut chain, vec![sent]).remove(0);
+    assert!(receipt.result.is_ok(), "{:?}", receipt.result);
+    assert_eq!(total(&chain, &counter).as_deref(), Some("6"));
+    assert_eq!(receipt.events[0].data[1], TxCallArgumentType::Address(authority().public().address()), "the account that sent it is its sender");
+
+    // What has no ABI value, or is no native contract, does not encode.
+    assert!(crate::abi::call_native_input(&counter, "add", &[TxCallArgumentType::Nil]).is_err());
+    assert!(crate::abi::call_native_input(&authority().public().address(), "add", &[]).is_err());
+}

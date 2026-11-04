@@ -192,6 +192,18 @@ impl Host {
         &self.state
     }
 
+    /// The hops the calls made from this host took, which the EVM puts under its frame that made them.
+    #[cfg(feature = "evm")]
+    pub(crate) fn take_trace(&self) -> Trace {
+        std::mem::take(&mut *lock(&self.trace))
+    }
+
+    /// The tokens the calls made from this host asked to be asked again, once they succeeded.
+    #[cfg(feature = "evm")]
+    pub(crate) fn take_refresh(&self) -> Vec<Address> {
+        std::mem::take(&mut *lock(&self.refresh)).into_iter().collect()
+    }
+
     /// The coin the calls made from this host paid, once they succeeded.
     #[cfg(feature = "evm")]
     pub(crate) fn take_payments(&self) -> Vec<Payment> {
@@ -592,14 +604,14 @@ impl Host {
     )]
     pub fn evm_call(&self, to: &Address, input: &[u8], value: u256, fuel: u64) -> Outcome {
         let hop = self.open(HopKind::Call, *to, "evm", value);
-        let outcome = self.enter_evm(to, input, value, fuel);
+        let outcome = self.enter_evm(hop, to, input, value, fuel);
         self.close(hop, &outcome);
 
         outcome
     }
 
     #[cfg(feature = "evm")]
-    fn enter_evm(&self, to: &Address, input: &[u8], value: u256, fuel: u64) -> Outcome {
+    fn enter_evm(&self, hop: Option<usize>, to: &Address, input: &[u8], value: u256, fuel: u64) -> Outcome {
         use crate::vm::evm::{self, Bridge, EvmAction, EvmBlock, EvmReturned};
 
         if !self.vm.runs_evm() {
@@ -638,11 +650,25 @@ impl Host {
             Err(err) => return Outcome::failed(self.fail(err)),
         };
         let fuel_used = ran.gas_used.saturating_mul(fuel_per_gas).min(fuel);
+        // Its frames under this call's hop, the top one being that hop itself: their events land
+        // after the ones this tree emitted so far, where the EVM's own go.
+        let base = self.offset + lock(&self.events).len();
+        let mut frames = ran.trace;
+        let top = (!frames.hops.is_empty()).then(|| frames.hops.remove(0));
+        let mut trace = lock(&self.trace);
+
+        for event in top.map(|top| top.events).unwrap_or_default() {
+            trace.emitted(hop, base + event as usize);
+        }
+
+        trace.graft(frames, self.stack.len(), |event| u32::try_from(base + event as usize).ok());
+        drop(trace);
+
         let result = match ran.result {
             Ok(EvmReturned::Output(output)) => {
                 self.state.merge(layer.take_changes());
+                lock(&self.refresh).extend(ran.refresh_tokens);
                 let mut events = lock(&self.events);
-                lock(&self.trace).emitted(self.hop, self.offset + events.len());
                 events.extend(ran.events);
                 // What it sent the EVM first, then what the EVM paid on.
                 let mut payments = lock(&self.payments);
@@ -670,7 +696,7 @@ impl Host {
     }
 
     #[cfg(not(feature = "evm"))]
-    fn enter_evm(&self, _: &Address, _: &[u8], _: u256, _: u64) -> Outcome {
+    fn enter_evm(&self, _: Option<usize>, _: &Address, _: &[u8], _: u256, _: u64) -> Outcome {
         Outcome::failed(VmError::Runtime("this node was built without the EVM".to_string()))
     }
 

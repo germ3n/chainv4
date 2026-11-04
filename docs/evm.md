@@ -302,6 +302,32 @@ stays.
 
 **Events** from native calls land in the receipt where the calls ran, among the EVM's logs.
 
+**Traces** go across engines as calls do. An EVM transaction's receipt has a
+[trace](contracts.md#traces), as a native one's does: each EVM frame a hop, from depth 0 for the
+transaction's own call, a call, a delegate call (`delegate`, the code run named as `to`) or a
+create (`create`, the contract made named as `to`), its function its selector in hex, its fuel the
+gas it used at the chain's rate, its error a revert's reason or how it halted. Under a frame that
+calls the native precompile come the native call's own hops, and theirs. A Lua or WebAssembly
+contract's `evm.call` shows the same way: its `evm` hop is the EVM's top frame, with that frame's
+logs, and every frame the EVM ran comes under it. Each hop's events point where they land in the
+receipt, native events among the EVM's logs as they ran, and a transaction that reverts keeps its
+trace with none, as a native one does.
+
+**Token refreshes** count across engines too: a native contract the EVM calls that asks
+`tokens.refresh()` is asked again once the transaction succeeds, from an EVM transaction or from
+a native call that went through the EVM, as long as that native call still stands.
+
+**From an EVM tool,** MetaMask or `cast`, a native contract is called by sending the precompile the
+calldata `callNative` takes, from any account, which the contract then sees as its sender:
+`chainv4::abi::call_native_input` writes it from the function's name and its arguments as a native
+call takes them, and the wallet's [Contracts page](wallet.md#contracts) offers it for each of a
+native contract's functions. With `cast`, as on the devnet:
+
+```sh
+cast send --rpc-url https://chain.homepage.gs/rpc 0x0000000000000000000000000000000000004e43 \
+  "callNative(bytes32,string,string,bytes)" 0x<the contract's 32 bytes> increment i64 $(cast abi-encode "f(int64)" 5)
+```
+
 **Reentry** follows the native rule: a native contract already running further up, even across the
 EVM, is entered again only through a function marked reentrant.
 
@@ -355,9 +381,6 @@ Two more, built for Paris so they run on any EVM chain:
 
 ## Not yet
 
-- **Native calls in traces.** An EVM transaction's receipt has no trace, so the native calls it
-  makes are not in one either.
-- **Token refreshes** a native contract asks for while the EVM calls it are not done.
 - **Blob transactions and the KZG point evaluation precompile,** which needs blobs.
 - **Selfdestruct** only clears what it can in the same transaction, as Ethereum's Cancun rules
   say: elsewhere it only sends the contract's coin.

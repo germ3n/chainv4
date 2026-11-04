@@ -74,6 +74,9 @@ pub enum HopKind {
     #[document(summary = "A contract created by another, running a template's code, and its init.")]
     #[wincode(tag = 3)]
     Clone,
+    #[document(summary = "An EVM contract created, by a transaction or by another contract's CREATE or CREATE2, and its init code run.")]
+    #[wincode(tag = 4)]
+    Create,
 }
 
 impl Hop {
@@ -154,6 +157,25 @@ impl Trace {
         if let Some(at) = at {
             self.hops[at].events.push(u32::try_from(index).unwrap_or(u32::MAX));
         }
+    }
+
+    #[document(
+        parent = "Trace",
+        summary = "Puts another run's hops in after this trace's, as calls under the one that made them: each deeper by deeper, its events placed where they land among the receipt's by events, which drops those it gives None for. Hops past MAX_HOPS are only counted, as the other run's own dropped ones are.",
+        params = {
+            sub = "The other run's trace.",
+            deeper = "How much deeper each of its hops goes.",
+            events = "Where one of its event indices lands among the receipt's events, or None when it was dropped.",
+        },
+    )]
+    pub fn graft(&mut self, sub: Trace, deeper: usize, events: impl Fn(u32) -> Option<u32>) {
+        for mut hop in sub.hops {
+            hop.depth = u8::try_from(usize::from(hop.depth).saturating_add(deeper)).unwrap_or(u8::MAX);
+            hop.events = hop.events.into_iter().filter_map(&events).collect();
+            self.open(hop);
+        }
+
+        self.dropped = self.dropped.saturating_add(sub.dropped);
     }
 
     #[document(

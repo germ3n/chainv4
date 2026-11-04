@@ -84,6 +84,19 @@ pub(super) struct Crossed {
     /// What it paid, and how many moves the EVM had made when it returned, which places them.
     pub payments: Vec<Payment>,
     pub pay_at: usize,
+    /// The tokens it asked to be asked again, with tokens.refresh.
+    pub refresh: Vec<Address>,
+}
+
+/// The hops one native call took, success or not, and the EVM frame that made it.
+pub(super) struct NativeHops {
+    /// The frame calling the native precompile, by its place among the run's frames.
+    pub under: Option<usize>,
+    pub trace: crate::structs::trace::Trace,
+    /// The depth its own hop started at, as its host counts depth.
+    pub first: usize,
+    /// It succeeded: its place among the crossed, whose events it emitted.
+    pub crossed: Option<usize>,
 }
 
 /// The native calls one EVM run makes through the precompile.
@@ -102,6 +115,10 @@ pub(super) struct NativeAt<'a> {
     pub fault: RefCell<Option<DbError>>,
     /// What the run's frames paid so far, as the inspector keeps it.
     pub paid: super::payments::Paid,
+    /// The run's frames so far, as the inspector keeps them: the innermost open one calls.
+    pub frames: std::rc::Rc<std::cell::RefCell<super::payments::Frames>>,
+    /// Every native call's hops, in order, for the trace.
+    pub hops: RefCell<Vec<NativeHops>>,
 }
 
 enum Answer {
@@ -226,6 +243,9 @@ impl NativeAt<'_> {
         };
         let host = Host::from_evm(layer.clone(), caller, self.block, limits.memory, self.bridge.vm.clone(), self.bridge.stack.clone());
         let outcome = host.call(&target, &name, &native, value, limits.fuel);
+        // Its hops, whatever came of it, under the frame calling the precompile.
+        let hops_at = self.hops.borrow().len();
+        self.hops.borrow_mut().push(NativeHops { under: self.frames.borrow().current(), trace: host.take_trace(), first: self.bridge.stack.len() + 1, crossed: None });
         let used = gas.saturating_add(outcome.fuel_used.div_ceil(fuel_per_gas)).min(inputs.gas_limit);
         let returned = match outcome.result {
             Ok(returned) => returned,
@@ -236,6 +256,7 @@ impl NativeAt<'_> {
         let changes = layer.take_changes();
         let events = host.take_events();
         let payments = host.take_payments();
+        let refresh = host.take_refresh();
 
         if inputs.is_static && (!changes.is_empty() || !events.is_empty()) {
             return Ok(Answer::Refused(format!("{name} on {target} changed state inside a static call"), used));
@@ -265,7 +286,8 @@ impl NativeAt<'_> {
         journal.sstore(Word::from(NATIVE_PRECOMPILE), U256::from(index), U256::from(1)).map_err(journal_failed)?;
         let log_at = journal.logs().len();
         let pay_at = self.paid.borrow().len();
-        self.crossed.borrow_mut().push(Crossed { changes: kept, events, log_at, payments, pay_at });
+        self.crossed.borrow_mut().push(Crossed { changes: kept, events, log_at, payments, pay_at, refresh });
+        self.hops.borrow_mut()[hops_at].crossed = Some(index);
 
         Ok(Answer::Returned(output, used))
     }
@@ -336,25 +358,25 @@ where
     Ok(journal.sload(Word::from(NATIVE_PRECOMPILE), U256::from(index)).map_err(journal_failed)?.data == U256::from(1))
 }
 
-/// The native calls whose markers stand when the run ends, in order.
-pub(super) fn standing(crossed: Vec<Crossed>, state: &EvmState) -> Vec<Crossed> {
+/// The native calls whose markers stand when the run ends, in order, each with its place among
+/// all the crossed.
+pub(super) fn standing(crossed: Vec<Crossed>, state: &EvmState) -> Vec<(usize, Crossed)> {
     let marks = state.get(&Word::from(NATIVE_PRECOMPILE));
 
     crossed
         .into_iter()
         .enumerate()
         .filter(|(index, _)| marks.and_then(|account| account.storage.get(&U256::from(*index))).is_some_and(|slot| slot.present_value == U256::from(1)))
-        .map(|(_, crossed)| crossed)
         .collect()
 }
 
 /// The EVM's logs as events, with the events of the native calls that stand placed where they ran.
-pub(super) fn interleave(logs: Vec<Event>, standing: &mut [Crossed]) -> Vec<Event> {
+pub(super) fn interleave(logs: Vec<Event>, standing: &mut [(usize, Crossed)]) -> Vec<Event> {
     let mut events = Vec::with_capacity(logs.len());
     let mut logs = logs.into_iter();
     let mut emitted = 0;
 
-    for crossed in standing {
+    for (_, crossed) in standing {
         while emitted < crossed.log_at {
             let Some(log) = logs.next() else { break };
             events.push(log);
@@ -371,7 +393,7 @@ pub(super) fn interleave(logs: Vec<Event>, standing: &mut [Crossed]) -> Vec<Even
 
 /// What the run paid: the EVM's own moves, each address told as the account it is, with the
 /// payments of the native calls that stand placed where they ran.
-pub(super) fn interleave_payments(state: &State, moved: Vec<super::payments::Moved>, standing: &mut [Crossed]) -> Result<Vec<Payment>, DbError> {
+pub(super) fn interleave_payments(state: &State, moved: Vec<super::payments::Moved>, standing: &mut [(usize, Crossed)]) -> Result<Vec<Payment>, DbError> {
     let mut payments = Vec::with_capacity(moved.len());
     let mut moved = moved.into_iter();
     let mut made = 0;
@@ -379,7 +401,7 @@ pub(super) fn interleave_payments(state: &State, moved: Vec<super::payments::Mov
         Ok(Payment { from: account_of(state, movement.from)?, to: account_of(state, movement.to)?, amount: from_word(movement.amount) })
     };
 
-    for crossed in standing {
+    for (_, crossed) in standing {
         while made < crossed.pay_at {
             let Some(movement) = moved.next() else { break };
             payments.push(told(movement)?);
@@ -427,20 +449,7 @@ fn error_string(reason: &str) -> Vec<u8> {
     see_also = "NATIVE_PRECOMPILE",
 )]
 pub fn native_type(kind: &str) -> Result<AbiType, String> {
-    Ok(match kind {
-        "address" => AbiType::Address,
-        "contract" => AbiType::FixedBytes(32),
-        "amount" | "u256" => AbiType::Uint(256),
-        "u128" => AbiType::Uint(128),
-        "u64" => AbiType::Uint(64),
-        "i256" => AbiType::Int(256),
-        "i128" => AbiType::Int(128),
-        "i64" | "number" => AbiType::Int(64),
-        "bool" => AbiType::Bool,
-        "string" => AbiType::String,
-        "bytes" => AbiType::Bytes,
-        other => return Err(format!("{other} is no native type: use address, contract, amount, bytes, bool, string, number, i64, u64, i128, u128, i256 or u256")),
-    })
+    crate::abi::native_abi_type(kind)
 }
 
 /// An ABI value as the native type named, decoded by native_type's: an address as the account
@@ -561,26 +570,11 @@ pub fn abi_value(ty: &AbiType, value: &TxCallArgumentType, state: Option<&State>
 
 /// Any native integer, or a whole number, that is not below zero, as a u256.
 fn unsigned(value: &TxCallArgumentType) -> Option<u256> {
-    match value {
-        TxCallArgumentType::U256(number) => Some(*number),
-        TxCallArgumentType::Amount(amount) => Some(amount.to_u256()),
-        other => u256::try_from(signed(other)?).ok(),
-    }
+    crate::abi::native_unsigned(value)
 }
 
-/// Any native integer, or a whole number, as an i256: None for a u256 past i256's range.
 fn signed(value: &TxCallArgumentType) -> Option<i256> {
-    Some(match value {
-        TxCallArgumentType::U64(number) => i256::from(*number),
-        TxCallArgumentType::U128(number) => i256::from(*number),
-        TxCallArgumentType::U256(number) => i256::try_from(*number).ok()?,
-        TxCallArgumentType::Amount(amount) => i256::try_from(amount.to_u256()).ok()?,
-        TxCallArgumentType::I64(number) => i256::from(*number),
-        TxCallArgumentType::I128(number) => i256::from(*number),
-        TxCallArgumentType::I256(number) => *number,
-        TxCallArgumentType::Number(number) if number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_992.0 => i256::from(*number as i64),
-        _ => return None,
-    })
+    crate::abi::native_signed(value)
 }
 
 fn show(value: &TxCallArgumentType) -> String {

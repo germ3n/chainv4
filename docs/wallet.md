@@ -965,6 +965,10 @@ engine, from the address picked.
   would do.
 - **Send** prepares the call for the Send page, which reviews, signs and sends it as any
   transaction, with biometrics, the offline signer or MetaMask.
+- **EVM calldata,** on a native function, writes the same call as an EVM tool sends it: to the
+  native precompile, `0x…4e43`, with `callNative`'s calldata for the arguments typed, each to copy,
+  for MetaMask or `cast` (`chainv4::abi::call_native_input`). The contract sees the account that
+  sends it as its sender, and the coin goes as the value.
 - **Deploy** takes Lua source, pasted or picked, a WebAssembly module, picked, or EVM init code in
   hex with its ABI, whose constructor's parameters get fields. It keeps the contract under the
   address it will land at, worked out from the sender's next nonce, and prepares the deploy for

@@ -324,7 +324,10 @@ Every run a transaction or the chain starts records where it went, in the receip
 - an upgrade's `check_perms` and `migrate`.
 
 **What it records:** a hop for the run itself at depth 0, and one for every call, delegate and
-transfer under it, in the order they started (`structs::trace`). Each hop says:
+transfer under it, in the order they started (`structs::trace`). Calls into the EVM, and the EVM
+transactions themselves, record every EVM frame among them, and the native calls those make
+under them, so one tree reads across engines (see [EVM](evm.md#calls-with-lua-and-webassembly-contracts)).
+Each hop says:
 - who made it and who it reached;
 - the function, by name: a selector that names a function is shown as the function's name;
 - the value it sent, and the fuel it burned with everything under it;

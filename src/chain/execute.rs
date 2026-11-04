@@ -700,24 +700,31 @@ fn refreshed(
         Ok(returned) => returned,
         Err(err) => return (Err(Failure::Contract(err)), contracted),
     };
-    let contracts = Contracts::new(layer);
+    match refresh_tokens(layer, vm, call.sender, call.block, limits, rules, &outcome.refresh_tokens, &mut contracted) {
+        Ok(()) => (Ok(Effect::Returned(returned)), contracted),
+        Err(failure) => (Err(failure), contracted),
+    }
+}
 
-    if outcome.refresh_tokens.is_empty() {
-        return (Ok(Effect::Returned(returned)), contracted);
+/// Asks the tokens a call asked to be asked again with tokens.refresh for what the registry keeps
+/// of them: what their questions burn and where they go join the call's, out of what it has left,
+/// and an answer that does not fit fails the transaction.
+#[allow(clippy::too_many_arguments)]
+fn refresh_tokens(layer: &Arc<State>, vm: &Arc<Vm>, sender: Address, block: BlockAt, limits: Limits, rules: &Rules, tokens: &[Address], contracted: &mut Contracted) -> Result<(), Failure> {
+    if tokens.is_empty() {
+        return Ok(());
     }
 
-    let standards = match rules.standards_in(layer) {
-        Ok(standards) => standards,
-        Err(err) => return (Err(Failure::Registry(RegistryError::Db(err))), contracted),
-    };
+    let contracts = Contracts::new(layer);
+    let standards = rules.standards_in(layer).map_err(|err| Failure::Registry(RegistryError::Db(err)))?;
 
-    for token in &outcome.refresh_tokens {
+    for token in tokens {
         let left = Limits {
             fuel: limits.fuel.saturating_sub(contracted.fuel_used),
             ..limits
         };
 
-        match contracts.refresh(vm, token, call.sender, left, &standards, call.block) {
+        match contracts.refresh(vm, token, sender, left, &standards, block) {
             Ok((fuel_used, trace)) => {
                 contracted.fuel_used += fuel_used;
                 contracted.trace.append(trace);
@@ -726,12 +733,12 @@ fn refreshed(
                 contracted.fuel_used += failed.fuel_used;
                 contracted.trace.append(failed.trace);
 
-                return (Err(Failure::Registry(failed.error)), contracted);
+                return Err(Failure::Registry(failed.error));
             }
         }
     }
 
-    (Ok(Effect::Returned(returned)), contracted)
+    Ok(())
 }
 
 /// Runs a batch's steps in order on one layer, which the caller keeps only if all of them went
@@ -1190,10 +1197,10 @@ fn evm(
 
     match evm::run(layer, &sender, nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block, Some(&bridge)) {
         Ok(ran) => {
-            let contracted = Contracted {
+            let mut contracted = Contracted {
                 fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),
                 events: ran.events,
-                trace: Default::default(),
+                trace: ran.trace,
                 payments: ran.payments,
             };
             let result = match ran.result {
@@ -1201,6 +1208,11 @@ fn evm(
                 Ok(EvmReturned::Output(output)) => Ok(Effect::Returned(vec![TxCallArgumentType::Bytes(output)])),
                 Err(err) => Err(Failure::Contract(err)),
             };
+
+            // The tokens the native calls it made asked to be asked again, as a native call's are.
+            let result = result.and_then(|effect| {
+                refresh_tokens(layer, vm, sender, block_at(rules, context), limits, rules, &ran.refresh_tokens, &mut contracted).map(|()| effect)
+            });
 
             (result, contracted)
         }

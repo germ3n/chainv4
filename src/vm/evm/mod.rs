@@ -45,6 +45,7 @@ use {
     crate::structs::event::Event,
     crate::structs::hash::Hash,
     crate::structs::receipt::Payment,
+    crate::structs::trace::{Hop, Trace},
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     crate::vm::VmError,
@@ -292,6 +293,10 @@ pub struct EvmRan {
     pub reverted: Vec<u8>,
     #[document(summary = "The coin its frames below the top paid, and the native contracts it called, in the order they paid it, each address told as the account it is; empty when it failed.")]
     pub payments: Vec<Payment>,
+    #[document(summary = "Where it went: each EVM frame as a hop, from depth 0 for the run's own call, with the native calls it made through the native precompile under the frame that made them, their own hops and all. Kept when it failed too, with no events.")]
+    pub trace: Trace,
+    #[document(summary = "The tokens the native calls it made asked to be asked again with tokens.refresh, of those that stand; empty when it failed.")]
+    pub refresh_tokens: Vec<Address>,
 }
 
 #[document(
@@ -387,6 +392,8 @@ pub fn run(
     };
     let paying = payments::Payments::default();
     let paid = paying.paid.clone();
+    let traced = paying.traced.clone();
+    let fuel_per_gas = bridge.map_or(1, |bridge| bridge.fuel_per_gas.max(1));
     let evm = Context::mainnet().with_db(db).with_block(block_env).with_cfg(cfg).build_mainnet_with_inspector(paying);
     #[cfg(feature = "names")]
     let names = block.names.clone().map(|config| names::NamesAt {
@@ -412,6 +419,8 @@ pub fn run(
         crossed: Default::default(),
         fault: Default::default(),
         paid: paid.clone(),
+        frames: traced.clone(),
+        hops: Default::default(),
     });
     let eth = evm.precompiles.clone();
     let mut evm = evm.with_precompiles(precompiles::ChainPrecompiles::new(
@@ -430,6 +439,8 @@ pub fn run(
     }
 
     let crossed = evm.precompiles.native().map(|native| native.crossed.take()).unwrap_or_default();
+    let native_hops = evm.precompiles.native().map(|native| native.hops.take()).unwrap_or_default();
+    let frames = std::mem::take(&mut *traced.borrow_mut());
 
     let outcome = match transacted {
         Ok(outcome) => outcome,
@@ -441,6 +452,8 @@ pub fn run(
                 events: Vec::new(),
                 reverted: Vec::new(),
                 payments: Vec::new(),
+                trace: Trace::default(),
+                refresh_tokens: Vec::new(),
             });
         }
     };
@@ -452,7 +465,7 @@ pub fn run(
             // call created is there for the EVM's changes to find.
             let mut standing = native::standing(crossed, &outcome.state);
 
-            for crossed in &standing {
+            for (_, crossed) in &standing {
                 state.merge(crossed.changes.clone());
             }
 
@@ -470,16 +483,21 @@ pub fn run(
                         .collect(),
                 })
                 .collect();
+            let placed = Placed { standing: standing.iter().map(|(index, crossed)| (*index, crossed.log_at, crossed.events.len())).collect() };
+            let trace = traced_run(state, &frames, native_hops, fuel_per_gas, Some(&placed))?;
+            let refresh_tokens = standing.iter_mut().flat_map(|(_, crossed)| std::mem::take(&mut crossed.refresh)).collect();
             let events = native::interleave(logs, &mut standing);
             let moved = paid.borrow().clone();
             let payments = native::interleave_payments(state, moved, &mut standing)?;
             let returned = match output {
                 Output::Create(_, Some(created)) => EvmReturned::Created(Address::Evm(created.into_array())),
-                Output::Create(_, None) => return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new() }),
+                Output::Create(_, None) => {
+                    return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new(), trace, refresh_tokens: Vec::new() });
+                }
                 Output::Call(bytes) => EvmReturned::Output(bytes.to_vec()),
             };
 
-            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new(), payments });
+            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new(), payments, trace, refresh_tokens });
         }
         ExecutionResult::Revert { output, .. } => {
             return Ok(EvmRan {
@@ -488,6 +506,8 @@ pub fn run(
                 events: Vec::new(),
                 reverted: output.to_vec(),
                 payments: Vec::new(),
+                trace: traced_run(state, &frames, native_hops, fuel_per_gas, None)?,
+                refresh_tokens: Vec::new(),
             });
         }
         ExecutionResult::Halt { reason, .. } => Err(match reason {
@@ -495,12 +515,114 @@ pub fn run(
             other => VmError::Runtime(format!("halted: {other:?}")),
         }),
     };
+    let trace = traced_run(state, &frames, native_hops, fuel_per_gas, None)?;
 
-    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new() })
+    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new(), trace, refresh_tokens: Vec::new() })
+}
+
+/// Where the events of a run that succeeded land in the receipt: the EVM's logs in order, with the
+/// events of each native call that stands put in after the logs emitted before it returned. Each
+/// standing call by its place among all the crossed, how many logs came before it, and its events.
+struct Placed {
+    standing: Vec<(usize, usize, usize)>,
+}
+
+impl Placed {
+    /// Where the run's nth log that stands lands.
+    fn log(&self, nth: usize) -> usize {
+        nth + self.standing.iter().filter(|(_, log_at, _)| *log_at <= nth).map(|(_, _, events)| events).sum::<usize>()
+    }
+
+    /// Where a native call's own event lands, the call by its place among the crossed: None for
+    /// one that does not stand, whose events were dropped.
+    fn native(&self, crossed: usize, event: usize) -> Option<usize> {
+        let mut before = 0;
+
+        for (index, log_at, events) in &self.standing {
+            if *index == crossed {
+                return Some(log_at + before + event);
+            }
+
+            before += events;
+        }
+
+        None
+    }
+}
+
+/// An EVM address in a hop, told as the account it is: a precompile, at an address no key or
+/// contract has, as itself.
+fn hop_address(state: &State, bytes: [u8; 20]) -> Result<Address, DbError> {
+    match bytes[..18].iter().all(|byte| *byte == 0) {
+        true => Ok(Address::Evm(bytes)),
+        false => account_of(state, bytes),
+    }
+}
+
+/// The run's trace: each frame a hop, in the order they began, fuel being gas at the chain's rate,
+/// with the logs it emitted that stand placed where they land; and under each frame that called
+/// the native precompile, that native call's own hops. With placed None, as for a run that
+/// failed, no hop keeps any event.
+fn traced_run(state: &State, frames: &payments::Frames, native_hops: Vec<native::NativeHops>, fuel_per_gas: u64, placed: Option<&Placed>) -> Result<Trace, DbError> {
+    let mut logged: Vec<Vec<u32>> = vec![Vec::new(); frames.frames.len()];
+
+    if let Some(placed) = placed {
+        for (nth, frame) in frames.logs.iter().enumerate() {
+            if let Some(logs) = logged.get_mut(*frame) {
+                logs.push(u32::try_from(placed.log(nth)).unwrap_or(u32::MAX));
+            }
+        }
+    }
+
+    let mut under: Vec<Vec<native::NativeHops>> = (0..frames.frames.len()).map(|_| Vec::new()).collect();
+    let mut loose = Vec::new();
+
+    for hops in native_hops {
+        match hops.under.and_then(|at| under.get_mut(at)) {
+            Some(list) => list.push(hops),
+            None => loose.push(hops),
+        }
+    }
+
+    let mut trace = Trace::default();
+    let graft = |trace: &mut Trace, hops: native::NativeHops, depth: usize| {
+        let mut sub = hops.trace;
+        sub.hops.iter_mut().for_each(|hop| hop.depth = hop.depth.saturating_sub(u8::try_from(hops.first).unwrap_or(u8::MAX)));
+        let crossed = hops.crossed;
+        trace.graft(sub, depth, |event| {
+            let (placed, crossed) = (placed?, crossed?);
+
+            placed.native(crossed, event as usize).map(|at| u32::try_from(at).unwrap_or(u32::MAX))
+        });
+    };
+
+    for ((frame, logs), natives) in frames.frames.iter().zip(logged).zip(under) {
+        trace.open(Hop {
+            depth: u8::try_from(frame.depth).unwrap_or(u8::MAX),
+            kind: frame.kind,
+            from: hop_address(state, frame.from)?,
+            to: hop_address(state, frame.to)?,
+            function: frame.function.clone(),
+            value: from_word(frame.value),
+            fuel_used: frame.gas.saturating_mul(fuel_per_gas),
+            error: frame.error.clone(),
+            events: logs,
+        });
+
+        for hops in natives {
+            graft(&mut trace, hops, frame.depth + 1);
+        }
+    }
+
+    for hops in loose {
+        graft(&mut trace, hops, 1);
+    }
+
+    Ok(trace)
 }
 
 /// A revert's reason: Solidity's Error(string) read out, else its bytes in hex.
-fn revert_reason(output: &[u8]) -> String {
+pub(super) fn revert_reason(output: &[u8]) -> String {
     const ERROR: [u8; 4] = [0x08, 0xc3, 0x79, 0xa0];
 
     if output.len() >= 68 && output[..4] == ERROR {

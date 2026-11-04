@@ -197,7 +197,8 @@ again: `what_a_block_costs_with_its_proofs`, in `src/chain/tests/range.rs`.
 **The trace** is `hops`, depth first, and `dropped`, how many hops past the 256 a receipt keeps
 were only counted. Each hop has:
 - `depth`: 0 for what the transaction ran itself;
-- `kind`: `call`, `delegate`, `transfer` or `clone`, a contract created by another;
+- `kind`: `call`, `delegate`, `transfer`, `clone`, a contract created by another from a template,
+  or `create`, an EVM contract created, by a transaction or a CREATE;
 - `from`, `to`, `function` and `value`;
 - `fuel_used`, including the hops under it;
 - `error`: why it failed, or `null`;

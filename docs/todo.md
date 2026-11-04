@@ -532,12 +532,14 @@ with.
 - [ ] **The DEX: next.** Price oracles (time-weighted prices, as V2's cumulative ones), flash
   swaps, a fee switch for the protocol, concentrated liquidity (V3's ranges), and routing across
   both DEXes at once.
-- [ ] **Native calls in EVM traces.** EVM transactions have no trace, so the native calls they
-  make are in none either; revm's inspector could build one with the native hops under it.
-- [ ] **Token refreshes from native calls the EVM makes.** A native contract that asks for
-  `tokens.refresh()` while the EVM calls it is not asked again.
-- [ ] **The wallet's Contracts page calling across engines.** Nothing to do for calls, but a
-  native contract's page could offer the `callNative` calldata for it, for EVM tools.
+- [x] **Native calls in EVM traces.** Done 2026-11-04. The EVM's inspector records every frame as a
+  hop (calls, delegate calls, creates as the new `create` kind), and the native precompile puts each
+  native call's hops under the frame that made it, events placed where they land; `evm.call` from Lua
+  or WebAssembly nests the EVM's frames under its hop. See [EVM](evm.md#calls-with-lua-and-webassembly-contracts).
+- [x] **Token refreshes from native calls the EVM makes.** Done 2026-11-04. They travel out with the
+  EVM's run, of the native calls that stand, and an EVM transaction refreshes them as a native one does.
+- [x] **The wallet's Contracts page calling across engines.** Done 2026-11-04. Each native function has
+  **EVM calldata**: the precompile and `callNative`'s calldata, from `chainv4::abi::call_native_input`.
 - [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
   prove the storage a read touches.
 - [x] **Old state over JSON-RPC.** Balances, nonces, code, storage and calls at an older block,

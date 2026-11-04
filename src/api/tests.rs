@@ -1813,11 +1813,16 @@ fn node_as(address: SocketAddr, headers: &str) -> Value {
 #[test]
 fn only_the_operator_lifts_bans() {
     let address = sharing_node(super::sharing::Sharing::default());
+    // Exactly the request, nothing past its body: bytes the server never reads can have the
+    // connection reset under the answer as it closes.
     let post = |body: &str, headers: &str| {
-        let headers = format!("{headers}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
-        // raw ends the headers with a blank line of its own, after the body: past its length, unread.
-        let (status, _, answer) = raw(address, "POST", "/node/unban", &headers);
-        (status, serde_json::from_slice::<Value>(&answer).unwrap_or(Value::Null))
+        let mut stream = TcpStream::connect(address).unwrap();
+        write!(stream, "POST /node/unban HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        let split = response.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+        let status = String::from_utf8_lossy(&response[..split]).split(' ').nth(1).unwrap().parse::<u16>().unwrap();
+        (status, serde_json::from_slice::<Value>(&response[split + 4..]).unwrap_or(Value::Null))
     };
 
     // From afar, without the token: refused, whatever it names.

@@ -33,6 +33,120 @@ fn keccak(bytes: &[u8]) -> [u8; 32] {
     Hasher::digest(HashType::Keccak256, bytes).to_bytes().try_into().expect("keccak256 is 32 bytes")
 }
 
+/// Where the native precompile lives, as the EVM's native module has it: 0x…4e43.
+const NATIVE_PRECOMPILE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x4e, 0x43];
+
+#[document(
+    summary = "The ABI type a native type crosses between engines as, by its name: address as the EVM's address, contract as bytes32, the integers at their widths, amount as uint256, number as int64, and bool, string and bytes as themselves.",
+    category = "ABI",
+    see_also = "call_native_input",
+)]
+pub fn native_abi_type(kind: &str) -> Result<AbiType, String> {
+    Ok(match kind {
+        "address" => AbiType::Address,
+        "contract" => AbiType::FixedBytes(32),
+        "amount" | "u256" => AbiType::Uint(256),
+        "u128" => AbiType::Uint(128),
+        "u64" => AbiType::Uint(64),
+        "i256" => AbiType::Int(256),
+        "i128" => AbiType::Int(128),
+        "i64" | "number" => AbiType::Int(64),
+        "bool" => AbiType::Bool,
+        "string" => AbiType::String,
+        "bytes" => AbiType::Bytes,
+        other => return Err(format!("{other} is no native type: use address, contract, amount, bytes, bool, string, number, i64, u64, i128, u128, i256 or u256")),
+    })
+}
+
+/// Any native integer, or a whole number, as a u256: None for a negative one.
+pub(crate) fn native_unsigned(value: &crate::structs::tx::TxCallArgumentType) -> Option<u256> {
+    use crate::structs::tx::TxCallArgumentType;
+
+    match value {
+        TxCallArgumentType::U256(number) => Some(*number),
+        TxCallArgumentType::Amount(amount) => Some(amount.to_u256()),
+        other => u256::try_from(native_signed(other)?).ok(),
+    }
+}
+
+/// Any native integer, or a whole number, as an i256: None for a u256 past i256's range.
+pub(crate) fn native_signed(value: &crate::structs::tx::TxCallArgumentType) -> Option<i256> {
+    use crate::structs::tx::TxCallArgumentType;
+
+    Some(match value {
+        TxCallArgumentType::U64(number) => i256::from(*number),
+        TxCallArgumentType::U128(number) => i256::from(*number),
+        TxCallArgumentType::U256(number) => i256::try_from(*number).ok()?,
+        TxCallArgumentType::Amount(amount) => i256::try_from(amount.to_u256()).ok()?,
+        TxCallArgumentType::I64(number) => i256::from(*number),
+        TxCallArgumentType::I128(number) => i256::from(*number),
+        TxCallArgumentType::I256(number) => *number,
+        TxCallArgumentType::Number(number) if number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_992.0 => i256::from(*number as i64),
+        _ => return None,
+    })
+}
+
+#[document(
+    summary = "The calldata an EVM tool sends the native precompile, at 0x…4e43, to call a native contract, as a Solidity contract's call through its Native interface does: callNative(target, name, types, args), each argument's native type named in types and its value ABI-encoded as that type crosses. A wallet or MetaMask sends it to the precompile, and the native contract sees that account as its sender.",
+    category = "ABI",
+    params = {
+        target = "The native contract.",
+        function = "Its function, by name.",
+        args = "Its arguments, as a native call takes them.",
+    },
+    returns = "The precompile's address and the calldata, or why it cannot be: a target that is no native contract, or an argument with no ABI value, as nil.",
+    see_also = "native_abi_type, evm_address",
+)]
+pub fn call_native_input(target: &Address, function: &str, args: &[crate::structs::tx::TxCallArgumentType]) -> Result<([u8; 20], Vec<u8>), String> {
+    use crate::structs::tx::TxCallArgumentType;
+
+    let Address::Contract(contract) = target else {
+        return Err(format!("{target} is no native contract"));
+    };
+    let mut kinds = Vec::with_capacity(args.len());
+    let mut types = Vec::with_capacity(args.len());
+    let mut values = Vec::with_capacity(args.len());
+
+    for arg in args {
+        let (kind, value) = match arg {
+            TxCallArgumentType::U64(_) | TxCallArgumentType::U128(_) | TxCallArgumentType::U256(_) | TxCallArgumentType::Amount(_) => {
+                let kind = match arg {
+                    TxCallArgumentType::U64(_) => "u64",
+                    TxCallArgumentType::U128(_) => "u128",
+                    TxCallArgumentType::U256(_) => "u256",
+                    _ => "amount",
+                };
+                (kind, AbiValue::Uint(native_unsigned(arg).ok_or("a number past its type")?))
+            }
+            TxCallArgumentType::I64(_) | TxCallArgumentType::I128(_) | TxCallArgumentType::I256(_) | TxCallArgumentType::Number(_) => {
+                let kind = match arg {
+                    TxCallArgumentType::I64(_) => "i64",
+                    TxCallArgumentType::I128(_) => "i128",
+                    TxCallArgumentType::I256(_) => "i256",
+                    _ => "number",
+                };
+                (kind, AbiValue::Int(native_signed(arg).ok_or("a number that is not whole, or past int64")?))
+            }
+            TxCallArgumentType::Bool(flag) => ("bool", AbiValue::Bool(*flag)),
+            TxCallArgumentType::String(text) => ("string", AbiValue::String(text.clone())),
+            TxCallArgumentType::Bytes(bytes) => ("bytes", AbiValue::Bytes(bytes.clone())),
+            TxCallArgumentType::Address(Address::Contract(bytes)) => ("contract", AbiValue::FixedBytes(bytes.to_vec())),
+            TxCallArgumentType::Address(address) => ("address", AbiValue::Address(evm_address(address))),
+            TxCallArgumentType::Nil => return Err("nil has no ABI value to cross with".to_string()),
+        };
+        types.push(native_abi_type(kind)?);
+        values.push(value);
+        kinds.push(kind);
+    }
+
+    let encoded = encode_values(&types, &values)?;
+    let call = [AbiType::FixedBytes(32), AbiType::String, AbiType::String, AbiType::Bytes];
+    let fields = [AbiValue::FixedBytes(contract.to_vec()), AbiValue::String(function.to_string()), AbiValue::String(kinds.join(",")), AbiValue::Bytes(encoded)];
+    let selector = Hasher::digest(HashType::Keccak256, b"callNative(bytes32,string,string,bytes)").to_bytes();
+
+    Ok((NATIVE_PRECOMPILE, [&selector[..4], encode_values(&call, &fields)?.as_slice()].concat()))
+}
+
 #[document(
     summary = "The 20 bytes an address goes by inside the EVM: a secp256k1 account's or an EVM contract's own, and for any other account, the last 20 bytes of the keccak256 of its key, as stored: its alias.",
     category = "ABI",
