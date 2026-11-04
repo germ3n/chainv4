@@ -496,6 +496,20 @@ committed state, under the chain's fuel cap. Whatever it writes, sends or emits 
 404 for an address that holds no contract. For reading contracts, such as a token's
 `decimals()` or someone's `balance_of`.
 
+### `GET /anchors?from=N&limit=M`
+
+What the chain anchored in Bitcoin (see [Anchoring](anchoring.md)):
+- `settings`: anchoring's settings in force, as genesis's `anchoring` writes them.
+- `chain_tag`: the 4 bytes anchors start their chain's part with.
+- `count`, and `root`: the anchor list's root, which the next anchor's OP_RETURN must carry.
+- `enforced_height`: the highest checkpoint an enforced anchor holds, or null.
+- `rewarded`: the last epoch whose anchor was paid.
+- `relay_tip`: the relay's tip, `{hash, height}`, hashes as explorers write them.
+- `entries`: a page, the newest page unless `from` says, oldest first. Each has `index`, `epoch`,
+  `block`, `btc_block`, `btc_height` and `enforced`.
+
+On a build without the bitcoin feature, 404.
+
 ### `GET /forks?limit=N`
 
 The side branches the node stores, every block off the main chain, newest first, `limit` of them

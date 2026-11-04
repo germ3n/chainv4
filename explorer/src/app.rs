@@ -489,6 +489,7 @@ impl Explorer {
             Ask::Validators => store.validators = Some(value),
             Ask::Signers => store.signers = Some(value),
             Ask::Evidence => store.evidence = Some(value),
+            Ask::Anchors => store.anchors = Some(value),
             Ask::Call { ref contract, ref function, ref args } => {
                 // A token's balance_of takes a holder alone; a multi-token collection's takes an id too.
                 let one_argument = serde_json::from_str::<Value>(args).ok().and_then(|args| args.as_array().map(Vec::len)) == Some(1);
@@ -758,7 +759,7 @@ impl Explorer {
 
         let page = match &self.view {
             View::Mempool | View::Tx(_) => vec![Ask::Mempool],
-            View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence],
+            View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence, Ask::Anchors],
             View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames { address: address.clone(), cursor: None }, Ask::AccountMultisigs { address: address.clone(), cursor: None }].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
             View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),

@@ -520,6 +520,12 @@ struct NodeArgs {
     /// under finality.finalized.block.
     #[arg(long, requires = "snapshot")]
     checkpoint: Option<String>,
+    /// With --snapshot, start at the checkpoint the anchors pick rather than one you are told:
+    /// hear what each peer's chain anchored in Bitcoin, check it against the Bitcoin headers their
+    /// relays hold, the most work winning, and take the newest checkpoint of the history Bitcoin
+    /// saw first (docs/anchoring.md). Hears from anchors.peers peers first, 2 unless tuned.
+    #[arg(long, requires = "snapshot", conflicts_with = "checkpoint")]
+    anchored: bool,
     /// Tune what the node takes on and how fast, as KEY=VALUE, repeated or comma-separated, such
     /// as sync.headers=512,gossip.wait=20ms: the keys are sync., gossip., dial., peers., node.,
     /// mining., http., range., rpc., filter., finality. and chain., in docs/node.md with their
@@ -864,10 +870,25 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             None => None,
         };
 
-        match node.sync_from_snapshot(checkpoint)? {
-            true if checkpoint.is_some() => log::info!("[node] syncing from a snapshot, starting at the checkpoint"),
-            true => log::info!("[node] syncing from a snapshot"),
-            false => log::info!("[node] the database holds more than genesis already: syncing as usual, not from a snapshot"),
+        #[cfg(feature = "bitcoin")]
+        if args.anchored {
+            match node.sync_from_anchors()? {
+                true => log::info!("[node] syncing from a snapshot, at the checkpoint the anchors pick"),
+                false => log::info!("[node] the database holds more than genesis already: syncing as usual, not from a snapshot"),
+            }
+        }
+
+        #[cfg(not(feature = "bitcoin"))]
+        if args.anchored {
+            return Err("--anchored needs a build with the bitcoin feature".into());
+        }
+
+        if !args.anchored {
+            match node.sync_from_snapshot(checkpoint)? {
+                true if checkpoint.is_some() => log::info!("[node] syncing from a snapshot, starting at the checkpoint"),
+                true => log::info!("[node] syncing from a snapshot"),
+                false => log::info!("[node] the database holds more than genesis already: syncing as usual, not from a snapshot"),
+            }
         }
     }
 

@@ -535,6 +535,66 @@ pub(crate) fn dex_from_json(mut fields: Fields) -> Result<crate::params::vm::Dex
     dex.problem().map_or(Ok(dex), |problem| Err(problem.to_string()))
 }
 
+/// Anchoring's settings as JSON: what genesis's anchoring and Change::Anchoring carry, the start's
+/// header as hex, the reward as a decimal string.
+pub fn anchoring_json(settings: &crate::params::anchoring::AnchorSettings) -> Value {
+    json!({
+        "bitcoin": settings.bitcoin,
+        "ethereum": settings.ethereum,
+        "enforce": settings.enforce,
+        "relay": settings.relay.map(|relay| relay.to_string()),
+        "btc_start": settings.btc_start.as_ref().map(|start| json!({
+            "header": crate::structs::hex::to_hex(&start.header),
+            "height": start.height,
+            "network": start.network.name(),
+        })),
+        "depth": settings.depth,
+        "every": settings.every,
+        "reward": settings.reward.to_string(),
+    })
+}
+
+/// Anchoring's settings from their JSON. What is left out is off, unset or the default, so
+/// `{"bitcoin": true, ...}` names only what it turns on.
+pub(crate) fn anchoring_from_json(mut fields: Fields) -> Result<crate::params::anchoring::AnchorSettings, String> {
+    use crate::params::anchoring::{AnchorSettings, BtcNetworkRules, BtcStart};
+
+    let flag = |fields: &mut Fields, key: &'static str| -> Result<bool, String> {
+        match fields.map.contains_key(key) {
+            true => fields.get(key)?.as_bool().ok_or_else(|| format!("{} is true or false", fields.name(key))),
+            false => Ok(false),
+        }
+    };
+    let (bitcoin, ethereum, enforce) = (flag(&mut fields, "bitcoin")?, flag(&mut fields, "ethereum")?, flag(&mut fields, "enforce")?);
+    let relay = match fields.later_text("relay")? {
+        Some(text) => Some(text.parse::<Address>().map_err(|err| format!("anchoring.relay: {err}"))?),
+        None => None,
+    };
+    let btc_start = match fields.later_object("btc_start")? {
+        Some(mut start) => {
+            let header = start.text("header")?;
+            let header = crate::structs::hex::from_hex(&header).ok_or("anchoring.btc_start.header is not hex")?;
+            let height = start.whole("height")?;
+            let network = start.text("network")?;
+            let network = BtcNetworkRules::from_name(&network).ok_or_else(|| format!("anchoring.btc_start.network is main, regtest or test, not {network}"))?;
+            start.done()?;
+
+            Some(BtcStart { header, height, network })
+        }
+        None => None,
+    };
+    let depth = fields.later_whole("depth")?.unwrap_or(crate::params::anchoring::DEFAULT_ANCHOR_DEPTH);
+    let every = fields.later_whole("every")?.unwrap_or(crate::params::anchoring::DEFAULT_ANCHOR_EVERY);
+    let reward = match fields.map.contains_key("reward") {
+        true => fields.amount("reward")?,
+        false => u256::ZERO,
+    };
+    fields.done()?;
+    let settings = AnchorSettings { bitcoin, ethereum, enforce, relay, btc_start, depth, every, reward };
+
+    settings.problem().map_or(Ok(settings), |problem| Err(problem.to_string()))
+}
+
 /// Limits from vote-change's --limits.
 pub fn limits_from_text(text: &str) -> Result<crate::params::BlockLimits, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
@@ -1035,6 +1095,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::TokenFunctions(functions) => json!({ "token_functions": functions }),
         Change::EvmSpec { spec, from } => json!({ "evm_spec": { "spec": spec.name(), "from": from } }),
         Change::Dex(dex) => json!({ "dex": dex_json(dex) }),
+        Change::Anchoring(settings) => json!({ "anchoring": anchoring_json(settings) }),
     }
 }
 
@@ -1102,6 +1163,7 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
             Change::EvmSpec { spec, from }
         }
         "dex" => Change::Dex(dex_from_json(Fields::of(value, "dex")?)?),
+        "anchoring" => Change::Anchoring(anchoring_from_json(Fields::of(value, "anchoring")?)?),
         "collections" => match value.as_str() {
             Some(text) => Change::Collections(collections_from_text(text)?),
             None => Change::Collections(collections_from_text(&value.to_string())?),

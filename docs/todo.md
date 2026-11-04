@@ -32,6 +32,11 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   - tests that test nothing, or the wrong thing, and places that want more;
   - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
     todo asks for it), and fix what turns up, a commit per feature.
+- [ ] **Run `cargo fmt` over everything.** The tree is not rustfmt-clean today (`cargo fmt --check`
+  shows diffs in `build.rs`, `gpu/` and more), so batches have kept to the style around them by
+  hand. Run it once across the node, `wallet/`, `explorer/`, `ui/`, `gpu/`, `macro/`, `wiki/` and
+  `contracts/`, in a commit of its own with nothing else in it, so blame stays readable. Then
+  add `cargo fmt --check` to CI.
 - [x] **Review fixes: consensus and what strangers can send.** Done 2026-11-01, from the review in
   the queue. In the node and its API:
   - the ABI type parser caps a fixed array's length (`u32::MAX`), so measuring a static type's size
@@ -273,30 +278,28 @@ offline; these would make that hold up as a treasury.
   checkpoint it is told to trust: it takes the checkpoint's headers from a peer by their hashes,
   holds it as justified and finalized, fetches nothing below it, and syncs on from there, so a
   long-range fork under it never reaches the node.
-- [ ] **Borrow Bitcoin's or Ethereum's security (owner's idea, 2026-11-04).** The question is
-  whether a header field with a Bitcoin or Ethereum tip id and height would bring their security
-  into the chain. A field on its own would not. A fork can quote the same real Bitcoin tip, so the
-  field proves only that a block was made after that Bitcoin block, not which chainv4 history is
-  the real one. Security comes from the other direction: anchoring each finalized checkpoint into
-  Bitcoin (an OP_RETURN, as Babylon's timestamping does) or into Ethereum (a contract or calldata).
-  A node could then refuse any fork that conflicts with the earliest-anchored checkpoint. Undoing
-  an anchored checkpoint would mean undoing Bitcoin as well, and a long-range fork built from old
-  validator keys loses to the anchor. With anchoring, the header field becomes useful too. Blocks
-  would name the Bitcoin height they have seen, checked against the headers the BTC relay already
-  holds. That gives the chain a consensus-agreed view of where its anchors sit, and the gateways a
-  shared Bitcoin height to count confirmations from. Design questions:
-  - Who pays the Bitcoin fees for each anchor, and how often to anchor?
-  - What happens while anchoring stalls?
-  - Bitcoin, Ethereum or both?
-  - Should fork choice consult the anchors, making every node watch Bitcoin, or should a fork
-    against an anchor only raise an alarm and halt finality?
-
-  Governance turns it on and off, as a setting voted in like any other. Anchoring to Bitcoin,
-  anchoring to Ethereum, the header field and whether fork choice heeds the anchors each switch
-  on their own, and so do how often to anchor and the fee cap. A chain starts with them off, and
-  switching on takes effect at a later epoch, so every node is watching Bitcoin before anything
-  depends on it. Switching off stops new anchors but leaves the old ones standing, so a vote
-  can't undo the protection the anchors already give.
+- [x] **Anchoring into Bitcoin (owner's idea, 2026-11-04).** Anyone writes a finalized checkpoint
+  into a Bitcoin OP_RETURN, with the anchor list's root, and proves it with `Tx::Anchor` against
+  the relay, earning a governance-set reward every `every` epochs. Anchors recorded while `enforce`
+  is on bind nodes: no block replaces one. `--snapshot --anchored` starts a new node at the newest
+  checkpoint of the history Bitcoin saw first, checked against the Bitcoin headers peers' relays
+  hold, by their work. `bridge btc anchor` is the anchorer. Each part switches on its own under
+  `Change::Anchoring`, all off when unset. No Bitcoin height went into headers: the relay's tip is
+  chain state already. See [Anchoring](anchoring.md).
+- [ ] **Anchoring: next.**
+  - **Ethereum anchors that count.** The anchorer writes them already, but the chain cannot check
+    them without a light client of Ethereum's finality: BLS12-381 checks of the sync committee and
+    Merkle-Patricia proofs as host functions. Once that is in, an Ethereum anchor counts in
+    anchored sync as a Bitcoin one does, by the slot it was finalized in.
+  - **The anchorer keeps its pending anchor on disk,** so a restart does not write another.
+  - **Anchored sync without `--snapshot`:** running every block from genesis, refusing any branch
+    without the picked checkpoint.
+  - **Running nodes check their peers' anchors now and then,** and say so loudly if a peer's history
+    beats their own. They cannot roll back past their finalized checkpoint, but an operator can
+    resync.
+  - **Deploy it:** the relay keeps each header's version and nonce now, so the devnet's relay is
+    deployed again. That, the anchorer service on .94 and turning it on by a vote go with the key
+    rotation's genesis.
 - [x] **Difficulty can retarget over a window.** Genesis's `consensus.window` makes difficulty
   the window's work over the time it took, each interval counting between a quarter and four
   targets, and bounds a block's timestamp by the window's median time, as Bitcoin does. The

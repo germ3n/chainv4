@@ -230,6 +230,8 @@ pub struct Store {
     pub validators: Option<Value>,
     pub signers: Option<Value>,
     pub evidence: Option<Value>,
+    /// GET /anchors: anchoring's settings and the newest anchors.
+    pub anchors: Option<Value>,
     pub feed: VecDeque<Live>,
     /// The node's total hashrate each time it reported, oldest first, with when: what the mining
     /// chart draws.

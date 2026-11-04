@@ -133,6 +133,9 @@ impl Draft {
             Control::Switch { .. } => {
                 self.switches.insert(path, !value.is_null());
             }
+            Control::Flag { .. } => {
+                self.switches.insert(path, value.as_bool() == Some(true));
+            }
             Control::MaybeChoice { .. } => {
                 self.texts.insert(path, value.as_str().unwrap_or_default().to_string());
             }
@@ -443,6 +446,7 @@ fn read(spec: &Spec, draft: &Draft, env: &Env, errors: &mut BTreeMap<String, Str
             true => None,
             false => Some(Value::Null),
         },
+        Control::Flag { .. } => Some(json!(on)),
         Control::List(line) => {
             let mut seen = HashSet::new();
             let mut values = Vec::new();
@@ -763,6 +767,7 @@ pub fn words(spec: &Spec, value: Option<&Value>, env: &Env) -> String {
         Control::MaybeWhole { off, .. } => value.as_u64().map_or_else(|| off.to_string(), |number| format::thousands(&number.to_string())),
         Control::MaybeBytes { off, .. } => value.as_u64().map_or_else(|| off.to_string(), bytes),
         Control::Switch { off, on } => if value.is_null() { off } else { on }.to_string(),
+        Control::Flag { off, on } => if value.as_bool() == Some(true) { on } else { off }.to_string(),
         Control::List(_) | Control::Table(_) => match value.as_array().map_or(0, Vec::len) {
             0 => "none".to_string(),
             1 => "1 listed".to_string(),
@@ -1025,7 +1030,7 @@ fn control(ui: &mut Ui, palette: &theme::Palette, spec: &Spec, draft: &mut Draft
                 ui.add(line_edit(draft.texts.entry(path.to_string()).or_default(), hint, false));
             }
         }
-        Control::Switch { off, on } => {
+        Control::Switch { off, on } | Control::Flag { off, on } => {
             theme::segmented(ui, palette, draft.switches.entry(path.to_string()).or_default(), &[(false, off), (true, on)]);
         }
         Control::List(line) => list(ui, palette, spec, line, draft, price_hint, built),

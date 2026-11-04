@@ -231,6 +231,7 @@ fn summary(tx: &Tx) -> String {
         Tx::ApproveMultisig { account, nonce, tx, .. } => format!("approve the multisig {account}'s transaction {nonce}: {}", summary(tx)),
         Tx::WithdrawMultisig { account, proposal } => format!("withdraw approval of {proposal} from the multisig {account}"),
         Tx::Claim { to, earned, height, .. } => format!("claim {to}'s earnings from the mining pool of block {height}, {earned} in all"),
+        Tx::Anchor { proof } => format!("show an anchor in Bitcoin block {}", crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>())),
         Tx::Batch { steps } => {
             let listed: Vec<String> = steps.iter().enumerate().map(|(index, step)| format!("{}. {}", index + 1, summary(step))).collect();
 

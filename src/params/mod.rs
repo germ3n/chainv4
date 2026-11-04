@@ -10,6 +10,7 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
+pub mod anchoring;
 pub mod fees;
 pub mod finality;
 pub mod vm;

@@ -26,8 +26,26 @@ use {
 /// network's for, and what a bump pays when it is not.
 const SOON_BLOCKS: u32 = 3;
 
+mod anchor;
+
 #[derive(clap::Subcommand)]
 pub enum BtcAction {
+    /// Anchors the chain into Bitcoin (docs/anchoring.md): writes its newest finalized checkpoint
+    /// into an OP_RETURN from the key's coins every anchoring.every epochs, and shows it to the
+    /// chain once the relay holds it deep enough, which pays the reward. With anchoring.ethereum
+    /// on, --eth-rpc and --evm-key, writes it to that chain too.
+    Anchor {
+        /// The secp256k1 key whose native segwit coins pay for anchors: --evm-key's unless given.
+        #[arg(long)]
+        btc_key: Option<std::path::PathBuf>,
+        /// Seconds between passes; 0 for one pass.
+        #[arg(long, default_value_t = 60)]
+        every: u64,
+        /// The rate to pay, in satoshis a virtual byte: what Esplora asks for within a few blocks
+        /// unless given.
+        #[arg(long)]
+        fee_rate: Option<u64>,
+    },
     /// Starts the relay, deployed from contracts/examples/btc_relay, at the header Esplora has at
     /// a height: on main, a difficulty period's first, a height divisible by 2016.
     RelayStart {
@@ -513,6 +531,28 @@ impl Bridge {
             BtcAction::Sweep { fee } => self.sweep(*fee),
             BtcAction::Sign => self.sign_releases(&self.fee_rates(), false),
             BtcAction::Pass => self.btc_pass(),
+            BtcAction::Anchor { btc_key, every, fee_rate } => {
+                let secret = match btc_key {
+                    Some(path) => match crate::cli::signer(Some(path))?.private() {
+                        crate::crypto::keypair::PrivateKey::Secp256k1(secret) => *secret,
+                        _ => return Err("--btc-key is a secp256k1 key: make one with keygen --scheme secp256k1".into()),
+                    },
+                    None => self.evm_secret()?,
+                };
+                let mut pending = None;
+
+                loop {
+                    if let Err(why) = self.anchor_pass(&secret, &mut pending, *fee_rate) {
+                        eprintln!("the anchor pass: {why}");
+                    }
+
+                    if *every == 0 {
+                        return Ok(());
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_secs(*every));
+                }
+            }
             BtcAction::Watch { every } => loop {
                 if let Err(why) = self.btc_pass() {
                     eprintln!("the Bitcoin pass: {why}");

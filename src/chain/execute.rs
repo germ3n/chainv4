@@ -60,6 +60,8 @@ pub struct Rules {
     pub names: Option<Arc<NamesConfig>>,
     #[document(summary = "What contracts run under in the block: host costs, contract limits, the EVM's spec and the DEX's fee, and the transaction and multisig bounds.")]
     pub vm: crate::params::vm::VmRules,
+    #[document(summary = "Anchoring's settings in force: genesis's, or the last decided.")]
+    pub anchoring: crate::params::anchoring::AnchorSettings,
 }
 
 impl Rules {
@@ -250,6 +252,8 @@ pub enum Failure {
     BondingClosed,
     #[document(summary = "A claim on a mining pool that pays nothing: see ClaimError.")]
     Claim(String),
+    #[document(summary = "An anchor whose proof does not show what it must: see prove.")]
+    Anchor(String),
     #[document(summary = "A batch's step failed, which undid every step: which one, counted from 0, and why.")]
     Step { step: u32, failure: Box<Failure> },
 }
@@ -277,7 +281,7 @@ impl fmt::Display for Failure {
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
             Failure::NoNames => write!(f, "this chain has no names"),
             Failure::BondingClosed => write!(f, "validators bond only under FFG finality, or before a switch into it"),
-            Failure::Claim(why) => write!(f, "{why}"),
+            Failure::Claim(why) | Failure::Anchor(why) => write!(f, "{why}"),
             Failure::Step { step, failure } => write!(f, "step {} failed, undoing every step: {failure}", step + 1),
         }
     }
@@ -798,6 +802,27 @@ fn batch(
     (Ok(Effect::Batch(outcomes)), all)
 }
 
+/// Runs a Tx::Anchor: anchoring's own check, on a build that reads Bitcoin.
+fn anchor(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Address, proof: &crate::structs::tx::AnchorProof) -> Result<Effect, Failure> {
+    #[cfg(feature = "bitcoin")]
+    {
+        let interval = rules.staking.as_ref().map(|staking| staking.checkpoint_interval).or(rules.signers.map(|signers| signers.checkpoint_interval));
+        let prove = crate::anchor::ProveRules { settings: &rules.anchoring, genesis: context.genesis, checkpoint_interval: interval, pooled: rules.pooled_fees };
+
+        match crate::anchor::prove(layer, &prove, sender, proof) {
+            Ok(_) => Ok(Effect::Done),
+            Err(crate::anchor::ProveError::Db(err)) => Err(Failure::Registry(RegistryError::Db(err))),
+            Err(err) => Err(Failure::Anchor(err.to_string())),
+        }
+    }
+    #[cfg(not(feature = "bitcoin"))]
+    {
+        let _ = (layer, rules, context, sender, proof);
+
+        Err(Failure::Anchor("this build reads no Bitcoin, so it takes no anchors".to_string()))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     layer: &Arc<State>,
@@ -881,6 +906,7 @@ fn run(
             Err(crate::registry::pools::ClaimError::Db(err)) => (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
             Err(err) => (Err(Failure::Claim(err.to_string())), Contracted::default()),
         },
+        Tx::Anchor { proof } => (anchor(layer, rules, context, &sender, proof), Contracted::default()),
         Tx::Transfer { from, to, amount } => (moved(accounts.transfer(from, to, amount.to_u256())), Contracted::default()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {
@@ -1092,6 +1118,7 @@ fn run(
                 Change::EvmSpec { spec, .. } if *spec < rules.vm.evm_spec => Ok(Some("an EVM spec is no older than the one in force, so no deployed contract loses an opcode")),
                 Change::EvmSpec { spec, .. } => Changes::new(layer).evm_specs().map(|specs| specs.eras.last().is_some_and(|(_, last)| spec < last).then_some("an EVM spec is no older than the one decided last")),
                 Change::Dex(dex) => Ok(dex.problem()),
+                Change::Anchoring(settings) => Ok(settings.problem()),
                 Change::Collections(functions) => Ok(functions.problem()),
                 Change::Federation(federation) => Ok(federation.problem()),
                 Change::Directory(directory) => Ok(directory.problem()),

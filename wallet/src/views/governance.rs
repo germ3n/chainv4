@@ -50,14 +50,14 @@ const REFRESH: u64 = 15_000;
 const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
-const KINDS: [&str; 17] = ["name", "bootnodes", "upgrade", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex"];
+const KINDS: [&str; 18] = ["name", "bootnodes", "upgrade", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring"];
 
 /// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
 const KIND_LIST_HEIGHT: f32 = 620.0;
 
 /// The kinds the propose form takes in part: a JSON object naming only some fields, laid over what
 /// stands, as the CLI's vote-change takes them.
-const PARTIAL: [&str; 9] = ["fees", "reward", "limits", "finality", "federation", "directory", "names", "governance", "dex"];
+const PARTIAL: [&str; 10] = ["fees", "reward", "limits", "finality", "federation", "directory", "names", "governance", "dex", "anchoring"];
 
 /// The settings in force, in the order the API lists them.
 const IN_FORCE: [&str; 16] = ["consensus", "name", "bootnodes", "names", "collections", "token_functions", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade", "governance", "evm_spec", "dex"];
@@ -1367,6 +1367,7 @@ fn label(kind: &str) -> &str {
         "token_functions" => "Tokens",
         "evm_spec" => "EVM spec",
         "dex" => "DEX fee",
+        "anchoring" => "Anchoring",
         "consensus" => "Consensus",
         "fees" => "Fees",
         "reward" => "Block reward",
@@ -1470,6 +1471,19 @@ fn stated(change: &Change, coin: &Coin) -> String {
         Change::TokenFunctions(functions) => format!("Tokens: {} function{} make one: {}", functions.len(), plural(functions.len() as u64), functions.join(", ")),
         Change::EvmSpec { spec, from } => format!("EVM spec: {} from block {}", spec.name(), format::thousands(&from.to_string())),
         Change::Dex(dex) => format!("DEX fee: {}% a trade", dex.fee_bps as f64 / 100.0),
+        Change::Anchoring(settings) => {
+            let on = |on: bool| if on { "on" } else { "off" };
+
+            format!(
+                "Anchoring: Bitcoin {}, Ethereum {}, enforced {}, {} deep, {} every {} epochs",
+                on(settings.bitcoin),
+                on(settings.ethereum),
+                on(settings.enforce),
+                blocks(settings.depth),
+                amount(&settings.reward),
+                format::thousands(&settings.every.to_string())
+            )
+        }
         Change::Upgrade(upgrade) => format!("Upgrade: nodes older than {} stop at block {}", upgrade.least, format::thousands(&upgrade.from.to_string())),
         Change::Consensus(consensus) => match consensus {
             ConsensusConfig::Authority { key, slot_ms } => format!("Consensus: one key, {}, makes a block every {}", format::short(&key.to_string()), millis(*slot_ms)),
@@ -1610,7 +1624,7 @@ mod tests {
             "epoch": 3,
             "version": 2,
             "versions": {
-                "consensus": 0, "bootnodes": 1, "names": 0, "collections": 0, "federation": 0, "directory": 0, "token_functions": 0, "evm_spec": 0, "dex": 0,
+                "consensus": 0, "bootnodes": 1, "names": 0, "collections": 0, "federation": 0, "directory": 0, "token_functions": 0, "evm_spec": 0, "dex": 0, "anchoring": 0,
                 "fees": 0, "reward": 0, "limits": 0, "upgrade": 0, "name": 1, "governance": 0,
             },
             "approval_epochs": 16,
@@ -1925,7 +1939,7 @@ mod tests {
 
         // The consensus is not laid over: a part of it is not one.
         assert!(raw("consensus", r#"{ "slot_ms": 1000 }"#, standing(&listing, "consensus")).is_err());
-        assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 9], "each a kind the form lists");
+        assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 10], "each a kind the form lists");
         assert!(PARTIAL.iter().all(|kind| KINDS.contains(kind)));
     }
 
@@ -2073,6 +2087,7 @@ mod tests {
                 Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: Some(2 << 20), contract: None, max_tx_bytes: None, multisig_members: None }),
                 "Limits: 10,000,000 fuel and 64 MiB of memory a transaction, blocks of at most 2 MiB",
             ),
+            (Change::Anchoring(chainv4::params::anchoring::AnchorSettings { ethereum: true, enforce: true, ..chainv4::params::anchoring::AnchorSettings::OFF }), "Anchoring: Bitcoin off, Ethereum on, enforced on, 6 blocks deep, 0 DEV every 90 epochs"),
             (Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })), "Finality: final once 6 blocks deep"),
             (Change::Finality(FinalityConfig::Ffg(ffg.clone())), "Finality: FFG, votes 3 blocks deep, bonds of at least 500 DEV, at most 1000 validators"),
             (Change::SwitchFinality { epoch: 40, config: FinalityConfig::Ffg(ffg) }, "Switch finality to ffg from epoch 40: FFG, votes 3 blocks deep"),

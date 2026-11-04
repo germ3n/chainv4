@@ -234,3 +234,68 @@ fn pays_nothing() -> Vec<u8> {
     }
     .base()
 }
+
+/// What the chain reads of the relay natively, for anchoring, is what the relay keeps: its tip,
+/// depths, a header written whole again from its record, which its peers' syncing nodes check by
+/// work, and a proof of an anchor checked against it.
+#[cfg(feature = "node")]
+#[test]
+fn anchoring_reads_the_relay_s_own_records_and_proves_an_anchor_by_them() {
+    use crate::anchor::{Anchors, Payload, ProveRules, Relay as Records, chain_tag, prove};
+    use crate::structs::tx::AnchorProof;
+    use crate::params::anchoring::{AnchorSettings, BtcNetworkRules, BtcStart};
+
+    let relay = Relay::new();
+    let start = mined(&[0; 32], &[0; 32], 1_700_000_000, REGTEST);
+    relay.call("start", &[bytes(&start), number(0), TxCallArgumentType::String("regtest".into())]).unwrap();
+
+    let genesis = crate::crypto::hasher::Hasher::digest(HashType::default_chain(), b"a chain");
+    let checkpoint = crate::crypto::hasher::Hasher::digest(HashType::default_chain(), b"its checkpoint at epoch 2");
+    let payload = Payload { chain: chain_tag(&genesis), epoch: 2, block: checkpoint.to_bytes().try_into().unwrap(), root: [0; 32] };
+    let anchor = crate::crypto::bitcoin::tx::Transaction {
+        version: 2,
+        inputs: vec![crate::crypto::bitcoin::tx::TxIn { txid: [5; 32], vout: 1, script_sig: Vec::new(), sequence: u32::MAX, witness: Vec::new() }],
+        outputs: vec![crate::crypto::bitcoin::tx::TxOut { value: 0, script: payload.script() }],
+        lock_time: 0,
+    }
+    .base();
+    let coinbase = coinbase(1);
+    let ids = [sha256d(&coinbase), sha256d(&anchor)];
+    let mut headers = vec![mined(&sha256d(&start), &crate::crypto::bitcoin::merkle_root(&ids), 1_700_000_060, REGTEST)];
+
+    for step in 2..=3u32 {
+        headers.push(mined(&sha256d(headers.last().unwrap()), &[step as u8; 32], 1_700_000_000 + 60 * step, REGTEST));
+    }
+
+    relay.call("submit", &[bytes(&headers.concat())]).unwrap();
+    let records = Records::new(&relay.world.state, relay.relay);
+    let block = sha256d(&headers[0]);
+
+    assert_eq!(records.network().unwrap(), Some(BtcNetworkRules::Regtest));
+    assert_eq!(records.tip().unwrap().map(|(_, height)| height), Some(3));
+    assert_eq!(records.depth(&block).unwrap(), 3);
+    assert_eq!(records.raw_header(&block).unwrap().map(|header| header.to_vec()), Some(headers[0].clone()));
+    assert_eq!(records.raw_header(&sha256d(&start)).unwrap().map(|header| header.to_vec()), Some(start.clone()), "the start too");
+
+    relay.world.state.put_value(crate::db::Column::Heights, 16u64.to_be_bytes().to_vec(), &checkpoint);
+    let settings = AnchorSettings {
+        bitcoin: true,
+        enforce: true,
+        relay: Some(relay.relay),
+        btc_start: Some(BtcStart { header: start, height: 0, network: BtcNetworkRules::Regtest }),
+        depth: 3,
+        ..AnchorSettings::OFF
+    };
+    let rules = ProveRules { settings: &settings, genesis, checkpoint_interval: Some(8), pooled: false };
+    let proof = AnchorProof {
+        block,
+        raw: anchor,
+        index: 1,
+        path: crate::crypto::bitcoin::merkle_path(&ids, 1),
+        coinbase,
+        coinbase_path: crate::crypto::bitcoin::merkle_path(&ids, 0),
+    };
+
+    prove(&relay.world.state, &rules, &Address::Ed25519([1; 32]), &proof).unwrap();
+    assert_eq!(Anchors::new(&relay.world.state).enforced_height().unwrap(), Some(16));
+}

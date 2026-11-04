@@ -53,6 +53,8 @@ pub enum VerifyError {
     BadMultisig,
     #[document(summary = "A claim with a Merkle path longer than any root's: more than 64 hashes.")]
     BadClaim,
+    #[document(summary = "An anchor's proof longer than any Bitcoin transaction or Merkle path it could show.")]
+    BadAnchor,
     #[document(summary = "A batch with no steps, or more than MAX_BATCH_STEPS.")]
     BatchSize,
     #[document(summary = "A batch holding what a batch may not: anything but a transfer, contract call, EVM call, deploy, upgrade, name, primary name, burn or claim.")]
@@ -78,6 +80,7 @@ impl fmt::Display for VerifyError {
             VerifyError::BadEthereum => write!(f, "not an Ethereum transaction for this chain, as signed"),
             VerifyError::BadMultisig => write!(f, "not a multisig's transaction a multisig may send"),
             VerifyError::BadClaim => write!(f, "a claim's path is longer than any pool's root needs"),
+            VerifyError::BadAnchor => write!(f, "an anchor's transaction, coinbase or path is longer than any Bitcoin block holds"),
             VerifyError::BatchSize => write!(f, "a batch holds 1 to {} steps", crate::structs::tx::MAX_BATCH_STEPS),
             VerifyError::BatchStep => write!(f, "a batch holds only transfers, contract calls, EVM calls, deploys, upgrades, names, primary names, burns and claims"),
             VerifyError::BatchNotTyped => write!(f, "a batch cannot be signed as EIP-712 typed data: its signer would see an opaque hash, not its steps"),

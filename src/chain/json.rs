@@ -53,6 +53,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "multisig_members": genesis.multisig_members,
         "evm_spec": genesis.evm_spec.map(|spec| spec.name()),
         "dex": genesis.dex.as_ref().map(crate::params::json::dex_json),
+        "anchoring": genesis.anchoring.as_ref().map(crate::params::json::anchoring_json),
     })
 }
 
@@ -193,6 +194,10 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("dex")?.map(crate::params::json::dex_from_json).transpose()?,
         false => None,
     };
+    let anchoring = match root.map.contains_key("anchoring") {
+        true => root.optional_object("anchoring")?.map(crate::params::json::anchoring_from_json).transpose()?,
+        false => None,
+    };
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -223,6 +228,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         multisig_members,
         evm_spec,
         dex,
+        anchoring,
     };
     root.done()?;
 

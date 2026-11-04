@@ -144,6 +144,15 @@ pub fn tx(transaction: &Tx) -> Value {
             "index": index,
             "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
         }),
+        Tx::Anchor { proof } => json!({
+            "type": "anchor",
+            "btc_block": crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>()),
+            "raw": crate::structs::hex::to_hex(&proof.raw),
+            "index": proof.index,
+            "path": proof.path.iter().map(|hash| crate::structs::hex::to_hex(hash)).collect::<Vec<_>>(),
+            "coinbase": crate::structs::hex::to_hex(&proof.coinbase),
+            "coinbase_path": proof.coinbase_path.iter().map(|hash| crate::structs::hex::to_hex(hash)).collect::<Vec<_>>(),
+        }),
         Tx::Batch { steps } => json!({ "type": "batch", "steps": steps.iter().map(tx).collect::<Vec<_>>() }),
     }
 }

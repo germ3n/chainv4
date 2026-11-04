@@ -312,6 +312,9 @@ pub struct Genesis {
     #[document(summary = "The DEX's settings, its fee, or None for DexSettings::DEFAULT's 0.3%. Under governance, Change::Dex replaces them. Added after chains launched: None adds nothing to genesis's encoding.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<crate::params::vm::DexSettings>")]
     pub dex: Option<crate::params::vm::DexSettings>,
+    #[document(summary = "Anchoring's settings, or None for everything off. Under governance, Change::Anchoring replaces them. Added after chains launched: None adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetOption<crate::params::anchoring::AnchorSettings>")]
+    pub anchoring: Option<crate::params::anchoring::AnchorSettings>,
 }
 
 impl Hashable for Genesis {}
@@ -589,6 +592,7 @@ impl Genesis {
             directory_admin: None,
             contract_limits: None,
             dex: None,
+            anchoring: None,
             evm_spec: None,
             max_tx_bytes: None,
             multisig_members: None,
@@ -641,6 +645,7 @@ impl Genesis {
             directory_admin: None,
             contract_limits: None,
             dex: None,
+            anchoring: None,
             evm_spec: None,
             max_tx_bytes: None,
             multisig_members: None,
@@ -911,6 +916,10 @@ impl Genesis {
             return Some(problem);
         }
 
+        if let Some(problem) = self.anchoring.as_ref().and_then(crate::params::anchoring::AnchorSettings::problem) {
+            return Some(problem);
+        }
+
         if let Some(problem) = self.fees.as_ref().and_then(|fees| fees.costs.as_ref()).and_then(crate::params::vm::HostCosts::problem) {
             return Some(problem);
         }
@@ -949,6 +958,7 @@ impl Genesis {
             pooled_fees: self.vote_reward_source == Some(VoteRewardSource::Fees),
             names: self.names.clone().map(Arc::new),
             vm: self.vm_rules(),
+            anchoring: self.anchoring.clone().unwrap_or_default(),
         }
     }
 
@@ -1038,6 +1048,8 @@ pub enum BlockError {
     Proof(String),
     #[document(summary = "It is on a branch that leaves the finalized checkpoint.")]
     ConflictsWithFinality,
+    #[document(summary = "It is on a branch that leaves a checkpoint anchored in Bitcoin while anchoring was enforced.")]
+    ConflictsWithAnchor,
     #[document(summary = "Its base price is not what its parent's makes it.")]
     BasePrice { expected: u256, got: u256 },
     #[document(summary = "Its gas_used is not what its transactions used.")]
@@ -1068,6 +1080,7 @@ impl fmt::Display for BlockError {
             BlockError::ProofRoot => write!(f, "proof_root does not match"),
             BlockError::Proof(why) => write!(f, "bad finality proof: {why}"),
             BlockError::ConflictsWithFinality => write!(f, "conflicts with the finalized checkpoint"),
+            BlockError::ConflictsWithAnchor => write!(f, "conflicts with a checkpoint anchored in Bitcoin"),
             BlockError::BasePrice { expected, got } => write!(f, "base price {got}, but its parent makes it {expected}"),
             BlockError::GasUsed { expected, got } => write!(f, "gas_used {got}, but its transactions used {expected}"),
             BlockError::Fee(why) => write!(f, "paying the producer its fees: {why}"),
@@ -1815,6 +1828,76 @@ impl Chain {
         self.snapshot
     }
 
+    #[document(parent = "Chain", summary = "Anchoring's settings in force at the tip: the last decided, or genesis's.")]
+    pub fn anchoring(&self) -> Result<crate::params::anchoring::AnchorSettings, DbError> {
+        let state = self.state();
+
+        Ok(crate::registry::changes::Changes::new(&state).anchoring()?.unwrap_or_else(|| self.rules.anchoring.clone()))
+    }
+
+    #[document(parent = "Chain", summary = "The highest checkpoint an enforced anchor holds on the main chain, by height: no block at or under it replaces the chain's.")]
+    pub fn anchored_height(&self) -> Result<Option<u64>, DbError> {
+        #[cfg(feature = "bitcoin")]
+        return crate::anchor::Anchors::new(&self.state()).enforced_height();
+
+        #[cfg(not(feature = "bitcoin"))]
+        Ok(None)
+    }
+
+    #[cfg(feature = "bitcoin")]
+    #[document(
+        parent = "Chain",
+        summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's headers start and the relay's tip. None while the chain holds no anchors, or anchoring has no relay or start.",
+    )]
+    pub fn anchors_answer(&self, asked: &[u64]) -> Result<Option<crate::params::anchoring::AnchorsAnswer>, DbError> {
+        let settings = self.anchoring()?;
+        let (Some(relay), Some(start)) = (settings.relay, settings.btc_start) else {
+            return Ok(None);
+        };
+        let state = self.state();
+        let anchors = crate::anchor::Anchors::new(&state);
+        let Some(newest) = anchors.count()?.checked_sub(1) else {
+            return Ok(None);
+        };
+        let mut wanted: Vec<u64> = asked.iter().copied().filter(|index| *index < newest).take(crate::net::MAX_SYNC_ANCHOR_PROOFS).collect();
+        wanted.push(newest);
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut proofs = Vec::with_capacity(wanted.len());
+
+        for index in wanted {
+            proofs.push((index, anchors.proof(index)?.ok_or_else(|| DbError::Corrupt(format!("anchor {index}'s proof is missing")))?));
+        }
+
+        let btc_tip = crate::anchor::Relay::new(&state, relay).tip()?.map_or(start.height, |(_, height)| height);
+
+        Ok(Some(crate::params::anchoring::AnchorsAnswer { start, btc_tip, entries: anchors.entries(0, newest + 1)?, proofs }))
+    }
+
+    #[cfg(feature = "bitcoin")]
+    #[document(parent = "Chain", summary = "Bitcoin headers from anchoring's relay's main chain, from a height on, 80 bytes each: stopping at its tip, or at one it keeps too little of to write whole.")]
+    pub fn btc_headers(&self, from: u64, count: u32) -> Result<Vec<Vec<u8>>, DbError> {
+        let Some(relay) = self.anchoring()?.relay else {
+            return Ok(Vec::new());
+        };
+        let state = self.state();
+        let relay = crate::anchor::Relay::new(&state, relay);
+        let mut headers = Vec::new();
+
+        for height in from..from.saturating_add(u64::from(count)) {
+            let Some(hash) = relay.main_at(height)? else {
+                break;
+            };
+            let Some(header) = relay.raw_header(&hash)? else {
+                break;
+            };
+
+            headers.push(header.to_vec());
+        }
+
+        Ok(headers)
+    }
+
     #[document(
         parent = "Chain",
         summary = "What a peer starting at a checkpoint it trusts asks for: the checkpoint start, and the checkpoint's total work; None when the block is no checkpoint on the main chain, or the headers it needs are missing.",
@@ -2261,6 +2344,11 @@ impl Chain {
             return Err(ImportError::Invalid(BlockError::ConflictsWithFinality));
         }
 
+        // Nor at or below a checkpoint anchored while anchoring was enforced, final or not.
+        if self.anchored_height()?.is_some_and(|anchored| block.header.height <= anchored) {
+            return Err(ImportError::Invalid(BlockError::ConflictsWithAnchor));
+        }
+
         let Some(parent) = self.block(&parent_id)? else {
             return Err(ImportError::UnknownParent(parent_id));
         };
@@ -2526,6 +2614,15 @@ impl Chain {
 
                 return Ok(Imported::Side);
             }
+        }
+
+        // Never off a checkpoint anchored while anchoring was enforced, however the branch weighs.
+        if let Some(anchored) = self.anchored_height()?
+            && fork_height < anchored
+        {
+            log::info!("[chain] not following a branch to {} that leaves the checkpoint at height {anchored} anchored in Bitcoin", new_tip.id());
+
+            return Ok(Imported::Side);
         }
 
         let state = Arc::new(State::new(self.db.clone()));
@@ -3365,6 +3462,10 @@ pub(crate) fn govern_rules(rules: &mut Rules, state: &State, height: u64) -> Res
 
     if let Some(dex) = changes.dex()? {
         rules.vm.dex = dex;
+    }
+
+    if let Some(anchoring) = changes.anchoring()? {
+        rules.anchoring = anchoring;
     }
 
     rules.vm.evm_spec = changes.evm_spec_at(height, rules.vm.evm_spec)?;

@@ -149,6 +149,7 @@ fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
         | Tx::SetDirectory { .. }
         | Tx::HandDirectory { to: None }
         | Tx::PrimaryName { .. }
+        | Tx::Anchor { .. }
         // Read past above: what_it_runs gives what these do, never one of these.
         | Tx::Multisig { .. }
         | Tx::Batch { .. } => {}

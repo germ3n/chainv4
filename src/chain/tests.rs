@@ -845,6 +845,39 @@ fn the_heavier_branch_wins_and_state_follows_it() {
     assert_eq!(crate::registry::supply::adds_up(&chain.state()).unwrap(), Ok(()), "minted less burned is what is held and bonded");
 }
 
+/// A checkpoint anchored while anchoring was enforced holds against any branch, however heavy:
+/// none that leaves it is followed, and no block at or under it is taken.
+#[cfg(feature = "bitcoin")]
+#[test]
+fn no_branch_leaves_a_checkpoint_anchored_while_enforced() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &pow_genesis()).unwrap();
+    let genesis = chain.block_at(0).unwrap().unwrap();
+    let (miner_a, miner_b) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
+    let a1 = mine_on(&chain, &genesis, Vec::new(), miner_a);
+    extended(chain.import(&a1, LATER));
+    let a2 = mine_on(&chain, &a1, Vec::new(), miner_a);
+    extended(chain.import(&a2, LATER));
+    let b1 = mine_on(&chain, &genesis, Vec::new(), miner_b);
+    assert!(matches!(chain.import(&b1, LATER), Ok(Imported::Side)));
+
+    // An anchor of the block at height 1 recorded enforced, as Tx::Anchor records one.
+    let state = State::new(db.clone());
+    state.put(Column::Validators, b"anchor:height".to_vec(), wincode::serialize(&1u64).unwrap());
+    db.commit(state.take_changes()).unwrap();
+    assert_eq!(chain.anchored_height().unwrap(), Some(1));
+
+    let b2 = mine_on(&chain, &b1, Vec::new(), miner_b);
+    assert!(matches!(chain.import(&b2, LATER), Ok(Imported::Side)), "level with the tip");
+    let b3 = mine_on(&chain, &b2, Vec::new(), miner_b);
+
+    assert!(matches!(chain.import(&b3, LATER), Ok(Imported::Side)), "heavier, yet it leaves the anchored block");
+    assert_eq!(chain.tip().id(), a2.id());
+
+    let other = mine_after(&chain, &genesis, 2_000, Vec::new(), miner_b);
+    assert!(matches!(chain.import(&other, LATER), Err(ImportError::Invalid(BlockError::ConflictsWithAnchor))));
+}
+
 #[test]
 fn side_branches_can_be_found_in_the_database() {
     let db = Arc::new(MemoryDb::default());

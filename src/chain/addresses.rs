@@ -142,6 +142,8 @@ fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
         Tx::Claim { to, .. } => {
             touched.insert(*to);
         }
+        // An anchor touches no one's history but its sender's.
+        Tx::Anchor { .. } => {}
         // Read past above: what_it_runs gives what these do, never one of these.
         Tx::Multisig { .. } | Tx::Batch { .. } => {}
     }

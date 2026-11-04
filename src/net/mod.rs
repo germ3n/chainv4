@@ -63,6 +63,10 @@ const _: () = assert!(SYNC_BATCH_BYTES >= crate::chain::MAX_BLOCK_BYTES);
 pub const MAX_SYNC_JUSTIFICATIONS: u32 = 64;
 /// The most headers one sync response carries.
 pub const MAX_SYNC_HEADERS: u32 = 1_024;
+#[document(summary = "The most anchor proofs one SyncRequest::Anchors may ask for beyond the newest's: 8.", category = "Node", see_also = "SyncRequest::Anchors")]
+pub const MAX_SYNC_ANCHOR_PROOFS: usize = 8;
+#[document(summary = "The most Bitcoin headers one SyncRequest::BtcHeaders answer holds: 2,000, as many as the relay takes in one submission.", category = "Node", see_also = "SyncRequest::BtcHeaders")]
+pub const MAX_SYNC_BTC_HEADERS: u32 = 2_000;
 #[document(summary = "The most epochs of finality one SyncRequest::Finality answers with: what light clients get at once, MAX_FINALITY_STEPS.", category = "Node")]
 pub const MAX_SYNC_FINALITY: u32 = crate::light::MAX_FINALITY_STEPS as u32;
 /// The most chain-state entries one sync response carries. Values are at most 64 KiB, so the
@@ -187,6 +191,12 @@ pub enum SyncRequest {
     #[document(summary = "The peer's finality from an epoch on, at most MAX_SYNC_FINALITY epochs, as it serves light clients: each main-chain checkpoint's justification and light update. What a node syncing from a snapshot learns the producers of a rotating or staked chain from.")]
     #[wincode(tag = 6)]
     Finality { from: u64, count: u32 },
+    #[document(summary = "The peer's anchor list, as anchored sync checks it: every entry, the newest's proof, and the proofs of the places asked for, at most MAX_SYNC_ANCHOR_PROOFS.")]
+    #[wincode(tag = 7)]
+    Anchors { proofs: Vec<u64> },
+    #[document(summary = "Bitcoin headers from the peer's relay's main chain, from a height on, at most MAX_SYNC_BTC_HEADERS: what anchored sync checks anchors against.")]
+    #[wincode(tag = 8)]
+    BtcHeaders { from: u64, count: u32 },
 }
 
 #[document(
@@ -225,6 +235,12 @@ pub enum SyncResponse {
     #[document(summary = "The finality asked for, an epoch at a time from the one asked, stopping before the first checkpoint past genesis the peer holds no justification for; empty on a chain whose finality does not vote.")]
     #[wincode(tag = 6)]
     Finality(Vec<FinalityStep>),
+    #[document(summary = "The peer's anchor list and the proofs asked for, or None when its chain holds no anchors or it cannot serve them.")]
+    #[wincode(tag = 7)]
+    Anchors(Option<crate::params::anchoring::AnchorsAnswer>),
+    #[document(summary = "The headers asked for, 80 bytes each, in height order, stopping at the relay's tip or at a header it keeps too little of to write whole.")]
+    #[wincode(tag = 8)]
+    BtcHeaders(Vec<Vec<u8>>),
 }
 
 #[document(

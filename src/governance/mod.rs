@@ -325,6 +325,9 @@ pub enum Change {
     #[document(summary = "The DEX's fee, replacing genesis's or the last decided: both DEXes, the native one and the EVM one, charge it from the block after the one that decides it, and the apps quote by it.")]
     #[wincode(tag = 16)]
     Dex(crate::params::vm::DexSettings),
+    #[document(summary = "Anchoring's settings, replacing genesis's or the last decided, whole: which anchors the chain takes, which bind nodes, the relay and start they are checked against, how deep, and the reward. In force from the block after the one that decides it; anchors recorded while enforce was on stay enforced.")]
+    #[wincode(tag = 17)]
+    Anchoring(crate::params::anchoring::AnchorSettings),
 }
 
 #[document(
@@ -471,6 +474,9 @@ pub enum ChangeKind {
     #[document(summary = "The DEX's fee.")]
     #[wincode(tag = 14)]
     Dex,
+    #[document(summary = "Anchoring's settings.")]
+    #[wincode(tag = 15)]
+    Anchoring,
 }
 
 impl Hashable for ChangeKind {
@@ -479,7 +485,7 @@ impl Hashable for ChangeKind {
 
 impl ChangeKind {
     #[document(parent = "ChangeKind", summary = "Every kind, in tag order.")]
-    pub const ALL: [ChangeKind; 15] = [
+    pub const ALL: [ChangeKind; 16] = [
         ChangeKind::Consensus,
         ChangeKind::Bootnodes,
         ChangeKind::Names,
@@ -495,9 +501,10 @@ impl ChangeKind {
         ChangeKind::TokenFunctions,
         ChangeKind::EvmSpec,
         ChangeKind::Dex,
+        ChangeKind::Anchoring,
     ];
 
-    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec or dex.")]
+    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex or anchoring.")]
     pub fn name(self) -> &'static str {
         match self {
             ChangeKind::Consensus => "consensus",
@@ -515,6 +522,7 @@ impl ChangeKind {
             ChangeKind::TokenFunctions => "token_functions",
             ChangeKind::EvmSpec => "evm_spec",
             ChangeKind::Dex => "dex",
+            ChangeKind::Anchoring => "anchoring",
         }
     }
 }
@@ -553,10 +561,11 @@ impl Change {
             Change::TokenFunctions(_) => ChangeKind::TokenFunctions,
             Change::EvmSpec { .. } => ChangeKind::EvmSpec,
             Change::Dex(_) => ChangeKind::Dex,
+            Change::Anchoring(_) => ChangeKind::Anchoring,
         }
     }
 
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec or dex.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex or anchoring.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -576,6 +585,7 @@ impl Change {
             Change::TokenFunctions(_) => "token_functions",
             Change::EvmSpec { .. } => "evm_spec",
             Change::Dex(_) => "dex",
+            Change::Anchoring(_) => "anchoring",
         }
     }
 }

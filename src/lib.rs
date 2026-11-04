@@ -3,6 +3,8 @@
 
 #[cfg(feature = "abi")]
 pub mod abi;
+#[cfg(all(feature = "bitcoin", feature = "node"))]
+pub mod anchor;
 #[cfg(feature = "http")]
 pub mod api;
 #[cfg(feature = "node")]

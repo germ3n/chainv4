@@ -177,6 +177,9 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         // Claims on one pool share its escrow, so they take turns; the pool is not known before
         // the root is read, so every claim shares one.
         Tx::Claim { to, .. } => touched.extend([Touch::Address(*to), Touch::Pools]),
+        // Anchors append to one list, read the relay, and may pay from the reward pool: they take
+        // turns, with governance, whose state the list is kept beside.
+        Tx::Anchor { .. } => touched.extend([Touch::Governance, Touch::Address(crate::chain::REWARD_POOL)]),
         Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => touched.push(Touch::Address(*to)),
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),

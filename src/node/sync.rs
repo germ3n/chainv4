@@ -134,7 +134,7 @@ impl Node {
 
                 self.sync_next()?;
             }
-            response @ (SyncResponse::Headers(_) | SyncResponse::Finality(_) | SyncResponse::State(_) | SyncResponse::Checkpoint(_)) => self.on_snapshot_response(peer, response, now)?,
+            response @ (SyncResponse::Headers(_) | SyncResponse::Finality(_) | SyncResponse::State(_) | SyncResponse::Checkpoint(_) | SyncResponse::Anchors(_) | SyncResponse::BtcHeaders(_)) => self.on_snapshot_response(peer, response, now)?,
             response @ SyncResponse::Blocks(_) if self.snapshotting() => self.on_snapshot_response(peer, response, now)?,
             SyncResponse::Blocks(blocks) => {
                 let Some((asked, from)) = self.sync.asking.filter(|(asked, _)| *asked == peer) else {

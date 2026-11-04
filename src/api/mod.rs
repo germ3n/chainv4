@@ -848,6 +848,8 @@ fn router(api: Api) -> Router {
     let router = router.route("/stream", get(stream));
     #[cfg(feature = "updates")]
     let router = router.route("/release", get(release));
+    #[cfg(feature = "bitcoin")]
+    let router = router.route("/anchors", get(anchors));
     let router = router.route("/claims/{pool}/{address}", get(claims)).route("/mining", get(mining::about)).route(mining::SOCKET_PATH, get(mining::socket));
     #[cfg(feature = "pool")]
     let router = router.route("/pool", get(pool)).route("/pool/{address}", get(pool_miner)).route("/pool/claim/{address}", get(pool_claim));
@@ -1481,6 +1483,7 @@ fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, 
         api.rules.standards_in(state).map(|standards| Change::TokenFunctions(standards.tokens.to_vec()))?.into(),
         Some(Change::EvmSpec { spec: changes.evm_specs()?.eras.last().map_or(genesis.evm_spec.unwrap_or_default(), |(_, spec)| *spec), from: changes.evm_specs()?.eras.last().map_or(0, |(from, _)| *from) }),
         Some(Change::Dex(changes.dex()?.or(genesis.dex).unwrap_or_default())),
+        Some(Change::Anchoring(changes.anchoring()?.or_else(|| genesis.anchoring.clone()).unwrap_or_default())),
         api.rules.standards_in(state)?.collections.map(Change::Collections),
         changes.federation()?.map(|decided| decided.federation).or_else(|| genesis.federation.clone()).map(Change::Federation),
         changes.directory()?.map(Change::Directory),
@@ -1614,6 +1617,49 @@ async fn rich(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Stri
 /// with GET /proofs/receipts/{tx}, whose outcome is Decided at that version; versions count up
 /// one at a time, so a gap shows. from is the oldest this node keeps, 1 unless it synced from a
 /// snapshot.
+/// The anchor list: anchoring's settings in force, how many anchors the chain recorded, the list's
+/// root, the highest enforced checkpoint, the relay's tip, and a page of entries, the newest last,
+/// from ?from on, the newest page unless told.
+#[cfg(feature = "bitcoin")]
+async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let state = State::new(api.db.clone());
+    let settings = Changes::new(&state).anchoring()?.or_else(|| api.genesis.anchoring.clone()).unwrap_or_default();
+    let anchors = crate::anchor::Anchors::new(&state);
+    let count = anchors.count()?;
+    let limit = page(&api.tuned, &query, DEFAULT_PAGE, MAX_PAGE)?;
+    let from = number(&query, "from")?.unwrap_or_else(|| count.saturating_sub(limit));
+    let shown = |hash: &[u8; 32]| crate::structs::hex::to_hex(&hash.iter().rev().copied().collect::<Vec<_>>());
+    let entries: Vec<Value> = anchors
+        .entries(from, limit)?
+        .iter()
+        .zip(from..)
+        .map(|(entry, index)| json!({
+            "index": index,
+            "epoch": entry.epoch,
+            "block": entry.block.to_string(),
+            "btc_block": shown(&entry.btc_block),
+            "btc_height": entry.btc_height,
+            "enforced": entry.enforced,
+        }))
+        .collect();
+    let relay_tip = match settings.relay {
+        Some(relay) => crate::anchor::Relay::new(&state, relay).tip()?.map(|(hash, height)| json!({ "hash": shown(&hash), "height": height })),
+        None => None,
+    };
+
+    Ok(Json(json!({
+        "settings": crate::params::json::anchoring_json(&settings),
+        "chain_tag": crate::structs::hex::to_hex(&crate::anchor::chain_tag(&api.genesis.block().id())),
+        "count": count,
+        "root": crate::structs::hex::to_hex(&anchors.root()?),
+        "enforced_height": anchors.enforced_height()?,
+        "rewarded": anchors.rewarded()?,
+        "relay_tip": relay_tip,
+        "from": from,
+        "entries": entries,
+    })))
+}
+
 async fn governance_history(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     if api.rules.governance.is_none() {
         return Err(ApiError::NotFound("this chain has no governance".to_string()));

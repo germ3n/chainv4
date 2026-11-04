@@ -117,7 +117,18 @@ pub struct NodeTuning {
     pub remembered: usize,
     #[document(summary = "How far below the best tip a snapshot sync takes its pivot's state: PIVOT_DEPTH by default, and never past half max_reorg_depth. A chain shorter than twice this is synced by running its blocks.")]
     pub snapshot_depth: u64,
+    #[document(summary = "How many peers anchored sync hears from before it picks a history: ANCHORED_PEERS by default. Each is asked; one honest one among them is enough.")]
+    pub anchored_peers: usize,
+    #[document(summary = "How deep in Bitcoin's main chain anchored sync wants an anchor's block: DEFAULT_ANCHOR_DEPTH by default.")]
+    pub anchored_depth: u64,
 }
+
+#[document(
+    summary = "How many peers anchored sync hears from before it picks a history unless anchors.peers says otherwise: 2. More is safer: a node hearing only from an attacker's peers is synced by what they show.",
+    category = "Node",
+    see_also = "NodeTuning::anchored_peers",
+)]
+pub const ANCHORED_PEERS: usize = 2;
 
 impl NodeTuning {
     #[document(parent = "NodeTuning", summary = "What every node did before these were tuned.")]
@@ -131,6 +142,8 @@ impl NodeTuning {
         most_solo: MOST_SOLO,
         remembered: MAX_REMEMBERED,
         snapshot_depth: PIVOT_DEPTH,
+        anchored_peers: ANCHORED_PEERS,
+        anchored_depth: crate::params::anchoring::DEFAULT_ANCHOR_DEPTH,
     };
 }
 
@@ -771,6 +784,8 @@ impl Node {
             most_solo: tuning.most_solo.max(1),
             remembered: tuning.remembered.max(1),
             snapshot_depth: tuning.snapshot_depth.max(1),
+            anchored_peers: tuning.anchored_peers.max(1),
+            anchored_depth: tuning.anchored_depth.max(1),
         };
         self
     }
@@ -1306,6 +1321,14 @@ impl Node {
                     .map(|(start, work)| crate::net::CheckpointAnswer { start, work }),
             ),
             SyncRequest::Finality { from, count } => SyncResponse::Finality(self.chain.light_finality_from(from, u64::from(count.min(MAX_SYNC_FINALITY)))?),
+            #[cfg(feature = "bitcoin")]
+            SyncRequest::Anchors { proofs } => SyncResponse::Anchors(self.chain.anchors_answer(&proofs)?),
+            #[cfg(feature = "bitcoin")]
+            SyncRequest::BtcHeaders { from, count } => SyncResponse::BtcHeaders(self.chain.btc_headers(from, count.min(crate::net::MAX_SYNC_BTC_HEADERS))?),
+            #[cfg(not(feature = "bitcoin"))]
+            SyncRequest::Anchors { .. } => SyncResponse::Anchors(None),
+            #[cfg(not(feature = "bitcoin"))]
+            SyncRequest::BtcHeaders { .. } => SyncResponse::BtcHeaders(Vec::new()),
         };
 
         Ok(response)

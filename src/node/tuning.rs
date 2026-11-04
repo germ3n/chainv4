@@ -101,6 +101,8 @@ pub const KNOBS: &[Knob] = &[
     // The node loop, and snapshots.
     count("node.event-budget", "256", 16, 65_536),
     flagged(count("snapshot.depth", "16", 1, 100_000), "--snapshot-depth"),
+    count("anchors.peers", "2", 1, 64),
+    count("anchors.depth", "6", 1, 144),
     flagged(ms("updates.every", "1h", MINUTE, 7 * DAY), "--update-every"),
     // The mining port.
     count("mining.connections", "256", 1, 65_536),
@@ -381,6 +383,8 @@ impl Tuning {
             most_solo: self.count("mining.solo"),
             remembered: self.count("peers.remembered"),
             snapshot_depth: self.get("snapshot.depth"),
+            anchored_peers: self.count("anchors.peers"),
+            anchored_depth: self.get("anchors.depth"),
         }
     }
 

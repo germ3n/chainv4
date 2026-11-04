@@ -223,6 +223,7 @@ pub const TX_KINDS: &[&str] = &[
     "approve_multisig",
     "withdraw_multisig",
     "claim",
+    "anchor",
     "set_directory",
     "hand_directory",
 ];

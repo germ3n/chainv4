@@ -82,6 +82,8 @@ pub enum Control {
     MaybeBytes { off: &'static str, on: &'static str },
     /// An object or null: on or off, the fields under it shown while on.
     Switch { off: &'static str, on: &'static str },
+    /// True or false, named.
+    Flag { off: &'static str, on: &'static str },
     /// A list, with lines to add and take away.
     List(Line),
     /// A list of objects, each with these fields.
@@ -159,6 +161,8 @@ const WHEN_BID: &[(&str, &str)] = &[("pricing.type", "bid")];
 const WHEN_FFG: &[(&str, &str)] = &[("type", "ffg")];
 const WHEN_DEPTH: &[(&str, &str)] = &[("type", "depth")];
 const WHEN_LEAK: &[(&str, &str)] = &[("type", "ffg"), ("leak", "on")];
+const WHEN_BTC_START: &[(&str, &str)] = &[("btc_start", "on")];
+const BTC_NETWORKS: Options = &[("main", "Bitcoin"), ("test", "Testnet4 or signet"), ("regtest", "Regtest")];
 const INTO_FFG: &[(&str, &str)] = &[("finality.type", "ffg")];
 const INTO_AUTHORITY: &[(&str, &str)] = &[("finality.type", "authority")];
 const INTO_LEAK: &[(&str, &str)] = &[("finality.type", "ffg"), ("finality.leak", "on")];
@@ -200,6 +204,19 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("from", "From block", "Must be ahead of the block that decides it; blocks below replay as they ran.", Control::Whole),
         ],
         "dex" => vec![field("fee_bps", "Fee a trade keeps, in hundredths of a percent", "30 is 0.3%. Both DEXes charge it from the block after the decision.", Control::Small).most(1000)],
+        "anchoring" => vec![
+            field("bitcoin", "Bitcoin anchors", "Whether the chain takes proofs of its checkpoints written into Bitcoin.", Control::Flag { off: "Off", on: "On" }),
+            field("ethereum", "Ethereum anchors", "Anchorers write to Ethereum too. The chain does not count them yet.", Control::Flag { off: "Off", on: "On" }),
+            field("enforce", "Enforced", "Anchors recorded from now on bind nodes: no block replaces them, and new nodes sync by them. Those recorded while on stay so.", Control::Flag { off: "Off", on: "On" }),
+            field("relay", "Bitcoin relay", "The relay contract proofs are checked against.", Control::MaybeContract),
+            field("btc_start", "Where the relay started", "Nodes checking anchors on their own check Bitcoin's headers from here.", Control::Switch { off: "Not set", on: "This header" }),
+            field("btc_start.header", "Header", "80 bytes, as 0x hex.", Control::Text).when(WHEN_BTC_START),
+            field("btc_start.height", "Its height", "On Bitcoin itself, divisible by 2016.", Control::Whole).when(WHEN_BTC_START),
+            field("btc_start.network", "Network", "", Control::Choice(BTC_NETWORKS)).when(WHEN_BTC_START),
+            field("depth", "Bitcoin blocks deep", "Before an anchor in one counts: 1 is the tip.", Control::Whole).least(1).most(144),
+            field("every", "Epochs between rewards", "Anchors in between are recorded, unpaid.", Control::Whole).least(1),
+            field("reward", "Reward", "For the first proof of a rewarded anchor.", Control::Amount),
+        ],
         "consensus" => vec![
             field("type", "Who makes blocks", "It must fit the chain's finality: signers in turn need authority, validators by stake need FFG.", Control::Choice(CONSENSUS_KINDS)),
             field("hash", "Work hash", "", Control::Choice(SECURE_HASHES)).when(WHEN_POW),
@@ -376,6 +393,7 @@ pub fn defaults(kind: &str) -> Value {
         "names" => json!({ "prices": [], "grace_ms": 7_776_000_000u64, "max_years": 100 }),
         "evm_spec" => json!({ "spec": "prague", "from": null }),
         "dex" => json!({ "fee_bps": 30 }),
+        "anchoring" => json!({ "bitcoin": false, "ethereum": false, "enforce": false, "relay": null, "btc_start": null, "depth": 6, "every": 90, "reward": "0" }),
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),

@@ -342,6 +342,8 @@ should governance change the block time later.
 | `dial.retry` | 300s | 1s to 1d | Before a peer Kademlia knows is dialed again. |
 | `peers.remembered` | 64 | 1 to 10,000 | Peers kept between starts. |
 | `node.event-budget` | 256 | 16 to 65,536 | Events the loop handles a pass, so a flood cannot starve production. |
+| `anchors.peers` | 2 | 1 to 64 | Peers `--anchored` hears from before it picks a history; see [Anchoring](anchoring.md#picking-a-history). |
+| `anchors.depth` | 6 | 1 to 144 | How deep in Bitcoin's main chain `--anchored` wants an anchor's block. |
 | `mining.connections` | 256 | 1 to 65,536 | Connections the mining port takes at once. |
 | `mining.per-ip` | 32 | 1 to 65,536 | Of those, from one address but loopback. |
 | `mining.devices` | 64 | 1 to 1,024 | Devices one worker's rates may name. |
@@ -743,6 +745,11 @@ one, the node:
 3. installs the pivot with the checkpoint as its justified and finalized checkpoint, so it never
    asks for, imports or rolls back to anything below it, and syncs justifications from the
    checkpoint's epoch on.
+
+**Starting at the checkpoint the anchors pick** (`--snapshot --anchored`) does the same from a
+checkpoint no one has to hand over: the node first hears each peer's anchor list and Bitcoin's
+headers from their relays, and takes the newest checkpoint of the history Bitcoin saw first. See
+[Anchoring](anchoring.md#picking-a-history).
 
 A long-range fork, one built below the checkpoint by keys that have since left, cannot reach it:
 the node holds no headers below the checkpoint to compare against, and refuses any block at or

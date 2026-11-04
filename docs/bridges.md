@@ -264,6 +264,10 @@ Bitcoin light client contract rather than vouched for, and the federation signs 
   and `includes(block, txid, index, path, coinbase, coinbase_path)`, a transaction's Merkle path to
   the block's root.
 
+**It keeps each header whole:** its version and nonce beside the rest, so a node can write a header
+again and serve it to a peer that checks anchors on its own ([Anchoring](anchoring.md#picking-a-history)).
+A relay deployed before that keeps neither, and serves no headers.
+
 **A proof comes with the block's coinbase.** A header does not say how tall its Merkle tree is, so
 the 64 bytes of two ids, an inner node, could pass for a transaction a level up with a path one
 short (CVE-2017-12842), and a real 64-byte transaction could be taken for an inner node with one too
@@ -588,6 +592,7 @@ chainv4 bridge btc pass --esplora URL --evm-key signer.key --key payer.key   # o
 chainv4 bridge btc cancel 1 --btc-gateway 0x… --evm-key signer.key  # each signer's vote
 chainv4 bridge btc bump 1 --rate 40 --evm-key signer.key --esplora URL  # sooner than a pass would
 chainv4 bridge btc sweep --fee 1000 --evm-key signer.key --btc-gateway 0x… --esplora URL
+chainv4 bridge btc anchor --esplora URL --btc-key anchorer.key --key payer.key  # the chain's checkpoints into Bitcoin: anchoring.md
 ```
 
 By hand, each step of a pass, and with a fee told:

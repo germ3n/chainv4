@@ -324,7 +324,51 @@ pub enum Tx {
         #[wincode(with = "BatchSteps")]
         steps: Vec<Tx>,
     },
+    #[document(
+        summary = "Shows that Bitcoin holds an anchor of one of this chain's checkpoints: the Bitcoin transaction whose OP_RETURN carries it and the proof that a block the relay holds, deep enough, includes it. The chain records the checkpoint in its anchor list and pays the sender the reward when one is due; whoever wrote the Bitcoin transaction, anyone may show it. See docs/anchoring.md.",
+        params = { proof = "The Bitcoin transaction, without its witnesses, its block, its Merkle path, and the block's coinbase with its own." },
+        see_also = "BtcProof, Payload, AnchorSettings, Anchors",
+    )]
+    #[wincode(tag = 27)]
+    Anchor { proof: crate::structs::tx::AnchorProof },
 }
+
+#[document(
+    summary = "What Tx::Anchor carries: a Bitcoin transaction and the proof a relay block includes it, as BtcProof keeps it once recorded.",
+    category = "Transactions",
+    see_also = "Tx::Anchor, BtcProof",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct AnchorProof {
+    #[document(summary = "The Bitcoin block, as the relay keys it: its header's SHA-256 twice, unreversed.")]
+    pub block: [u8; 32],
+    #[document(summary = "The transaction, without its witnesses.")]
+    pub raw: Vec<u8>,
+    #[document(summary = "Its place in the block.")]
+    pub index: u64,
+    #[document(summary = "Its Merkle path, siblings from its own row up.")]
+    pub path: Vec<[u8; 32]>,
+    #[document(summary = "The block's coinbase, without its witness.")]
+    pub coinbase: Vec<u8>,
+    #[document(summary = "The coinbase's Merkle path, as long as the transaction's.")]
+    pub coinbase_path: Vec<[u8; 32]>,
+}
+
+impl crate::crypto::hashable::Hashable for AnchorProof {}
+
+#[document(
+    summary = "The most bytes an anchor's Bitcoin transaction, or the coinbase with it, may take: 100,000, Bitcoin's standard limit for one transaction.",
+    category = "Transactions",
+    see_also = "Tx::Anchor",
+)]
+pub const MAX_ANCHOR_TX: usize = 100_000;
+
+#[document(
+    summary = "The longest Merkle path an anchor's proof may carry: 32 levels, more than any Bitcoin block has.",
+    category = "Transactions",
+    see_also = "Tx::Anchor",
+)]
+pub const MAX_ANCHOR_PATH: usize = 32;
 
 #[document(
     summary = "The longest Merkle path a claim may carry, 64 hashes: enough for a pool root over every claim there could be.",
@@ -637,7 +681,7 @@ impl Verifiable for Tx {
             },
             // Whether the list is one a chain takes is decided when the transaction runs, and so are
             // name prices and collection standards.
-            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_), .. } => Ok(()),
+            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Anchoring(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_), .. } => Ok(()),
             // The members' signatures are checked when it runs, against the chain's genesis id and
             // the policy in state.
             Tx::Multisig { account, tx, signatures } => {
@@ -652,6 +696,10 @@ impl Verifiable for Tx {
             Tx::ApproveMultisig { account, tx, .. } => multisig_inner(account, tx),
             Tx::CreateMultisig { members, .. } | Tx::ChangeMultisig { members, .. } => members.iter().try_for_each(|member| member.key.verify()),
             Tx::WithdrawMultisig { .. } => Ok(()),
+            Tx::Anchor { proof } => match proof.raw.len() <= MAX_ANCHOR_TX && proof.coinbase.len() <= MAX_ANCHOR_TX && proof.path.len() <= MAX_ANCHOR_PATH && proof.coinbase_path.len() <= MAX_ANCHOR_PATH {
+                true => Ok(()),
+                false => Err(VerifyError::BadAnchor),
+            },
             Tx::Claim { to, path, .. } => {
                 to.verify()?;
 
@@ -791,6 +839,7 @@ impl Tx {
             | Tx::WithdrawMultisig { .. }
             | Tx::SetDirectory { .. }
             | Tx::HandDirectory { .. }
+            | Tx::Anchor { .. }
             | Tx::Batch { .. } => false,
         }
     }

@@ -33,6 +33,9 @@ pub const PIVOT_DEPTH: u64 = 16;
 /// running blocks: peers that cannot serve any pivot would have it move forever.
 const MAX_MOVES: u32 = 8;
 
+#[cfg(feature = "bitcoin")]
+mod anchored;
+
 /// Where taking a snapshot stands.
 pub(super) struct SnapshotSync {
     /// The light client that checks the headers: of the chain from genesis, or from the
@@ -49,9 +52,15 @@ pub(super) struct SnapshotSync {
     distrusted: HashSet<PeerId>,
     /// How many times the pivot moved up.
     moves: u32,
+    /// Picking the checkpoint by the anchors peers show, while the node starts by them.
+    #[cfg(feature = "bitcoin")]
+    anchored: Option<anchored::Anchored>,
 }
 
 enum Phase {
+    /// Picking the checkpoint to start at by the anchors peers show, and Bitcoin's headers.
+    #[cfg(feature = "bitcoin")]
+    Anchors,
     /// Fetching the checkpoint start: the trusted block's header and those below it.
     Checkpoint,
     /// Checking headers, and learning finality, up to the heaviest peer's tip.
@@ -64,6 +73,10 @@ enum Phase {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Asked {
+    #[cfg(feature = "bitcoin")]
+    Anchors,
+    #[cfg(feature = "bitcoin")]
+    BtcHeaders { from: u64 },
     Checkpoint,
     Headers { from: u64 },
     Finality { from: u64 },
@@ -89,6 +102,8 @@ impl SnapshotSync {
             asking: None,
             distrusted: HashSet::new(),
             moves: 0,
+            #[cfg(feature = "bitcoin")]
+            anchored: None,
         }
     }
 
@@ -139,6 +154,8 @@ impl SnapshotSync {
     /// What it is doing, for the node's report.
     pub(super) fn stage(&self) -> String {
         match &self.phase {
+            #[cfg(feature = "bitcoin")]
+            Phase::Anchors => "picking a checkpoint by the anchors peers show".to_string(),
             Phase::Checkpoint => "fetching the checkpoint".to_string(),
             Phase::Headers => format!("checking headers, {} so far", self.checked()),
             Phase::State { pivot, walk } => format!("taking state at height {pivot}, {} entries so far", walk.taken()),
@@ -166,6 +183,25 @@ impl Node {
         Ok(true)
     }
 
+    #[cfg(feature = "bitcoin")]
+    #[document(
+        parent = "Node",
+        summary = "Syncs from a snapshot at the checkpoint the anchors pick, rather than one the operator trusts: hears from NodeTuning::anchored_peers peers at least, checks each one's anchor list against the Bitcoin headers the peers' relays hold, the most work among them winning, and takes the newest checkpoint of the history whose anchors sit lowest in Bitcoin where the lists part. Then it goes on as from --checkpoint. Only for a node that holds genesis alone.",
+        returns = "Whether it will: false for a node past genesis.",
+    )]
+    pub fn sync_from_anchors(&mut self) -> Result<bool, NodeError> {
+        if !self.sync_from_snapshot(None)? {
+            return Ok(false);
+        }
+
+        let snapshot = self.sync.snapshot.as_mut().expect("just made");
+        snapshot.light = None;
+        snapshot.phase = Phase::Anchors;
+        snapshot.anchored = Some(anchored::Anchored::default());
+
+        Ok(true)
+    }
+
     /// Whether the node is taking state from a snapshot.
     pub(super) fn snapshotting(&self) -> bool {
         self.sync.snapshot.is_some()
@@ -179,6 +215,11 @@ impl Node {
 
         if snapshot.asking.is_some() {
             return Ok(());
+        }
+
+        #[cfg(feature = "bitcoin")]
+        if matches!(snapshot.phase, Phase::Anchors) {
+            return self.anchored_next();
         }
 
         let Some(peer) = self
@@ -197,6 +238,8 @@ impl Node {
         }
 
         let (asked, request) = match &snapshot.phase {
+            #[cfg(feature = "bitcoin")]
+            Phase::Anchors => unreachable!("asked for above"),
             Phase::Checkpoint => (Asked::Checkpoint, SyncRequest::Checkpoint {
                 block: snapshot.checkpoint.expect("fetching one").0,
             }),
@@ -245,6 +288,16 @@ impl Node {
         };
 
         match (asked, response) {
+            #[cfg(feature = "bitcoin")]
+            (Asked::Anchors, SyncResponse::Anchors(answer)) => {
+                snapshot.asking = None;
+                self.take_anchors(peer, answer);
+            }
+            #[cfg(feature = "bitcoin")]
+            (Asked::BtcHeaders { from }, SyncResponse::BtcHeaders(headers)) => {
+                snapshot.asking = None;
+                self.take_btc_headers(peer, from, headers, now);
+            }
             (Asked::Checkpoint, SyncResponse::Checkpoint(answer)) => {
                 snapshot.asking = None;
                 self.take_checkpoint(peer, answer)?;

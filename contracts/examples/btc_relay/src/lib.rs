@@ -57,10 +57,12 @@ impl Network {
 
 /// A header as Bitcoin writes it, 80 bytes.
 struct Header {
+    version: u32,
     prev: [u8; 32],
     merkle: [u8; 32],
     time: u32,
     bits: u32,
+    nonce: u32,
 }
 
 impl Header {
@@ -68,10 +70,12 @@ impl Header {
         let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
 
         (bytes.len() == 80).then(|| Header {
+            version: word(0),
             prev: bytes[4..36].try_into().expect("32 bytes"),
             merkle: bytes[36..68].try_into().expect("32 bytes"),
             time: word(68),
             bits: word(72),
+            nonce: word(76),
         })
     }
 }
@@ -89,6 +93,10 @@ struct Kept {
     period_start: u32,
     /// The times of the last MEDIAN_SPAN blocks up to it, oldest first.
     times: Vec<u32>,
+    /// The header's version and nonce, kept after the times so a node can write the header whole
+    /// again and serve it to a peer checking anchors (docs/anchoring.md).
+    version: u32,
+    nonce: u32,
 }
 
 impl Kept {
@@ -107,6 +115,9 @@ impl Kept {
             out.extend_from_slice(&time.to_le_bytes());
         }
 
+        out.extend_from_slice(&self.version.to_le_bytes());
+        out.extend_from_slice(&self.nonce.to_le_bytes());
+
         out
     }
 
@@ -123,6 +134,8 @@ impl Kept {
             time: word(108)?,
             period_start: word(112)?,
             times: (0..count).map(|index| word(117 + 4 * index)).collect::<Option<Vec<_>>>()?,
+            version: word(117 + 4 * count)?,
+            nonce: word(121 + 4 * count)?,
         })
     }
 
@@ -246,7 +259,7 @@ fn start(header: Vec<u8>, height: u64, network_name: String) -> Result<bool, &'s
     }
 
     let hash = sha256d(&header);
-    let record = Kept { prev: parsed.prev, merkle: parsed.merkle, height, work: U256::ZERO, bits: parsed.bits, time: parsed.time, period_start: parsed.time, times: alloc::vec![parsed.time] };
+    let record = Kept { prev: parsed.prev, merkle: parsed.merkle, height, work: U256::ZERO, bits: parsed.bits, time: parsed.time, period_start: parsed.time, times: alloc::vec![parsed.time], version: parsed.version, nonce: parsed.nonce };
     headers().set(&hash, &record.encode());
     main_chain().set(&height.to_be_bytes(), &hash);
     storage::own().set(b"tip", &hash);
@@ -322,6 +335,8 @@ fn submit(headers_bytes: Vec<u8>) -> Result<u64, &'static str> {
             time: parsed.time,
             period_start: if height.is_multiple_of(INTERVAL) { parsed.time } else { prev.period_start },
             times,
+            version: parsed.version,
+            nonce: parsed.nonce,
         };
         headers().set(&hash, &record.encode());
         taken += 1;

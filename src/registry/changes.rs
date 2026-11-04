@@ -26,6 +26,7 @@ const NAMES: &[u8] = b"change:names";
 const TOKEN_FUNCTIONS: &[u8] = b"change:token-functions";
 const EVM_SPEC: &[u8] = b"change:evm-spec";
 const DEX: &[u8] = b"change:dex";
+const ANCHORING: &[u8] = b"change:anchoring";
 const COLLECTIONS: &[u8] = b"change:collections";
 const FEDERATION: &[u8] = crate::registry::federation::FEDERATION_KEY;
 const DIRECTORY: &[u8] = crate::registry::directory::DIRECTORY_KEY;
@@ -432,6 +433,11 @@ impl<'a> Changes<'a> {
         Ok(self.evm_specs()?.eras.into_iter().rev().find(|(from, _)| *from <= height).map_or(genesis, |(_, spec)| spec))
     }
 
+    #[document(parent = "Changes", summary = "Anchoring's settings decided last, or None while governance never decided any, when genesis's stand.")]
+    pub fn anchoring(&self) -> Result<Option<crate::params::anchoring::AnchorSettings>, DbError> {
+        self.state.get_value(Column::Validators, ANCHORING)
+    }
+
     #[document(parent = "Changes", summary = "The DEX's settings decided last, or None while governance never decided any, when genesis's stand.")]
     pub fn dex(&self) -> Result<Option<crate::params::vm::DexSettings>, DbError> {
         self.state.get_value(Column::Validators, DEX)
@@ -675,6 +681,7 @@ impl<'a> Changes<'a> {
             Change::TokenFunctions(functions) => self.token_functions()?.as_ref() == Some(functions),
             Change::EvmSpec { spec, .. } => self.evm_specs()?.eras.last().map(|(_, last)| last) == Some(spec),
             Change::Dex(dex) => self.dex()?.as_ref() == Some(dex),
+            Change::Anchoring(settings) => self.anchoring()?.as_ref() == Some(settings),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
             Change::Directory(directory) => self.directory()?.as_ref() == Some(directory),
@@ -752,6 +759,12 @@ impl<'a> Changes<'a> {
             }
             Change::Dex(dex) => {
                 self.state.put_value(Column::Validators, DEX.to_vec(), &dex);
+
+                decided.consensus
+            }
+            // Read for each block from its parent's state, as the DEX's fee is.
+            Change::Anchoring(settings) => {
+                self.state.put_value(Column::Validators, ANCHORING.to_vec(), &settings);
 
                 decided.consensus
             }

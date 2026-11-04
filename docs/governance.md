@@ -71,8 +71,8 @@ through finality's light updates; genesis refuses it with depth finality or none
 Each kind of setting has a ballot and a version of its own, its `ChangeKind`: the consensus
 (with finality's tuning and a switch of finality's kind, which are checked against each other
 and so share one), bootnodes, names, collections, token functions, the federation, the
-directory, fees, the reward, limits, an upgrade, the name, governance itself, the EVM spec and
-the DEX's fee. Deciding a change of one kind leaves every other kind's votes standing, but for
+directory, fees, the reward, limits, an upgrade, the name, governance itself, the EVM spec, the
+DEX's fee and anchoring. Deciding a change of one kind leaves every other kind's votes standing, but for
 governance itself, which clears them all.
 
 1. **Proposing and voting** are one transaction: `Tx::VoteChange` names the `version` of the
@@ -473,6 +473,14 @@ in `change:evm-spec`, so a block below it replays as it ran.
 
 Genesis's `dex` (`{"fee_bps": 30}`, 0.3%, when unset) and `Change::Dex` set what a trade on both
 DEXes keeps for the pool, in hundredths of a percent, 0 to 1000. See [DEX](dex.md#the-fee).
+
+## Anchoring
+
+Genesis's `anchoring` and `Change::Anchoring` set which anchors of the chain's checkpoints in
+Bitcoin the chain takes, whether they bind nodes, the relay and start they are checked against, how
+deep, and the reward, each part on its own and all of it off when unset. In force from the block
+after the decision. Anchors recorded while `enforce` was on stay enforced. See
+[Anchoring](anchoring.md#settings).
 
 ## What else each kind carries
 

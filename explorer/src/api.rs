@@ -65,6 +65,8 @@ pub enum Ask {
     Validators,
     Signers,
     Evidence,
+    /// What the chain anchored in Bitcoin: the settings and the newest anchors.
+    Anchors,
     /// A page of indexed events, from the newest or from where a cursor says.
     Events { query: EventQuery, cursor: Option<String> },
     /// A page of the transactions touching an address, from the address index, that pass a filter,
@@ -180,6 +182,7 @@ impl Ask {
             Ask::Validators => "/validators".to_string(),
             Ask::Signers => "/signers".to_string(),
             Ask::Evidence => "/evidence".to_string(),
+            Ask::Anchors => "/anchors".to_string(),
             Ask::Events { query, cursor } => {
                 let mut path = format!("/events?{}", query.params());
 
@@ -275,6 +278,7 @@ impl Ask {
             | Ask::Validators
             | Ask::Signers
             | Ask::Evidence
+            | Ask::Anchors
             | Ask::Tokens { .. }
             | Ask::Collections(_)
             | Ask::Call { .. }
@@ -686,6 +690,7 @@ mod tests {
             Ask::Validators,
             Ask::Signers,
             Ask::Evidence,
+            Ask::Anchors,
             Ask::Events { query: EventQuery::mentioning("ed25519:0x01"), cursor: None },
             Ask::AccountTxs { address: text(), query: String::new(), cursor: None },
             Ask::Tokens { symbol: String::new(), cursor: None },

@@ -319,6 +319,15 @@ pub enum TxArgs {
         #[arg(long)]
         directory: String,
     },
+    /// Shows that Bitcoin holds an anchor of one of this chain's checkpoints, so the chain records
+    /// it and pays the reward when one is due (docs/anchoring.md): the proof as hex, as
+    /// `bridge btc anchor` prints it, the Bitcoin transaction, its block, its Merkle path and the
+    /// block's coinbase, encoded together.
+    Anchor {
+        /// The proof, 0x hex.
+        #[arg(long)]
+        proof: String,
+    },
     /// Hands the directory's admin role to another address, or with --renounce gives it up for
     /// good, leaving the directory as it is.
     HandDirectory {
@@ -1247,6 +1256,15 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::TokenFunctions(functions) => format!("what makes a token: {}", functions.join(", ")),
                 crate::governance::Change::EvmSpec { spec, from } => format!("the EVM's {} spec from block {from}", spec.name()),
                 crate::governance::Change::Dex(dex) => format!("a DEX fee of {} basis points", dex.fee_bps),
+                crate::governance::Change::Anchoring(settings) => format!(
+                    "anchoring: Bitcoin {}, Ethereum {}, enforced {}, {} deep, a reward of {} every {} epochs",
+                    if settings.bitcoin { "on" } else { "off" },
+                    if settings.ethereum { "on" } else { "off" },
+                    if settings.enforce { "on" } else { "off" },
+                    settings.depth,
+                    settings.reward,
+                    settings.every
+                ),
                 crate::governance::Change::Collections(functions) => format!("what makes a collection: {} NFT and {} multi-token functions",
                     functions.nft.len(),
                     functions.multi.len()
@@ -1281,6 +1299,13 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             println!("setting the directory, as its admin");
 
             Tx::SetDirectory { directory }
+        }
+        TxArgs::Anchor { proof } => {
+            let bytes = from_hex(&proof).ok_or("--proof is not hex")?;
+            let proof: crate::structs::tx::AnchorProof = wincode::deserialize(&bytes).map_err(|_| "--proof is not an encoded anchor proof")?;
+            println!("showing an anchor in Bitcoin block {}", crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>()));
+
+            Tx::Anchor { proof }
         }
         TxArgs::HandDirectory { to: Some(to), .. } => {
             println!("handing the directory's admin role to {to}");

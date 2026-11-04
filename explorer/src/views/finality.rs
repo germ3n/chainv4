@@ -77,6 +77,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         });
     }
 
+    anchors(ui, ctx);
+
     super::section(ui, look, "Conflicting votes this node caught", |ui| {
         match store.evidence.as_ref().and_then(|evidence| evidence.get("evidence")).and_then(Value::as_array) {
             Some(evidence) if evidence.is_empty() => super::note(ui, look, "None."),
@@ -86,6 +88,71 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
                 }
             }
             None => super::waiting(ui, ctx, &Ask::Evidence),
+        }
+    });
+}
+
+/// What the chain anchored in Bitcoin: whether it takes and enforces anchors, and the newest, each
+/// with the Bitcoin block that holds it.
+fn anchors(ui: &mut Ui, ctx: &mut Ctx) {
+    let look = ctx.look;
+    let store = ctx.store;
+    let Some(anchors) = &store.anchors else {
+        super::section(ui, look, "Anchored in Bitcoin", |ui| super::waiting(ui, ctx, &Ask::Anchors));
+
+        return;
+    };
+    let settings = &anchors["settings"];
+    let on = |name: &str| settings[name].as_bool() == Some(true);
+    let entries = anchors["entries"].as_array().cloned().unwrap_or_default();
+    let count = anchors["count"].as_u64().unwrap_or(0);
+
+    super::section(ui, look, &format!("Anchored in Bitcoin · {}", format::thousands(&count.to_string())), |ui| {
+        if !on("bitcoin") && count == 0 {
+            super::note(ui, look, "This chain takes no Bitcoin anchors: governance turns them on.");
+
+            return;
+        }
+
+        super::facts(ui, look, "anchoring", |facts| {
+            facts.row("taking anchors", |ui| {
+                widgets::pill(ui, if on("bitcoin") { "Bitcoin" } else { "off" }, look.palette.soft);
+            });
+            facts.row("enforced", |ui| {
+                ui.label(if on("enforce") { "yes: no block replaces an anchored checkpoint" } else { "no" });
+            });
+            facts.row("deep", |ui| {
+                ui.label(format!("{} Bitcoin blocks", settings["depth"].as_u64().unwrap_or(0)));
+            });
+            if let Some(height) = anchors["enforced_height"].as_u64() {
+                facts.row("held up to", |ui| {
+                    ui.label(format!("block {}", format::thousands(&height.to_string())));
+                });
+            }
+            if let Some(tip) = anchors["relay_tip"]["height"].as_u64() {
+                facts.row("relay's tip", |ui| {
+                    ui.label(format!("Bitcoin block {}", format::thousands(&tip.to_string())));
+                });
+            }
+        });
+
+        for entry in entries.iter().rev() {
+            super::list_row(ui, look, |ui| {
+                let epoch = entry["epoch"].as_u64().unwrap_or(0);
+                let block = entry["block"].as_str().unwrap_or_default().to_string();
+                widgets::end_row(
+                    ui,
+                    |ui| {
+                        widgets::pill(ui, &format!("epoch {epoch}"), if entry["enforced"].as_bool() == Some(true) { look.roles.final_ } else { look.palette.soft });
+                        super::block(ui, ctx, &block, &format::short(&block));
+                    },
+                    |ui| {
+                        ui.label(RichText::new(format!("Bitcoin {}", format::thousands(&entry["btc_height"].as_u64().unwrap_or(0).to_string()))).monospace());
+                    },
+                );
+                let btc = entry["btc_block"].as_str().unwrap_or_default();
+                super::copyable_as(ui, RichText::new(format::short(btc)).small().color(look.palette.muted), btc);
+            });
         }
     });
 }

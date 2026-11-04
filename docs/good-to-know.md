@@ -1402,6 +1402,27 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **What it found is kept apart from the settings** (the `chainv4-bitcoin` entry), so a new
   install starts from the checkpoint again.
 
+## Anchoring
+
+- **Off until governance turns it on,** each part on its own: taking Bitcoin anchors, writing to
+  Ethereum, and enforcing them. See [Anchoring](anchoring.md).
+- **An enforced anchor binds even a checkpoint that is not final:** no block at or under it is
+  imported, and no branch splitting off below it is followed, whatever it weighs or justified.
+  Turning `enforce` off later frees nothing recorded while it was on.
+- **An anchor's root must be the list's root when it is shown:** an anchor written while another
+  was recorded in between is refused, and the anchorer writes a new one. Two anchorers racing
+  waste Bitcoin fees; only the first earns the reward.
+- **Only Bitcoin itself protects anything.** On testnet4, signet or regtest, headers cost next to
+  nothing to make, so a fork could make its own Bitcoin.
+- **The relay must keep each header's version and nonce** for a node to serve Bitcoin's headers to
+  one syncing with `--anchored`. Relays from before anchoring keep neither, so they need deploying
+  again.
+- **`--anchored` hears from `anchors.peers` peers, 2 unless tuned,** before it picks a history:
+  with fewer it waits. A node that hears only an attacker's peers follows what they show.
+- **The anchorer keeps its pending anchor in memory:** one restarted before showing its anchor
+  writes another, at another Bitcoin fee.
+- **Ethereum anchors are written, not counted,** until a light client of Ethereum's finality is in.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa
