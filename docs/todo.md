@@ -9,8 +9,9 @@ it are in [Good to know](good-to-know.md), and how each part works is in the
 ### Keys to rotate after the malware
 
 The development Mac ran a stealer for about an hour on 2026-11-03 (removed the same day). No misuse
-was seen, but whatever it could read is taken as copied. Queued next, 2026-11-04, after the pentest's
-fixes: the new genesis carries them, as the Luau fork's fuel charges, powers and the Wasm call's load
+was seen, but whatever it could read is taken as copied. Postponed until the owner is at the machine
+(2026-11-04); the sixth genesis went out on the same keys with the pentest's fixes. The rotation's genesis
+will carry whatever is new by then. First planned: the new genesis carries them, as the Luau fork's fuel charges, powers and the Wasm call's load
 fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork's commit first
 (`germ3n/luau-src-rs` 325972b) and point Cargo.lock at it, so the servers build the same engine.
 
@@ -272,6 +273,30 @@ offline; these would make that hold up as a treasury.
   checkpoint it is told to trust: it takes the checkpoint's headers from a peer by their hashes,
   holds it as justified and finalized, fetches nothing below it, and syncs on from there, so a
   long-range fork under it never reaches the node.
+- [ ] **Borrow Bitcoin's or Ethereum's security (owner's idea, 2026-11-04).** The question is
+  whether a header field with a Bitcoin or Ethereum tip id and height would bring their security
+  into the chain. A field on its own would not. A fork can quote the same real Bitcoin tip, so the
+  field proves only that a block was made after that Bitcoin block, not which chainv4 history is
+  the real one. Security comes from the other direction: anchoring each finalized checkpoint into
+  Bitcoin (an OP_RETURN, as Babylon's timestamping does) or into Ethereum (a contract or calldata).
+  A node could then refuse any fork that conflicts with the earliest-anchored checkpoint. Undoing
+  an anchored checkpoint would mean undoing Bitcoin as well, and a long-range fork built from old
+  validator keys loses to the anchor. With anchoring, the header field becomes useful too. Blocks
+  would name the Bitcoin height they have seen, checked against the headers the BTC relay already
+  holds. That gives the chain a consensus-agreed view of where its anchors sit, and the gateways a
+  shared Bitcoin height to count confirmations from. Design questions:
+  - Who pays the Bitcoin fees for each anchor, and how often to anchor?
+  - What happens while anchoring stalls?
+  - Bitcoin, Ethereum or both?
+  - Should fork choice consult the anchors, making every node watch Bitcoin, or should a fork
+    against an anchor only raise an alarm and halt finality?
+
+  Governance turns it on and off, as a setting voted in like any other. Anchoring to Bitcoin,
+  anchoring to Ethereum, the header field and whether fork choice heeds the anchors each switch
+  on their own, and so do how often to anchor and the fee cap. A chain starts with them off, and
+  switching on takes effect at a later epoch, so every node is watching Bitcoin before anything
+  depends on it. Switching off stops new anchors but leaves the old ones standing, so a vote
+  can't undo the protection the anchors already give.
 - [x] **Difficulty can retarget over a window.** Genesis's `consensus.window` makes difficulty
   the window's work over the time it took, each interval counting between a quarter and four
   targets, and bounds a block's timestamp by the window's median time, as Bitcoin does. The
