@@ -78,6 +78,8 @@ pub struct DecidedAt {
     pub epoch: u64,
     #[document(summary = "Finality's activation_delay.")]
     pub activation_delay: u64,
+    #[document(summary = "The block's time, in milliseconds since the Unix epoch: what a decided federation is kept with.")]
+    pub time: u64,
 }
 
 #[document(
@@ -467,9 +469,46 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, DIRECTORY)
     }
 
-    #[document(parent = "Changes", summary = "Writes genesis's federation as the one in force, version 0, as the chain starts.")]
-    pub fn write_genesis_federation(&self, federation: &crate::registry::federation::Federation) {
-        self.state.put_value(Column::Validators, FEDERATION.to_vec(), &crate::registry::federation::DecidedFederation { version: 0, federation: federation.clone() });
+    #[document(parent = "Changes", summary = "Writes genesis's federation as the one in force, version 0, as the chain starts, and keeps it for good as decided at height 0, at genesis's time.")]
+    pub fn write_genesis_federation(&self, federation: &crate::registry::federation::Federation, time: u64) {
+        let decided = crate::registry::federation::DecidedFederation { version: 0, federation: federation.clone() };
+
+        self.write_federation(&decided, crate::registry::federation::DecidedWhen { height: 0, time });
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "Writes a federation as the one in force, and keeps it for good by its version with the block that decided it, so contracts read it once another replaced it: what genesis and a decided Change::Federation both write.",
+    )]
+    pub fn write_federation(&self, decided: &crate::registry::federation::DecidedFederation, when: crate::registry::federation::DecidedWhen) {
+        use crate::registry::federation::{FederationRecord, federation_history_key};
+
+        self.state.put_value(Column::Validators, FEDERATION.to_vec(), decided);
+        self.state.put_value(Column::Validators, federation_history_key(decided.version), &FederationRecord { federation: decided.federation.clone(), decided: when });
+    }
+
+    #[document(parent = "Changes", summary = "The federation of a version as the chain keeps it for good, with the block that decided it; None for one never decided.")]
+    pub fn federation_record(&self, version: u64) -> Result<Option<crate::registry::federation::FederationRecord>, DbError> {
+        self.state.get_value(Column::Validators, &crate::registry::federation::federation_history_key(version))
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "The federation of a version, in force or past, with the block that decided it and the one that decided the next, once one did: what federation.at reads. One in force that was written without its record, as on a chain from before records were kept, is given alone, with neither block. None for a version never decided.",
+    )]
+    pub fn federation_at(&self, version: u64) -> Result<Option<crate::registry::federation::FederationAt>, DbError> {
+        use crate::registry::federation::FederationAt;
+
+        let replaced = match version.checked_add(1) {
+            Some(next) => self.federation_record(next)?.map(|record| record.decided),
+            None => None,
+        };
+
+        if let Some(record) = self.federation_record(version)? {
+            return Ok(Some(FederationAt { version, federation: record.federation, decided: Some(record.decided), replaced }));
+        }
+
+        Ok(self.federation()?.filter(|decided| decided.version == version).map(|decided| FederationAt { version, federation: decided.federation, decided: None, replaced: None }))
     }
 
     #[document(parent = "Changes", summary = "The fees governance decided last, or None while it decided none, when genesis's stand.")]
@@ -786,9 +825,12 @@ impl<'a> Changes<'a> {
             }
             // And the federation: contracts read it as they run, and its version counts the ones
             // decided, after genesis's 0.
+            // Each is kept for good too, with the block that decided it, which is when the one
+            // before was replaced: the Bitcoin gateway counts an old federation's grace from it.
             Change::Federation(federation) => {
                 let version = self.federation()?.map_or(1, |decided| decided.version + 1);
-                self.state.put_value(Column::Validators, FEDERATION.to_vec(), &crate::registry::federation::DecidedFederation { version, federation });
+                let when = crate::registry::federation::DecidedWhen { height: at.height, time: at.time };
+                self.write_federation(&crate::registry::federation::DecidedFederation { version, federation }, when);
 
                 decided.consensus
             }
@@ -929,7 +971,7 @@ mod tests {
 
     /// An approval made at an epoch, finality fixing what is decided two epochs ahead.
     fn at(epoch: u64) -> DecidedAt {
-        DecidedAt { height: epoch * 10, epoch, activation_delay: 2 }
+        DecidedAt { height: epoch * 10, epoch, activation_delay: 2, time: epoch * 10_000 }
     }
     use crate::db::MemoryDb;
     use crate::structs::address::Address;
@@ -1047,6 +1089,32 @@ mod tests {
         assert_eq!(changes.vote(&member(2), 0, renamed, ChangeVote::Yes, at(1), rules(4), &Weighted), Ok(ChangeVoted::Decided { decision: 1, kind: ChangeKind::Name, version: 1 }));
         assert_eq!(changes.name().unwrap().as_deref(), Some("chainv4 mainnet"));
         assert_eq!(changes.decided().unwrap().consensus, pow(), "the consensus stays");
+    }
+
+    #[test]
+    fn every_federation_is_kept_for_good_with_the_block_that_decided_it_and_the_one_that_replaced_it() {
+        use crate::registry::federation::{DecidedWhen, Federation};
+
+        let federation = |threshold: u32| Federation { signers: vec![[2; 33], [3; 33]], threshold, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6, btc: None };
+        let state = State::new(Arc::new(MemoryDb::default()));
+        let changes = Changes::new(&state);
+        changes.write_genesis(&pow(), 2).unwrap();
+
+        assert_eq!(changes.federation_at(0).unwrap(), None, "none until genesis or governance names one");
+        changes.write_genesis_federation(&federation(1), 5_000);
+        let genesis = changes.federation_at(0).unwrap().unwrap();
+        assert_eq!((genesis.federation.threshold, genesis.decided, genesis.replaced), (1, Some(DecidedWhen { height: 0, time: 5_000 }), None));
+
+        // Decided by the ballot: in force from then, and genesis's replaced by that block.
+        changes.vote(&member(1), 0, Change::Federation(federation(2)), ChangeVote::Yes, at(3), rules(4), &Weighted).unwrap();
+        changes.vote(&member(2), 0, Change::Federation(federation(2)), ChangeVote::Yes, at(3), rules(4), &Weighted).unwrap();
+        let third = DecidedWhen { height: 30, time: 30_000 };
+        assert_eq!(changes.federation().unwrap().map(|decided| decided.version), Some(1));
+        assert_eq!(changes.federation_at(0).unwrap().unwrap().replaced, Some(third));
+        let now = changes.federation_at(1).unwrap().unwrap();
+        assert_eq!((now.federation.threshold, now.decided, now.replaced), (2, Some(third), None));
+        assert_eq!(changes.federation_at(2).unwrap(), None, "a version never decided");
+        assert_eq!(changes.federation_at(u64::MAX).unwrap(), None);
     }
 
     #[test]
@@ -1270,7 +1338,7 @@ mod tests {
             changes.vote(&member(2), 0, bootnodes.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted),
             Err(RegistryError::BadChange("governance changed itself in this block; vote from the next"))
         );
-        let next = DecidedAt { height: 11, epoch: 1, activation_delay: 2 };
+        let next = DecidedAt { height: 11, epoch: 1, activation_delay: 2, time: 11_000 };
         assert_eq!(changes.vote(&member(2), 0, bootnodes, ChangeVote::Yes, next, rules(4), &Weighted), counted(u256::ONE));
     }
 }

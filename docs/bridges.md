@@ -29,6 +29,10 @@ Who vouches for a deposit made on another chain, and signs what leaves for one, 
   each decided one a version more than the last.
 - **Contracts read** the one in force, with its version: `federation.get()` in Lua,
   `federation()` in the SDK, the `federation` host call (see [Contracts](contracts.md)).
+- **Every one is kept,** by its version, with the block that decided it: `federation.at(version)`
+  in Lua reads one in force or past, with when it was decided and, once the next was, when it was
+  replaced (`Host::federation_at`). The Bitcoin gateway reads an old federation's keys and grace by
+  it, rather than by what it saw itself.
 - **`GET /status`** shows it, in `federation`, with its `version`.
 
 **Swappable:** the signer set is one value the bridge contracts read, so a later batch can point it
@@ -54,7 +58,9 @@ A transfer leaves through one chain's gateway and arrives at another's:
 **What moves** is a kind: 0 the coin, 1 a fungible token, 2 an NFT, 3 an amount of a multi-token
 id. An asset is native to one chain, its **origin**:
 - **Leaving its origin,** it is held by the gateway it leaves through: the coin with the call, a
-  token, NFT or multi-token amount moved in with `transfer_from` (approve the gateway first).
+  token, NFT or multi-token amount moved in with `transfer_from` (approve the gateway first). Both
+  gateways check what arrived, the balance before and after or the NFT's owner, and refuse less: a
+  token that takes a fee, or moves nothing, would leave the wrapped one backed by less than it says.
 - **Arriving elsewhere,** it is minted as its wrapped token or collection there, made the first
   time: wUSDT, Wrapped Tether, with the same decimals, ids and URIs.
 - **Going back,** the wrapped one is burned where it is, and the held one released at its origin.
@@ -82,6 +88,12 @@ for them, and they recover to no one. Gateway.sol marks what it delivered by the
 too, so the new one's nonces can start from 1. The time is what the chain says when `setup` runs,
 not anything its owner gives; someone who produces every block of a restart could give it the old
 time, but such a chain is the old chain.
+
+**Changing a peer strands nothing.** Both gateways keep what arrived by the source chain, the
+gateway it came from and its nonce, so a new peer counting its nonces from 1 again has transfers of
+its own. A transfer that left is signed, voided and refunded by the peer it was sent to, as the
+gateway recorded it, whatever the peer is now. A transfer arriving is taken from the peer in force
+alone, and `received` and `voided` read by it, or by the gateway named as a third argument.
 
 **A recipient is checked as it is sent,** on both gateways: 20 bytes and not zero for an EVM chain;
 for chainv4, 33 bytes of a known kind, a shorter kind followed by zeros, and not zero. Names, symbols
@@ -286,7 +298,9 @@ Bitcoin's nodes do not relay one.
 
 `contracts/lua/btc_gateway.lua` is set up once by its owner, on a relay, with wBTC's template
 (`wrapped.lua`, cloned as Wrapped Bitcoin), the most fee a release may pay, the least a virtual
-byte, and how long an old federation's deposit addresses stay open.
+byte, how long an old federation's deposit addresses stay open, and the least a deposit mints,
+10,000 satoshis unless told: `setup(relay, template, fee_cap, fee_floor, grace_ms, least_deposit)`.
+No federation policy changes the least deposit; `least_deposit()` reads it.
 
 **The federation's Bitcoin policy.** Once the federation names one, its `btc`
 (`fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms`, `fee_part`, the share of a withdrawal
@@ -311,6 +325,13 @@ force, for this chain and this gateway, a P2WSH any wallet pays:
 Once a payment to it is `bitcoin_depth` deep in the relay, anyone shows it, `deposit(block, tx,
 index, path, coinbase, coinbase_path, vout, recipient)`, and its value is minted as wBTC to that address, once. The gateway
 holds the output, by its transaction and place, for a later release.
+- **The least deposit:** a payment under it mints nothing, and stays on Bitcoin under the
+  federation's keys, so say it where a deposit address is given out. Dust minted as wBTC was
+  dragged into releases that cost more to sign than it was worth: 300 deposits of 330 satoshis
+  once made a 100,000-satoshi withdrawal 37,561 virtual bytes, past the cap.
+- **A coinbase,** a deposit at place 0 in its block, waits 100 confirmations rather than
+  `bitcoin_depth`, then mints like any other: Bitcoin lets nothing spend a coinbase before, so a
+  release spending one minted sooner would be stuck, and could not be cancelled once signed.
 
 A proof of a payment outlives a chain, and a gateway on a new one holds nothing yet, under the same
 address if the same keys deployed it. So the chain's id is in the script: an old payment pays
@@ -323,7 +344,12 @@ refuses a relay that has not started.
 as much as a release of its own costs at the floor, `least_withdrawal()`, and queues it, with the
 most it agrees to lose to fees: a tenth of it unless it says, and never so much that under 1,000
 satoshis would arrive. It may change that while it waits, `set_most_fee(id, most)`, by who asked for
-it alone. The script is one Bitcoin's nodes relay: P2PKH, P2SH, or a witness program (P2WPKH,
+it alone. Raised, a limit holds at once. Lowered, it holds 30 blocks later, and a release proposed
+before then is judged by the old one: a pass plans up to 50 withdrawals against the limits it read,
+and one owner lowering theirs as the proposal landed once undid it for all of them. Until then
+`withdrawal(id)` gives the lower limit and the height it holds from after the rest, and the planner
+goes by it already, as what it proposes may land after. A lowering waiting in a release holds once
+that is cancelled and the withdrawal queued again. The script is one Bitcoin's nodes relay: P2PKH, P2SH, or a witness program (P2WPKH,
 P2WSH, P2TR or a later version), as a release with any other output would never be mined.
 
 **Releasing** pays queued withdrawals, and the federation does it, with no one withdrawing having
@@ -356,7 +382,9 @@ one for one whatever the fee. **Every release keeps change,** as a child paying 
 should what it spends past what was burned be under 330 satoshis, as when the gateway holds just
 what they burned, the change is 330 all the same, and the withdrawals lose what tops it up with the
 fee, split as the fee is. The planner takes another held output first, so this costs nothing unless
-the gateway holds no more. A sweep pays no one, so its fee stays the federation's. `withdrawal(id)`
+the gateway holds no more. A sweep pays no one, so its fee comes off what backs wBTC: once shown, it
+is added to `shortfall()`, as a child's fee is, for later releases to
+[repay](#repaying-what-a-child-cost). `withdrawal(id)`
 says the limit, and its share once it is in a release, with any child's that paid for it.
 
 **Only a signer proposes.** A release's fee is burned to Bitcoin's miners, off the withdrawals it pays,
@@ -426,13 +454,18 @@ proposal's age, each pass also logs one line of it, its id, the version Bitcoin 
 against what the network asks, and how it is bumped.
 
 **A new federation** takes over the deposit addresses: new ones are made under it, and the old
-ones stay open for the grace period. A **sweep** is a release with no withdrawals, paying what
-older federations hold to the one in force, proposed by a signer as any release is.
+ones stay open for the grace period, counted from the block that decided the next, as the chain
+keeps it, whether or not the gateway ever ran under the old one: `deposit` takes the version an
+address was made under, and reads it with `federation.at`. Before this, the gateway knew only a
+federation it was called under while that one was in force, so one replaced before anything called
+it left what was paid to its addresses unmintable. A **sweep** is a release with no withdrawals,
+paying what older federations hold to the one in force, proposed by a signer as any release is.
 
 **Reading it:** `wbtc()`, `deposit_script(address)` (the witness script, the output script and
 the federation's version), `utxo(n)`, `utxo_of(outpoint)` and `utxo_count()`, `withdrawal(id)`,
 `anchor(id)` and `withdrawal_count()`, `proposal(id)`, `tree(id)`, `voted(id, key)` and
-`proposal_count()`, `change_script()` or `change_script(version)`, `fee_limits()`, `shortfall()`.
+`proposal_count()`, `change_script()` or `change_script(version)`, `fee_limits()`, `least_deposit()`,
+`shortfall()`.
 
 ### Bumping a stuck release
 
@@ -445,7 +478,8 @@ bumped, one of two ways, each a proposal of its own that the signers sign as the
   the same scripts, each less its even share of what they now lose, within what each agreed to
   lose; its change is what it was, as the withdrawals pay the bump as they paid the fee; and its
   fee is past every open version of it by a satoshi a virtual byte, Bitcoin's incremental relay
-  fee, and under the cap. A sweep's bump comes off its change, as its fee is the federation's.
+  fee, and under the cap. A sweep's bump comes off its change, as its fee does, and whichever
+  version is shown, its fee is owed to the backing.
 - **A child, as the fallback:** `child(parent, raw, signature)`, under the domain
   `chainv4-btc-child`, proposes a child spending the change of a version, which every release
   keeps for this, then outputs the gateway holds unspent only should that change not pay its fee
@@ -462,8 +496,8 @@ should the child have been shown first.
 replacement's outputs to them are lower. A child's fee is charged to them too, within their limits,
 and recorded, `withdrawal(id)` saying its share; but they have their outputs already, so the
 federation pays it from its change, and the gateway then holds that much less than the wBTC it
-backs, until later releases [repay it](#repaying-what-a-child-cost). This is the one cost the backing
-bears, even for a while, so a replacement comes first.
+backs, until later releases [repay it](#repaying-what-a-child-cost). With a sweep's fee, this is what
+the backing bears, for a while, so a replacement comes first.
 
 **A withdrawal whose limit is too low for its share.** A replacement pays exactly the same withdrawals
 and splits evenly, so it goes as high as the tightest limit lets it, and the pass names whose limit held
@@ -552,8 +586,9 @@ signer signs.
 
 ### Repaying what a child cost
 
-Later releases repay what children cost the backing, a little each, until it is back to one for one,
-with no one stepping in. `shortfall()` says what is left to repay, and how much of that open releases
+Later releases repay what children and sweeps cost the backing, a little each, until it is back to
+one for one, with no one stepping in. A sweep shown adds its fee, or its shown replacement's, to what
+is owed, as nothing else pays it. `shortfall()` says what is left to repay, and how much of that open releases
 repay once shown; the explorer shows the first as what is left to repay.
 - **How much:** a release's budget is the least of what is owed past what open releases repay and
   `repay_pct` percent of its own fee, a fifth unless the federation says. Each withdrawal repays an even
@@ -583,7 +618,7 @@ as `btc_gateway`, or `--btc-gateway` before it does:
 chainv4 send deploy --wasm btc_relay.wasm                      # the relay
 chainv4 bridge btc relay-start 0x<relay> 840000 --esplora URL   # its checkpoint, on the network Esplora serves
 chainv4 bridge btc relay-sync 0x<relay> --esplora URL           # the headers since, 25 a tx; run it often
-chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --fee-floor 2 --grace-hours 168
+chainv4 bridge btc deploy 0x<relay> --fee-cap 50000 --fee-floor 2 --grace-hours 168 --least-deposit 10000
 chainv4 bridge btc address ed25519:0x… --btc-gateway 0x…       # where to pay: bc1q…, tb1q… or bcrt1q…, as the relay follows
 chainv4 bridge btc deposit <txid> 0 ed25519:0x… --btc-gateway 0x… --esplora URL
 chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
@@ -639,7 +674,8 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
 - **relay-start** starts the relay on the network Esplora serves, known by its genesis block
   (`/block-height/0`): `main`, `test` for testnet4, testnet3 and signet, or `regtest`. `--network`
   names it where Esplora's genesis is none of those, and is refused where it is another.
-- **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told. Sync the relay first.
+- **deploy** takes `--fee-floor` in satoshis a virtual byte, 2 unless told, and `--least-deposit` in
+  satoshis, 10,000 unless told, and says what it set up on stderr. Sync the relay first.
 - **address** writes the deposit address for the Bitcoin the chain follows, and says on stderr which
   and what said so, the address alone going to stdout:
   1. the gateway's relay, by its `network_name()`, as it was started: `bc1q…` on `main`, `tb1q…` on
@@ -647,6 +683,8 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   2. else, for a relay not started, Esplora's genesis block, when `--esplora` is given;
   3. else `--network`, `main`, `test` or `regtest`;
   4. else mainnet, saying that nothing said which.
+
+  It says the least deposit on stderr too, and that a coinbase mints once 100 deep.
 
   A `--network` the relay or Esplora contradicts is refused rather than written. The script is the
   same on every network, so a deposit to the address of another, such as a mainnet wallet paying the
@@ -663,12 +701,14 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   field. `--most-fee` is the most it may lose, a tenth of it unless told; **set-most-fee** changes
   that while it waits.
 - **propose** pays the queued withdrawals, oldest first, up to 50, from what the gateway holds
-  unspent, in the order it took it, starting with what a withdrawal's anchor requires; one whose
+  unspent, starting with what a withdrawal's anchor requires, then the largest first, leaving out
+  any output worth no more than it costs to spend at the rate (`btc_input_vbytes`), so dust held
+  never drags a release past the cap; one whose
   anchor is in another release waits for it, and so does one that agreed to lose less than its
   share of `--fee`. A fee under the floor for that size is refused here, naming what it takes. It
   takes a signer's `--evm-key`; without `--fee` it goes by the network as a pass does.
 - **sweep** pays what older federations hold to the one in force, as much as the fee pays at the
-  floor; sweep again for the rest. It takes a signer's `--evm-key`.
+  floor; sweep again for the rest. Its fee is owed to the backing once it is shown. It takes a signer's `--evm-key`.
 - **sign** goes over every open release against the gateway's state before signing it: each
   withdrawal named once, still proposed, paid what it burned less its share of the fee, within what
   it agreed to lose, and with its anchor among the inputs; each

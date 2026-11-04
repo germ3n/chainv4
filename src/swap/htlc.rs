@@ -56,6 +56,13 @@ pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
 )]
 pub const DUST: u64 = 294;
 
+#[document(
+    summary = "The fee rate, in satoshis a virtual byte, a second lock's refund on Bitcoin goes out at by default: high, so it is mined at once. A claim of an HTLC stays valid past its lock time until a refund is mined, so with Bitcoin as the second leg the starter could claim it late and leave the other side too little time to claim the first lock.",
+    category = "Swaps",
+    see_also = "Htlc::urgent_fee_rate",
+)]
+pub const URGENT_FEE_RATE: u64 = 50;
+
 #[document(summary = "A swap's hash time-locked contract on Bitcoin.", category = "Swaps")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Htlc {
@@ -180,6 +187,15 @@ impl Htlc {
         tx.inputs[0].witness = self.witness(&[signature], spend);
 
         Ok(tx)
+    }
+
+    #[document(
+        parent = "Htlc",
+        summary = "The fee rate an urgent refund of these coins pays: URGENT_FEE_RATE, or the highest of its halvings that still leaves more than dust, down to 1. None when no rate does.",
+        see_also = "URGENT_FEE_RATE",
+    )]
+    pub fn urgent_fee_rate(&self, coins: Coins, to: &[u8]) -> Option<u64> {
+        std::iter::successors(Some(URGENT_FEE_RATE), |rate| (*rate > 1).then_some(rate / 2)).find(|rate| self.unsigned(coins, to.to_vec(), *rate, Spend::Refund).is_ok())
     }
 
     #[document(parent = "Htlc", summary = "Who a spend's branch takes: the claim's party, or the refund's.")]

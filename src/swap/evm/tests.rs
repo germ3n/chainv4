@@ -16,9 +16,12 @@ fn calls_are_swap_sols_as_solc_names_them() {
     assert_eq!(calls[0].input[4..36], hash);
     assert_eq!(calls[0].input[36..68], address_word(&[0xb2; 20]));
     assert_eq!(calls[0].input[68..], number_word(u256::new(1_793_043_200)), "whole seconds");
-    assert_eq!(leg(None).claim_call(&[0x22; 32]).input, [&[0xbd, 0x66, 0x52, 0x8a][..], &[0x22; 32]].concat());
-    assert_eq!(leg(None).refund_call(&hash).input[..4], [0x72, 0x49, 0xfb, 0xb6]);
-    assert_eq!(get_input(&hash)[..4], [0x8e, 0xaa, 0x6a, 0xc0]);
+    let id = [0x33; 32];
+    assert_eq!(leg(None).claim_call(&id, &[0x22; 32]).input, [&[0x84, 0xcc, 0x9d, 0xfb][..], &id, &[0x22; 32]].concat());
+    assert_eq!(leg(None).refund_call(&id).input, [&[0x72, 0x49, 0xfb, 0xb6][..], &id].concat());
+    assert_eq!(leg(None).withdraw_call(&id).input, [&[0x8e, 0x19, 0x89, 0x9e][..], &id].concat());
+    assert_eq!(get_input(&id)[..4], [0x8e, 0xaa, 0x6a, 0xc0]);
+    assert_eq!(item_input(&id)[..4], [0x1d, 0x37, 0x6d, 0x9b]);
 
     // A token is approved first, then locked, sending no coin.
     let calls = leg(Some([0x70; 20])).lock_calls(&hash, 1_793_043_200_000).unwrap();
@@ -41,7 +44,7 @@ fn swap_sol_sits_where_create2_puts_it_through_the_proxy() {
 
 #[test]
 fn get_answers_read_as_locks() {
-    let words = |state: u8, token: [u8; 20], secret: [u8; 32]| {
+    let words = |state: u8, token: [u8; 20], secret: [u8; 32], owed: u8| {
         [
             number_word(u256::from(state)),
             address_word(&[0xa1; 20]),
@@ -51,18 +54,21 @@ fn get_answers_read_as_locks() {
             number_word(u256::new(1_793_043_200)),
             secret,
             number_word(u256::new(4_242)),
+            number_word(u256::from(owed)),
         ]
         .concat()
     };
 
-    let locked = read_lock(&words(1, [0; 20], [0; 32])).unwrap();
-    assert_eq!(locked, Lock { state: LockState::Locked, recipient: Some(Party::Evm([0xb2; 20])), token: None, amount: u256::new(7), deadline: 1_793_043_200_000, secret: None, height: Some(4_242), item: None });
+    let locked = read_lock(&words(1, [0; 20], [0; 32], 0)).unwrap();
+    assert_eq!(locked, Lock { state: LockState::Locked, recipient: Some(Party::Evm([0xb2; 20])), token: None, amount: u256::new(7), deadline: 1_793_043_200_000, secret: None, height: Some(4_242), item: None, owed: false });
     assert_eq!(Leg::Evm(leg(None)).stands(&locked, 1_793_043_200_999), Ok(()), "seconds, as Swap.sol keeps them");
 
-    let claimed = read_lock(&words(2, [0x70; 20], [0x22; 32])).unwrap();
-    assert_eq!((claimed.token, claimed.secret), (Some(Party::Evm([0x70; 20])), Some([0x22; 32])));
-    assert_eq!(read_lock(&words(0, [0; 20], [0; 32])).unwrap().state, LockState::None);
-    assert!(read_lock(&words(4, [0; 20], [0; 32])).is_err());
+    let claimed = read_lock(&words(2, [0x70; 20], [0x22; 32], 1)).unwrap();
+    assert_eq!((claimed.token, claimed.secret, claimed.owed), (Some(Party::Evm([0x70; 20])), Some([0x22; 32]), true));
+    assert_eq!(read_lock(&words(0, [0; 20], [0; 32], 0)).unwrap().state, LockState::None);
+    assert!(read_lock(&words(4, [0; 20], [0; 32], 0)).is_err());
+    assert!(read_lock(&words(2, [0; 20], [0; 32], 2)).is_err(), "owed is a bool");
+    assert!(read_lock(&words(1, [0; 20], [0; 32], 0)[..8 * 32]).is_err(), "a Swap.sol from before claims paid by pull");
     assert!(read_lock(&[0; 32]).is_err());
 }
 

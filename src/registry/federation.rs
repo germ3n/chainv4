@@ -175,6 +175,69 @@ pub struct DecidedFederation {
 
 impl Hashable for DecidedFederation {}
 
+#[document(
+    summary = "Where every federation the chain ever had is kept for good, in the Validators column, by this prefix and its version's eight bytes big-endian: genesis's as 0, and each one governance decided, with the block that decided it. A contract reads one it never saw in force, and when the next replaced it, as the Bitcoin gateway does to mint what was paid to an old federation's deposit addresses.",
+    category = "Bridges",
+    see_also = "FederationRecord, Changes::federation_at",
+)]
+pub const FEDERATION_HISTORY_PREFIX: &[u8] = b"change:past-federation:";
+
+#[document(
+    summary = "Where the federation of a version is kept for good: FEDERATION_HISTORY_PREFIX and the version big-endian.",
+    category = "Bridges",
+    see_also = "FEDERATION_HISTORY_PREFIX",
+)]
+pub fn federation_history_key(version: u64) -> Vec<u8> {
+    [FEDERATION_HISTORY_PREFIX, &version.to_be_bytes()].concat()
+}
+
+#[document(
+    summary = "The block a federation was decided in: its height and its time. Genesis's was decided at height 0, at genesis's time.",
+    category = "Bridges",
+    see_also = "FederationRecord",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct DecidedWhen {
+    #[document(summary = "The block's height.")]
+    pub height: u64,
+    #[document(summary = "The block's time, in milliseconds since the Unix epoch.")]
+    pub time: u64,
+}
+
+impl Hashable for DecidedWhen {}
+
+#[document(
+    summary = "A federation as the chain keeps it for good, by its version: what it was, and the block that decided it. The next version's record says when it was replaced.",
+    category = "Bridges",
+    see_also = "FEDERATION_HISTORY_PREFIX, FederationAt",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct FederationRecord {
+    #[document(summary = "The federation.")]
+    pub federation: Federation,
+    #[document(summary = "The block that decided it.")]
+    pub decided: DecidedWhen,
+}
+
+impl Hashable for FederationRecord {}
+
+#[document(
+    summary = "A federation of any version, as a contract reads it: what it was, the block that decided it if the chain kept it, and the block that decided the next, once one did. It is in force from the block after it was decided until the block after it was replaced.",
+    category = "Bridges",
+    see_also = "Changes::federation_at, Host::federation_at",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FederationAt {
+    #[document(summary = "Its version.")]
+    pub version: u64,
+    #[document(summary = "The federation.")]
+    pub federation: Federation,
+    #[document(summary = "The block that decided it, or None for one kept only as the one in force, as genesis's on a VM given it directly.")]
+    pub decided: Option<DecidedWhen>,
+    #[document(summary = "The block that decided the next version, or None while it is in force.")]
+    pub replaced: Option<DecidedWhen>,
+}
+
 #[cfg(all(test, feature = "secp256k1"))]
 mod tests {
     use super::*;

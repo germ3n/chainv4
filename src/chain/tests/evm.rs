@@ -1215,6 +1215,7 @@ mod swap {
         let secret = [0x5e; 32];
         let hash = crate::crypto::bitcoin::sha256(&secret);
         let deadline = chain.tip().timestamp + 30 * SLOT;
+        let id = leg.swap_id(&hash, deadline).unwrap();
         let [approve, lock] = <[_; 2]>::try_from(leg.lock_calls(&hash, deadline).unwrap()).unwrap();
 
         // The token moves only once approved; then it is locked, all of it.
@@ -1224,18 +1225,18 @@ mod swap {
         assert_eq!(token_balance(&mut chain, token, swap), u256::new(1_000));
         refused(&run(&mut chain, swap, 0, lock.input), "already exists");
 
-        let locked = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&hash)))).unwrap();
+        let locked = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&id)))).unwrap();
         assert_eq!(locked.state, LockState::Locked);
         assert_eq!(Leg::Evm(leg.clone()).stands(&locked, deadline), Ok(()));
 
         // The wrong secret claims nothing; the right one pays the receiver and keeps the secret.
-        refused(&run(&mut chain, swap, 0, leg.claim_call(&[0; 32]).input), "no swap waits");
-        assert!(run(&mut chain, swap, 0, leg.claim_call(&secret).input).result.is_ok());
+        refused(&run(&mut chain, swap, 0, leg.claim_call(&id, &[0; 32]).input), "no swap waits");
+        assert!(run(&mut chain, swap, 0, leg.claim_call(&id, &secret).input).result.is_ok());
         assert_eq!(token_balance(&mut chain, token, receiver), u256::new(1_000));
-        let claimed = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&hash)))).unwrap();
-        assert_eq!((claimed.state, claimed.secret), (LockState::Claimed, Some(secret)));
-        refused(&run(&mut chain, swap, 0, leg.claim_call(&secret).input), "no swap waits");
-        refused(&run(&mut chain, swap, 0, leg.refund_call(&hash).input), "no swap is locked");
+        let claimed = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&id)))).unwrap();
+        assert_eq!((claimed.state, claimed.secret, claimed.owed), (LockState::Claimed, Some(secret), false));
+        refused(&run(&mut chain, swap, 0, leg.claim_call(&id, &secret).input), "no swap waits");
+        refused(&run(&mut chain, swap, 0, leg.refund_call(&id).input), "no swap is locked");
 
         // The coin, locked until a few blocks on: too early to refund, then too late to claim,
         // and back to who locked it.
@@ -1243,20 +1244,21 @@ mod swap {
         let other = [0x6f; 32];
         let other_hash = crate::crypto::bitcoin::sha256(&other);
         let soon = chain.tip().timestamp + 4 * SLOT;
+        let other_id = coin.swap_id(&other_hash, soon).unwrap();
         let before = balance(&chain, &me);
         let lock = coin.lock_calls(&other_hash, soon).unwrap().remove(0);
         assert!(run(&mut chain, swap, 500, lock.input).result.is_ok());
         assert_eq!(balance(&chain, &me), before - u256::new(500));
-        refused(&run(&mut chain, swap, 0, coin.refund_call(&other_hash).input), "too early");
+        refused(&run(&mut chain, swap, 0, coin.refund_call(&other_id).input), "too early");
 
         while chain.tip().timestamp / 1_000 < soon / 1_000 {
             advance(&mut chain, Vec::new());
         }
 
-        refused(&run(&mut chain, swap, 0, coin.claim_call(&other).input), "too late");
-        assert!(run(&mut chain, swap, 0, coin.refund_call(&other_hash).input).result.is_ok());
+        refused(&run(&mut chain, swap, 0, coin.claim_call(&other_id, &other).input), "too late");
+        assert!(run(&mut chain, swap, 0, coin.refund_call(&other_id).input).result.is_ok());
         assert_eq!(balance(&chain, &me), before);
-        assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&other_hash)))).unwrap().state, LockState::Refunded);
+        assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&other_id)))).unwrap().state, LockState::Refunded);
 
         // What does not hold locks nothing.
         let third = crate::crypto::bitcoin::sha256(&[1; 32]);
@@ -1264,7 +1266,7 @@ mod swap {
         refused(&run(&mut chain, swap, 1, past.input), "after this block's time");
         let nothing = coin.lock_calls(&third, deadline + 60 * SLOT).unwrap().remove(0);
         refused(&run(&mut chain, swap, 0, nothing.input), "lock something");
-        assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&third)))).unwrap().state, LockState::None);
+        assert_eq!(read_lock(&returned(&run(&mut chain, swap, 0, get_input(&coin.swap_id(&third, deadline + 60 * SLOT).unwrap())))).unwrap().state, LockState::None);
     }
 
     fn word(address: [u8; 20]) -> Vec<u8> {
@@ -1296,18 +1298,19 @@ mod swap {
         let secret = [0x5e; 32];
         let hash = crate::crypto::bitcoin::sha256(&secret);
         let deadline = chain.tip().timestamp + 30 * SLOT;
+        let id = nft.swap_id(&hash, deadline).unwrap();
         let [approve, lock] = <[_; 2]>::try_from(nft.lock_calls(&hash, deadline).unwrap()).unwrap();
 
         refused(&run(&mut chain, swap, 0, lock.input.clone()), "not the owner, approved or an operator");
         assert!(run(&mut chain, art, 0, approve.input).result.is_ok());
         assert!(run(&mut chain, swap, 0, lock.input).result.is_ok());
         assert_eq!(owner_of(&mut chain, 1), swap);
-        let mut locked = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&hash)))).unwrap();
-        locked.item = read_item(&returned(&run(&mut chain, swap, 0, item_input(&hash)))).unwrap();
+        let mut locked = read_lock(&returned(&run(&mut chain, swap, 0, get_input(&id)))).unwrap();
+        locked.item = read_item(&returned(&run(&mut chain, swap, 0, item_input(&id)))).unwrap();
 
         assert_eq!(locked.item, nft.item);
         assert_eq!(Leg::Evm(nft.clone()).stands(&locked, deadline), Ok(()));
-        assert!(run(&mut chain, swap, 0, nft.claim_call(&secret).input).result.is_ok());
+        assert!(run(&mut chain, swap, 0, nft.claim_call(&id, &secret).input).result.is_ok());
         assert_eq!(owner_of(&mut chain, 1), receiver);
 
         // ERC-1155: an operator, then an amount pulled in; the deadline passes and it goes back.
@@ -1315,12 +1318,13 @@ mod swap {
         let other = [0x6f; 32];
         let other_hash = crate::crypto::bitcoin::sha256(&other);
         let soon = chain.tip().timestamp + 4 * SLOT;
+        let other_id = multi.swap_id(&other_hash, soon).unwrap();
         let [operator, lock] = <[_; 2]>::try_from(multi.lock_calls(&other_hash, soon).unwrap()).unwrap();
 
         assert!(run(&mut chain, items, 0, operator.input).result.is_ok());
         assert!(run(&mut chain, swap, 0, lock.input).result.is_ok());
         assert_eq!((held(&mut chain, swap, 9), held(&mut chain, me, 9)), (u256::new(20), u256::new(30)));
-        assert_eq!(read_item(&returned(&run(&mut chain, swap, 0, item_input(&other_hash)))).unwrap(), multi.item);
+        assert_eq!(read_item(&returned(&run(&mut chain, swap, 0, item_input(&other_id)))).unwrap(), multi.item);
 
         // Tokens sent to it any other way are refused.
         let stray = calldata("safeTransferFrom(address,address,uint256,uint256,bytes)", &[word(me), word(swap), number(9), number(1), number(160), number(0)]);
@@ -1330,7 +1334,7 @@ mod swap {
             advance(&mut chain, Vec::new());
         }
 
-        assert!(run(&mut chain, swap, 0, multi.refund_call(&other_hash).input).result.is_ok());
+        assert!(run(&mut chain, swap, 0, multi.refund_call(&other_id).input).result.is_ok());
         assert_eq!((held(&mut chain, swap, 9), held(&mut chain, me, 9)), (u256::ZERO, u256::new(50)));
         assert_eq!(read_item(&returned(&run(&mut chain, swap, 0, item_input(&crate::crypto::bitcoin::sha256(&[1; 32]))))).unwrap(), None);
     }

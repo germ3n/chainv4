@@ -23,7 +23,7 @@ fn bytes(value: &Value, what: &str) -> mlua::Result<Vec<u8>> {
 }
 
 /// A whole number a script hands over, as a plain number or one of the integer types.
-fn whole(value: &Value, what: &str) -> mlua::Result<u64> {
+pub(super) fn whole(value: &Value, what: &str) -> mlua::Result<u64> {
     let refused = || Error::runtime(format!("{what} is a whole number"));
 
     match value {

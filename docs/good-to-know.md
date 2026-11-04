@@ -1069,6 +1069,29 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **Contracts can read the block's time and height** now, `ctx.time` and `ctx.height` in Lua,
   `block_time()` and `block_height()` in the SDK: the header's, the same on every node. A node
   without them refuses such contracts, so every node updates together.
+- **Swaps are kept by an id of all their terms now,** in swap.lua and Swap.sol alike: the
+  keccak256 of the hash, locker, recipient, token, kind, NFT id, amount and deadline in Solidity's
+  ABI. A stranger who saw the hash and locked under it first used to refuse the real lock for
+  good; now theirs is a swap of its own. Claim, withdraw, refund, get and item take the id, which
+  the apps work out from the terms (`Terms::swap_id`) and `chainv4 swap show` prints. Both
+  contracts redeploy with it, Swap.sol at a new CREATE2 address, and codes made before still
+  read.
+- **A claim whose payout is refused still stands,** with its secret, its payout owed; anyone may
+  send `withdraw(id)` to pay it once the token lets it, and a claimed swap is never refunded.
+  Before, a token the other side controls, paused, upgradeable or refusing in a hook, failed the
+  claim whole, yet the secret was mined in it, and they took both sides.
+- **swap.lua checks what arrived:** a token's and a multi-token's balance before and after, and an
+  NFT's owner, as Swap.sol does. It refuses coin sent with a claim, withdraw or refund, and a lock
+  for the zero address.
+- **A Bitcoin HTLC's claim never expires:** Bitcoin's script cannot say "before", so a claim is
+  mined after the lock time until a refund is. With Bitcoin as the second leg the starter could
+  claim it late and take back the first lock. Whoever pays a second lock on Bitcoin must refund it
+  the moment Bitcoin takes the refund: the wallet does so by itself at a high fee
+  (`htlc::URGENT_FEE_RATE`), and `chainv4 swap bitcoin-refund --esplora … --wait` from the CLI.
+  Both warn when Bitcoin is offered as the second leg.
+- **`Terms::check` refuses deadlines that wrap or run on too long:** the gap is added checked,
+  the first deadline must be ahead, and none may be more than a year on (`MAX_SPAN_MS`) nor past
+  what its leg's chain can write.
 
 ## The DEX
 
@@ -1099,6 +1122,11 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Bridges
 
+- **`received` and `voided` read by the peer in force** unless a third argument names another
+  gateway: what arrived is kept by the gateway it came from, so after `set_peer` the old peer's
+  transfers are asked about by its address.
+- **A native token, NFT or multi-token is sent only if it really moves in:** the gateway checks its
+  balance or the NFT's owner, so a test token needs a working `balance_of`, and `owner_of` for an NFT.
 - **The gateway's setup takes no chain id:** it reads `chain.id()`, the id the chain's EVM answers
   `CHAINID` with, so no owner can give it another. `setup` takes the three templates alone.
 - **`Transfer::from` or `to` for a gateway here is its `identity()`,** not its address: its 33 bytes
@@ -1174,7 +1202,18 @@ voting finality it now goes back to the checkpoint and follows the node from the
   before a reset pays what nobody will mint: tell people. Sync the relay before `btc deploy`: a
   gateway mints only what was mined past the relay's tip when it was set up.
 - **A new federation makes new deposit addresses:** pay
-  an old one only within the grace period, after which its deposits do not mint.
+  an old one only within the grace period, after which its deposits do not mint. The grace counts
+  from the block that decided the next federation, which the chain keeps with every federation it
+  decided (`federation.at`), not from when the gateway next ran: one the gateway never ran under
+  mints all the same.
+- **Deposits start at 10,000 satoshis** unless the gateway was set up with another least
+  (`least_deposit()`, `btc deploy --least-deposit`): a payment under it mints nothing and stays on
+  Bitcoin. `btc address` says it on stderr.
+- **A coinbase paying a deposit address mints once 100 deep,** whatever `bitcoin_depth` says, as
+  Bitcoin lets nothing spend it before.
+- **The planner takes the largest outputs first,** and leaves out any worth no more than spending
+  it costs at the rate, so dust the gateway holds, as a gateway set up with a low least deposit may,
+  is never dragged into a release.
 - **Withdrawals start at 10,000 satoshis,** more if the floor is high, and a release pays at most 50.
 - **A withdrawal pays its own fee.** It arrives as what it burned less its share of the release's
   fee, split evenly, up to the most it agreed to lose, a tenth unless it says. So `--fee` to `btc
@@ -1201,6 +1240,12 @@ voting finality it now goes back to the checkpoint and follows the node from the
   out what each repays; a release that does not carry just that, or a replacement that changes it, is refused.
 - **`set_most_fee` raises a limit while its release is open,** for a bump its limit held back; it never
   lowers one in a release, as what the release took stands.
+- **A lowered most fee holds 30 blocks later,** while its withdrawal is queued; a raised one at once. A
+  release proposed before then is judged by the old limit, so lowering one cannot undo a release planned
+  against it. `withdrawal(id)` gives the lower one and its height after the rest, and the planner goes by
+  it from the moment it is asked.
+- **A sweep's fee is owed to the backing:** it pays no withdrawal, so once shown it is added to
+  `shortfall()`, as a child's is, and later releases repay it.
 - **Signers take turns:** a pass waits its place among the federation's signers times a block of the chain,
   at least a second, before it shows, votes, proposes or bumps, then checks the gateway and the node's
   mempool again. A large federation's last signer may wait a while each time; the first never does. A pass
@@ -1210,9 +1255,9 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **A proof needs the block's coinbase:** `deposit` and `released` take it and its path, without its
   witness. Esplora gives it as `/block/HASH/txid/0`, then as any transaction. A wallet's coin kept
   before that is shown through Esplora instead.
-- **`setup` takes a fee floor:** `setup(relay, template, fee_cap, fee_floor, grace_ms)`, the floor in
-  satoshis a virtual byte, at least 1, and the cap at least 710 virtual bytes of it, or it is
-  refused. A release paying less for its size than the floor is refused too: `--fee` is checked
+- **`setup` takes a fee floor:** `setup(relay, template, fee_cap, fee_floor, grace_ms, least_deposit)`,
+  the floor in satoshis a virtual byte, at least 1, and the cap at least 710 virtual bytes of it, or it
+  is refused; the least deposit is 10,000 satoshis when left out. A release paying less for its size than the floor is refused too: `--fee` is checked
   against it before anything is sent.
 - **A withdrawal's script is one nodes relay:** P2PKH, P2SH or a witness program, not any 80 bytes.
 - **Only a signer proposes a release,** `propose(raw, signature, ids…)` over `btc_propose_digest`, as a

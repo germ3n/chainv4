@@ -388,7 +388,7 @@ fn collections_need_both_lists_or_the_registry_and_answer_within_limits() {
     assert_eq!(Collections::new(&world.state).get(&listed).unwrap(), None);
 }
 
-#[cfg(feature = "sha256")]
+#[cfg(all(feature = "sha256", feature = "keccak256"))]
 #[test]
 fn the_swap_contract_locks_and_pays_nfts_of_either_standard() {
     let mut world = World::new();
@@ -410,15 +410,16 @@ fn the_swap_contract_locks_and_pays_nfts_of_either_standard() {
     world.call(art, "approve", &[address(swap), id(1)]).result.unwrap();
     assert!(world.call_at(DEPLOYER, swap, "lock_nft", &nft, 5, now).result.unwrap_err().to_string().contains("send none"));
     let locked = world.call_at(DEPLOYER, swap, "lock_nft", &nft, 0, now);
+    let swap_id = locked.result.clone().unwrap().remove(0);
 
     assert_eq!(locked.events.iter().map(|event| event.name.as_str()).collect::<Vec<_>>(), ["Transfer", "Locked", "LockedItem"]);
-    assert_eq!(locked.events[2].data, [text(&hash), text("nft"), id(1)]);
+    assert_eq!(locked.events[2].data, [swap_id.clone(), text("nft"), id(1)]);
     assert_eq!(world.call(art, "owner_of", &[id(1)]).result.unwrap(), [address(swap)]);
-    assert_eq!(world.call(swap, "item", &[text(&hash)]).result.unwrap(), [text("nft"), id(1)]);
-    let got = world.call(swap, "get", &[text(&hash)]).result.unwrap();
+    assert_eq!(world.call(swap, "item", std::slice::from_ref(&swap_id)).result.unwrap(), [text("nft"), id(1)]);
+    let got = world.call(swap, "get", std::slice::from_ref(&swap_id)).result.unwrap();
 
     assert_eq!((got[3].clone(), got[4].clone()), (address(art), id(1)), "the collection, and how many");
-    world.call_at(alice, swap, "claim", &[text(&to_hex(&secret))], 0, now + 1).result.unwrap();
+    world.call_at(alice, swap, "claim", &[swap_id, text(&to_hex(&secret))], 0, now + 1).result.unwrap();
     assert_eq!(world.call(art, "owner_of", &[id(1)]).result.unwrap(), [address(alice)]);
 
     // An amount of a multi-token id: the contract an operator, then locked, then refunded.
@@ -427,16 +428,16 @@ fn the_swap_contract_locks_and_pays_nfts_of_either_standard() {
     let multi = [text(&other_hash), address(alice), deadline, address(items), id(9), id(20)];
 
     world.call(items, "set_approval_for_all", &[address(swap), TxCallArgumentType::Bool(true)]).result.unwrap();
-    world.call_at(DEPLOYER, swap, "lock_multi", &multi, 0, now).result.unwrap();
+    let other_id = world.call_at(DEPLOYER, swap, "lock_multi", &multi, 0, now).result.unwrap().remove(0);
     assert_eq!(world.call(items, "balance_of", &[address(swap), id(9)]).result.unwrap(), [id(20)]);
-    assert_eq!(world.call(swap, "item", &[text(&other_hash)]).result.unwrap(), [text("multi"), id(9)]);
-    world.call_at(alice, swap, "refund", &[text(&other_hash)], 0, now + 3_600_000).result.unwrap();
+    assert_eq!(world.call(swap, "item", std::slice::from_ref(&other_id)).result.unwrap(), [text("multi"), id(9)]);
+    world.call_at(alice, swap, "refund", &[other_id], 0, now + 3_600_000).result.unwrap();
     assert_eq!(world.call(items, "balance_of", &[address(DEPLOYER), id(9)]).result.unwrap(), [id(50)]);
 
     // Coins say so, and nothing locked is none.
     let coin = to_hex(&crate::crypto::bitcoin::sha256(&[1; 32]));
 
     assert_eq!(world.call(swap, "item", &[text(&coin)]).result.unwrap(), [text("none"), id(0)]);
-    world.call_at(DEPLOYER, swap, "lock", &[text(&coin), address(alice), TxCallArgumentType::I64((now + 3_600_000) as i64)], 5, now).result.unwrap();
-    assert_eq!(world.call(swap, "item", &[text(&coin)]).result.unwrap(), [text("coin"), id(0)]);
+    let coin_id = world.call_at(DEPLOYER, swap, "lock", &[text(&coin), address(alice), TxCallArgumentType::I64((now + 3_600_000) as i64)], 5, now).result.unwrap().remove(0);
+    assert_eq!(world.call(swap, "item", &[coin_id]).result.unwrap(), [text("coin"), id(0)]);
 }

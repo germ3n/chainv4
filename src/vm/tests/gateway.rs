@@ -372,7 +372,9 @@ local M = {}
 function M.name() return "\255\254 bad" end
 function M.symbol() return "\237\160\128" end
 function M.decimals() return 8 end
-function M.transfer_from() return true end
+-- It moves what it is asked to, to the gateway, which checks its balance for it.
+function M.transfer_from(from, to, amount) storage.set("held", tostring(u256(storage.get("held") or 0) + u256(amount))) return true end
+function M.balance_of() return u256(storage.get("held") or 0) end
 
 return M
 "#;
@@ -602,7 +604,8 @@ const STUBBORN: &str = r#"
     function M.name() return "Stubborn" end
     function M.symbol() return "STB" end
     function M.decimals() return 0 end
-    function M.transfer_from(from, to, amount) return true end
+    function M.transfer_from(from, to, amount) storage.set("held", tostring(u256(storage.get("held") or 0) + u256(amount))) return true end
+    function M.balance_of() return u256(storage.get("held") or 0) end
     function M.allow() storage.set("allowed", "1") end
     function M.paid() return storage.get("paid") or "nothing" end
 
@@ -672,8 +675,8 @@ fn a_refund_begun_under_one_federation_takes_the_threshold_of_the_next() {
     assert_eq!(bridge.world.balance(alice), before + u256::from(1_000u64));
 }
 
-// Pentest (docs/queue.md): the gateway driven by hostile parties. An ignored test is a finding,
-// asserting what should hold, and fails until it is fixed.
+// Pentest (docs/queue.md): the gateway driven by hostile parties. Each was a finding, fixed since:
+// each test asserting what must hold.
 
 /// A token whose transfer_from moves one less than it is asked to: a fee taken on every transfer,
 /// as some tokens do.
@@ -686,7 +689,7 @@ fn fee_token(bridge: &mut Bridge) -> Address {
 }
 
 #[test]
-#[ignore = "finding: send records what was asked for, not what arrived, so a token that takes a fee leaves its wrapped supply backed by less"]
+
 fn a_native_token_that_moves_less_than_asked_is_refused_or_recorded_as_it_arrived() {
     let mut bridge = Bridge::new();
     let alice = Address::Ed25519([0xa; 32]);
@@ -701,7 +704,7 @@ fn a_native_token_that_moves_less_than_asked_is_refused_or_recorded_as_it_arrive
 }
 
 #[test]
-#[ignore = "finding: what arrived is keyed by the source chain and nonce alone, so after set_peer the new peer's transfers at nonces the old one used are never delivered, nor can they be voided"]
+
 fn a_new_peer_s_transfers_arrive_though_the_old_peer_used_their_nonces() {
     let bridge = Bridge::new();
     let alice = Address::Ed25519([0xa; 32]);
@@ -723,7 +726,7 @@ fn a_new_peer_s_transfers_arrive_though_the_old_peer_used_their_nonces() {
 }
 
 #[test]
-#[ignore = "finding: attest and attest_refund work a transfer's ends out from the peers now, so one in flight when the owner changes the peer can no longer be signed or refunded"]
+
 fn a_transfer_in_flight_when_the_peer_changes_can_still_be_signed_and_refunded() {
     let bridge = Bridge::new();
     let alice = Address::Ed25519([0xa; 32]);

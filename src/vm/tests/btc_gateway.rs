@@ -7,7 +7,7 @@ use {
     super::*,
     crate::crypto::bitcoin::sha256d,
     crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut},
-    crate::registry::federation::{DecidedFederation, Federation},
+    crate::registry::federation::{DecidedFederation, DecidedWhen, Federation},
 };
 
 const NOW: u64 = 1_800_000_000_000;
@@ -38,6 +38,12 @@ fn federation(secrets: &[u8], threshold: u32) -> Federation {
         bitcoin_depth: 2,
         btc: None,
     }
+}
+
+/// Governance decides another federation, as it writes one: in force, and kept for good with the
+/// block that decided it, at the time calls run at.
+fn decide(world: &World, version: u64, federation: Federation) {
+    crate::registry::changes::Changes::new(&world.state).write_federation(&DecidedFederation { version, federation }, DecidedWhen { height: 1, time: NOW });
 }
 
 struct Btc {
@@ -408,8 +414,8 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     assert_eq!(btc.call_as(alice, "withdraw", &[bytes(&bob), number(20_000)]).unwrap(), [TxCallArgumentType::I64(1)]);
     assert_eq!(
         btc.call("withdrawal", &[number(1)]).unwrap(),
-        [bytes(&bob), TxCallArgumentType::I64(20_000), TxCallArgumentType::String("queued".into()), address(alice), TxCallArgumentType::I64(2_000), TxCallArgumentType::Nil],
-        "and who asked, for wallets, and the most it may lose, a tenth unless told"
+        [bytes(&bob), TxCallArgumentType::I64(20_000), TxCallArgumentType::String("queued".into()), address(alice), TxCallArgumentType::I64(2_000), TxCallArgumentType::Nil, TxCallArgumentType::Nil, TxCallArgumentType::Nil],
+        "and who asked, for wallets, and the most it may lose, a tenth unless told, with no lowering waiting"
     );
     assert_eq!(btc.wbtc_of(alice), u256::from(30_000u64));
 
@@ -464,8 +470,7 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     assert_eq!(btc.call("withdrawal", &[number(1)]).unwrap()[5], TxCallArgumentType::I64(1_000), "what it lost, for wallets");
 
     // A new federation: the old one's change is swept to it, all of it; the new one's is not.
-    let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
-    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+    decide(&btc.world, 1, federation(&[31, 32], 2));
     let new_change = match &btc.call("change_script", &[]).unwrap()[..] {
         [TxCallArgumentType::Bytes(script)] => crate::crypto::bitcoin::tx::p2wsh(script),
         other => panic!("{other:?}"),
@@ -486,12 +491,12 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     };
 
     assert_ne!(&old_output, output, "a new federation, new deposit addresses");
-    let late = pays(output, 7_000);
+    let late = pays(output, 10_000);
     let (block, index, path, first, first_path) = btc.mine(&late);
     btc.bury();
     btc.call("deposit", &[bytes(&block), bytes(&late), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(alice), number(0)]).unwrap();
 
-    assert_eq!(btc.wbtc_of(alice), u256::from(37_000u64));
+    assert_eq!(btc.wbtc_of(alice), u256::from(40_000u64));
 }
 
 /// A release to propose, and the gateway's answer to everyone who may not propose it.
@@ -583,8 +588,7 @@ fn what_proposed_a_release_does_not_bring_it_back_once_cancelled_and_signing_it_
 fn only_a_signer_of_the_federation_in_force_proposes_a_release_or_a_sweep() {
     let (btc, _, _) = a_release_to_propose();
     let deposit = btc.gateway_input();
-    let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
-    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+    decide(&btc.world, 1, federation(&[31, 32], 2));
     let sweep = spending(&[deposit], vec![btc.change(49_000)]).base();
 
     assert!(btc.propose_as(21, &sweep, &[]).unwrap_err().contains("only a signer"), "of the federation before");
@@ -729,8 +733,7 @@ fn the_gateway_goes_by_the_fee_policy_the_federation_names_once_governance_names
 
     // The same signers, with a policy of their own: a higher floor and a lower cap.
     let policy = BtcPolicy { fee_cap: 8_000, fee_floor: 10, grace_ms: 1_000, cancel_after_ms: 60_000, fee_part: 4, bump_after_ms: 60_000, bump_below_pct: 80, repay_pct: 20, repay_most: 500 };
-    let next = DecidedFederation { version: 0, federation: Federation { btc: Some(policy), ..federation(&[21, 22, 23], 2) } };
-    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+    decide(&btc.world, 0, Federation { btc: Some(policy), ..federation(&[21, 22, 23], 2) });
 
     assert_eq!(btc.call("fee_limits", &[]).unwrap(), [TxCallArgumentType::I64(8_000), TxCallArgumentType::I64(10)]);
     let release = |fee: u64| spending(&[deposit], vec![pays_bob(20_000 - fee), btc.change(80_000)]);
@@ -957,11 +960,11 @@ fn a_chain_restarted_from_the_identical_genesis_does_not_mint_a_deposit_from_bef
     assert_eq!(new.wbtc_of(ALICE), u256::ZERO);
 
     // A payment since mints.
-    let fresh = pays(&new.deposit_output(ALICE), 7_000);
+    let fresh = pays(&new.deposit_output(ALICE), 10_000);
     let (block, index, path, first, first_path) = new.mine(&fresh);
     new.bury();
     new.call("deposit", &[bytes(&block), bytes(&fresh), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]).unwrap();
-    assert_eq!(new.wbtc_of(ALICE), u256::from(7_000u64));
+    assert_eq!(new.wbtc_of(ALICE), u256::from(10_000u64));
 }
 
 #[cfg(feature = "bridge")]
@@ -1003,7 +1006,7 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
         raw: release.base(),
         txid: sha256d(&release.base()).to_vec(),
         version: 0,
-        withdrawals: vec![NamedWithdrawal { id, script: bob(), sats: 20_000, most_fee: 2_000, state: "proposed".to_string(), anchor: None }],
+        withdrawals: vec![NamedWithdrawal { id, script: bob(), sats: 20_000, most_fee: 2_000, state: "proposed".to_string(), anchor: None, lowering: None }],
         inputs: vec![held(&first), held(&second)],
         change_script: change_script.clone(),
         fee_cap: CAP,
@@ -1120,7 +1123,7 @@ fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_ne
     // In a release, only higher, as a bump may need: what it was proposed under stands.
     assert!(btc.call_as(ALICE, "set_most_fee", &[number(small), number(1_000)]).unwrap_err().contains("only raises"));
     btc.call_as(ALICE, "set_most_fee", &[number(small), number(2_000)]).unwrap();
-    assert_eq!(btc.call("withdrawal", &[number(small)]).unwrap()[4..], [TxCallArgumentType::I64(2_000), TxCallArgumentType::I64(1_001)]);
+    assert_eq!(btc.call("withdrawal", &[number(small)]).unwrap()[4..], [TxCallArgumentType::I64(2_000), TxCallArgumentType::I64(1_001), TxCallArgumentType::Nil, TxCallArgumentType::Nil]);
 
     // What the gateway holds falls by just what was burned, whatever the fee was: a full release
     // leaves all of it backed.
@@ -1139,11 +1142,13 @@ fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_ne
     assert!(btc.call_as(ALICE, "withdraw", &[bytes(&bob()), number(10_000), number(0)]).unwrap_err().contains("from 1"));
     assert_eq!(btc.call("least_withdrawal", &[]).unwrap(), [TxCallArgumentType::I64(10_000)]);
 
-    // A sweep's fee stays the federation's: no withdrawal to bear it.
-    let next = DecidedFederation { version: 1, federation: federation(&[31, 32], 2) };
-    btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
+    // A sweep's fee comes off no withdrawal: once shown it is owed to the backing, as a child's is.
+    decide(&btc.world, 1, federation(&[31, 32], 2));
     let sweep = spending(&[second], vec![btc.change(99_001)]);
     btc.propose_as(31, &sweep.base(), &[]).unwrap();
+    btc.sign_all(2, &sweep);
+    btc.show(2, &sweep).unwrap();
+    assert_eq!(btc.owed(), [1_000, 0]);
 }
 
 #[cfg(feature = "bridge")]

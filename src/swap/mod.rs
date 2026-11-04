@@ -46,6 +46,12 @@ pub const FIRST_DEADLINE_MS: u64 = 24 * 3_600_000;
 )]
 pub const SECOND_DEADLINE_MS: u64 = 12 * 3_600_000;
 
+#[document(
+    summary = "How far ahead of now a swap's deadlines may be, at most: a year. A deadline past it is refused, so no lock is made to outlast the other by years nor end at a time its chain cannot write.",
+    category = "Swaps",
+)]
+pub const MAX_SPAN_MS: u64 = 365 * 24 * 3_600_000;
+
 /// The first byte of terms written as two legs. Terms from before, chainv4 against Bitcoin, began
 /// with their chain's tag, 0 or 1, and still read.
 const LEGS: u8 = 2;
@@ -214,6 +220,57 @@ impl BitcoinParty {
     }
 }
 
+#[document(
+    summary = "What kind of thing a lock holds, as both swap contracts number it in a swap's id: 0 the coin or a fungible token, 1 an NFT, 2 an amount of a multi-token id.",
+    category = "Swaps",
+    see_also = "ChainLeg::swap_id, EvmLeg::swap_id",
+)]
+pub fn item_kind(item: Option<Item>) -> u8 {
+    match item {
+        None => 0,
+        Some(Item { multi: false, .. }) => 1,
+        Some(Item { multi: true, .. }) => 2,
+    }
+}
+
+/// A number as one word of Solidity's ABI: 32 bytes, big-endian.
+pub(crate) fn number_word(number: u256) -> [u8; 32] {
+    number.to_be_bytes()
+}
+
+/// A chainv4 address in a swap's id: the ABI's static tuple (uint8 kind, bytes32 bytes), which is
+/// 31 zero bytes and then the 33 bytes Address::to_abi writes, so two kinds of address with the
+/// same bytes never name one swap.
+fn chain_party(address: &Address) -> [u8; 64] {
+    let mut words = [0; 64];
+    words[31..].copy_from_slice(&address.to_abi());
+
+    words
+}
+
+impl ChainLeg {
+    #[document(
+        parent = "ChainLeg",
+        summary = "The swap's id in chainv4's swap contract, what every call but a lock takes: the keccak256 of the hash, the payer, the receiver, the token (the zero address for the coin), the kind of thing locked, the NFT's id or 0, the amount and the deadline, in milliseconds, in Solidity's ABI, each address the tuple (uint8 kind, bytes32 bytes). A stranger's lock under the same hash is another swap. None until both parties are in.",
+        see_also = "item_kind",
+    )]
+    pub fn swap_id(&self, hash: &[u8; 32], deadline: u64) -> Option<[u8; 32]> {
+        let token = self.token.unwrap_or(Address::Ed25519([0; 32]));
+        let words = [
+            hash.to_vec(),
+            chain_party(&self.payer?).to_vec(),
+            chain_party(&self.receiver?).to_vec(),
+            chain_party(&token).to_vec(),
+            number_word(u256::from(item_kind(self.item))).to_vec(),
+            number_word(self.item.map_or(u256::ZERO, |item| item.id)).to_vec(),
+            number_word(self.amount).to_vec(),
+            number_word(u256::from(deadline)).to_vec(),
+        ];
+
+        Some(crate::crypto::secp256k1::keccak(&words.concat()))
+    }
+}
+
 #[document(summary = "A swap's leg on an EVM chain, such as Ethereum: a lock in Swap.sol there.", category = "Swaps", see_also = "Leg")]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct EvmLeg {
@@ -308,6 +365,8 @@ pub struct Lock {
     pub height: Option<u64>,
     #[document(summary = "The NFT it holds, as the contract's item() says; None for coins, a fungible token, or a contract from before NFTs.")]
     pub item: Option<Item>,
+    #[document(summary = "Claimed, but its payout to the recipient was refused when claimed: anyone may send withdraw to try it again.")]
+    pub owed: bool,
 }
 
 #[document(
@@ -483,6 +542,18 @@ impl Leg {
         Ok(())
     }
 
+    #[document(
+        parent = "Leg",
+        summary = "The swap's id in its chain's swap contract, which its claim, refund, withdraw, get and item take: ChainLeg::swap_id on chainv4, EvmLeg::swap_id on an EVM chain. None on Bitcoin, whose HTLC is no contract's, and until both parties are in.",
+    )]
+    pub fn swap_id(&self, hash: &[u8; 32], deadline: u64) -> Option<[u8; 32]> {
+        match self {
+            Leg::Chain(leg) => leg.swap_id(hash, deadline),
+            Leg::Evm(leg) => leg.swap_id(hash, deadline),
+            Leg::Bitcoin(_) => None,
+        }
+    }
+
     #[document(parent = "Leg", summary = "Whether these parties are its payer, or its receiver.")]
     pub fn is(&self, role: Role, parties: &Parties) -> bool {
         match self.party(role) {
@@ -593,6 +664,9 @@ impl Leg {
 
         match self {
             Leg::Chain(leg) if leg.amount == u256::ZERO => Err("a swap locks more than nothing on chainv4".to_string()),
+            // The swap contract takes its deadline as an i64 of milliseconds.
+            Leg::Chain(_) if i64::try_from(deadline).is_err() => Err("a deadline chainv4 cannot write as a time".to_string()),
+            Leg::Chain(leg) if leg.receiver.is_some_and(|receiver| receiver.bytes().iter().all(|byte| *byte == 0)) => Err("the zero address, on chainv4".to_string()),
             Leg::Chain(leg) => one_nft(&leg.item, leg.amount, leg.token.is_some()),
             Leg::Bitcoin(leg) => {
                 if leg.sats < htlc::DUST {
@@ -611,6 +685,12 @@ impl Leg {
             Leg::Evm(leg) => {
                 if leg.amount == u256::ZERO {
                     return Err(format!("a swap locks more than nothing on {}", self.chain_name()));
+                }
+
+                // Swap.sol keeps whole seconds in a uint64, which every deadline in milliseconds
+                // fits; this says so rather than leave it to arithmetic.
+                if deadline / 1_000 > u64::MAX / 1_000 {
+                    return Err(format!("a deadline {} cannot write as a time", self.chain_name()));
                 }
 
                 let zero = [0; 20];
@@ -715,6 +795,20 @@ impl Terms {
                 .all(|(given, now)| kept(given.party(Role::Payer), now.party(Role::Payer)) && kept(given.party(Role::Receiver), now.party(Role::Receiver)))
     }
 
+    #[document(
+        parent = "Terms",
+        summary = "A leg's swap id in its chain's swap contract, from the terms: what to claim, refund, withdraw and read it by. None for a Bitcoin leg, and for an offer not yet answered.",
+        see_also = "Leg::swap_id",
+    )]
+    pub fn swap_id(&self, side: Side) -> Option<[u8; 32]> {
+        self.leg(side).swap_id(&self.hash, self.deadline(side))
+    }
+
+    #[document(parent = "Terms", summary = "Whether a leg's lock is Bitcoin's and the second: its refunder must be online at its deadline and refund at once, as a claim of an HTLC stays valid past its lock time until a refund is mined.")]
+    pub fn bitcoin_second(&self) -> bool {
+        matches!(self.second, Leg::Bitcoin(_))
+    }
+
     #[document(parent = "Terms", summary = "Its Bitcoin leg, if it has one, and which side it is.")]
     pub fn bitcoin(&self) -> Option<(Side, &BitcoinLeg)> {
         self.legs().into_iter().find_map(|(side, leg)| match leg {
@@ -747,12 +841,18 @@ impl Terms {
             return Err(format!("both legs on {}: a swap is between two chains", self.first.chain_name()));
         }
 
-        if self.second_deadline <= now {
+        if self.first_deadline <= now || self.second_deadline <= now {
             return Err("its deadlines have passed".to_string());
         }
 
-        if self.second_deadline + MIN_GAP_MS > self.first_deadline {
+        // Checked, as a second deadline near the end of time would otherwise wrap past the first,
+        // and the second lock would outlast the first.
+        if self.second_deadline.checked_add(MIN_GAP_MS).is_none_or(|end| end > self.first_deadline) {
             return Err(format!("the second lock must end at least {} hours before the first, so the second side has time to claim", MIN_GAP_MS / 3_600_000));
+        }
+
+        if self.first_deadline > now.saturating_add(MAX_SPAN_MS) {
+            return Err(format!("its deadlines are more than {} days ahead", MAX_SPAN_MS / 86_400_000));
         }
 
         for (side, leg) in self.legs() {
@@ -825,7 +925,7 @@ impl Terms {
 impl Lock {
     #[document(
         parent = "Lock",
-        summary = "A lock as chainv4's swap contract shows it, from get's values as text: state, locker, recipient, token (the zero address for the coin), amount, deadline and secret.",
+        summary = "A lock as chainv4's swap contract shows it, from get's values as text: state, locker, recipient, token (the zero address for the coin), amount, deadline, secret, the block it was locked in, and whether its payout is owed.",
     )]
     pub fn from_chain(values: &[String]) -> Result<Lock, String> {
         let state = match values.first().map(String::as_str) {
@@ -837,13 +937,15 @@ impl Lock {
         };
 
         if state == LockState::None {
-            return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None, item: None });
+            return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None, item: None, owed: false });
         }
 
-        // Contracts from before they said the block a swap was locked in give seven values.
-        let (recipient, token, amount, deadline, secret, height) = match values {
-            [_, _, recipient, token, amount, deadline, secret] => (recipient, token, amount, deadline, secret, None),
-            [_, _, recipient, token, amount, deadline, secret, height] => (recipient, token, amount, deadline, secret, Some(height)),
+        // Contracts from before they said the block a swap was locked in give seven values, and
+        // those from before claims paid by pull eight.
+        let (recipient, token, amount, deadline, secret, height, owed) = match values {
+            [_, _, recipient, token, amount, deadline, secret] => (recipient, token, amount, deadline, secret, None, false),
+            [_, _, recipient, token, amount, deadline, secret, height] => (recipient, token, amount, deadline, secret, Some(height), false),
+            [_, _, recipient, token, amount, deadline, secret, height, owed] => (recipient, token, amount, deadline, secret, Some(height), owed == "true"),
             _ => return Err("an answer the swap contract does not give".to_string()),
         };
         let address = |text: &str| text.parse::<Address>().map_err(|_| format!("{text} is not an address"));
@@ -864,6 +966,7 @@ impl Lock {
             secret,
             height: height.map(|height| number(height).and_then(|height| u64::try_from(height).map_err(|_| "a height past any chain".to_string()))).transpose()?.filter(|height| *height > 0),
             item: None,
+            owed,
         })
     }
 

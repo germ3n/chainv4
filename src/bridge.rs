@@ -146,12 +146,44 @@ pub struct NamedWithdrawal {
     pub script: Vec<u8>,
     #[document(summary = "What it burned: it arrives less its share of its release's fee.")]
     pub sats: u64,
-    #[document(summary = "The most it agreed to lose to that share.")]
+    #[document(summary = "The most it agreed to lose to that share, as the gateway judges a release proposed now.")]
     pub most_fee: u64,
     #[document(summary = "queued, proposed or paid.")]
     pub state: String,
     #[document(summary = "The outpoint its release must spend, after one paying it was cancelled.")]
     pub anchor: Option<String>,
+    #[document(summary = "A lower most fee its owner asked for that does not hold yet, and the height it holds from while it is queued: BTC_LOWER_MOST_FEE_AFTER blocks after it was asked for.")]
+    pub lowering: Option<(u64, u64)>,
+}
+
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "How many blocks a lowered most fee waits before it holds, as the Bitcoin gateway has it: a release proposed against the old limit, with up to 50 withdrawals, lands under it, rather than one owner undoing it by lowering theirs. A raised one holds at once.",
+    category = "Bridges",
+    see_also = "NamedWithdrawal::most_fee_at",
+)]
+pub const BTC_LOWER_MOST_FEE_AFTER: u64 = 30;
+
+#[cfg(feature = "bitcoin")]
+impl NamedWithdrawal {
+    #[document(
+        parent = "NamedWithdrawal",
+        summary = "The most it may lose to fees in a release proposed at a height, as the gateway judges it: a lowering holds from its height while it is queued, and one in a release keeps the limit that release was proposed under, for its bumps too.",
+    )]
+    pub fn most_fee_at(&self, height: u64) -> u64 {
+        match self.lowering {
+            Some((lowered, from)) if self.state == "queued" && height >= from => lowered,
+            _ => self.most_fee,
+        }
+    }
+
+    #[document(
+        parent = "NamedWithdrawal",
+        summary = "The most it may lose in a release however late that lands: most_fee_at once any lowering holds. What the planner goes by, as it cannot know the block a proposal lands in, and a release within the lower limit passes the higher one too.",
+    )]
+    pub fn most_fee_ahead(&self) -> u64 {
+        self.most_fee_at(u64::MAX)
+    }
 }
 
 #[cfg(feature = "bitcoin")]
@@ -516,7 +548,7 @@ fn sound_btc_release(facts: &ReleaseFacts) -> Result<(u64, u64), String> {
 
         let share = btc_fee_share(cost, facts.withdrawals.len() as u64, at) + repays[at];
 
-        if share > withdrawal.most_fee {
+        if share > withdrawal.most_fee_ahead() {
             return Err(format!("its share of the fee is more than withdrawal {} agreed to lose", withdrawal.id));
         }
 
@@ -607,18 +639,37 @@ const BTC_MOST_WITHDRAWALS: usize = 50;
 #[cfg(feature = "bitcoin")]
 const BTC_MOST_VBYTES: u64 = 100_000;
 
-/// What pays these withdrawals and leaves change of at least dust: what their anchors require, then
-/// what the gateway holds in the order it took it. Should it hold no more than they burned and less
-/// than dust past it, all it holds, the withdrawals topping its change up to dust. None if it holds
-/// less than they burned.
 #[cfg(feature = "bitcoin")]
-fn btc_inputs<'a>(chosen: &[&NamedWithdrawal], held: &'a [(String, SpentOutput)]) -> Option<Vec<&'a (String, SpentOutput)>> {
+#[document(
+    summary = "What spending one output the gateway holds adds to a release once signed, in virtual bytes: its outpoint, empty script and sequence, and its witness at its largest.",
+    params = { threshold = "How many of its federation must sign.", script_len = "The length of the witness script that spends it." },
+    category = "Bridges",
+    see_also = "btc_release_vbytes",
+)]
+pub fn btc_input_vbytes(threshold: u32, script_len: usize) -> u64 {
+    let witness = 2 + threshold as usize * 74 + if script_len < 0xfd { 1 } else { 3 } + script_len;
+
+    (4 * 41 + witness).div_ceil(4) as u64
+}
+
+/// What pays these withdrawals and leaves change of at least dust: what their anchors require, then
+/// what the gateway holds, largest first, leaving out what is worth no more than it costs to spend at
+/// the rate. Taken in the order held, dust paid to a deposit address ahead of the rest would drag
+/// hundreds of inputs into every release, past the cap. Should it hold no more than they burned and
+/// less than dust past it, all it holds of worth, the withdrawals topping its change up to dust.
+/// None if it holds less than they burned.
+#[cfg(feature = "bitcoin")]
+fn btc_inputs<'a>(chosen: &[&NamedWithdrawal], held: &'a [(String, SpentOutput)], rate: u64) -> Option<Vec<&'a (String, SpentOutput)>> {
     let burned: u64 = chosen.iter().map(|withdrawal| withdrawal.sats).sum();
     let required = |outpoint: &str| chosen.iter().any(|withdrawal| withdrawal.anchor.as_deref() == Some(outpoint));
     let mut inputs: Vec<_> = held.iter().filter(|(outpoint, _)| required(outpoint)).collect();
     let mut taken: u64 = inputs.iter().map(|(_, output)| output.sats).sum();
+    let worth = |output: &SpentOutput| output.sats > btc_input_vbytes(output.threshold, output.script_len).saturating_mul(rate);
+    // Largest first, and among equals in the order held, so every signer picks the same.
+    let mut rest: Vec<_> = held.iter().filter(|(outpoint, output)| !required(outpoint) && worth(output)).collect();
+    rest.sort_by_key(|(_, output)| std::cmp::Reverse(output.sats));
 
-    for output in held.iter().filter(|(outpoint, _)| !required(outpoint)) {
+    for output in rest {
         if taken >= burned + BTC_DUST {
             break;
         }
@@ -632,7 +683,7 @@ fn btc_inputs<'a>(chosen: &[&NamedWithdrawal], held: &'a [(String, SpentOutput)]
 
 #[cfg(feature = "bitcoin")]
 #[document(
-    summary = "The release to propose from what is queued and what the gateway holds, oldest first. It is worked out from the gateway's state and the fee alone, so signers doing it at once build the same one, and the first to land wins. A withdrawal it cannot pay now is left out and said why, never holding up the rest: one whose anchor is in another release, one past what the gateway holds, one that agreed to lose less than its share of the fee. A release past the cap at this rate pays fewer, for another to pay the rest.",
+    summary = "The release to propose from what is queued, oldest first, and what the gateway holds, largest first, leaving out an output worth no more than it costs to spend at the rate, so dust paid to a deposit address never drags a release past the cap. It is worked out from the gateway's state and the fee alone, so signers doing it at once build the same one, and the first to land wins. A withdrawal it cannot pay now is left out and said why, never holding up the rest: one whose anchor is in another release, one past what the gateway holds, one that agreed to lose less than its share of the fee, by the lowest its limit comes to however late the release lands. A release past the cap at this rate pays fewer, for another to pay the rest.",
     params = {
         queued = "What is queued, oldest first.",
         held = "What the gateway holds unspent, in the order it took it.",
@@ -671,7 +722,12 @@ pub fn plan_btc_release(queued: &[NamedWithdrawal], held: &[(String, SpentOutput
             return Ok(ReleasePlan { tx: None, ids: Vec::new(), fee: 0, cost: 0, repay: ReleaseRepay::default(), waiting });
         }
 
-        let Some(inputs) = btc_inputs(&chosen, held) else {
+        // The rate each input costs at: a fee told pays at least the floor, and may be no more.
+        let rate = match fee {
+            ReleaseFee::Fixed(_) => fee_floor,
+            ReleaseFee::Rate(rate) => rate.max(fee_floor),
+        };
+        let Some(inputs) = btc_inputs(&chosen, held, rate) else {
             let largest = chosen.iter().rev().max_by_key(|withdrawal| withdrawal.sats).expect("there is one").id;
             out.insert(largest);
             waiting.push((largest, "the gateway holds too little unspent to pay it, for now".to_string()));
@@ -723,19 +779,19 @@ pub fn plan_btc_release(queued: &[NamedWithdrawal], held: &[(String, SpentOutput
         let short = chosen
             .iter()
             .enumerate()
-            .filter(|(at, withdrawal)| btc_fee_share(cost, count, *at) > withdrawal.most_fee)
-            .min_by_key(|(at, withdrawal)| (withdrawal.most_fee, std::cmp::Reverse(*at)))
+            .filter(|(at, withdrawal)| btc_fee_share(cost, count, *at) > withdrawal.most_fee_ahead())
+            .min_by_key(|(at, withdrawal)| (withdrawal.most_fee_ahead(), std::cmp::Reverse(*at)))
             .map(|(_, withdrawal)| withdrawal);
 
         if let Some(short) = short {
             out.insert(short.id);
-            waiting.push((short.id, format!("it agreed to lose {}, less than its share of a fee of {cost}: its owner raises that with set-most-fee, or it waits for fees to fall", short.most_fee)));
+            waiting.push((short.id, format!("it agreed to lose {}, less than its share of a fee of {cost}: its owner raises that with set-most-fee, or it waits for fees to fall", short.most_fee_ahead())));
 
             continue;
         }
 
         // What each repays comes out of what its limit leaves, and goes back to the federation's change.
-        let rooms: Vec<u64> = chosen.iter().enumerate().map(|(at, withdrawal)| withdrawal.most_fee - btc_fee_share(cost, count, at)).collect();
+        let rooms: Vec<u64> = chosen.iter().enumerate().map(|(at, withdrawal)| withdrawal.most_fee_ahead() - btc_fee_share(cost, count, at)).collect();
         let (budget, repays) = btc_repays(repay.owed, paid, repay.pct, repay.most, &rooms);
 
         for (at, output) in tx.outputs.iter_mut().take(chosen.len()).enumerate() {

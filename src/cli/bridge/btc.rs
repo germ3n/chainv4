@@ -81,6 +81,10 @@ pub enum BtcAction {
         /// How long an old federation's deposit addresses stay open, in hours.
         #[arg(long, default_value_t = 168)]
         grace_hours: u64,
+        /// The least a deposit mints, in satoshis: dust minted as wBTC would be dragged into
+        /// releases that cost more to sign than it is worth.
+        #[arg(long, default_value_t = 10_000)]
+        least_deposit: u64,
     },
     /// An address's deposit address on Bitcoin, under the federation in force, written for the
     /// Bitcoin the gateway's relay follows: bc1q… on main, tb1q… on the test networks, bcrt1q…
@@ -109,7 +113,8 @@ pub enum BtcAction {
         #[arg(long)]
         network: Option<String>,
     },
-    /// Changes the most a queued withdrawal of yours may lose to fees, as fees rise past it.
+    /// Changes the most a queued withdrawal of yours may lose to fees, as fees rise past it. Raised,
+    /// it holds at once; lowered, 30 blocks later, as a release may be on its way under the old one.
     SetMostFee { withdrawal: u64, most_fee: u64 },
     /// A federation signer, with --evm-key, proposes a release paying the queued withdrawals from
     /// what the gateway holds. Its fee comes off them evenly, and one that agreed to lose less than
@@ -328,6 +333,14 @@ fn whole(value: &Value) -> u64 {
     text(value).parse().unwrap_or(0)
 }
 
+/// A lower most fee a withdrawal asked for that does not hold yet, and the height it holds from, as
+/// withdrawal(id) gives them last: None for none, as from a gateway from before they were given.
+fn lowering(withdrawal: &[Value]) -> Option<(u64, u64)> {
+    let given = |at: usize| withdrawal.get(at).and_then(|value| text(value).parse().ok());
+
+    Some((given(6)?, given(7)?))
+}
+
 /// What the network asks for a release to be mined, as Esplora says it, in satoshis a virtual byte.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct FeeRates {
@@ -491,24 +504,38 @@ impl Bridge {
 
                 Ok(())
             }
-            BtcAction::Deploy { relay, fee_cap, fee_floor, grace_hours } => {
+            BtcAction::Deploy { relay, fee_cap, fee_floor, grace_hours, least_deposit } => {
                 let me = crate::cli::signer(self.args.key.as_deref())?.public().address();
                 let template = self.deploy_lua(&me, "wrapped.lua", super::WRAPPED_LUA)?;
                 let gateway = self.deploy_lua(&me, "btc_gateway.lua", include_str!("../../../contracts/lua/btc_gateway.lua"))?;
-                self.call(gateway, "setup", u256::ZERO, vec![TxCallArgumentType::Address(*relay), TxCallArgumentType::Address(template), number(*fee_cap), number(*fee_floor), number(grace_hours * 3_600_000)])?;
+                let setup = vec![TxCallArgumentType::Address(*relay), TxCallArgumentType::Address(template), number(*fee_cap), number(*fee_floor), number(grace_hours * 3_600_000), number(*least_deposit)];
+                self.call(gateway, "setup", u256::ZERO, setup)?;
                 println!("btc gateway {gateway}");
+                eprintln!("releases pay at most {fee_cap} satoshis and at least {fee_floor} a virtual byte; an old federation's addresses stay open {grace_hours} hours; deposits mint from {least_deposit} satoshis");
 
                 Ok(())
             }
             BtcAction::Address { recipient, network: told } => {
                 let (written, network, why) = self.deposit_address(recipient, told.as_deref())?;
                 eprintln!("for Bitcoin's {} network: {why}", network.name());
+
+                // A gateway from before it had a least deposit says nothing of one.
+                if let Some(least) = self.btc_gateway().ok().and_then(|gateway| self.read(&gateway, "least_deposit", json!([])).ok()).and_then(|found| found.first().map(whole)) {
+                    eprintln!("a payment under {least} satoshis mints nothing, and a coinbase mints once 100 deep");
+                }
+
                 println!("{written}");
 
                 Ok(())
             }
             BtcAction::Deposit { txid, vout, recipient } => {
                 let Proof { tx, block, index, path, coinbase, coinbase_path } = self.proof(txid)?;
+
+                // Bitcoin lets no one spend a coinbase for 100 blocks, so the gateway waits that long too.
+                if index == 0 {
+                    eprintln!("a coinbase: it mints once 100 deep, as Bitcoin lets nothing spend it before");
+                }
+
                 let args = vec![bytes(block.to_vec()), bytes(tx), number(index), bytes(path), bytes(coinbase), bytes(coinbase_path), number(u64::from(*vout)), TxCallArgumentType::Address(*recipient), TxCallArgumentType::Nil];
                 self.call(self.btc_gateway()?, "deposit", u256::ZERO, args)
             }
@@ -1335,7 +1362,7 @@ impl Bridge {
             }
 
             if state == "queued" {
-                found.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), most_fee: whole(&withdrawal[4]), state, anchor: self.anchor(gateway, id)? });
+                found.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), most_fee: whole(&withdrawal[4]), state, anchor: self.anchor(gateway, id)?, lowering: lowering(&withdrawal) });
             }
         }
 
@@ -1486,7 +1513,7 @@ impl Bridge {
         for id in found.get(2).map(text).unwrap_or_default().split(',').filter(|id| !id.is_empty()) {
             let id: u64 = id.parse().map_err(|_| "a release names what is no withdrawal")?;
             let withdrawal = self.read(gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
-            withdrawals.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), most_fee: whole(&withdrawal[4]), state: text(&withdrawal[2]), anchor: self.anchor(gateway, id)? });
+            withdrawals.push(NamedWithdrawal { id, script: raw(&withdrawal[0]), sats: whole(&withdrawal[1]), most_fee: whole(&withdrawal[4]), state: text(&withdrawal[2]), anchor: self.anchor(gateway, id)?, lowering: lowering(&withdrawal) });
         }
 
         let inputs = tx.inputs.iter().map(|input| {

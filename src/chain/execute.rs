@@ -1138,7 +1138,7 @@ fn run(
                 Err(err) => return (Err(Failure::Registry(err.into())), Contracted::default()),
             }
 
-            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay() };
+            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay(), time: context.timestamp };
             let voted = Changes::new(layer).vote(&sender, *version, change.clone(), *vote, at, governance.ballot(), &*governance.governance);
 
             let effect = voted.map(|voted| match voted {
@@ -1155,7 +1155,7 @@ fn run(
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
             let epoch = height / rules.checkpoint_interval.max(1);
-            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: rules.finality.activation_delay() };
+            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: rules.finality.activation_delay(), time: context.timestamp };
 
             (moved(Changes::new(layer).clear(&sender, *version, change, at, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }

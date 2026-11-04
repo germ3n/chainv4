@@ -204,6 +204,12 @@ chainv4 send --key member.key vote-change --vote yes --federation '{"signers":["
 - **One state entry,** `change:federation`, holds the one in force, genesis's written there as
   the chain starts, so a light client proves it: the wallet computes Bitcoin deposit addresses
   from it.
+- **Every one is kept for good,** under `change:past-federation:` and its version, with the height
+  and time of the block that decided it, genesis's as decided at height 0: contracts read one by
+  its version with `federation.at`, and the next one's block is when it was replaced. The Bitcoin
+  gateway counts an old federation's grace from that, so one replaced before anything called the
+  gateway still mints what was paid to its addresses. A chain from before these records has none
+  of them.
 - **Its own version counts up** with each one decided, after genesis's 0, so what was signed for
   one federation is told from what was signed for the next.
 - **It is checked as genesis's is:** 1 to 20 secp256k1 keys, each once, a threshold of 1 to as

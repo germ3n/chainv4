@@ -13,6 +13,10 @@ Each side locks what it pays under the same hash:
 Whoever claims one lock shows the secret behind the hash on that chain, and the other side claims
 the other lock with it. A lock nobody claims in time goes back to whoever made it.
 
+Both swap contracts keep each lock by its **swap id**, a hash of all its terms (see
+[Swap ids](#swap-ids)), so someone who saw the hash and locks under it first makes a swap of their
+own and blocks nothing.
+
 All of it is behind the default-on `swap` cargo feature:
 
 | Part | Where |
@@ -76,12 +80,17 @@ who claims it (its receiver):
 **What `Terms::check` refuses:**
 - both legs on one chain;
 - less than 294 satoshis (Bitcoin's dust limit), or nothing on chainv4 or an EVM chain;
-- deadlines past, or a second deadline less than four hours (`MIN_GAP_MS`) before the first;
-- Bitcoin keys that are not keys, or the zero address on an EVM chain;
+- deadlines past, or a second deadline less than four hours (`MIN_GAP_MS`) before the first,
+  worked out so that no deadline near the end of time wraps the sum round;
+- a deadline more than a year ahead (`MAX_SPAN_MS`), or one its leg's chain cannot write: an i64
+  of milliseconds on chainv4, a u32 of seconds on Bitcoin, a uint64 of seconds on an EVM chain;
+- Bitcoin keys that are not keys, or the zero address on an EVM chain or as a receiver on chainv4;
 - the same party paying and receiving one leg.
 
 **`Terms::answers`** holds an answer to every term of its offer. The wallet refuses an answer that
 changes anything but the other side's parts.
+
+`Terms::check` takes the time now, which the CLI and the wallet pass as they offer and answer.
 
 **Codes made before legs still read.** Those were chainv4 against Bitcoin, and read as the same
 swap in two legs. Terms are written as legs from then on, a 2 first.
@@ -104,6 +113,17 @@ are still written with a 2, as before NFTs, so apps from before read every code 
   minutes: the defaults are 24 and 12 hours.
 - **Claim early.** A claim sent just before a deadline may be mined after it, when the lock is
   refundable instead.
+- **On Bitcoin a claim never expires.** Bitcoin's script cannot say "before": the HTLC's claim
+  branch holds no time, so a claim is mined after the lock time as before it, until a refund is
+  mined. chainv4 and EVM chains refuse a claim at or after its deadline; Bitcoin does not.
+  - With Bitcoin as the **first** leg this does no harm: a late claim of it is the other side's,
+    with a secret the starter showed by claiming theirs, so the swap owes it them anyway.
+  - With Bitcoin as the **second** leg, the starter could claim the bitcoin late, just before the
+    first deadline, leaving the other side too little time to claim the first lock with the
+    secret, then take the first lock back. So whoever pays a second lock on Bitcoin must refund
+    it **the moment Bitcoin takes the refund**, at a high fee (`htlc::URGENT_FEE_RATE`, 50 sat/vB,
+    or the most the coins can pay). The wallet does this by itself, and the CLI with
+    `swap bitcoin-refund --esplora … --wait`; both warn when Bitcoin is offered as the second leg.
 
 ## chainv4's side: the swap contract
 
@@ -121,19 +141,23 @@ A new offer's leg on chainv4 takes, in this order:
 
 | Function | What it does |
 | --- | --- |
-| `lock(hash, recipient, deadline)` | Locks the coin the call sends, for `recipient` to claim with the secret before `deadline`, Unix milliseconds. |
-| `lock_token(hash, recipient, deadline, token, amount)` | Locks `amount` of a token, moved with `transfer_from`: approve the swap contract for it first. Sends no coin. |
-| `claim(secret)` | Pays the swap whose hash is the secret's SHA-256 to its recipient, before its deadline. Anyone may send it. |
-| `refund(hash)` | Pays a swap nobody claimed back to its locker, from its deadline on. Anyone may send it. |
-| `lock_nft(hash, recipient, deadline, collection, id)` | Locks one [NFT](nft-standard.md), moved with `transfer_from`: approve the swap contract for it first. |
-| `lock_multi(hash, recipient, deadline, collection, id, amount)` | Locks `amount` of a multi-token id, moved with `transfer_from`: make the swap contract an operator first. |
-| `get(hash)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin, the collection for NFTs), amount, deadline, the secret once claimed, and the block it was locked in. |
-| `item(hash)` | What it holds, `coin`, `token`, `nft` or `multi`, and the NFT's id, or 0; `none` for no swap. |
+| `lock(hash, recipient, deadline)` | Locks the coin the call sends, for `recipient` to claim with the secret before `deadline`, Unix milliseconds. Returns the swap's id. |
+| `lock_token(hash, recipient, deadline, token, amount)` | Locks `amount` of a token, moved with `transfer_from`: approve the swap contract for it first. Sends no coin. A token that delivers less than `amount`, as one taking a fee does, is refused, by its `balance_of` before and after. |
+| `lock_nft(hash, recipient, deadline, collection, id)` | Locks one [NFT](nft-standard.md), moved with `transfer_from`: approve the swap contract for it first. Refused unless `owner_of` then names the contract. |
+| `lock_multi(hash, recipient, deadline, collection, id, amount)` | Locks `amount` of a multi-token id, moved with `transfer_from`: make the swap contract an operator first. Refused unless the contract then holds that much more of the id. |
+| `claim(id, secret)` | Claims the swap with the secret whose SHA-256 is its hash, before its deadline, and shows the secret. Its payout is tried at once; when the token refuses it, the claim stands and the payout is owed. Anyone may send it. |
+| `withdraw(id)` | Pays a claimed swap's recipient what its claim could not. Anyone may send it, as often as it takes. |
+| `refund(id)` | Pays a swap nobody claimed back to its locker, from its deadline on. A claimed swap is never refunded. Anyone may send it. |
+| `get(id)` | Its state, `none`, `locked`, `claimed` or `refunded`; locker, recipient, token (the zero address for the coin, the collection for NFTs), amount, deadline, the secret once claimed, the block it was locked in, and whether its payout is owed. |
+| `item(id)` | What it holds, `coin`, `token`, `nft` or `multi`, and the NFT's id, or 0; `none` for no swap. |
+| `id(hash, locker, recipient, token, kind, nft_id, amount, deadline)` | The id a swap of those terms has, `kind` being `coin`, `token`, `nft` or `multi`: for tools that hold the terms and not the id. For the coin, `token` is ignored, as a transaction cannot name the zero address. |
 
-Hashes and secrets are `0x` and 64 hex digits. A secret must be 32 bytes, as Bitcoin's script
-wants it, so a secret one chain takes the others take too. Events: `Locked(hash, locker,
-recipient, token, amount, deadline)`, then `LockedItem(hash, kind, id)` for NFTs,
-`Claimed(hash, secret)`, `Refunded(hash)`.
+Ids, hashes and secrets are `0x` and 64 hex digits. A secret must be 32 bytes, as Bitcoin's
+script wants it, so a secret one chain takes the others take too. Every call but `lock` refuses
+coin sent with it, which nothing would pay back. A lock for the zero address is refused. Events:
+`Locked(id, hash, locker, recipient, token, amount, deadline)`, then `LockedItem(id, kind, id)` for
+NFTs, `Claimed(id, secret)`, `Owed(id, why)` when the claim's payout was refused, `Withdrawn(id)`
+once withdraw paid it, `Refunded(id)`.
 
 ## An EVM chain's side: Swap.sol
 
@@ -142,18 +166,24 @@ runs on every EVM chain, the ones without `PUSH0` too:
 
 | Function | What it does |
 | --- | --- |
-| `lock(bytes32 hash, address recipient, uint64 deadline)` | Locks the ETH sent, until `deadline`, Unix **seconds**. |
+| `lock(bytes32 hash, address recipient, uint64 deadline)` | Locks the ETH sent, until `deadline`, Unix **seconds**. Returns the swap's id. |
 | `lockToken(hash, recipient, deadline, address token, uint256 amount)` | Locks an ERC-20, moved with `transferFrom`: approve Swap.sol first. A token that takes a fee as it moves is refused. Tokens that return nothing, as USDT does, are taken. |
-| `claim(bytes32 secret)` | Pays the recipient, before the deadline: SHA-256 through Ethereum's own precompile. Anyone may send it. |
-| `refund(bytes32 hash)` | Pays the locker back, from the deadline on. Anyone may send it. |
 | `lockNft(hash, recipient, deadline, address collection, uint256 id)` | Locks an ERC-721 token, moved with `transferFrom`: approve Swap.sol for it first. |
 | `lockMulti(hash, recipient, deadline, address collection, uint256 id, uint256 amount)` | Locks an amount of an ERC-1155 id, moved with `safeTransferFrom`: `setApprovalForAll` for Swap.sol first. Swap.sol takes ERC-1155 tokens only as this moves them in. |
-| `get(bytes32 hash)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH, the collection for NFTs), amount, deadline, the secret once claimed, and the block it was locked in. |
-| `item(bytes32 hash)` | What it holds: 0 the coin or an ERC-20, 1 an ERC-721 token, 2 an ERC-1155 amount; and the NFT's id. |
+| `claim(bytes32 id, bytes32 secret)` | Claims the swap, before its deadline, with the secret whose SHA-256, through Ethereum's own precompile, is its hash. Its payout is tried through a call it can catch; when refused, the claim stands and the payout is owed. Anyone may send it. |
+| `withdraw(bytes32 id)` | Pays a claimed swap's recipient what its claim could not. Anyone may send it, as often as it takes. |
+| `refund(bytes32 id)` | Pays the locker back, from the deadline on. A claimed swap is never refunded. Anyone may send it. |
+| `get(bytes32 id)` | State (0 none, 1 locked, 2 claimed, 3 refunded), locker, recipient, token (zero for ETH, the collection for NFTs), amount, deadline, the secret once claimed, the block it was locked in, and whether its payout is owed. |
+| `item(bytes32 id)` | What it holds: 0 the coin or an ERC-20, 1 an ERC-721 token, 2 an ERC-1155 amount; and the NFT's id. |
+| `idOf(hash, locker, recipient, token, uint8 kind, nftId, amount, uint64 deadline)` | The id a swap of those terms has. |
 
-Events: `Locked`, then `LockedItem(hash, kind, id)` for NFTs, `Claimed(hash, secret)`,
-`Refunded(hash)`. The secret is kept in the
-contract's state as well, so `get` alone shows it, with no log search, which providers limit.
+Events: `Locked(id, hash, locker, recipient, token, amount, deadline)`, then `LockedItem(id,
+kind, id)` for NFTs, `Claimed(id, secret)`, `Owed(id)`, `Withdrawn(id)`, `Refunded(id)`. The secret
+is kept in the contract's state as well, so `get` alone shows it, with no log search, which
+providers limit.
+
+- **Swap.sol's address changed with claims paid by pull,** as CREATE2 puts new code at a new
+  address: new offers default to it, and terms naming the old one still go there.
 
 - **One address on every chain.** Swap.sol is deployed through the deterministic deployment
   proxy (`0x4e59b44847b379578588920ca78fbf26c0b4956c`, on most EVM chains) with no salt. CREATE2
@@ -164,6 +194,46 @@ contract's state as well, so `get` alone shows it, with no log search, which pro
 - **Reaching a chain:** by its JSON-RPC: `--eth-rpc` for the CLI, Settings, **Swaps** for the
   wallet. A provider's URL, your own node's, or chainv4's own `POST /rpc`, its EVM being an EVM
   chain too.
+
+## Swap ids
+
+Both contracts keep a lock by the keccak256 of all its terms in Solidity's ABI: the hash, the
+locker, the recipient, the token (the zero address for the coin), the kind of thing locked (0 the
+coin or a fungible token, 1 an NFT, 2 a multi-token amount), the NFT's id or 0, the amount and the
+deadline.
+
+| Chain | An address is | The deadline is |
+| --- | --- | --- |
+| chainv4 | the static tuple `(uint8 kind, bytes32 bytes)`: 31 zero bytes, then the 33 `Address::to_abi` writes | milliseconds |
+| An EVM chain | an `address` | whole seconds, as Swap.sol keeps it |
+
+- **The locker is whoever sends the lock,** so nobody else can make a lock with the real one's id.
+  A stranger who saw the hash and locks under it first makes a swap of their own: the real lock
+  still goes in, and the other side checks the lock by the id its own terms give.
+- **The apps work it out from the terms:** `Terms::swap_id(side)`, `ChainLeg::swap_id` and
+  `EvmLeg::swap_id` in `src/swap/`, `chainv4 swap show` prints both legs' ids, and the contracts
+  give it back from `lock` and from `id` (`idOf` on Swap.sol).
+- **Every call but a lock takes the id:** claim, withdraw, refund, get and item.
+
+## Claims paid by pull
+
+A claim's payout can be refused: a token its issuer pauses or blacklists, an upgradeable one, or
+an ERC-1155 receiver's hook. Before, the claim then failed whole, yet its transaction, the secret
+in it, was mined, so the other side could read the secret, claim the first lock, and refund
+their own after its deadline.
+
+- **A claim records the swap as claimed and keeps its secret** even when its payout is refused.
+  The payout is then owed: `get` says so, and the contract emits `Owed`.
+- **`withdraw(id)` tries the payout again,** sent by anyone, as often as it takes; it fails whole
+  while the token still refuses, and the payout stays owed.
+- **A claimed swap is never refunded,** owed or not.
+- **A payout that goes at once leaves nothing owed.** While it is tried nothing is owed, so a
+  recipient or token called back during it finds nothing to withdraw.
+- **The CLI** says when a claim's payout was refused, and `swap withdraw` pays it; **the wallet**
+  shows **Pay it out**; **the explorer** shows the payout owed.
+
+On chainv4 a token that burns all the fuel its payout is given still fails the claim whole, as
+`contracts.call` passes the call all the fuel there is: keep to tokens you trust there too.
 
 ## Bitcoin's side: the HTLC
 
@@ -221,9 +291,11 @@ chainv4 swap bitcoin-claim UR:CHAINV4-SWAP/… --secret 0x… --funding <txid>:<
 
 **Which leg a command acts on:**
 - `lock` acts on the leg your `--key` pays.
-- `claim` acts on the one it receives, or else the only one not on Bitcoin.
+- `claim` and `withdraw` act on the one it receives, or else the only one not on Bitcoin.
 - `refund` acts on the one it pays.
 - `--leg first|second` picks one outright.
+
+Each finds its lock by the swap id the terms give, which `swap show` prints.
 
 **Locking second checks the first lock first:** it must stand as the terms say on chainv4 or the
 EVM chain, or the lock is refused. A first lock on Bitcoin the CLI cannot see: check it yourself,
@@ -231,6 +303,14 @@ then lock with `--anyway`.
 
 **Other commands:**
 - `swap refund` and `swap bitcoin-refund` take a lock back after its deadline.
+- `swap withdraw` pays a claimed leg's receiver what its claim could not, once the token lets it.
+- `swap bitcoin-claim` and `bitcoin-refund` print the signed transaction, or with `--esplora URL`
+  broadcast it there. `bitcoin-refund --esplora URL --wait` waits for the deadline, then sends the
+  refund every 30 seconds while Bitcoin refuses it as not final, its median time short of the
+  deadline. Refunding a second lock, `bitcoin-refund` pays `htlc::URGENT_FEE_RATE` unless
+  `--fee-rate` says otherwise; every other spend 2 sat/vB.
+- `swap offer`, `answer` and `show` warn when Bitcoin is the second leg, and `swap status` says
+  when its refund is due.
 - `swap revealed --tx <hex>` reads the secret from a Bitcoin claim's transaction, for when the
   starter claims the bitcoin first.
 - `swap offer --contract` and `--evm-contract` name contracts other than the defaults.
@@ -263,6 +343,15 @@ An open swap lays out each leg, where it stands, and what to do next:
   claiming and refunding it, with the coins it holds (txid:vout and amount), where they go and
   the fee. It is signed with the account's key, or, for an account watched from the offline
   signer, as a PSBT the signer signs, showing that it claims or refunds a swap's coins.
+- **A second lock on Bitcoin is refunded by the wallet itself,** on whatever page is open, once
+  its deadline passes on the clock, at `htlc::URGENT_FEE_RATE`: signed with the account's key and
+  broadcast through the light client, or else Esplora, again at the pace swaps are asked at until
+  Bitcoin takes it (its median time runs about an hour behind) or the light client sees the HTLC
+  spent. An account watched from the signer, or a multisig, it cannot sign for: the swap's page
+  says to refund it by hand at once. The offer form warns when what you get is bitcoin, and an
+  answer when you pay it second.
+- **A claim whose payout was refused** shows as owed, with **Pay it out**, which sends `withdraw`.
+- **Each leg is asked by its swap id,** worked out from the terms.
 
 **Settings, Swaps:**
 - **the swap contract here,** when not the node's;
@@ -343,8 +432,9 @@ branch holds its key.
 
 ## In the explorer
 
-The **Swaps** page lists the swap contract's swaps from its events, newest first, each lock with
-whether it is final yet, and finds one by its hash, or by its code, which lays out both legs. See
+The **Swaps** page lists the swap contract's swaps from its events, newest first, each by its id,
+with whether its lock is final yet and whether a claim's payout is owed. It finds one by its id,
+every lock under a hash among the recent ones, or a swap's code, which lays out both legs. See
 [Explorer](explorer.md).
 
 ## Waiting for finality
@@ -365,7 +455,7 @@ When a lock counts as final (`swap::Settled`):
 | An EVM chain | at or below the block its RPC tags `finalized`. Where it names none, as on chainv4's own EVM without finality, 12 blocks deep (`EVM_DEPTH`). |
 | Bitcoin | paid in full with 3 confirmations (`BITCOIN_DEPTH`; Settings, Swaps, **Bitcoin depth**), as the wallet's light client counts them. Without it, depth is yours to check. |
 
-The swap contracts say which block a swap was locked in, `get`'s last value, to reckon from.
+The swap contracts say which block a swap was locked in, `get`'s eighth value, to reckon from.
 
 **Holding, with an override:**
 - `chainv4 swap lock` and `claim` refuse until the lock is final, saying what is left, and act
@@ -382,8 +472,10 @@ The swap contracts say which block a swap was locked in, `get`'s last value, to 
 - **Lock second only once the first lock is final,** with the amount, recipient and deadline the
   terms say. The CLI and the wallet check a contract's lock, and its finality, for you; on
   Bitcoin, the wallet's light client counts confirmations, or check the HTLC on an explorer.
-- **The starter must claim before the second deadline,** and the other side before the first:
-  a claim that misses its deadline cannot be mined, and the lock goes back.
+- **The starter must claim before the second deadline,** and the other side before the first. On
+  chainv4 and an EVM chain a claim that misses its deadline is refused, and the lock goes back.
+  **On Bitcoin a late claim is still mined** until a refund is: refund a second lock there the
+  moment its deadline passes (see [Deadlines](#deadlines)).
 - **A Bitcoin leg pays what it says, not more:** the HTLC is spent whole, to one output, less the
   fee. Pay it exactly, in one output.
 - **An EVM leg needs that chain's coin for gas,** on both sides: the claim is a transaction there.
@@ -405,8 +497,17 @@ The swap contracts say which block a swap was locked in, `get`'s last value, to 
   ERC-20:
   - the token is locked once approved, and claimed with the secret;
   - the coin is refused a refund before its deadline and a claim at it, and is refunded after;
-  - the wrong secret, a second lock under one hash, a deadline past and nothing locked are all
+  - the wrong secret, the same terms locked twice, a deadline past and nothing locked are all
     refused.
+- **Against hostile parties** (`src/chain/tests/pentest_swap.rs`), on both contracts:
+  - a stranger's lock under the swap's hash leaves the real one to go in;
+  - a claim whose payout a paused token or a refusing hook refuses stands, is never refunded, and
+    `withdraw`, sent by anyone, pays it once;
+  - a token that delivers less than it says, or an NFT that never moves, is refused;
+  - coin sent with a claim, withdraw or refund is refused;
+  - the contracts give back the id `src/swap` works out, for every kind of lock;
+  - terms whose deadlines would wrap, or end more than a year on, are refused.
+- **The wallet refunds a second lock on Bitcoin** at the urgent fee rate once due, and not before.
 - **The calls are Swap.sol's:** selectors as solc names them, and CREATE2's address checked
   against EIP-1014's example.
 - **The CLI swaps end to end against a running node:**

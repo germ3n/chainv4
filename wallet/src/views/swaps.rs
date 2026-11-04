@@ -7,10 +7,13 @@
 //!
 //! This chain's legs go through the swap contract the terms name, as calls the Send page reviews
 //! and signs, on the offline signer too. An EVM chain's go through Swap.sol there, by a JSON-RPC
-//! URL Settings gives ([evm]). Bitcoin's is an HTLC: paid from any Bitcoin wallet, and claimed or
-//! refunded here, signed with this account's bitcoin key, or by the offline signer as a PSBT. The
-//! wallet does not follow Bitcoin: what it needs of it is pasted, or, with an Esplora API set in
-//! Settings, looked up and broadcast there.
+//! URL Settings gives ([evm]). Both keep each leg by its swap id, which the wallet works out from
+//! the terms; a claim whose payout the token refused is paid out later by withdraw. Bitcoin's is an
+//! HTLC: paid from any Bitcoin wallet, and claimed or refunded here, signed with this account's
+//! bitcoin key, or by the offline signer as a PSBT. What the wallet needs of Bitcoin its light
+//! client finds, or it is pasted, or, with an Esplora API set in Settings, looked up and broadcast
+//! there. A second lock on Bitcoin it refunds by itself the moment its deadline lets it
+//! ([refund_due]), as Bitcoin takes a late claim until a refund is mined.
 
 mod evm;
 
@@ -56,12 +59,13 @@ pub struct SwapsState {
     scan: Scan,
     /// An offer read, to answer.
     offered: Option<Box<Terms>>,
-    /// What this chain's swap contract said of each swap, by its hash, and when it was last asked.
+    /// What this chain's swap contract said of each leg, by its swap id, and when it was last
+    /// asked.
     status: HashMap<String, Result<Vec<Value>, String>>,
-    /// What the contract's item said each NFT swap holds, by its hash.
+    /// What the contract's item said each NFT leg holds, by its swap id.
     items: HashMap<String, Result<Vec<Value>, String>>,
     asked: HashMap<String, f64>,
-    /// What Swap.sol said of each swap's EVM leg, by its hash and chain, and when it was asked.
+    /// What Swap.sol said of each EVM leg, by its swap id and chain, and when it was asked.
     evm_locks: HashMap<(String, u64), Result<Lock, String>>,
     evm_asked: HashMap<String, f64>,
     /// Each EVM chain's height and finalized block, by chain id, as its RPC last said.
@@ -94,6 +98,22 @@ pub struct SwapsState {
     to_multisig: Option<(String, u64, Vec<chainv4::swap::evm::Call>)>,
     /// A multisig's Bitcoin spend of the HTLC, collecting its members' signatures.
     shared: Option<Box<Shared>>,
+    /// Second locks on Bitcoin this wallet refunds by itself once their deadline passes, by the
+    /// swap's hash: when it last tried, and whether a broadcast was taken.
+    refunding: HashMap<String, Refunding>,
+}
+
+/// Where the wallet's own refund of a second lock on Bitcoin stands.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Refunding {
+    /// When it last broadcast the refund, in the frame's seconds.
+    tried: Option<f64>,
+    /// What came of it, in words, for the swap's page.
+    said: Option<String>,
+    /// Bitcoin took it: Esplora said so, or the light client saw the HTLC spent.
+    taken: bool,
+    /// A broadcast through the light client, waiting for what came of it.
+    relayed: Option<u64>,
 }
 
 /// A multisig's HTLC spend on its way round its members: the PSBT, what it spends, and the
@@ -133,6 +153,7 @@ impl Default for SwapsState {
             multisigs: HashMap::new(),
             to_multisig: None,
             shared: None,
+            refunding: HashMap::new(),
         }
     }
 }
@@ -276,6 +297,8 @@ enum Looked {
     Funding { hash: String, outpoint: String, sats: u64 },
     Secret { hash: String, secret: [u8; 32] },
     Broadcast(Result<String, String>),
+    /// What Esplora said of the wallet's own refund of a second lock, by the swap's hash.
+    Refunded { hash: String, result: Result<String, String> },
     Failed(String),
 }
 
@@ -447,8 +470,11 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
             ui.separator();
 
             if response.clicked() {
+                // A second lock's refund on Bitcoin races a late claim, so is offered at the urgent rate.
+                let urgent = !record.started && Terms::from_text(&record.terms).is_ok_and(|terms| terms.bitcoin_second());
+                let fee_rate = if urgent { chainv4::swap::htlc::URGENT_FEE_RATE } else { 2 };
                 state.open = Some(index);
-                state.bitcoin = BitcoinForm { fee_rate: "2".to_string(), ..BitcoinForm::default() };
+                state.bitcoin = BitcoinForm { fee_rate: fee_rate.to_string(), ..BitcoinForm::default() };
                 state.trouble = None;
                 state.forgetting = false;
                 state.evm.pending = None;
@@ -625,6 +651,12 @@ fn start(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
         ui.add_space(6.0);
         leg_form(ui, ctx, &mut state.form.get, "You get", "get");
         ui.add_space(6.0);
+
+        // Bitcoin as the second lock: its refund races a claim Bitcoin still takes past its deadline.
+        if matches!(state.form.get.kind, Kind::Bitcoin | Kind::BitcoinTestnet) {
+            ui.add(egui::Label::new(RichText::new("Bitcoin as what you get is the second lock. Bitcoin takes a claim of it even past its deadline, so whoever pays it must be online then to refund it at once: say so to the other side, or offer bitcoin as what you pay.").small().color(palette.warn)).wrap());
+            ui.add_space(6.0);
+        }
 
         let form = &mut state.form;
         super::row(ui, &palette, "Deadlines", |ui| {
@@ -827,6 +859,11 @@ fn read(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
 
         ui.add_space(8.0);
         summary(ui, ctx, &terms);
+
+        if terms.bitcoin_second() {
+            ui.add(egui::Label::new(RichText::new("You pay bitcoin second. Bitcoin takes a claim of it even past its deadline, so be online then: this wallet refunds it by itself the moment Bitcoin lets it, while it is open and follows Bitcoin or has an Esplora API under Settings.").small().color(palette.warn)).wrap());
+        }
+
         as_picker(ui, ctx, state, "answer-as");
         ui.horizontal_wrapped(|ui| {
             if theme::primary(ui, &palette, "Answer it", true).clicked() {
@@ -899,27 +936,36 @@ fn when(time: u64, now: u64) -> String {
     }
 }
 
-/// Asks a leg's contract where it stands, when it was not asked lately.
-fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now: f64) {
-    let hash = to_hex(&terms.hash);
+/// A leg's swap id, as text: what its contract keeps it under, from the terms. Agreed terms
+/// always have one for a leg not on Bitcoin.
+fn id_of(terms: &Terms, side: Side) -> String {
+    terms.swap_id(side).map(|id| to_hex(&id)).unwrap_or_default()
+}
+
+/// Asks a leg's contract where it stands, by its swap id, when it was not asked lately.
+fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, side: Side, now: f64) {
+    let (Some(swap_id), leg) = (terms.swap_id(side), terms.leg(side)) else {
+        return;
+    };
+    let id = to_hex(&swap_id);
     let every = ctx.settings.pace().every(ASK_EVERY);
     let stale = |asked: Option<&f64>| asked.is_none_or(|asked| now - asked > every);
 
     match leg {
-        Leg::Chain(leg) if stale(state.asked.get(&hash)) => {
-            state.asked.insert(hash.clone(), now);
-            ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "get", "args": [{ "type": "string", "value": hash }] }).to_string()));
+        Leg::Chain(leg) if stale(state.asked.get(&id)) => {
+            state.asked.insert(id.clone(), now);
+            ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "get", "args": [{ "type": "string", "value": id }] }).to_string()));
 
             // Which NFT it holds, asked only of legs that lock one: contracts from before NFTs have
             // no item.
             if leg.item.is_some() {
-                ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "item", "args": [{ "type": "string", "value": hash }] }).to_string()));
+                ctx.node.ask(Ask::Call(json!({ "contract": leg.contract.to_string(), "function": "item", "args": [{ "type": "string", "value": id }] }).to_string()));
             }
         }
-        Leg::Evm(leg) if stale(state.evm_asked.get(&hash)) => {
+        Leg::Evm(leg) if stale(state.evm_asked.get(&id)) => {
             if let Some(url) = state.evm.url_for(ctx, leg.chain_id) {
-                state.evm_asked.insert(hash, now);
-                evm::ask_lock(ctx, state, &url, leg, &terms.hash);
+                state.evm_asked.insert(id, now);
+                evm::ask_lock(ctx, state, &url, leg, &swap_id);
                 evm::ask_heads(ctx, state, &url, leg.chain_id);
             }
         }
@@ -928,12 +974,12 @@ fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now:
 }
 
 /// A leg's lock, as its contract last said; None for Bitcoin's, which is no contract's.
-fn lock_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, leg: &Leg) -> Option<Result<Lock, String>> {
-    let hash = to_hex(&terms.hash);
+fn lock_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, side: Side) -> Option<Result<Lock, String>> {
+    let id = id_of(terms, side);
     let text = |value: &Value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string);
 
-    match leg {
-        Leg::Chain(chain) => Some(match (state.status.get(&hash), chain.item, state.items.get(&hash)) {
+    match terms.leg(side) {
+        Leg::Chain(chain) => Some(match (state.status.get(&id), chain.item, state.items.get(&id)) {
             (None, _, _) | (_, Some(_), None) => Err("asking".to_string()),
             (Some(answer), None, _) => answer.clone().and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())),
             (Some(answer), Some(_), Some(item)) => answer.clone().and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())).and_then(|lock| {
@@ -942,7 +988,7 @@ fn lock_of(ctx: &Ctx, state: &SwapsState, terms: &Terms, leg: &Leg) -> Option<Re
         }),
         Leg::Evm(leg) => Some(match state.evm.url_for(ctx, leg.chain_id) {
             None => Err(format!("no JSON-RPC URL for {} under Settings, Swaps", chain_name(leg.chain_id))),
-            Some(_) => state.evm_locks.get(&(hash, leg.chain_id)).cloned().unwrap_or_else(|| Err("asking".to_string())),
+            Some(_) => state.evm_locks.get(&(id, leg.chain_id)).cloned().unwrap_or_else(|| Err("asking".to_string())),
         }),
         Leg::Bitcoin(_) => None,
     }
@@ -959,6 +1005,7 @@ fn describe(leg: &Leg, lock: Option<&Result<Lock, String>>, deadline: u64) -> St
                 Ok(()) => "locked as the terms say, waiting for its claim".to_string(),
                 Err(why) => format!("locked, but not as the terms say: {why}"),
             },
+            LockState::Claimed if lock.owed => "claimed, the secret out, but its payout was refused: it is owed, and anyone may pay it out".to_string(),
             LockState::Claimed => "claimed: the secret is out".to_string(),
             LockState::Refunded => "refunded".to_string(),
         },
@@ -1017,11 +1064,11 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
         // Where each leg stands, asked now and then.
         let time = ui.input(|input| input.time);
-        for (_, leg) in terms.legs() {
-            ask_leg(ctx, state, &terms, leg, time);
+        for side in [Side::First, Side::Second] {
+            ask_leg(ctx, state, &terms, side, time);
         }
 
-        let locks = terms.legs().map(|(_, leg)| lock_of(ctx, state, &terms, leg));
+        let locks = [Side::First, Side::Second].map(|side| lock_of(ctx, state, &terms, side));
         let lock = |side: Side| locks[match side { Side::First => 0, Side::Second => 1 }].as_ref();
         let paid = htlc_seen(ctx, &terms);
         let settles = [Side::First, Side::Second].map(|side| settled_of(ctx, state, &terms, side, lock(side), paid.as_deref()));
@@ -1238,7 +1285,7 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                                     let ready = state.evm.pending.is_none() && (step + 1 < steps || waiting.is_none());
 
                                     if theme::primary(ui, &palette, &label, ready).clicked() {
-                                        send_evm(ctx, state, &terms, on, call, me.evm);
+                                        send_evm(ctx, state, id_of(&terms, side), on, call, me.evm);
                                     }
                                 }
                             });
@@ -1253,15 +1300,20 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
 
             // Taking back what was locked, after its deadline.
             if locked && ctx.now >= deadline {
+                let id = id_of(&terms, side);
+
                 match leg {
                     Leg::Chain(chain) => {
                         if theme::quiet(ui, &palette, "Take back your lock on this chain").clicked() {
-                            prepared = Some(call(me.chain.expect("a payer here"), chain.contract, "refund", vec![TxCallArgumentType::String(hash.clone())], u256::ZERO, "Refund a swap".to_string()));
+                            prepared = Some(call(me.chain.expect("a payer here"), chain.contract, "refund", vec![TxCallArgumentType::String(id)], u256::ZERO, "Refund a swap".to_string()));
                         }
                     }
                     Leg::Evm(on) => {
-                        if theme::quiet(ui, &palette, &format!("Take back your lock on {}", chain_name(on.chain_id))).clicked() && state.evm.pending.is_none() {
-                            send_evm(ctx, state, &terms, on, on.refund_call(&terms.hash), me.evm);
+                        if let Some(swap_id) = terms.swap_id(side)
+                            && theme::quiet(ui, &palette, &format!("Take back your lock on {}", chain_name(on.chain_id))).clicked()
+                            && state.evm.pending.is_none()
+                        {
+                            send_evm(ctx, state, id, on, on.refund_call(&swap_id), me.evm);
                         }
                     }
                     Leg::Bitcoin(_) => {}
@@ -1273,6 +1325,26 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
         if let Some(side) = gets {
             let (leg, deadline) = (terms.leg(side), terms.deadline(side));
             let stands = lock(side).and_then(|lock| lock.as_ref().ok()).filter(|lock| lock.state == LockState::Locked).map(|lock| leg.stands(lock, deadline));
+            let id = id_of(&terms, side);
+
+            // A claim whose payout the token refused is yours still: paid out once it lets it.
+            if let (Some(Ok(Lock { state: LockState::Claimed, owed: true, .. })), Some(swap_id)) = (lock(side), terms.swap_id(side)) {
+                ui.colored_label(palette.warn, format!("Claimed, but {} refused to pay it out then. It is yours still: pay it out once it lets it.", leg.chain_name()));
+
+                match leg {
+                    Leg::Chain(chain) => {
+                        if theme::primary(ui, &palette, "Pay it out", true).clicked() {
+                            prepared = Some(call(me.chain.expect("an address here"), chain.contract, "withdraw", vec![TxCallArgumentType::String(id.clone())], u256::ZERO, "Pay out a claimed swap".to_string()));
+                        }
+                    }
+                    Leg::Evm(on) => {
+                        if theme::primary(ui, &palette, &format!("Pay it out on {}", chain_name(on.chain_id)), state.evm.pending.is_none()).clicked() {
+                            send_evm(ctx, state, id.clone(), on, on.withdraw_call(&swap_id), me.evm);
+                        }
+                    }
+                    Leg::Bitcoin(_) => {}
+                }
+            }
 
             match (leg, secret, stands) {
                 (Leg::Bitcoin(_), _, _) => {}
@@ -1298,12 +1370,14 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
                         Leg::Chain(chain) => {
                             if theme::primary(ui, &palette, "Claim on this chain", open).clicked() {
                                 // Anyone may send the claim; this account sends it from here.
-                                prepared = Some(call(me.chain.expect("an address here"), chain.contract, "claim", vec![TxCallArgumentType::String(to_hex(&secret))], u256::ZERO, "Claim a swap".to_string()));
+                                prepared = Some(call(me.chain.expect("an address here"), chain.contract, "claim", vec![TxCallArgumentType::String(id.clone()), TxCallArgumentType::String(to_hex(&secret))], u256::ZERO, "Claim a swap".to_string()));
                             }
                         }
                         Leg::Evm(on) => {
-                            if theme::primary(ui, &palette, &format!("Claim on {}", chain_name(on.chain_id)), open && state.evm.pending.is_none()).clicked() {
-                                send_evm(ctx, state, &terms, on, on.claim_call(&secret), me.evm);
+                            if let Some(swap_id) = terms.swap_id(side)
+                                && theme::primary(ui, &palette, &format!("Claim on {}", chain_name(on.chain_id)), open && state.evm.pending.is_none()).clicked()
+                            {
+                                send_evm(ctx, state, id.clone(), on, on.claim_call(&swap_id, &secret), me.evm);
                             }
                         }
                         Leg::Bitcoin(_) => {}
@@ -1323,6 +1397,19 @@ fn detail(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) -> O
         // Bitcoin's leg: a claim with the secret, or a refund after the lock time.
         if let (Some(htlc), Some((side, _))) = (terms.htlc(), terms.bitcoin()) {
             let (pays_bitcoin, gets_bitcoin) = (pays == Some(side), gets == Some(side));
+
+            // Paying the second lock on Bitcoin: refunded by the wallet itself at the deadline, as a
+            // late claim is still mined until a refund is.
+            if pays_bitcoin && side == Side::Second {
+                match state.refunding.get(&hash).and_then(|refunding| refunding.said.clone()) {
+                    Some(said) => {
+                        ui.colored_label(palette.warn, said);
+                    }
+                    None => {
+                        ui.label(RichText::new(format!("Keep this wallet open when its deadline comes, {}: it refunds your bitcoin by itself the moment Bitcoin lets it, as a claim of it past the deadline would still be mined.", when(terms.second_deadline, ctx.now))).small().color(palette.muted));
+                    }
+                }
+            }
             let spend = match (gets_bitcoin, pays_bitcoin, secret) {
                 (true, _, Some(secret)) => Some(Spend::Claim { secret }),
                 (_, true, _) if ctx.now / 1_000 >= u64::from(htlc.locktime) => Some(Spend::Refund),
@@ -1456,10 +1543,10 @@ fn more(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, index: usize) {
 }
 
 /// Starts a call on an EVM leg on its way, through the chain's RPC, from this account's address
-/// there.
-fn send_evm(ctx: &Ctx, state: &mut SwapsState, terms: &Terms, leg: &EvmLeg, call: chainv4::swap::evm::Call, from: Option<[u8; 20]>) {
+/// there: the leg, by its swap id, is asked again once it is mined.
+fn send_evm(ctx: &Ctx, state: &mut SwapsState, id: String, leg: &EvmLeg, call: chainv4::swap::evm::Call, from: Option<[u8; 20]>) {
     match (state.evm.url_for(ctx, leg.chain_id), from) {
-        (Some(url), Some(from)) => state.evm.start(ctx, to_hex(&terms.hash), call, leg.chain_id, url, from),
+        (Some(url), Some(from)) => state.evm.start(ctx, id, call, leg.chain_id, url, from),
         (None, _) => state.trouble = Some(format!("Give a JSON-RPC URL for {} under Settings, Swaps, to send there.", chain_name(leg.chain_id))),
         (_, None) => state.trouble = Some("This account has no Ethereum key to send with.".to_string()),
     }
@@ -1958,6 +2045,127 @@ fn broadcast(ctx: &Ctx, state: &SwapsState, hex: String) {
     });
 }
 
+/// Refunds, by itself and at a high fee, every second lock this account paid on Bitcoin, the
+/// moment Bitcoin takes the refund. A claim of an HTLC stays valid past its lock time until a
+/// refund is mined, so the starter could claim the bitcoin late, once the first lock is near its
+/// deadline, and leave too little time to claim that with the secret. Run every frame on every
+/// page, it broadcasts again at the pace open swaps are asked at: Bitcoin refuses the refund until
+/// its median time, about an hour behind the clock, passes the lock time. It stops once Esplora
+/// takes it or the light client sees the HTLC spent. A multisig's, or one signed on the offline
+/// signer, it cannot sign: the swap's page says to refund it by hand now.
+pub fn refund_due(ctx: &mut Ctx, state: &mut SwapsState, egui: &egui::Context) {
+    take_looked(ctx, state);
+    let (time, every) = (egui.input(|input| input.time), ctx.settings.pace().every(ASK_EVERY));
+
+    for index in 0..ctx.book.swaps.len() {
+        let record = ctx.book.swaps[index].clone();
+        let Some((terms, htlc, network)) = Terms::from_text(&record.terms).ok().and_then(|terms| second_refund_due(&terms, record.started, ctx.now).map(|(htlc, network)| (terms, htlc, network))) else {
+            continue;
+        };
+        let hash = to_hex(&terms.hash);
+        let paid = htlc_seen(ctx, &terms);
+        let refunding = state.refunding.entry(hash.clone()).or_default();
+
+        // What came of a broadcast through the light client: sent, but taken only once a block
+        // spends the HTLC, so it is sent again until then.
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        if let Some(id) = refunding.relayed
+            && let Some(result) = ctx.lights.on(network == Network::Test).and_then(|light| light.broadcasted(id))
+        {
+            refunding.said = Some(match result {
+                Ok(txid) => format!("Your refund {txid} went to Bitcoin's peers: sent again until a block takes it."),
+                Err(why) => format!("Your refund was not sent: {why}. Trying again."),
+            });
+            refunding.relayed = None;
+        }
+
+        if paid.as_ref().is_some_and(|paid| paid.iter().any(|coin| coin.spent)) {
+            refunding.taken = true;
+        }
+
+        if refunding.taken || refunding.tried.is_some_and(|tried| time - tried < every) {
+            continue;
+        }
+
+        refunding.tried = Some(time);
+        egui.request_repaint_after(std::time::Duration::from_secs_f64(every));
+
+        let Some(holder) = ctx.holders.iter().find(|holder| holder.id() == record.account) else {
+            continue;
+        };
+        let key = match (&record.multisig, secret_key(ctx, holder, network)) {
+            (None, Some(key)) => key,
+            _ => {
+                refunding.said = Some("Its deadline passed: refund it now, below, and broadcast it at once. A late claim of it is still mined until a refund is.".to_string());
+                continue;
+            }
+        };
+        let funding = paid.as_ref().and_then(|paid| paid.iter().find(|coin| !coin.spent).map(|coin| (coin.outpoint.clone(), coin.sats.to_string())));
+        let Some((outpoint, sats)) = funding.or_else(|| record.funding.as_ref().and_then(|kept| kept.rsplit_once(':').map(|(outpoint, sats)| (outpoint.to_string(), sats.to_string())))) else {
+            refunding.said = Some("Its deadline passed: refund it now. Look its coins up below, or follow Bitcoin under Settings, so the wallet refunds it by itself.".to_string());
+            continue;
+        };
+        let to = bitcoin_key(ctx, holder, network).map(|key| bech32::encode_segwit(network.hrp(), &hash160(&key))).unwrap_or_default();
+        let raw = match urgent_refund(&htlc, network, &key, outpoint, sats, to) {
+            Ok(tx) => tx.encode(),
+            Err(why) => {
+                refunding.said = Some(format!("Its deadline passed, and the wallet cannot refund it by itself: {why}. Refund it now, below."));
+                continue;
+            }
+        };
+
+        #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+        if let Some(light) = ctx.lights.on_mut(network == Network::Test) {
+            state.refunding.entry(hash).or_default().relayed = Some(light.broadcast(raw));
+            continue;
+        }
+
+        let refunding = state.refunding.entry(hash.clone()).or_default();
+
+        match ctx.settings.esplora.trim().is_empty() {
+            true => refunding.said = Some("Its deadline passed: refund it now, below, and broadcast it at once. Set an Esplora API, or follow Bitcoin, under Settings, so the wallet does it by itself.".to_string()),
+            false => refund_on_esplora(ctx, state, hash, to_hex(&raw)[2..].to_string()),
+        }
+    }
+}
+
+/// The HTLC and network of a second lock on Bitcoin this side paid, once its deadline passed on
+/// the clock: what the wallet refunds by itself. None for any other swap, or one not yet due.
+fn second_refund_due(terms: &Terms, started: bool, now: u64) -> Option<(chainv4::swap::htlc::Htlc, Network)> {
+    // Only the second side pays a second lock, and only its refund races a late claim.
+    let (htlc, (side, leg)) = (terms.htlc()?, terms.bitcoin()?);
+
+    (side == Side::Second && !started && now / 1_000 >= u64::from(htlc.locktime)).then(|| (htlc, leg.network()))
+}
+
+/// The wallet's own refund of an HTLC's coins to the account, signed here, at the high fee a
+/// refund racing a late claim pays.
+fn urgent_refund(htlc: &chainv4::swap::htlc::Htlc, network: Network, key: &[u8; 32], outpoint: String, sats: String, to: String) -> Result<Transaction, String> {
+    let form = BitcoinForm { funding: outpoint, sats, to, fee_rate: "1".to_string(), ..BitcoinForm::default() };
+    let (coins, _, to) = spend_form(&form, network)?;
+    let rate = htlc.urgent_fee_rate(coins, &to).ok_or("its coins are too few to pay any fee and leave more than dust")?;
+
+    htlc.spend(coins, to, rate, Spend::Refund, key)
+}
+
+/// Broadcasts the wallet's own refund through Esplora, keeping what it said by the swap's hash.
+fn refund_on_esplora(ctx: &Ctx, state: &SwapsState, hash: String, hex: String) {
+    let Ok(client) = crate::app::client(ctx.settings) else {
+        return;
+    };
+    let (looked, wake) = (state.looked.clone(), ctx.wake.clone());
+    let url = format!("{}/tx", ctx.settings.esplora.trim().trim_end_matches('/'));
+
+    client.fetch(url, Some(hex.into_bytes()), move |answer| {
+        let result = answer.and_then(|answer| match answer.ok {
+            true => Ok(String::from_utf8_lossy(&answer.bytes).trim().to_string()),
+            false => Err(format!("{}: {}", answer.status, String::from_utf8_lossy(&answer.bytes).trim())),
+        });
+        looked.lock().expect("never poisoned").push(Looked::Refunded { hash, result });
+        wake.request_repaint();
+    });
+}
+
 /// Takes what Esplora answered since the last frame.
 fn take_looked(ctx: &mut Ctx, state: &mut SwapsState) {
     let looked: Vec<Looked> = std::mem::take(&mut *state.looked.lock().expect("never poisoned"));
@@ -1975,6 +2183,19 @@ fn take_looked(ctx: &mut Ctx, state: &mut SwapsState) {
                 if let Some(record) = ctx.book.swaps.iter_mut().find(|record| hash_of(record).as_deref() == Some(hash.as_str())) {
                     record.secret = Some(to_hex(&secret));
                     *ctx.changed = true;
+                }
+            }
+            Looked::Refunded { hash, result } => {
+                let refunding = state.refunding.entry(hash).or_default();
+
+                match result {
+                    Ok(txid) => {
+                        refunding.taken = true;
+                        refunding.said = Some(format!("Your bitcoin is refunded: {txid}."));
+                    }
+                    // Bitcoin's median time short of the lock time: tried again at the next turn.
+                    Err(why) if why.contains("non-final") => refunding.said = Some("Its deadline passed on the clock, not yet by Bitcoin's median time: the refund is sent again until Bitcoin takes it.".to_string()),
+                    Err(why) => refunding.said = Some(format!("Esplora refused the refund: {why}. Trying again.")),
                 }
             }
             Looked::Broadcast(Ok(txid)) => state.trouble = Some(format!("Broadcast: {txid}")),

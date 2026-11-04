@@ -32,6 +32,14 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   - tests that test nothing, or the wrong thing, and places that want more;
   - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
     todo asks for it), and fix what turns up, a commit per feature.
+- [ ] **Pin the Rust and clang toolchains.** Nothing pins either today: no `rust-toolchain.toml`,
+  and the Luau fork's C++ (built by `luau0-src`) and RocksDB are compiled by whatever `cc`/clang the
+  machine has. Fuel and memory metering go through that C++, so two nodes built with different
+  compilers could, in principle, meter alike or not. That is the same worry as the cross-OS
+  consistency check. Pin Rust with a `rust-toolchain.toml` at the root and in `wallet/`, `explorer/`
+  and `contracts/`, with the components and targets the builds use (wasm32, Android, iOS). Pin clang
+  for the C/C++ deps in the Docker image and the CI, and say which in `docs/development.md`. A
+  release then names the toolchains it was built with.
 - [ ] **Run `cargo fmt` over everything.** The tree is not rustfmt-clean today (`cargo fmt --check`
   shows diffs in `build.rs`, `gpu/` and more), so batches have kept to the style around them by
   hand. Run it once across the node, `wallet/`, `explorer/`, `ui/`, `gpu/`, `macro/`, `wiki/` and
@@ -1296,53 +1304,59 @@ with.
   ignored test that fails until it is fixed. None is consensus: one is a client release, the rest
   a contract redeploy. No finding makes nodes disagree, stalls one, or does work it is not paid for.
   What it found, worst first:
-  - [ ] **Swap terms with a deadline near `u64::MAX` wrap the gap check** (`src/swap/mod.rs`,
+  - [x] **Swap terms with a deadline near `u64::MAX` wrap the gap check** (`src/swap/mod.rs`,
     `Terms::check`). A starter's code passes in a release build, the other side locks on an EVM leg
     with a deadline that never comes, and the starter takes back their own lock and claims the
     other. Debug builds panic instead. Fix: `checked_add`, a first deadline in the future, and every
     leg's deadline capped. A client release (`terms_refuse_a_second_deadline_so_late_…`).
-  - [ ] **A claim whose payout is refused still shows the secret,** in `swap.lua` and `Swap.sol`. The
+  - [x] **A claim whose payout is refused still shows the secret,** in `swap.lua` and `Swap.sol`. The
     counterparty, controlling the token (an upgradeable, pausable or blacklisting one, or a refusing
     ERC-1155 hook), makes the claim fail. They read the secret from the failed transaction, claim
     the other leg, and refund their own after the deadline. Fix: record the claim and the secret
     even when paying fails, and let anyone retry the payout by pull. A redeploy, which moves
     Swap.sol's CREATE2 address.
-  - [ ] **Swap hashes can be squatted,** in both contracts. Swaps are keyed by hash alone, so whoever
+  - [x] **Swap hashes can be squatted,** in both contracts. Swaps are keyed by hash alone, so whoever
     saw the hash locks one unit under it first, and the real lock is refused for good. Fix: key by
     the hash and the locker, or by all the terms. A redeploy and a client change.
-  - [ ] **Dust ahead of the gateway's outputs stalls every Bitcoin release.** Deposits of 330 sats
+  - [x] **Dust ahead of the gateway's outputs stalls every Bitcoin release.** Deposits of 330 sats
     each mint, with no minimum. The planner takes outputs in the order they came, so a release drags
     in hundreds of them, past the fee cap: 300 of them made a 100,000-sat withdrawal 37,561 vB. Fix:
     pick inputs largest first and skip those not worth spending (planner only), and perhaps a
     minimum deposit (redeploy).
-  - [ ] **`gateway.lua` records what was asked for, not what arrived:** a token that takes a fee
+  - [x] **`gateway.lua` records what was asked for, not what arrived:** a token that takes a fee
     leaves the wrapped supply backed by less (300 recorded, 299 held), and a token or collection
     that moves nothing at all mints an unbacked wrapped one on the peer chain. Gateway.sol checks its
     balance and the NFT's owner. `swap.lua`'s `lock_token` has the same flaw, and makes its holders insolvent. Fix:
-    compare balances before and after, as the Solidity contracts do. A redeploy.
-  - [ ] **`gateway.lua` keys what arrived by source chain and nonce alone:** after `set_peer` names a
+    compare balances before and after, as the Solidity contracts do. A redeploy. Fixed in
+    `gateway.lua` and `swap.lua` 2026-11-04, the NFT's owner checked too.
+  - [x] **`gateway.lua` keys what arrived by source chain and nonce alone:** after `set_peer` names a
     new Gateway.sol, which counts from 1 again, its transfers at nonces the old one used are never
     delivered, nor can they be voided. Gateway.sol keys by the gateway too. A redeploy.
-  - [ ] **`gateway.lua` works a transfer's ends out from the peers now:** one in flight when the
+  - [x] **`gateway.lua` works a transfer's ends out from the peers now:** one in flight when the
     owner changes a peer can no longer be signed or refunded. Fix: sign and refund by the ends it
     recorded as it left. A redeploy.
-  - [ ] **A federation the Bitcoin gateway never saw in force strands what was paid to it:** it learns
+  - [x] **A federation the Bitcoin gateway never saw in force strands what was paid to it:** it learns
     a federation only when called while that one is in force, and the apps write deposit addresses
     from the node's status. Fix: a host call for a past federation, `federation.at(version)`, over a
     history the node keeps. That is consensus. Or the node writes each decided federation into the
     gateway.
-  - [ ] **A sweep's fee goes uncounted:** it comes out of what backs wBTC but is not added to
+  - [x] **A sweep's fee goes uncounted:** it comes out of what backs wBTC but is not added to
     `shortfall`, as a child's is: 99,000 held against 100,000 wBTC after one sweep. A redeploy.
-  - [ ] **A coinbase paying a deposit address mints before Bitcoin lets it be spent** (100 blocks), so
+  - [x] **A coinbase paying a deposit address mints before Bitcoin lets it be spent** (100 blocks), so
     a release spending it is stuck for hours and cannot be cancelled once signed. Fix: refuse
     coinbases, or wait 100 confirmations for one. A redeploy.
-  - [ ] **Lowering a withdrawal's most-fee undoes a release planned against it,** delaying the up to
+  - [x] **Lowering a withdrawal's most-fee undoes a release planned against it,** delaying the up to
     49 others with it, for two transactions a round. Fix: a lowered limit takes effect some blocks
     later. A redeploy.
-  - [ ] **Coin sent with `swap.lua`'s claim or refund is kept for good.** Fix: refuse it. A redeploy.
-  - [ ] **A Bitcoin HTLC claim never expires,** as Bitcoin's script cannot say "before", so Bitcoin as
+  - [x] **Coin sent with `swap.lua`'s claim or refund is kept for good.** Fix: refuse it. A redeploy.
+  - [x] **A Bitcoin HTLC claim never expires,** as Bitcoin's script cannot say "before", so Bitcoin as
     the second leg must be refunded the moment its deadline passes. `docs/swaps.md` says otherwise.
     Fix: the docs, and the apps refunding at once or warning. A passing test pins the property.
+
+  - [ ] **A payout that burns all the fuel still fails a claim whole on chainv4.** `contracts.call`
+    hands the callee all the fuel left, so a hostile token that spends it leaves `swap.lua`'s `pcall`
+    nothing to record the claim with. Fix: a call with a fuel cap in the Lua host (and Wasm's), so
+    a caller keeps enough to finish. That is likely consensus, so it goes on a new genesis.
 
   Found sound: a deposit on a branch that lost or shown twice, inner Merkle nodes posing as
   transactions, signatures for another input, release, digest, gateway or federation, high-s twins

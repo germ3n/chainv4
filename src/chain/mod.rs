@@ -774,7 +774,7 @@ impl Genesis {
         // In the state, so a light client proves the federation and the directory in force from
         // either source.
         if let Some(federation) = &self.federation {
-            crate::registry::changes::Changes::new(state).write_genesis_federation(federation);
+            crate::registry::changes::Changes::new(state).write_genesis_federation(federation, self.timestamp);
         }
 
         if let Some(directory) = &self.directory {

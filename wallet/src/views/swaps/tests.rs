@@ -55,21 +55,29 @@ fn a_legs_lock_reads_as_where_it_stands() {
     let (zero, alice) = (Address::Ed25519([0; 32]).to_string(), Address::Ed25519([0xa; 32]).to_string());
     let locked = |amount: &str| -> Vec<Value> { ["locked", &alice, &alice, &zero, amount, &deadline, ""].iter().map(|text| value(text)).collect() };
     let mut state = SwapsState::default();
-    let hash = to_hex(&terms.hash);
+    // Each leg is kept by its swap id, the contract's key for it.
+    let id = id_of(&terms, Side::Second);
+    assert_eq!(id, to_hex(&terms.swap_id(Side::Second).unwrap()));
+    assert_eq!(id_of(&terms, Side::First), "", "Bitcoin's HTLC has none");
 
     let read = |state: &SwapsState| {
-        let text = |value: &Value| value["value"].as_str().unwrap().to_string();
-        state.status.get(&hash).cloned().map(|answer| answer.and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())))
+        let text = |value: &Value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string);
+        state.status.get(&id).cloned().map(|answer| answer.and_then(|values| Lock::from_chain(&values.iter().map(text).collect::<Vec<_>>())))
     };
 
     assert_eq!(describe(leg, Some(&Err("asking".to_string())), terms.second_deadline), "not known yet: asking");
-    state.status.insert(hash.clone(), Ok(vec![value("none")]));
+    state.status.insert(id.clone(), Ok(vec![value("none")]));
     assert_eq!(describe(leg, read(&state).as_ref(), terms.second_deadline), "nothing locked yet");
-    state.status.insert(hash.clone(), Ok(locked("5000")));
+    state.status.insert(id.clone(), Ok(locked("5000")));
     assert_eq!(describe(leg, read(&state).as_ref(), terms.second_deadline), "locked as the terms say, waiting for its claim");
-    state.status.insert(hash.clone(), Ok(locked("4000")));
+    state.status.insert(id.clone(), Ok(locked("4000")));
     assert!(describe(leg, read(&state).as_ref(), terms.second_deadline).starts_with("locked, but not as the terms say"), "less than agreed");
     assert!(describe(&terms.first, None, terms.first_deadline).contains("HTLC"));
+
+    // A claim whose payout the token refused reads as owed, as get's last value says.
+    let claimed = ["claimed", &alice, &alice, &zero, "5000", &deadline, &to_hex(&[7; 32]), "9"].iter().map(|text| value(text)).chain([json!({ "type": "bool", "value": true })]).collect();
+    state.status.insert(id.clone(), Ok(claimed));
+    assert!(describe(leg, read(&state).as_ref(), terms.second_deadline).contains("owed"));
 
     assert_eq!(when(1_000 + 90 * 60_000, 1_000), "in 1 h 30 min");
     assert_eq!(when(1_000, 1_000 + 5 * 60_000), "5 min ago");
@@ -181,16 +189,16 @@ fn a_leg_locking_an_nft_names_it_and_its_contract_is_asked_which() {
     assert_eq!(form(Asset::Multi, "9").item(), Ok(Some(Item { id: u256::new(9), multi: true })));
     assert!(form(Asset::Nft, "seven").item().is_err());
 
-    // The contract's item answer is kept beside get's, by the swap's hash.
+    // The contract's item answer is kept beside get's, by the leg's swap id.
     let (_, terms, _) = offered();
-    let hash = to_hex(&terms.hash);
+    let id = id_of(&terms, Side::Second);
     let mut state = SwapsState::default();
-    state.asked.insert(hash.clone(), 0.0);
-    let asked = |function: &str| Ask::Call(json!({ "contract": "contract:0x5a", "function": function, "args": [{ "type": "string", "value": hash }] }).to_string());
+    state.asked.insert(id.clone(), 0.0);
+    let asked = |function: &str| Ask::Call(json!({ "contract": "contract:0x5a", "function": function, "args": [{ "type": "string", "value": id }] }).to_string());
     let returned = Ok(json!({ "status": "returned", "values": [{ "type": "string", "value": "nft" }, { "type": "u256", "value": "7" }] }));
 
     assert!(state.answered(&asked("item"), &returned));
-    assert!(state.items.contains_key(&hash) && !state.status.contains_key(&hash));
+    assert!(state.items.contains_key(&id) && !state.status.contains_key(&id));
     assert!(!state.answered(&asked("lock"), &returned), "not a read");
 }
 
@@ -287,4 +295,39 @@ fn a_swap_is_acted_on_from_the_address_its_terms_name_whatever_is_picked_now() {
     let stranger = Terms::offer([1; 32], leg(10), leg(20), NOW + 7_200_000, NOW + 3_600_000, &Parties { chain: Some(Address::Ed25519([9; 32])), ..Parties::default() }).unwrap();
 
     assert_eq!(named_in(&stranger, &holder), None);
+}
+
+#[test]
+fn a_second_lock_on_bitcoin_is_refunded_by_the_wallet_at_a_high_fee_once_its_deadline_passes() {
+    let seed = seed();
+    let (refunder, ours) = bitcoin_key(&seed, Network::Test, 0);
+    let (_, hash) = secret().unwrap();
+    let alice = Parties { chain: Some(Address::Ed25519([0xa; 32])), bitcoin: Some(chainv4::swap::BitcoinParty::Key(bitcoin_key(&seed, Network::Test, 1).1)), evm: None };
+    let bob = Parties { chain: Some(Address::Ed25519([0xb; 32])), bitcoin: Some(chainv4::swap::BitcoinParty::Key(ours)), evm: None };
+    // Alice pays this chain's coin first; Bob, answering, pays bitcoin second.
+    let pays = Leg::Chain(ChainLeg { item: None, contract: Address::Contract([0x5a; 32]), token: None, amount: u256::new(5_000), payer: None, receiver: None });
+    let gets = Leg::Bitcoin(BitcoinLeg { testnet: true, sats: 80_000, payer: None, receiver: None });
+    let terms = Terms::offer(hash, pays, gets, NOW + FIRST_DEADLINE_MS, NOW + SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
+    let deadline = terms.second_deadline;
+
+    // Due for Bob alone, and only from the deadline on: the starter's own lock, the first, has
+    // no late claim to race.
+    assert!(second_refund_due(&terms, false, deadline - 1_000).is_none());
+    assert!(second_refund_due(&terms, true, deadline).is_none(), "the starter pays no second lock");
+    let (htlc, network) = second_refund_due(&terms, false, deadline).unwrap();
+    assert_eq!((htlc.refund.clone(), network), (chainv4::swap::BitcoinParty::Key(ours), Network::Test));
+    let (_, first_on_bitcoin, _) = offered();
+    assert!(second_refund_due(&first_on_bitcoin, false, first_on_bitcoin.first_deadline).is_none(), "Bitcoin as the first leg");
+
+    // Signed here at the high fee, back to Bob, with the lock time Bitcoin checks it against.
+    let to = bech32::encode_segwit("tb", &hash160(&ours));
+    let refund = urgent_refund(&htlc, network, &refunder, format!("{}:0", "cd".repeat(32)), "80000".to_string(), to.clone()).unwrap();
+    assert_eq!(refund.lock_time, htlc.locktime);
+    assert_eq!(revealed(&refund, &hash), None);
+    assert_eq!((80_000 - refund.outputs[0].value) / refund.vsize(), chainv4::swap::htlc::URGENT_FEE_RATE, "the urgent rate, for a witness priced as long as DER makes it");
+
+    // Coins too few for it pay the highest rate they can; none, and it says why.
+    let small = urgent_refund(&htlc, network, &refunder, format!("{}:0", "cd".repeat(32)), "2000".to_string(), to.clone()).unwrap();
+    assert!(small.outputs[0].value >= chainv4::swap::htlc::DUST);
+    assert!(urgent_refund(&htlc, network, &refunder, format!("{}:0", "cd".repeat(32)), "300".to_string(), to).unwrap_err().contains("too few"));
 }

@@ -2009,8 +2009,17 @@ mod voting {
         let first = Changes::new(&chain.state()).federation().unwrap().unwrap();
 
         assert_eq!((first.version, first.federation.threshold), (1, 2));
+        let decided_first = crate::registry::federation::DecidedWhen { height: chain.tip().height, time: chain.tip().timestamp };
         decide(&mut chain, 1, Change::Federation(federation(3, &[1, 2, 3, 4])));
         assert_eq!(Changes::new(&chain.state()).federation().unwrap().map(|decided| decided.version), Some(2));
+
+        // Each is kept for good with the block that decided it, which says when the one before it
+        // was replaced: what contracts read with federation.at, the same on every node.
+        let replaced = crate::registry::federation::DecidedWhen { height: chain.tip().height, time: chain.tip().timestamp };
+        let past = Changes::new(&chain.state()).federation_at(1).unwrap().unwrap();
+        assert_eq!((past.federation.threshold, past.decided, past.replaced), (2, Some(decided_first), Some(replaced)));
+        assert_eq!(Changes::new(&chain.state()).federation_at(2).unwrap().map(|now| now.replaced), Some(None));
+        assert_eq!(Changes::new(&chain.state()).federation_at(0).unwrap(), None, "this chain had none at genesis");
         assert!(matches!(&send_as(&mut chain, &dev(), Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 2, change: Change::Federation(federation(3, &[1, 2, 3, 4])) }).result, Err(failure) if failure.to_string().contains("decided already")));
     }
 

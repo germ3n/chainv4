@@ -1,7 +1,8 @@
 //! Atomic swaps through the chain's swap contract, contracts/lua/swap.lua: every lock, claim and
 //! refund, newest first, from the event index, each lock with whether it is final yet, which is when
-//! the other side may safely act on it. A swap is found by its hash, as the contract holds it, or by
-//! its code, ur:chainv4-swap, which lays out both legs, the other chain's too.
+//! the other side may safely act on it. The contract keeps each swap by its id, a hash of all its
+//! terms. A swap is found by its id, by its hash, which every lock under it in the recent events
+//! shares, or by its code, ur:chainv4-swap, which lays out both legs, the other chain's too.
 
 use {
     super::Ctx,
@@ -23,7 +24,7 @@ const EVENTS: u32 = 300;
 
 #[derive(Default)]
 pub struct SwapsState {
-    /// A swap's hash, or its code, as typed.
+    /// A swap's id or hash, or its code, as typed.
     find: String,
     asked: HashMap<Ask, u64>,
 }
@@ -31,6 +32,8 @@ pub struct SwapsState {
 /// A swap as the contract's events tell it.
 #[derive(Clone, Debug, Default)]
 struct Seen {
+    /// The secret's hash it was locked under: other locks may share it.
+    hash: String,
     state: &'static str,
     recipient: String,
     token: String,
@@ -54,7 +57,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState) {
     };
 
     super::section(ui, look, "Find a swap", |ui| {
-        ui.add(egui::TextEdit::singleline(&mut state.find).hint_text("Its hash, 0x…, or its code, ur:chainv4-swap/…").desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut state.find).hint_text("Its id or hash, 0x…, or its code, ur:chainv4-swap/…").desired_width(f32::INFINITY));
         let find = state.find.trim().to_string();
 
         if find.to_ascii_lowercase().starts_with("ur:") {
@@ -89,9 +92,9 @@ fn ask(ctx: &mut Ctx, state: &mut SwapsState, asked: Ask) {
     }
 }
 
-/// A lock as a swap contract's get shows it, once it answered.
-fn get(ctx: &mut Ctx, state: &mut SwapsState, contract: &str, hash: &str) -> Option<Result<Lock, String>> {
-    let asked = Ask::Call { contract: contract.to_string(), function: "get".to_string(), args: json!([{ "type": "string", "value": hash }]).to_string() };
+/// A lock as a swap contract's get shows it, by its id, once it answered.
+fn get(ctx: &mut Ctx, state: &mut SwapsState, contract: &str, id: &str) -> Option<Result<Lock, String>> {
+    let asked = Ask::Call { contract: contract.to_string(), function: "get".to_string(), args: json!([{ "type": "string", "value": id }]).to_string() };
     ask(ctx, state, asked.clone());
     let called: Called = serde_json::from_value(ctx.store.calls.get(&asked)?.clone()).ok()?;
 
@@ -101,7 +104,7 @@ fn get(ctx: &mut Ctx, state: &mut SwapsState, contract: &str, hash: &str) -> Opt
     };
 
     // Which NFT it holds, from contracts that say: those from before NFTs have no item.
-    let item = Ask::Call { contract: contract.to_string(), function: "item".to_string(), args: json!([{ "type": "string", "value": hash }]).to_string() };
+    let item = Ask::Call { contract: contract.to_string(), function: "item".to_string(), args: json!([{ "type": "string", "value": id }]).to_string() };
     ask(ctx, state, item.clone());
     let item = ctx.store.calls.get(&item).and_then(|value| serde_json::from_value::<Called>(value.clone()).ok()).filter(|called| called.status == "returned");
 
@@ -117,7 +120,7 @@ fn finality(ctx: &Ctx, height: u64) -> Settled {
         return Settled::Unknown("the node's status is not in yet".to_string());
     };
     let finalized = status.finality.as_ref().map(|finality| finality.finalized.height.unwrap_or(0));
-    let lock = Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height), item: None };
+    let lock = Lock { state: LockState::Locked, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: Some(height), item: None, owed: false };
 
     chain_settled(&lock, status.height, finalized)
 }
@@ -161,17 +164,38 @@ fn locked(ctx: &Ctx, token: &str, amount: &str) -> String {
     }
 }
 
-fn lookup(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, contract: &str, hash: &str) {
+/// A swap by its id, or every lock under a hash the contract's recent events show.
+fn lookup(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, contract: &str, typed: &str) {
     let look = ctx.look;
+    let query = EventQuery::contract(contract, None).limited(EVENTS);
+    let under: Vec<String> = ctx.store.events.get(&query).map(|found| swaps(&found.items)).unwrap_or_default().into_iter().filter(|(_, seen)| seen.hash == typed).map(|(id, _)| id).collect();
 
-    match get(ctx, state, contract, hash) {
+    // A hash: each lock under it is a swap of its own, by its id.
+    if !under.is_empty() {
+        for id in under {
+            ui.label(RichText::new(format!("Swap {}", format::short(&id))).monospace().small().color(look.palette.muted));
+            match get(ctx, state, contract, &id) {
+                Some(Ok(lock)) => lock_facts(ui, ctx, &lock, &format!("swap lookup {id}")),
+                Some(Err(why)) => {
+                    ui.colored_label(look.palette.bad, why);
+                }
+                None => {
+                    ui.spinner();
+                }
+            }
+        }
+
+        return;
+    }
+
+    match get(ctx, state, contract, typed) {
         None => {
             ui.spinner();
         }
         Some(Err(why)) => {
             ui.colored_label(look.palette.bad, why);
         }
-        Some(Ok(lock)) if lock.state == LockState::None => super::note(ui, look, "Nothing is locked under that hash in this swap contract."),
+        Some(Ok(lock)) if lock.state == LockState::None => super::note(ui, look, "No swap has that id in this swap contract, nor is any of its recent ones locked under that hash."),
         Some(Ok(lock)) => lock_facts(ui, ctx, &lock, "swap lookup"),
     }
 }
@@ -211,6 +235,12 @@ fn lock_facts(ui: &mut Ui, ctx: &mut Ctx, lock: &Lock, id: &str) {
         if let Some(secret) = lock.secret {
             facts.row("secret", |ui| {
                 ui.monospace(chainv4::structs::hex::to_hex(&secret));
+            });
+        }
+
+        if lock.owed {
+            facts.row("payout", |ui| {
+                ui.colored_label(look.palette.warn, "owed: the token refused it at the claim, and anyone may send withdraw");
             });
         }
     });
@@ -262,9 +292,14 @@ fn legs(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms) {
             });
         });
 
-        // This chain's side, as its contract shows it.
+        // This chain's side, as its contract shows it, by the id its terms give.
         if let Leg::Chain(chain) = leg {
-            match get(ctx, state, &chain.contract.to_string(), &chainv4::structs::hex::to_hex(&terms.hash)) {
+            let Some(id) = terms.swap_id(side) else {
+                super::note(ui, look, "Its id, which the contract keeps it by, waits for both sides' parts.");
+                continue;
+            };
+
+            match get(ctx, state, &chain.contract.to_string(), &chainv4::structs::hex::to_hex(&id)) {
                 Some(Ok(lock)) if lock.state != LockState::None => {
                     let stands = leg.stands(&lock, deadline).map_or_else(|why| format!("not as the terms say: {why}"), |()| "as the terms say".to_string());
                     ui.label(RichText::new(format!("{}, {stands}", state_name(lock.state))).color(look.palette.soft));
@@ -310,11 +345,11 @@ fn recent(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
     }
 
     if look.narrow {
-        for (hash, seen) in swaps.iter().rev().take(50) {
+        for (id, seen) in swaps.iter().rev().take(50) {
             super::list_row(ui, look, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(widgets::strong(seen.state, 13.5).color(look.palette.ink));
-                    ui.monospace(format::short(hash));
+                    ui.monospace(format::short(id));
                 });
                 ui.horizontal_wrapped(|ui| {
                     ui.label(locked_item(ctx, &seen.token, &seen.amount, seen.item.as_ref().map(|(kind, id)| (kind.as_str(), id.as_str()))));
@@ -337,9 +372,9 @@ fn recent(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
         return;
     }
 
-    super::table(ui, look, ("swaps", contract.to_string()), &["hash", "state", "locks", "for", "deadline", "locked in", "finality"], |ui| {
-        for (hash, seen) in swaps.iter().rev().take(50) {
-            ui.monospace(format::short(hash));
+    super::table(ui, look, ("swaps", contract.to_string()), &["id", "state", "locks", "for", "deadline", "locked in", "finality"], |ui| {
+        for (id, seen) in swaps.iter().rev().take(50) {
+            ui.monospace(format::short(id));
             ui.label(widgets::strong(seen.state, 13.0));
             ui.label(locked_item(ctx, &seen.token, &seen.amount, seen.item.as_ref().map(|(kind, id)| (kind.as_str(), id.as_str()))));
             super::address(ui, ctx, &seen.recipient);
@@ -361,42 +396,49 @@ fn recent(ui: &mut Ui, ctx: &mut Ctx, contract: &str) {
     });
 }
 
-/// Swaps by hash, from the contract's events, newest last: Locked(hash, locker, recipient, token,
-/// amount, deadline), Claimed(hash, secret), Refunded(hash).
+/// Swaps by id, from the contract's events, newest last: Locked(id, hash, locker, recipient,
+/// token, amount, deadline), LockedItem(id, kind, nft id), Claimed(id, secret), Owed(id, why),
+/// Withdrawn(id), Refunded(id).
 fn swaps(events: &[FoundEvent]) -> Vec<(String, Seen)> {
     let text = |event: &FoundEvent, index: usize| event.data.get(index).map(|value| value.text()).unwrap_or_default();
-    let mut by_hash: HashMap<String, Seen> = HashMap::new();
+    let mut by_id: HashMap<String, Seen> = HashMap::new();
 
     // Oldest first, so a claim or refund lands on its lock.
     for event in events.iter().rev() {
-        let hash = text(event, 0).to_ascii_lowercase();
+        let id = text(event, 0).to_ascii_lowercase();
 
         match event.name.as_str() {
             "Locked" => {
-                by_hash.insert(hash, Seen {
+                by_id.insert(id, Seen {
+                    hash: text(event, 1).to_ascii_lowercase(),
                     state: "locked",
-                    recipient: text(event, 2),
-                    token: text(event, 3),
-                    amount: text(event, 4),
+                    recipient: text(event, 3),
+                    token: text(event, 4),
+                    amount: text(event, 5),
                     item: None,
-                    deadline: text(event, 5).parse().unwrap_or(0),
+                    deadline: text(event, 6).parse().unwrap_or(0),
                     height: event.height,
                     block: event.block.clone(),
                     locked_in: event.tx.clone(),
                 });
             }
             "LockedItem" => {
-                if let Some(seen) = by_hash.get_mut(&hash) {
+                if let Some(seen) = by_id.get_mut(&id) {
                     seen.item = Some((text(event, 1), text(event, 2)));
                 }
             }
-            "Claimed" => {
-                if let Some(seen) = by_hash.get_mut(&hash) {
+            "Claimed" | "Withdrawn" => {
+                if let Some(seen) = by_id.get_mut(&id) {
                     seen.state = "claimed";
                 }
             }
+            "Owed" => {
+                if let Some(seen) = by_id.get_mut(&id) {
+                    seen.state = "claimed, payout owed";
+                }
+            }
             "Refunded" => {
-                if let Some(seen) = by_hash.get_mut(&hash) {
+                if let Some(seen) = by_id.get_mut(&id) {
                     seen.state = "refunded";
                 }
             }
@@ -405,7 +447,7 @@ fn swaps(events: &[FoundEvent]) -> Vec<(String, Seen)> {
     }
 
     // Oldest first, by where each was locked.
-    let mut list: Vec<(String, Seen)> = by_hash.into_iter().collect();
+    let mut list: Vec<(String, Seen)> = by_id.into_iter().collect();
     list.sort_by(|(one, first), (two, second)| (first.height, one).cmp(&(second.height, two)));
 
     list

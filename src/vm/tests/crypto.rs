@@ -187,3 +187,66 @@ fn contracts_read_the_federation_in_force() {
 
     assert_eq!(world.call(lua, "read", &[]).result.unwrap()[..3], [TxCallArgumentType::I64(4), TxCallArgumentType::I64(1), TxCallArgumentType::I64(1)]);
 }
+
+const LUA_FEDERATION_AT: &str = r#"
+local M = {}
+
+function M.read(version)
+    local fed = federation.at(version)
+    if fed == nil then return "none" end
+    return fed.version, fed.threshold, fed.signers[1], fed.decided_height, fed.decided_time, fed.replaced_height, fed.replaced_time
+end
+
+function M.once()
+    return federation.at(0).version
+end
+
+function M.again()
+    return federation.at(0).version, federation.at(0).version
+end
+
+return M
+"#;
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn contracts_read_a_federation_of_any_version_with_when_it_was_decided_and_replaced() {
+    use crate::registry::federation::{DecidedFederation, DecidedWhen};
+
+    let read = |world: &World, lua: Address, version: u64| world.call(lua, "read", &[TxCallArgumentType::U64(version)]).result.unwrap();
+    let mut bare = World::new();
+    let lua = bare.lua_code(LUA_FEDERATION_AT);
+
+    assert_eq!(read(&bare, lua, 0), [text("none")], "a chain with none");
+
+    // Genesis's, given to the VM: version 0, with no block kept for it, and in force.
+    let genesis = federation_of(2, &[1, 2, 3]);
+    let mut world = World {
+        vm: Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_federation(Some(genesis.clone()))),
+        ..World::new()
+    };
+    let lua = world.lua_code(LUA_FEDERATION_AT);
+    let none = TxCallArgumentType::Nil;
+
+    assert_eq!(read(&world, lua, 0), [TxCallArgumentType::I64(0), TxCallArgumentType::I64(2), bytes(&genesis.signers[0]), none.clone(), none.clone(), none.clone(), none.clone()]);
+    assert_eq!(read(&world, lua, 1), [text("none")], "a version never decided");
+
+    // Governance decides two more: each past one says the block that replaced it.
+    let changes = crate::registry::changes::Changes::new(&world.state);
+    changes.write_federation(&DecidedFederation { version: 1, federation: federation_of(1, &[9]) }, DecidedWhen { height: 7, time: 70_000 });
+    changes.write_federation(&DecidedFederation { version: 2, federation: federation_of(2, &[4, 5]) }, DecidedWhen { height: 9, time: 90_000 });
+
+    assert_eq!(read(&world, lua, 0)[5..], [TxCallArgumentType::I64(7), TxCallArgumentType::I64(70_000)], "genesis's, replaced by version 1");
+    assert_eq!(
+        read(&world, lua, 1),
+        [TxCallArgumentType::I64(1), TxCallArgumentType::I64(1), bytes(&federation_of(1, &[9]).signers[0]), TxCallArgumentType::I64(7), TxCallArgumentType::I64(70_000), TxCallArgumentType::I64(9), TxCallArgumentType::I64(90_000)]
+    );
+    assert_eq!(read(&world, lua, 2)[3..], [TxCallArgumentType::I64(9), TxCallArgumentType::I64(90_000), none.clone(), none], "in force");
+
+    // A version is a whole number, and reading a past one costs what reading the one in force does.
+    assert!(world.call(lua, "read", &[TxCallArgumentType::I64(-1)]).result.unwrap_err().to_string().contains("whole number"));
+    assert!(world.call(lua, "read", &[TxCallArgumentType::String("1.5".into())]).result.is_err());
+    let charged = world.call(lua, "again", &[]).fuel_used - world.call(lua, "once", &[]).fuel_used;
+    let costs = crate::params::vm::HostCosts::default();
+    assert!((costs.federation..costs.federation + 20).contains(&charged), "{charged}");
+}

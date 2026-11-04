@@ -1,14 +1,14 @@
 //! A swap's leg on an EVM chain, such as Ethereum, Sepolia or Base: contracts/evm/Swap.sol, the
-//! same lock, claim, refund and get as chainv4's swap contract, by block.timestamp in seconds. Here
-//! are its calls as calldata, what get answers, and the transactions that carry them; reaching the
-//! chain, by its JSON-RPC, is the apps'.
+//! same lock, claim, withdraw, refund and get as chainv4's swap contract, each swap by an id of all
+//! its terms, by block.timestamp in seconds. Here are its calls as calldata, what get answers, and
+//! the transactions that carry them; reaching the chain, by its JSON-RPC, is the apps'.
 //!
 //! Swap.sol is deployed through the deterministic deployment proxy most EVM chains have, with no
 //! salt, so it sits at one address on each of them: [deployed_address]. Terms still name the contract, so a
 //! chain without the proxy works with one deployed anywhere.
 
 use {
-    super::{EvmLeg, Item, Lock, LockState, Party},
+    super::{EvmLeg, Item, Lock, LockState, Party, item_kind, number_word},
     crate::crypto::ethereum::{EthereumKind, EthereumTx},
     crate::crypto::secp256k1::keccak,
     crate::structs::hex::{from_hex, to_hex},
@@ -140,9 +140,6 @@ fn address_word(address: &[u8; 20]) -> [u8; 32] {
     word
 }
 
-fn number_word(number: u256) -> [u8; 32] {
-    number.to_be_bytes()
-}
 
 fn calldata(signature: &str, words: &[[u8; 32]]) -> Vec<u8> {
     [selector(signature).to_vec(), words.concat()].concat()
@@ -202,25 +199,50 @@ impl EvmLeg {
         })
     }
 
-    #[document(parent = "EvmLeg", summary = "Claiming it with the secret: anyone may send it, and it pays the receiver.")]
-    pub fn claim_call(&self, secret: &[u8; 32]) -> Call {
-        Call { to: self.contract, value: u256::ZERO, input: calldata("claim(bytes32)", &[*secret]), what: "Claim a swap" }
+    #[document(
+        parent = "EvmLeg",
+        summary = "The swap's id in Swap.sol, what every call but a lock takes: keccak256(abi.encode(hash, payer, receiver, token, kind, NFT id, amount, deadline)), the token the zero address for the coin, the kind as item_kind numbers it, and the deadline in whole seconds, as Swap.sol keeps it. A stranger's lock under the same hash is another swap. None until both parties are in.",
+        see_also = "item_kind",
+    )]
+    pub fn swap_id(&self, hash: &[u8; 32], deadline: u64) -> Option<[u8; 32]> {
+        let words = [
+            *hash,
+            address_word(&self.payer?),
+            address_word(&self.receiver?),
+            address_word(&self.token.unwrap_or([0; 20])),
+            number_word(u256::from(item_kind(self.item))),
+            number_word(self.item.map_or(u256::ZERO, |item| item.id)),
+            number_word(self.amount),
+            number_word(u256::from(deadline / 1_000)),
+        ];
+
+        Some(keccak(&words.concat()))
     }
 
-    #[document(parent = "EvmLeg", summary = "Refunding it after its deadline: anyone may send it, and it pays the payer back.")]
-    pub fn refund_call(&self, hash: &[u8; 32]) -> Call {
-        Call { to: self.contract, value: u256::ZERO, input: calldata("refund(bytes32)", &[*hash]), what: "Refund a swap" }
+    #[document(parent = "EvmLeg", summary = "Claiming it with the secret, by its swap id: anyone may send it. It records the claim and the secret, and pays the receiver, or leaves the payout owed for withdraw when the token refuses it.")]
+    pub fn claim_call(&self, id: &[u8; 32], secret: &[u8; 32]) -> Call {
+        Call { to: self.contract, value: u256::ZERO, input: calldata("claim(bytes32,bytes32)", &[*id, *secret]), what: "Claim a swap" }
+    }
+
+    #[document(parent = "EvmLeg", summary = "Refunding it after its deadline, by its swap id: anyone may send it, and it pays the payer back. A claimed swap is never refunded.")]
+    pub fn refund_call(&self, id: &[u8; 32]) -> Call {
+        Call { to: self.contract, value: u256::ZERO, input: calldata("refund(bytes32)", &[*id]), what: "Refund a swap" }
+    }
+
+    #[document(parent = "EvmLeg", summary = "Paying a claimed swap's receiver what its claim could not, by its swap id: anyone may send it, as often as it takes.")]
+    pub fn withdraw_call(&self, id: &[u8; 32]) -> Call {
+        Call { to: self.contract, value: u256::ZERO, input: calldata("withdraw(bytes32)", &[*id]), what: "Pay out a claimed swap" }
     }
 }
 
-#[document(summary = "Calldata asking Swap.sol where the swap under a hash stands, for eth_call.", category = "Swaps", see_also = "read_lock")]
-pub fn get_input(hash: &[u8; 32]) -> Vec<u8> {
-    calldata("get(bytes32)", &[*hash])
+#[document(summary = "Calldata asking Swap.sol where the swap with an id stands, for eth_call.", category = "Swaps", see_also = "read_lock, EvmLeg::swap_id")]
+pub fn get_input(id: &[u8; 32]) -> Vec<u8> {
+    calldata("get(bytes32)", &[*id])
 }
 
-#[document(summary = "Calldata asking Swap.sol which NFT the swap under a hash holds, for eth_call.", category = "Swaps", see_also = "read_item")]
-pub fn item_input(hash: &[u8; 32]) -> Vec<u8> {
-    calldata("item(bytes32)", &[*hash])
+#[document(summary = "Calldata asking Swap.sol which NFT the swap with an id holds, for eth_call.", category = "Swaps", see_also = "read_item, EvmLeg::swap_id")]
+pub fn item_input(id: &[u8; 32]) -> Vec<u8> {
+    calldata("item(bytes32)", &[*id])
 }
 
 #[document(
@@ -243,9 +265,9 @@ pub fn read_item(output: &[u8]) -> Result<Option<Item>, String> {
     }
 }
 
-#[document(summary = "What Swap.sol's get answered, as a lock.", category = "Swaps", see_also = "get_input")]
+#[document(summary = "What Swap.sol's get answered, as a lock: its state, locker, recipient, token, amount, deadline, secret, the block it was locked in, and whether its payout is owed.", category = "Swaps", see_also = "get_input")]
 pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
-    if output.len() != 8 * 32 {
+    if output.len() != 9 * 32 {
         return Err("an answer Swap.sol does not give: is the contract Swap.sol?".to_string());
     }
 
@@ -267,8 +289,14 @@ pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
     };
     let secret: [u8; 32] = word(6).try_into().expect("32 bytes");
 
+    let owed = match small(8)? {
+        0 => false,
+        1 => true,
+        _ => return Err("a flag Swap.sol does not give".to_string()),
+    };
+
     if state == LockState::None {
-        return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None, item: None });
+        return Ok(Lock { state, recipient: None, token: None, amount: u256::ZERO, deadline: 0, secret: None, height: None, item: None, owed: false });
     }
 
     Ok(Lock {
@@ -280,6 +308,7 @@ pub fn read_lock(output: &[u8]) -> Result<Lock, String> {
         secret: (state == LockState::Claimed).then_some(secret),
         height: Some(small(7)?).filter(|height| *height > 0),
         item: None,
+        owed,
     })
 }
 

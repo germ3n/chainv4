@@ -7,7 +7,8 @@
 --   <threshold> <signer keys…> <count> OP_CHECKMULTISIG
 -- so any Bitcoin wallet pays it, and only the federation's threshold spends it. Once the payment
 -- is bitcoin_depth deep in the Bitcoin light client contract (contracts/examples/btc_relay),
--- anyone shows it, and its value is minted to the address it was for. Bitcoin outlives a chain,
+-- anyone shows it, and its value is minted to the address it was for, if it is at least the least
+-- deposit the gateway was set up with. Bitcoin outlives a chain,
 -- and a gateway deployed by the same keys on a new one has the same address and holds nothing yet,
 -- so without the chain's id in the script the same proof would mint again there.
 --
@@ -66,8 +67,16 @@ local MOST_VBYTES = 100000
 -- paying a withdrawal and change. The fee cap has to pay this at the floor, or a floor could leave
 -- no release at all it allows.
 local ONE_INPUT_VBYTES = 710
+-- What a deposit is at least unless the gateway was set up with another: dust minted as wBTC would
+-- be dragged into releases that cost more to sign than it is worth.
+local DEFAULT_LEAST_DEPOSIT = 10000
+-- How many confirmations a coinbase needs before Bitcoin lets anything spend it, so before a
+-- release spending one could be mined: minted sooner, it would hold up the release it went in.
+local COINBASE_MATURITY = 100
+-- How many blocks a lowered most fee waits before it holds, so a release proposed against the old
+-- limit, up to 50 withdrawals with it, is not undone by one owner lowering theirs as it lands.
+local LOWER_MOST_FEE_AFTER = 30
 
-local feds = storage.namespace("feds")
 local utxos = storage.namespace("utxos")
 local withdrawals = storage.namespace("withdrawals")
 local proposals = storage.namespace("proposals")
@@ -301,46 +310,28 @@ local function repay_most()
     return policy("repay_most", nil) or DEFAULT_REPAY_MOST
 end
 
--- The federations this gateway has seen, by version: their threshold and keys, and when the next
--- took over, after which their deposit addresses stay open for the grace period.
-local function remember()
-    local fed = federation.get()
-
-    if fed == nil then
-        error("this chain has no federation")
-    end
-
-    local version = tostring(fed.version)
-
-    if feds:get(version .. ":threshold") == nil then
-        local latest = storage.get("fed_latest")
-
-        if latest then
-            feds:set(latest .. ":retired", tostring(ctx.time))
-        end
-
-        feds:set(version .. ":threshold", tostring(fed.threshold))
-        feds:set(version .. ":keys", table.concat(fed.signers))
-        storage.set("fed_latest", version)
-    end
-
-    return fed
+-- The federation in force.
+local function in_force()
+    return federation.get() or error("this chain has no federation")
 end
 
+-- The federations of each version, as the chain keeps every one it decided, read once a call:
+-- every call starts afresh, and a release spending many outputs of one federation asks for it once.
+local known = {}
+
+-- A federation's threshold and keys by its version, and the block time the next was decided at,
+-- once one was, after which its deposit addresses stay open for the grace period. The chain says
+-- so, not what this gateway saw: one replaced before anything called the gateway is known all the same.
 local function fed_at(version)
-    local threshold = feds:get(version .. ":threshold")
+    version = whole(version, "the version")
+    local fed = known[version]
 
-    if threshold == nil then
-        error("a federation this gateway never saw")
+    if fed == nil then
+        fed = federation.at(version) or error("no federation of that version")
+        known[version] = fed
     end
 
-    local joined, keys = feds:get(version .. ":keys"), {}
-
-    for at = 1, #joined, 33 do
-        table.insert(keys, joined:sub(at, at + 32))
-    end
-
-    return tonumber(threshold), keys, tonumber(feds:get(version .. ":retired") or "")
+    return fed.threshold, fed.signers, fed.replaced_time
 end
 
 -- The witness script a held output was paid to: a deposit's, or for change, the bare multisig.
@@ -445,10 +436,11 @@ end
 -- (contracts/lua/wrapped.lua), the most fee a release may pay, in satoshis, the least it may pay a
 -- virtual byte, and how long an old federation's deposit addresses stay open, in milliseconds; set
 -- once, and what holds while the federation names no Bitcoin policy of its own, which governance
--- may set, and then holds instead. A chain restarted from the identical genesis has the same id and this gateway the same
+-- may set, and then holds instead. Then the least a deposit mints, in satoshis, 10,000 unless
+-- given, which no policy changes. A chain restarted from the identical genesis has the same id and this gateway the same
 -- address, so what is at or under the relay's tip now, before this gateway existed, is never a
 -- deposit to it.
-function M.setup(relay_address, template, fee_cap, fee_floor, grace_ms)
+function M.setup(relay_address, template, fee_cap, fee_floor, grace_ms, least_deposit)
     owner_only()
 
     if storage.get("relay") then
@@ -470,10 +462,20 @@ function M.setup(relay_address, template, fee_cap, fee_floor, grace_ms)
     storage.set("fee_cap", tostring(fee_cap))
     storage.set("fee_floor", tostring(fee_floor))
     storage.set("grace", tostring(whole(grace_ms, "the grace period")))
+    storage.set("least_deposit", tostring(whole(least_deposit or DEFAULT_LEAST_DEPOSIT, "the least deposit")))
+    in_force()
     local token = contracts.clone(template, "wbtc", "Wrapped Bitcoin", "wBTC", 8, ctx.contract)
     storage.set("wbtc", token:text())
-    remember()
     return token
+end
+
+-- What a deposit is at least to mint, in satoshis.
+local function least_deposit()
+    return tonumber(storage.get("least_deposit") or DEFAULT_LEAST_DEPOSIT)
+end
+
+function M.least_deposit()
+    return least_deposit()
 end
 
 function M.wbtc()
@@ -488,7 +490,7 @@ end
 -- An address's deposit script under the federation in force, and the P2WSH output that pays it:
 -- what a wallet shows as its bc1q… deposit address.
 function M.deposit_script(recipient)
-    local fed = remember()
+    local fed = in_force()
     local script = deposit_script(recipient:encode(), fed.threshold, fed.signers)
 
     return script, p2wsh(script), fed.version
@@ -498,20 +500,28 @@ end
 -- address it was for. raw is the transaction without its witness; index and path are its place
 -- and Merkle path in the block; coinbase and coinbase_path the block's first transaction, without
 -- its witness, and its path; vout the output; version the federation the address was made under,
--- the one in force or one retired within the grace period.
+-- the one in force or any before it within the grace period of when the chain replaced it, whether
+-- or not this gateway ever ran under it. A coinbase, at place 0, waits until Bitcoin lets it be
+-- spent, 100 confirmations, as a release spending it could not be mined before.
 function M.deposit(block, raw, index, path, coinbase, coinbase_path, vout, recipient, version)
-    local fed = remember()
-    version = tostring(whole(version or fed.version, "the version"))
+    local fed = in_force()
+    version = whole(version or fed.version, "the version")
     local threshold, keys, retired = fed_at(version)
 
     if retired and ctx.time > retired + grace_ms() then
         error("that federation's deposit addresses closed")
     end
 
-    local txid = proven(block, raw, index, path, coinbase, coinbase_path, fed.bitcoin_depth)
-    local depth = tonumber(tostring(contracts.call(relay(), "confirmations", block)))
+    local depth = fed.bitcoin_depth
 
-    if relay_height(relay()) - depth + 1 < tonumber(storage.get("first_height")) then
+    if whole(index, "the place") == 0 then
+        depth = math.max(depth, COINBASE_MATURITY)
+    end
+
+    local txid = proven(block, raw, index, path, coinbase, coinbase_path, depth)
+    local confirmations = tonumber(tostring(contracts.call(relay(), "confirmations", block)))
+
+    if relay_height(relay()) - confirmations + 1 < tonumber(storage.get("first_height")) then
         error("mined before this gateway was set up")
     end
 
@@ -520,6 +530,10 @@ function M.deposit(block, raw, index, path, coinbase, coinbase_path, vout, recip
 
     if output.script ~= p2wsh(deposit_script(recipient:encode(), threshold, keys)) then
         error("the output does not pay that address's deposit address")
+    end
+
+    if output.sats < least_deposit() then
+        error("a deposit mints at least " .. least_deposit() .. " satoshis")
     end
 
     local key = hex(txid) .. ":" .. vout
@@ -578,9 +592,40 @@ function M.withdraw(script, sats, most_fee)
     return id
 end
 
--- Who asked for a withdrawal changes the most it may lose to fees: while it waits, as fees rise past
--- it, or to a lower limit before a release takes it; and in a release Bitcoin has not mined, only
--- higher, so a bump its limit held back can go, as what that release took stays within it.
+-- The most a withdrawal may lose to fees, as a release proposed now is judged by: what it agreed to,
+-- or a lower limit it asked for once LOWER_MOST_FEE_AFTER blocks have passed, while it is queued. One
+-- in a release keeps what the release was proposed under, for its bumps too, until it is queued
+-- again; so a release planned against a limit is never undone by its owner lowering it as it lands.
+local function lowering_holds(id)
+    local from = withdrawals:get(id .. ":lowered_from")
+
+    return from ~= nil and withdrawals:get(id .. ":state") == "queued" and ctx.height >= tonumber(from)
+end
+
+local function most_fee_of(id)
+    if lowering_holds(id) then
+        return tonumber(withdrawals:get(id .. ":lowered"))
+    end
+
+    return tonumber(withdrawals:get(id .. ":most_fee"))
+end
+
+-- Makes a lowering that holds now the limit, as a release takes the withdrawal or its owner asks
+-- again: in a release, the limit it was proposed under is what stays.
+local function settle_most_fee(id)
+    if lowering_holds(id) then
+        withdrawals:set(id .. ":most_fee", withdrawals:get(id .. ":lowered"))
+        withdrawals:set(id .. ":lowered", nil)
+        withdrawals:set(id .. ":lowered_from", nil)
+    end
+
+    return most_fee_of(id)
+end
+
+-- Who asked for a withdrawal changes the most it may lose to fees. Raised, it holds at once: as fees
+-- rise past it while it waits, or in a release Bitcoin has not mined, so a bump its limit held back
+-- can go, as what that release took stays within it. Lowered, only while it is queued, and it holds
+-- LOWER_MOST_FEE_AFTER blocks later, as a release planned against the limit before may be on its way.
 function M.set_most_fee(id, most_fee)
     id = whole(id, "the withdrawal")
 
@@ -595,11 +640,20 @@ function M.set_most_fee(id, most_fee)
         error("a withdrawal that is not queued or in a release")
     end
 
-    if state == "proposed" and most < tonumber(withdrawals:get(id .. ":most_fee")) then
+    -- A lowering that has come to hold is the limit now, and one still waiting gives way to this.
+    local now = settle_most_fee(id)
+    withdrawals:set(id .. ":lowered", nil)
+    withdrawals:set(id .. ":lowered_from", nil)
+
+    if most >= now then
+        withdrawals:set(id .. ":most_fee", tostring(most))
+    elseif state == "proposed" then
         error("a withdrawal in a release only raises the most it may lose, for a bump")
+    else
+        withdrawals:set(id .. ":lowered", tostring(most))
+        withdrawals:set(id .. ":lowered_from", tostring(ctx.height + LOWER_MOST_FEE_AFTER))
     end
 
-    withdrawals:set(id .. ":most_fee", tostring(most))
     return true
 end
 
@@ -764,7 +818,7 @@ local function pays_as_asked(tx, ids, cost, state, repays)
 
         local share = fee_share(cost, #ids, at) + repays[at]
 
-        if share > tonumber(withdrawals:get(id .. ":most_fee")) then
+        if share > most_fee_of(id) then
             error("a share of the fee past what withdrawal " .. id .. " agreed to lose")
         end
 
@@ -788,7 +842,7 @@ local function repays_for(ids, cost, fee)
     local repays, total = {}, 0
 
     for at, id in ipairs(ids) do
-        local room = tonumber(withdrawals:get(id .. ":most_fee")) - fee_share(cost, #ids, at)
+        local room = most_fee_of(id) - fee_share(cost, #ids, at)
         repays[at] = math.max(0, math.min(fee_share(budget, #ids, at), repay_most(), room))
         total = total + repays[at]
     end
@@ -874,7 +928,7 @@ local function charged_within(parent, fee)
     local repays = repays_of(parent, #ids)
 
     for at, id in ipairs(ids) do
-        if fee_share(cost, #ids, at) + repays[at] + fee_share(fee, #ids, at) > tonumber(withdrawals:get(id .. ":most_fee")) then
+        if fee_share(cost, #ids, at) + repays[at] + fee_share(fee, #ids, at) > most_fee_of(id) then
             error("a share of the child's fee, with its share of the release's, past what withdrawal " .. id .. " agreed to lose")
         end
     end
@@ -914,10 +968,11 @@ end
 -- all it spends past what those withdrawals burned, so the fee costs the backing nothing, or where
 -- that is under Bitcoin's dust, dust, the withdrawals losing what tops it up with the fee. With no
 -- withdrawals it is a sweep: everything it spends an old federation's, all of it to the one in
--- force, the fee the federation's. Whatever it proposes Bitcoin must be able to mine, as its inputs
--- and withdrawals wait on it until it is shown mined or cancelled.
+-- force, the fee owed to the backing once shown, as no withdrawal pays it. Whatever it proposes
+-- Bitcoin must be able to mine, as its inputs and withdrawals wait on it until it is shown mined
+-- or cancelled.
 function M.propose(raw, signature, ...)
-    local fed = remember()
+    local fed = in_force()
     local ids, named = {}, {}
 
     for _, id in ipairs({ ... }) do
@@ -1038,6 +1093,7 @@ function M.propose(raw, signature, ...)
     end
 
     for at, withdrawal in ipairs(ids) do
+        settle_most_fee(withdrawal)
         withdrawals:set(withdrawal .. ":state", "proposed")
         record_fee(withdrawal, fee_share(cost, #ids, at) + repays[at])
     end
@@ -1074,7 +1130,7 @@ end
 -- incremental rate, under the cap. Every version stays open until one is shown.
 function M.replace(of, raw, signature)
     of = whole(of, "the proposal")
-    local fed = remember()
+    local fed = in_force()
 
     if state_of(of) ~= "open" then
         error("no open release by that number")
@@ -1171,7 +1227,7 @@ end
 -- what it pays for. A child is bumped by replacing it, with M.replace.
 function M.child(parent, raw, signature)
     parent = whole(parent, "the proposal")
-    local fed = remember()
+    local fed = in_force()
 
     if state_of(parent) ~= "open" then
         error("no open release by that number")
@@ -1357,7 +1413,7 @@ end
 -- needs none: every version of a release spends the same inputs, and a child pays no withdrawal.
 function M.cancel(id, signature)
     id = whole(id, "the proposal")
-    local fed = remember()
+    local fed = in_force()
 
     if state_of(id) ~= "open" then
         error("no open release by that number")
@@ -1526,7 +1582,7 @@ end
 -- must know. Every output is held once, as no two of what spends the same inputs can be mined.
 function M.released(id, block, raw, index, path, coinbase, coinbase_path)
     id = whole(id, "the proposal")
-    local fed = remember()
+    local fed = in_force()
     local state = state_of(id)
 
     if state ~= "open" and state ~= "cancelled" then
@@ -1590,6 +1646,12 @@ function M.released(id, block, raw, index, path, coinbase, coinbase_path)
         -- Every version repays the same, the release's, so it is settled once, by the release.
         settle(root, true)
 
+        -- A sweep pays no withdrawal, so its fee came out of what backs wBTC: owed to the backing, as
+        -- a child's is, for later releases to repay.
+        if #ids == 0 then
+            storage.set("shortfall", tostring(count("shortfall") + number_of(id, "fee")))
+        end
+
         show_change(hex(txid) .. ":" .. #ids, tx.outputs[#ids + 1].sats, proposals:get(id .. ":version"))
 
         if id ~= root then
@@ -1614,9 +1676,9 @@ function M.released(id, block, raw, index, path, coinbase, coinbase_path)
     return true
 end
 
--- What the federation paid from its change for children and later releases have not repaid yet, in
--- satoshis: what the gateway holds falls short of the wBTC it backs by this, as a child's fee is
--- charged to withdrawals already paid. Then how much of it open releases repay, once shown: a release
+-- What the federation paid from its change for children and sweeps and later releases have not repaid
+-- yet, in satoshis: what the gateway holds falls short of the wBTC it backs by this, as a child's fee
+-- is charged to withdrawals already paid and a sweep pays none. Then how much of it open releases repay, once shown: a release
 -- proposed repays only what is left past that.
 function M.shortfall()
     return count("shortfall"), count("repaying")
@@ -1661,14 +1723,22 @@ function M.fee_limits()
 end
 
 -- A withdrawal: its output script, the satoshis it burned, its state: queued, proposed or paid; who
--- asked; the most it may lose to fees; and its share of the fee of the release it is in, what it
--- arrives less of, once it is in one.
+-- asked; the most it may lose to fees, as a release proposed now is judged by; its share of the fee
+-- of the release it is in, what it arrives less of, once it is in one; and a lower limit it asked
+-- for that does not hold yet, with the height it holds from while queued, or nil for none.
 function M.withdrawal(id)
     id = whole(id, "the withdrawal")
 
     local by = withdrawals:get(id .. ":by")
+    local most = by and most_fee_of(id)
+    local lowered, from = withdrawals:get(id .. ":lowered"), withdrawals:get(id .. ":lowered_from")
 
-    return withdrawals:get(id .. ":script"), tonumber(withdrawals:get(id .. ":sats")), withdrawals:get(id .. ":state"), by and address.parse(by), tonumber(withdrawals:get(id .. ":most_fee") or ""), tonumber(withdrawals:get(id .. ":fee") or "")
+    -- One that holds already is the limit given before it.
+    if lowering_holds(id) then
+        lowered, from = nil, nil
+    end
+
+    return withdrawals:get(id .. ":script"), tonumber(withdrawals:get(id .. ":sats")), withdrawals:get(id .. ":state"), by and address.parse(by), most, tonumber(withdrawals:get(id .. ":fee") or ""), tonumber(lowered or ""), tonumber(from or "")
 end
 
 -- What a withdrawal is at least, in satoshis.
@@ -1691,7 +1761,7 @@ function M.change_script(version)
         return witness_script(tostring(whole(version, "the version")), "")
     end
 
-    local fed = remember()
+    local fed = in_force()
 
     return multisig(fed.threshold, fed.signers)
 end

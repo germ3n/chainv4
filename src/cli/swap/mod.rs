@@ -94,7 +94,8 @@ pub enum SwapAction {
     /// as the terms say, where it can see it.
     Lock(LegAction),
     /// Claims a leg with the secret, which shows it on that chain. Anyone may send it: what is
-    /// locked goes to the leg's receiver.
+    /// locked goes to the leg's receiver, or, when the token refuses it, is owed to them, for
+    /// withdraw to pay.
     Claim {
         #[command(flatten)]
         action: LegAction,
@@ -102,6 +103,9 @@ pub enum SwapAction {
         #[arg(long)]
         secret: String,
     },
+    /// Pays a claimed leg's receiver what its claim could not, as when the token refused it then.
+    /// Anyone may send it, as often as it takes.
+    Withdraw(LegAction),
     /// Takes a lock back to whoever made it, once its deadline passed and nobody claimed it.
     Refund(LegAction),
     /// Where each leg stands: locked, claimed with its secret, or refunded; Bitcoin's HTLC to look
@@ -125,8 +129,18 @@ pub enum SwapAction {
         secret: String,
     },
     /// Takes back the bitcoin you locked, once its lock time passed: prints the signed
-    /// transaction, which Bitcoin mines once its median time is past the deadline.
-    BitcoinRefund(BitcoinSpend),
+    /// transaction, which Bitcoin mines once its median time is past the deadline. With Bitcoin as
+    /// the second leg it pays a high fee by default, and with --esplora and --wait it waits for the
+    /// deadline and broadcasts it the moment Bitcoin takes it: a claim of the HTLC stays valid past
+    /// the deadline until a refund is mined.
+    BitcoinRefund {
+        #[command(flatten)]
+        spend: BitcoinSpend,
+        /// Wait for the deadline, then broadcast the refund through --esplora until Bitcoin takes
+        /// it, trying again every 30 seconds while its median time is short of the deadline.
+        #[arg(long, requires = "esplora")]
+        wait: bool,
+    },
     /// Finishes a multisig's claim or refund of the HTLC from its PSBT, once its members signed
     /// enough: prints the transaction to broadcast.
     BitcoinFinish {
@@ -259,9 +273,14 @@ pub struct BitcoinSpend {
     /// Where the coins go: a bc1q… or tb1q… address.
     #[arg(long)]
     pub to: String,
-    /// The fee, in satoshis a virtual byte.
-    #[arg(long, default_value_t = 2)]
-    pub fee_rate: u64,
+    /// The fee, in satoshis a virtual byte: by default 2, or for the refund of a second lock on
+    /// Bitcoin a high one, which it must be mined at once to be safe.
+    #[arg(long)]
+    pub fee_rate: Option<u64>,
+    /// An Esplora API, such as https://mempool.space/api, to broadcast the signed transaction
+    /// through rather than print it. It tells that server the swap's addresses.
+    #[arg(long)]
+    pub esplora: Option<String>,
 }
 
 pub fn swap(args: SwapArgs) -> CliResult<()> {
@@ -286,12 +305,14 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             let terms = Terms::offer(hash, pay, get, now + first, now + second, &parties.read(&agent, &node, &hash)?)?;
             terms.check(now)?;
             println!("{}", terms.to_text());
+            warn_bitcoin_second(&terms);
         }
         SwapAction::Answer { offer, parties, node, tls } => {
             let offered = Terms::from_text(&offer)?;
             let terms = offered.answer(&parties.read(&agent(&tls)?, node.trim_end_matches('/'), &offered.hash)?)?;
             terms.check(now)?;
             println!("{}", terms.to_text());
+            warn_bitcoin_second(&terms);
         }
         SwapAction::Show { terms } => show(&Terms::from_text(&terms)?),
         SwapAction::Lock(action) => {
@@ -398,9 +419,32 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             // Anyone may claim for the receiver: a multisig's claim needs none of its members.
             let action = LegAction { multisig: None, out: None, ..action };
 
+            let id = terms.swap_id(side).ok_or("the terms do not say who locked that leg")?;
+
             match terms.leg(side) {
-                Leg::Chain(leg) => call(&action, leg.contract, "claim", u256::ZERO, vec![text(to_hex(&secret))])?,
-                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.claim_call(&secret), false, &evm_secret(&keypair)?)?,
+                Leg::Chain(leg) => call(&action, leg.contract, "claim", u256::ZERO, vec![text(to_hex(&id)), text(to_hex(&secret))])?,
+                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.claim_call(&id, &secret), false, &evm_secret(&keypair)?)?,
+                Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
+            }
+
+            // A claim stands even when its payout was refused, which withdraw then tries again.
+            if let Ok(lock) = look(&terms, side, &action)
+                && lock.owed
+            {
+                println!("claimed, but the payout was refused: it is owed to the receiver, and swap withdraw pays it once the token lets it");
+            }
+        }
+        SwapAction::Withdraw(action) => {
+            let terms = agreed(&action.terms)?;
+            let (keypair, parties) = keyed(&action)?;
+            let side = pick(&terms, &action, &parties, Role::Receiver, "withdraw")?;
+            let id = terms.swap_id(side).ok_or("the terms do not say who locked that leg")?;
+            // Anyone may withdraw for the receiver.
+            let action = LegAction { multisig: None, out: None, ..action };
+
+            match terms.leg(side) {
+                Leg::Chain(leg) => call(&action, leg.contract, "withdraw", u256::ZERO, vec![text(to_hex(&id))])?,
+                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.withdraw_call(&id), false, &evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
             }
         }
@@ -408,12 +452,13 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             let terms = agreed(&action.terms)?;
             let (keypair, parties) = keyed(&action)?;
             let side = pick(&terms, &action, &parties, Role::Payer, "refund")?;
+            let id = terms.swap_id(side).ok_or("the terms do not say who locked that leg")?;
             // Anyone may refund to the payer, a multisig too.
             let action = LegAction { multisig: None, out: None, ..action };
 
             match terms.leg(side) {
-                Leg::Chain(leg) => call(&action, leg.contract, "refund", u256::ZERO, vec![text(to_hex(&terms.hash))])?,
-                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.refund_call(&terms.hash), false, &evm_secret(&keypair)?)?,
+                Leg::Chain(leg) => call(&action, leg.contract, "refund", u256::ZERO, vec![text(to_hex(&id))])?,
+                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.refund_call(&id), false, &evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
             }
         }
@@ -429,6 +474,12 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
                 if let (Leg::Bitcoin(leg), Some(htlc)) = (leg, terms.htlc()) {
                     println!("{name} leg, on {}: the HTLC {}, to look up on a Bitcoin explorer", leg.network().name(), htlc.address(leg.network()));
+
+                    // A late claim of the HTLC is still taken, so the second lock's refund is due
+                    // the moment it can be mined.
+                    if side == Side::Second && now / 1_000 >= u64::from(htlc.locktime) {
+                        println!("its deadline passed: if it was not claimed, refund it now, swap bitcoin-refund --esplora … --wait, as a late claim is still mined until a refund is");
+                    }
                     continue;
                 }
 
@@ -453,6 +504,10 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                         if let Some(secret) = lock.secret {
                             println!("secret {}", to_hex(&secret));
                         }
+
+                        if lock.owed {
+                            println!("its payout is owed to the receiver: the token refused it at the claim. swap withdraw pays it");
+                        }
                     }
                     Err(why) => println!("{name} leg, on {}: not known, {why}", leg.chain_name()),
                 }
@@ -460,9 +515,23 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
         }
         SwapAction::BitcoinClaim { spend, secret } => {
             let secret = bytes32(&secret, "--secret")?;
-            println!("{}", bitcoin(&spend, Spend::Claim { secret })?);
+            let signed = bitcoin(&spend, Spend::Claim { secret })?;
+            match &spend.esplora {
+                Some(esplora) if spend.multisig.is_none() => println!("broadcast {}", esplora_broadcast(&agent(&TlsArgs::default())?, esplora, &signed)?),
+                _ => println!("{signed}"),
+            }
         }
-        SwapAction::BitcoinRefund(spend) => println!("{}", bitcoin(&spend, Spend::Refund)?),
+        SwapAction::BitcoinRefund { spend, wait } => {
+            let signed = bitcoin(&spend, Spend::Refund)?;
+            match &spend.esplora {
+                Some(esplora) if spend.multisig.is_none() => {
+                    let terms = agreed(&spend.terms)?;
+                    let locktime = terms.htlc().map_or(0, |htlc| u64::from(htlc.locktime));
+                    println!("broadcast {}", refund_when_due(&agent(&TlsArgs::default())?, esplora, &signed, locktime, wait)?);
+                }
+                _ => println!("{signed}"),
+            }
+        }
         SwapAction::BitcoinFinish { terms, psbt, sats, secret } => {
             let terms = agreed(&terms)?;
             let htlc = terms.htlc().ok_or("the terms hold no HTLC: no leg is on Bitcoin")?;
@@ -663,11 +732,14 @@ fn settled(terms: &Terms, side: Side, action: &LegAction, lock: &Lock) -> CliRes
 
 /// A leg's lock as its contract shows it.
 fn look(terms: &Terms, side: Side, action: &LegAction) -> CliResult<Lock> {
+    let id = terms.swap_id(side);
+
     match terms.leg(side) {
         Leg::Chain(leg) => {
+            let id = id.ok_or("the terms do not say who locked that leg")?;
             let (agent, node) = (agent(&action.tls)?, action.node.trim_end_matches('/'));
             let ask = |function: &str| -> CliResult<Vec<String>> {
-                let body = json!({ "contract": leg.contract.to_string(), "function": function, "args": [{ "type": "string", "value": to_hex(&terms.hash) }] });
+                let body = json!({ "contract": leg.contract.to_string(), "function": function, "args": [{ "type": "string", "value": to_hex(&id) }] });
                 let answer = ok(agent.post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()))?;
                 let values: Vec<String> = answer["values"].as_array().into_iter().flatten().map(|value| value["value"].as_str().map_or_else(|| value["value"].to_string(), str::to_string)).collect();
 
@@ -686,11 +758,12 @@ fn look(terms: &Terms, side: Side, action: &LegAction) -> CliResult<Lock> {
             }
         }
         Leg::Evm(leg) => {
+            let id = id.ok_or("the terms do not say who locked that leg")?;
             let rpc = evm_rpc(action, leg)?;
-            let mut lock = evm::read_lock(&rpc.call(&leg.contract, &evm::get_input(&terms.hash))?)?;
+            let mut lock = evm::read_lock(&rpc.call(&leg.contract, &evm::get_input(&id))?)?;
 
             if leg.item.is_some() {
-                lock.item = evm::read_item(&rpc.call(&leg.contract, &evm::item_input(&terms.hash))?)?;
+                lock.item = evm::read_item(&rpc.call(&leg.contract, &evm::item_input(&id))?)?;
             }
 
             Ok(lock)
@@ -729,6 +802,12 @@ fn show(terms: &Terms) {
         }
     }
 
+    for (side, _) in terms.legs() {
+        if let Some(id) = terms.swap_id(side) {
+            println!("{} leg's swap id {}", if side == Side::First { "first" } else { "second" }, to_hex(&id));
+        }
+    }
+
     match (terms.agreed(), terms.htlc(), terms.bitcoin()) {
         (_, Some(htlc), Some((_, leg))) => {
             println!("bitcoin HTLC {}", htlc.address(leg.network()));
@@ -737,6 +816,8 @@ fn show(terms: &Terms) {
         (false, ..) => println!("an offer: the other side's part is not in yet"),
         _ => {}
     }
+
+    warn_bitcoin_second(terms);
 }
 
 /// Terms both sides agreed.
@@ -797,13 +878,15 @@ fn allowance(action: &LegAction, token: Address, owner: Address, spender: Addres
 /// Bitcoin's leg, spent: the signed transaction, as hex to broadcast.
 pub(super) fn bitcoin(spend: &BitcoinSpend, how: Spend) -> CliResult<String> {
     let terms = agreed(&spend.terms)?;
-    let (htlc, (_, leg)) = (terms.htlc().ok_or("the terms hold no HTLC: no leg is on Bitcoin")?, terms.bitcoin().ok_or("no leg is on Bitcoin")?);
+    let (htlc, (side, leg)) = (terms.htlc().ok_or("the terms hold no HTLC: no leg is on Bitcoin")?, terms.bitcoin().ok_or("no leg is on Bitcoin")?);
     let (txid, vout) = spend.funding.split_once(':').ok_or("--funding is txid:vout")?;
     let mut txid: [u8; 32] = from_hex(&format!("0x{txid}")).and_then(|bytes| bytes.try_into().ok()).ok_or("--funding's txid is 64 hex digits")?;
     // Explorers write a txid backwards from how a transaction names it.
     txid.reverse();
     let vout: u32 = vout.parse().map_err(|_| "--funding's vout is a number")?;
     let to = output_script(&spend.to, leg.network())?;
+    let coins = Coins { txid, vout, value: spend.sats };
+    let fee_rate = fee_rate(&htlc, side, how, coins, &to, spend.fee_rate)?;
 
     // A multisig's branch: unsigned, as a PSBT for its members.
     if let (Some(multisig), Some(out)) = (spend.multisig, &spend.psbt) {
@@ -815,7 +898,7 @@ pub(super) fn bitcoin(spend: &BitcoinSpend, how: Spend) -> CliResult<String> {
             return Err(format!("the multisig's keys at {index} are not who this spend's branch takes: give the --multisig-index the swap was made with").into());
         }
 
-        let tx = htlc.unsigned(Coins { txid, vout, value: spend.sats }, to, spend.fee_rate, how)?;
+        let tx = htlc.unsigned(coins, to, fee_rate, how)?;
         let psbt = crate::crypto::bitcoin::psbt::Psbt::for_htlc_multisig(&tx, spend.sats, &htlc, &wallet, index)?;
         std::fs::write(out, psbt.to_base64() + "\n")?;
 
@@ -826,9 +909,69 @@ pub(super) fn bitcoin(spend: &BitcoinSpend, how: Spend) -> CliResult<String> {
     let PrivateKey::Bitcoin(secret) = key.private() else {
         return Err("--key is not a bitcoin key file: make one with keygen --scheme bitcoin".into());
     };
-    let tx = htlc.spend(Coins { txid, vout, value: spend.sats }, to, spend.fee_rate, how, secret)?;
+    let tx = htlc.spend(coins, to, fee_rate, how, secret)?;
 
     Ok(to_hex(&tx.encode())[2..].to_string())
+}
+
+/// The fee rate a spend of the HTLC pays: the one given; for the refund of a second lock, a high
+/// one, as it must be mined before a late claim; else 2.
+fn fee_rate(htlc: &crate::swap::htlc::Htlc, side: Side, how: Spend, coins: Coins, to: &[u8], given: Option<u64>) -> CliResult<u64> {
+    match (given, side, how) {
+        (Some(rate), ..) => Ok(rate),
+        (None, Side::Second, Spend::Refund) => Ok(htlc.urgent_fee_rate(coins, to).ok_or("those coins are too few to pay any fee and leave more than dust")?),
+        (None, ..) => Ok(2),
+    }
+}
+
+/// Tells Bitcoin of the swap's HTLC with the second leg on it, after the terms: whoever pays it
+/// must be online at its deadline, as a late claim is still mined until a refund is.
+fn warn_bitcoin_second(terms: &Terms) {
+    if terms.bitcoin_second() {
+        eprintln!(
+            "note: Bitcoin is the second leg. Bitcoin cannot refuse a claim past the deadline, so whoever pays the HTLC must be online at its deadline and refund it at once, \
+             with swap bitcoin-refund --esplora … --wait, or the starter could claim it late and take back the first lock"
+        );
+    }
+}
+
+/// Broadcasts a signed Bitcoin transaction through an Esplora API: its txid.
+fn esplora_broadcast(agent: &ureq::Agent, esplora: &str, hex: &str) -> CliResult<String> {
+    let url = format!("{}/tx", esplora.trim().trim_end_matches('/'));
+    let mut answer = agent.post(&url).send(hex.to_string()).map_err(|err| format!("cannot reach Esplora: {err}"))?;
+    let body = answer.body_mut().read_to_string().unwrap_or_default();
+
+    match answer.status().is_success() {
+        true => Ok(body.trim().to_string()),
+        false => Err(format!("Esplora refused it: {}", body.trim()).into()),
+    }
+}
+
+/// Broadcasts a refund through Esplora: at once, or with wait, from its lock time on, again every
+/// 30 seconds while Bitcoin refuses it as not final, its median time running behind the clock.
+fn refund_when_due(agent: &ureq::Agent, esplora: &str, hex: &str, locktime: u64, wait: bool) -> CliResult<String> {
+    loop {
+        let now = crate::node::now_ms() / 1_000;
+
+        if wait && now < locktime {
+            eprintln!("waiting {} s for the deadline", locktime - now);
+            std::thread::sleep(std::time::Duration::from_secs((locktime - now).min(30)));
+            continue;
+        }
+
+        match esplora_broadcast(agent, esplora, hex) {
+            Err(why) if wait && not_final(&why.to_string()) => {
+                eprintln!("not final yet, as Bitcoin's median time is short of the deadline: trying again in 30 s");
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Whether Bitcoin refused a transaction only for its lock time, which a later block lets through.
+fn not_final(why: &str) -> bool {
+    why.contains("non-final") || why.contains("non-BIP68-final")
 }
 
 /// The script a native segwit address on the network pays.
@@ -904,5 +1047,24 @@ mod tests {
         for bad in ["chainv4:nft:contract:0xc1", "chainv4:multi:x:1", "evm:1:nft:3", "dogecoin:5"] {
             assert!(read(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_second_lock_s_bitcoin_refund_pays_a_high_fee_unless_told_and_every_other_spend_two() {
+        let key = |byte: u8| BitcoinParty::Key(crate::crypto::secp256k1::public_key(&[byte; 32]).unwrap());
+        let htlc = crate::swap::htlc::Htlc { hash: [7; 32], claim: key(1), refund: key(2), locktime: 1_793_000_000 };
+        let coins = Coins { txid: [9; 32], vout: 0, value: 100_000 };
+        let to = [&[0x00, 20][..], &[0x33; 20]].concat();
+        let rate = |side: Side, how: Spend, given: Option<u64>| fee_rate(&htlc, side, how, coins, &to, given).unwrap();
+
+        assert_eq!(rate(Side::Second, Spend::Refund, None), crate::swap::htlc::URGENT_FEE_RATE, "it races a late claim");
+        assert_eq!(rate(Side::First, Spend::Refund, None), 2);
+        assert_eq!(rate(Side::Second, Spend::Claim { secret: [0; 32] }, None), 2);
+        assert_eq!(rate(Side::Second, Spend::Refund, Some(9)), 9, "the rate given");
+        assert!(fee_rate(&htlc, Side::Second, Spend::Refund, Coins { value: 300, ..coins }, &to, None).is_err(), "too few to pay any fee");
+
+        // Bitcoin refuses a refund before its median time passes the lock time; that is tried again.
+        assert!(not_final("Esplora refused it: sendrawtransaction RPC error: {\"code\":-26,\"message\":\"non-final\"}"));
+        assert!(!not_final("Esplora refused it: bad-txns-inputs-missingorspent"));
     }
 }

@@ -376,7 +376,7 @@ what its storage or calls cost (`vm::cost`).
 | The address a key controls | 100 |
 | RIPEMD-160, HASH160 or double SHA-256 | As a hash: 20, plus 1 per 64 bytes |
 | Checking a state proof or a Merkle path | 200, plus 60 per 32 bytes of it |
-| Reading the federation | 200 |
+| Reading the federation, in force or of any version | 200 |
 | Reading the chain's id | 20 |
 
 **Loading code** is paid for by the deploy or upgrade, and shows in its receipt's `fuel_used`:
@@ -470,7 +470,7 @@ and `debug` are not there at all.
 | `u64`, `u128`, `u256`, `i64`, `i128`, `i256` | The integer types: `u256(value)` or `u256.new`, and `zero`, `min`, `max`, for each. See [Integers](#integers). |
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
 | `crypto` | See [Crypto](#crypto). |
-| `federation` | `federation.get()`: the bridges' federation in force, `{ version, threshold, signers }`, or `nil`. See [Bridges](bridges.md). |
+| `federation` | `federation.get()`: the bridges' federation in force, `{ version, threshold, signers }`, or `nil`. `federation.at(version)`: the one of any version, in force or past, as the chain keeps every one it decided, with `decided_height` and `decided_time`, the block that decided it, and once the next was decided, `replaced_height` and `replaced_time`, that block's; `nil` for a version never decided. Version 0 is genesis's. Each costs what reading the one in force does. See [Bridges](bridges.md#the-federation). |
 | `chain` | `chain.id()`: the chain's id, what its EVM answers `CHAINID` with and the [bridges](bridges.md) name it by. Six bytes of its genesis id, so nothing an owner sets: bind to it whatever must hold on this chain alone. |
 
 ### Crypto

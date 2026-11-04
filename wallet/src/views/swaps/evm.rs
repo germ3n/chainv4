@@ -1,6 +1,7 @@
 //! A swap's legs on EVM chains, such as Ethereum, Sepolia or Base: Swap.sol there, read through
 //! the chain's JSON-RPC, a URL Settings gives, and sent to as every page sends there
-//! (crate::views::evm): a lock, claim or refund priced, shown, signed and waited for until mined.
+//! (crate::views::evm): a lock, claim, withdraw or refund priced, shown, signed and waited for until
+//! mined. Swap.sol keeps each swap by its id, which the wallet works out from the terms.
 
 use {
     super::SwapsState,
@@ -14,26 +15,27 @@ use {
 
 /// What Swap.sol or its chain answered, for the next frame to take.
 pub enum Read {
-    Lock { hash: String, chain_id: u64, lock: Box<Result<Lock, String>> },
+    /// A leg's lock, by its swap id.
+    Lock { id: String, chain_id: u64, lock: Box<Result<Lock, String>> },
     /// The chain's height, and the block its RPC calls finalized, where it names one.
     Heads { chain_id: u64, heads: Result<(u64, Option<u64>), String> },
 }
 
-/// Asks Swap.sol where a leg's lock stands, and for a leg locking an NFT, which one it holds, in
-/// one batch.
-pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, hash: &[u8; 32]) {
-    let (chain_id, key) = (leg.chain_id, to_hex(hash));
+/// Asks Swap.sol where a leg's lock stands, by its swap id, and for a leg locking an NFT, which
+/// one it holds, in one batch.
+pub fn ask_lock(ctx: &Ctx, state: &SwapsState, url: &str, leg: &EvmLeg, id: &[u8; 32]) {
+    let (chain_id, key, hash) = (leg.chain_id, to_hex(id), id);
     let call = |id: u64, input: Vec<u8>| request(id, "eth_call", json!([{ "to": to_hex(&leg.contract), "data": to_hex(&input) }, "latest"]));
     let output = |value: &Value| value.as_str().and_then(from_hex).ok_or_else(|| format!("eth_call answered {value}"));
 
     if leg.item.is_none() {
-        return state.evm.ask(ctx, url, call(1, get_input(hash)), move |answer| Read::Lock { hash: key, chain_id, lock: Box::new(answer.and_then(|value| output(&value)).and_then(|output| read_lock(&output))) });
+        return state.evm.ask(ctx, url, call(1, get_input(hash)), move |answer| Read::Lock { id: key, chain_id, lock: Box::new(answer.and_then(|value| output(&value)).and_then(|output| read_lock(&output))) });
     }
 
     let batch = json!([call(1, get_input(hash)), call(2, item_input(hash))]);
 
     state.evm.ask_raw(ctx, url, batch, move |answer| Read::Lock {
-        hash: key,
+        id: key,
         chain_id,
         lock: Box::new(answer.and_then(|replies| {
             let reply = |id: u64| -> Result<Vec<u8>, String> {
@@ -74,26 +76,27 @@ pub fn take(ctx: &mut Ctx, state: &mut SwapsState) {
     let (reads, mined) = state.evm.take();
 
     // Asked again at once: the lock has moved.
-    if let Some(hash) = mined {
-        state.evm_asked.remove(&hash);
+    if let Some(id) = mined {
+        state.evm_asked.remove(&id);
     }
 
     for read in reads {
         match read {
-            Read::Lock { hash, chain_id, lock } => {
-                // A claim there shows the secret: kept for the other leg's claim, once it is the
-                // swap's, whatever the RPC says.
+            Read::Lock { id, chain_id, lock } => {
+                // A claim there shows the secret: kept for the other leg's claim, for the swap
+                // whose hash it is, whatever the RPC says.
                 let lock = *lock;
 
-                if let Ok(Lock { secret: Some(secret), .. }) = &lock
-                    && to_hex(&chainv4::crypto::bitcoin::sha256(secret)) == hash
-                    && let Some(record) = ctx.book.swaps.iter_mut().find(|record| record.secret.is_none() && super::hash_of(record).as_deref() == Some(hash.as_str()))
-                {
-                    record.secret = Some(to_hex(secret));
-                    *ctx.changed = true;
+                if let Ok(Lock { secret: Some(secret), .. }) = &lock {
+                    let hash = to_hex(&chainv4::crypto::bitcoin::sha256(secret));
+
+                    if let Some(record) = ctx.book.swaps.iter_mut().find(|record| record.secret.is_none() && super::hash_of(record).as_deref() == Some(hash.as_str())) {
+                        record.secret = Some(to_hex(secret));
+                        *ctx.changed = true;
+                    }
                 }
 
-                state.evm_locks.insert((hash, chain_id), lock);
+                state.evm_locks.insert((id, chain_id), lock);
             }
             Read::Heads { chain_id, heads } => {
                 if let Ok(heads) = heads {

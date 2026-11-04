@@ -371,6 +371,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         states.settings.hide();
     }
 
+    // A second lock paid on Bitcoin is refunded the moment its deadline lets it, whatever page is
+    // open: a late claim of it is still mined until a refund is.
+    #[cfg(feature = "swap")]
+    if ctx.settings.role() == Role::Online {
+        swaps::refund_due(ctx, &mut states.swaps, ui.ctx());
+    }
+
     // What cannot be done without asking the node says so, rather than ask it.
     if ctx.settings.read_blocks && let Some(what) = reading::turned_off(*ctx.page) {
         reading::needs_asking(ui, ctx, what);

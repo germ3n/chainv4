@@ -1742,7 +1742,8 @@ mod send {
             sats: 100_000,
             key: None,
             to,
-            fee_rate: 2,
+            fee_rate: Some(2),
+            esplora: None,
             multisig: Some(account),
             multisig_index: None,
             psbt: Some(psbt.clone()),
@@ -1829,7 +1830,7 @@ mod send {
         let key = dir.0.join("bob.key");
         fs::write(&key, bob_bitcoin.to_key_file()).unwrap();
         let to = crate::structs::bech32::encode_segwit("tb", &crate::crypto::bitcoin::hash160(&bitcoin_key(&bob_bitcoin)));
-        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key: Some(key), to, fee_rate: 2, multisig: None, multisig_index: None, psbt: None, node: String::new() };
+        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key: Some(key), to, fee_rate: Some(2), esplora: None, multisig: None, multisig_index: None, psbt: None, node: String::new() };
         let signed = bitcoin(&spend, Spend::Claim { secret }).unwrap();
         let (tx, witnessed) = Transaction::read(&from_hex(&format!("0x{signed}")).unwrap()).unwrap();
 
@@ -2280,7 +2281,7 @@ mod send {
         run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }, None, None).unwrap();
 
         // The gateway, after its wBTC template, on that relay.
-        run(BtcAction::Deploy { relay, fee_cap: 10_000, fee_floor: 2, grace_hours: 1 }, None, None).unwrap();
+        run(BtcAction::Deploy { relay, fee_cap: 10_000, fee_floor: 2, grace_hours: 1, least_deposit: 10_000 }, None, None).unwrap();
         let gateway = deployed_at(&me, start + 2, hash);
         assert_eq!(gateway, announced);
         run(BtcAction::Address { recipient: me, network: None }, None, None).unwrap();
@@ -2483,7 +2484,7 @@ mod send {
             fs::write(&wasm, crate::vm::tests::example("btc_relay")).unwrap();
             send(fixture.running.args(TxArgs::Deploy { lua: None, wasm: Some(wasm), evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
             fixture.run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }).unwrap();
-            fixture.run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1 }).unwrap();
+            fixture.run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1, least_deposit: 10_000 }).unwrap();
             let output = fixture.read("deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
 
             for sats in [300_000, 300_001, 300_002] {
@@ -3324,7 +3325,7 @@ mod send {
         let run = |action: BtcAction, gateway: Option<Address>| bridge(args(action, None, None, &esplora, gateway, None));
         run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }, None).unwrap();
         let gateway = deployed_at(&me, start + 3, hash);
-        run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1 }, Some(gateway)).unwrap();
+        run(BtcAction::Deploy { relay, fee_cap: 100_000, fee_floor: 2, grace_hours: 1, least_deposit: 10_000 }, Some(gateway)).unwrap();
         let output = read(&gateway, "deposit_script", serde_json::json!([{ "type": "address", "value": me.to_string() }]))[1]["value"].as_str().map(|hex| crate::structs::hex::from_hex(hex).unwrap()).unwrap();
 
         // What the gateway holds: three deposits to spend on all that follows, each release holding one.
@@ -3919,7 +3920,7 @@ mod send {
         swap(SwapArgs { action: SwapAction::Lock(action) }).unwrap();
         multisig(&files[3], EvmAction::Sign { bundle: lock.clone(), yes: true }).unwrap();
         multisig(&files[3], EvmAction::Submit { bundle: lock, eth_rpc: eth_rpc.clone() }).unwrap();
-        let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
+        let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&terms.swap_id(crate::swap::Side::First).unwrap())).unwrap()).unwrap();
         running.stop();
 
         assert_eq!(terms.first.stands(&locked, terms.first_deadline), Ok(()));
@@ -4049,7 +4050,8 @@ mod send {
         let unfinal = swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap_err();
         assert!(unfinal.to_string().contains("not final yet") && unfinal.to_string().contains("--anyway"), "{unfinal}");
         swap(SwapArgs { action: SwapAction::Lock(LegAction { anyway: true, ..action(Some(bob_file.clone()), None) }) }).unwrap();
-        let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
+        let id = terms.swap_id(crate::swap::Side::Second).unwrap();
+        let locked = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&id)).unwrap()).unwrap();
         assert_eq!(terms.second.stands(&locked, terms.second_deadline), Ok(()));
         assert!(locked.height.is_some(), "Swap.sol says the block it was locked in");
 
@@ -4058,8 +4060,8 @@ mod send {
         let held = swap(SwapArgs { action: SwapAction::Claim { action: action(Some(bob_file.clone()), Some(LegArg::Second)), secret: to_hex(&secret) } }).unwrap_err();
         assert!(held.to_string().contains("not final yet"), "{held}");
         swap(SwapArgs { action: SwapAction::Claim { action: LegAction { anyway: true, ..action(Some(bob_file.clone()), Some(LegArg::Second)) }, secret: to_hex(&secret) } }).unwrap();
-        let claimed = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&hash)).unwrap()).unwrap();
-        assert_eq!((claimed.state, claimed.secret), (LockState::Claimed, Some(secret)));
+        let claimed = evm::read_lock(&rpc.call(&swap_sol, &evm::get_input(&id)).unwrap()).unwrap();
+        assert_eq!((claimed.state, claimed.secret, claimed.owed), (LockState::Claimed, Some(secret), false));
         let paid: serde_json::Value = serde_json::from_str(
             &ureq::post(format!("{node}/rpc"))
                 .header("content-type", "application/json")

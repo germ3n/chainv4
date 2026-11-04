@@ -392,6 +392,30 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "The bridges' federation of a version, in force or past, as the chain keeps every one it decided: what it was, the block that decided it, and the block that decided the next, once one did. Version 0 is genesis's, which a VM given it directly knows without a record. None for a version never decided. Engines charge cost::FEDERATION, as for the one in force.",
+        params = { version = "Its version: 0 for genesis's, and one more for each decided since." },
+    )]
+    pub fn federation_at(&self, version: u64) -> Result<Option<crate::registry::federation::FederationAt>, VmError> {
+        let changes = crate::registry::changes::Changes::new(&self.state);
+
+        if let Some(found) = changes.federation_at(version).map_err(|err| self.fail(err))? {
+            return Ok(Some(found));
+        }
+
+        // Genesis's federation, where the VM was given it rather than the state: replaced once
+        // governance decided version 1.
+        match (version, self.vm.federation()) {
+            (0, Some(federation)) => {
+                let replaced = changes.federation_record(1).map_err(|err| self.fail(err))?.map(|record| record.decided);
+
+                Ok(Some(crate::registry::federation::FederationAt { version: 0, federation: federation.clone(), decided: None, replaced }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    #[document(
+        parent = "Host",
         summary = "The chain's id, as the gateways name it and the EVM's CHAINID answers: six bytes of its genesis id. Nothing a contract's owner sets, so a contract may bind what it signs or pays to this one chain. Engines charge cost::CHAIN_ID.",
     )]
     pub fn chain_id(&self) -> u64 {

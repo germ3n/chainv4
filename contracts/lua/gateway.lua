@@ -50,11 +50,12 @@ local wrapped = storage.namespace("wrapped")
 local origins = storage.namespace("origins")
 -- Transfers that left, by nonce: their fields, for signers and relayers to read.
 local out = storage.namespace("out")
--- Transfers that arrived and are done, by source chain and nonce.
+-- Transfers that arrived and are done, by source chain, the gateway they came from, and nonce: a
+-- new peer on a chain counts its nonces from 1 again, and its transfers are others than the old one's.
 local done = storage.namespace("done")
 -- The signatures posted, by digest and signer key.
 local board = storage.namespace("board")
--- Transfers on their way here that were voided, by source chain and nonce: the transfer's digest and
+-- Transfers on their way here that were voided, by source chain, gateway and nonce: the transfer's digest and
 -- the height it was voided at, as what a signer reads before it signs a refund must be final.
 local voids = storage.namespace("voids")
 -- Transfers that left and were refunded, by nonce: the height. And where their senders would have
@@ -66,6 +67,11 @@ local function hex(bytes)
     return (bytes:gsub(".", function(byte)
         return string.format("%02x", string.byte(byte))
     end))
+end
+
+-- Where what arrived from a chain's gateway at a nonce is kept, in done and voids.
+local function arrival(source, from, nonce)
+    return source .. ":" .. hex(from) .. ":" .. nonce
 end
 
 local function owner_only()
@@ -212,14 +218,16 @@ local function signed(d)
     return count, fed.threshold
 end
 
--- The gateways at the two ends of a transfer between two chains, as it writes them.
-local function ends(source, target)
+-- The gateways at the two ends of a transfer between two chains, as it writes them. One that left
+-- here goes by the peer it was sent to, as it recorded it, so changing a peer strands nothing in
+-- flight; one coming here, by the peer in force, the only one whose transfers it takes.
+local function ends(source, target, nonce)
     local from, to
 
     if target == here() then
         from, to = peers:get(tostring(source)), identity()
     elseif source == here() then
-        from, to = identity(), peers:get(tostring(target))
+        from, to = identity(), (nonce and out:get(nonce .. ":to")) or peers:get(tostring(target))
     else
         error("a transfer to or from another pair of chains")
     end
@@ -253,7 +261,7 @@ local function transfer(source, target, nonce, kind, origin, asset, id, amount, 
         error("kind is 0 the coin, 1 a token, 2 an NFT or 3 a multi-token amount")
     end
 
-    t.from, t.to = ends(t.source, t.target)
+    t.from, t.to = ends(t.source, t.target, t.source == here() and t.nonce or nil)
 
     return t
 end
@@ -390,16 +398,35 @@ function M.send(target, recipient, kind, asset, id, amount)
             ok, answer = pcall(contracts.call, asset, "symbol")
             symbol = ok and readable(answer) or ""
 
+            -- What arrived is checked, not taken on the token's word, as Gateway.sol checks it: a
+            -- token that takes a fee, or moves nothing, would leave what is minted on the other
+            -- chain backed by less than it says.
             if kind == TOKEN then
                 ok, answer = pcall(contracts.call, asset, "decimals")
                 decimals = ok and tonumber(tostring(answer)) or 0
+                local before = u256(contracts.call(asset, "balance_of", ctx.contract))
                 contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, amount)
+
+                if u256(contracts.call(asset, "balance_of", ctx.contract)) - before ~= amount then
+                    error("the token moved less than the amount")
+                end
             elseif kind == NFT then
                 uri = readable(contracts.call(asset, "token_uri", id))
                 contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, id)
+
+                local owner = contracts.call(asset, "owner_of", id)
+
+                if owner == nil or owner:text() ~= ctx.contract:text() then
+                    error("the NFT did not move")
+                end
             else
                 uri = readable(contracts.call(asset, "token_uri", id))
+                local before = u256(contracts.call(asset, "balance_of", ctx.contract, id))
                 contracts.call(asset, "transfer_from", ctx.sender, ctx.contract, id, amount)
+
+                if u256(contracts.call(asset, "balance_of", ctx.contract, id)) - before ~= amount then
+                    error("the multi-token moved less than the amount")
+                end
             end
         end
     end
@@ -410,6 +437,8 @@ function M.send(target, recipient, kind, asset, id, amount)
 
     local nonce = whole(storage.get("nonce") or 0, "the nonce") + 1
     storage.set("nonce", tostring(nonce))
+    -- The peer it is sent to, which signing and refunding it go by whatever the peer is later.
+    out:set(nonce .. ":to", peer)
     local t = transfer(here(), target, nonce, kind, origin, asset_bytes, id, amount, recipient, name, symbol, decimals, uri)
     local d = digest(t)
 
@@ -455,7 +484,7 @@ function M.attest(source, target, nonce, kind, origin, asset, id, amount, recipi
         error("no such transfer left this gateway")
     end
 
-    local at = t.source .. ":" .. t.nonce
+    local at = arrival(t.source, t.from, t.nonce)
 
     -- Its delivery signatures may be public already, and stop counting here.
     if t.target == here() and voids:get(at .. ":digest") then
@@ -484,8 +513,8 @@ end
 -- signatures. One already done cannot be voided, and whichever lands first wins.
 function M.attest_void(source, target, nonce, d, signature)
     source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
-    local from, to = ends(source, target)
-    local at = source .. ":" .. nonce
+    local from, to = ends(source, target, nonce)
+    local at = arrival(source, from, nonce)
 
     if source == here() and out:get(nonce .. ":digest") ~= d then
         error("no such transfer left this gateway")
@@ -519,7 +548,7 @@ end
 -- and if paying fails all of this is undone, so it is tried again with nothing paid twice.
 function M.attest_refund(source, target, nonce, d, sender, signature)
     source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
-    local from, to = ends(source, target)
+    local from, to = ends(source, target, nonce)
 
     if source == here() then
         if out:get(nonce .. ":digest") ~= d then
@@ -577,8 +606,11 @@ function M.refund_of(nonce)
 end
 
 -- A transfer on its way here that was voided: its digest and the height it was voided at; nil if not.
-function M.voided(source, nonce)
-    local at = whole(source, "the source") .. ":" .. whole(nonce, "the nonce")
+-- Whether a transfer coming here was voided, by its chain and nonce, from the peer in force or from
+-- the gateway named.
+function M.voided(source, nonce, from)
+    source = whole(source, "the source")
+    local at = arrival(source, from or peers:get(tostring(source)) or "", whole(nonce, "the nonce"))
     local d = voids:get(at .. ":digest")
 
     if d == nil then
@@ -591,7 +623,7 @@ end
 -- What the federation signs to void a transfer: what the tools compare with their own.
 function M.void_digest(source, target, nonce, d)
     source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
-    local from, to = ends(source, target)
+    local from, to = ends(source, target, nonce)
 
     return void_digest(from, to, source, target, nonce, d)
 end
@@ -599,7 +631,7 @@ end
 -- What the federation signs to refund a transfer: what the tools compare with their own.
 function M.refund_digest(source, target, nonce, d, sender)
     source, target, nonce = whole(source, "the source"), whole(target, "the target"), whole(nonce, "the nonce")
-    local from, to = ends(source, target)
+    local from, to = ends(source, target, nonce)
 
     return refund_digest(from, to, source, target, nonce, d, sender)
 end
@@ -621,9 +653,12 @@ function M.signatures(d)
     return fed.threshold, table.unpack(found)
 end
 
--- Whether a transfer from a chain arrived and was done.
-function M.received(source, nonce)
-    return done:get(whole(source, "the source") .. ":" .. whole(nonce, "the nonce")) ~= nil
+-- Whether a transfer from a chain arrived and was done, from the peer in force or from the gateway
+-- named.
+function M.received(source, nonce, from)
+    source = whole(source, "the source")
+
+    return done:get(arrival(source, from or peers:get(tostring(source)) or "", whole(nonce, "the nonce"))) ~= nil
 end
 
 -- What a wrapped asset here stands for: its origin chain, kind and address there; nil for any

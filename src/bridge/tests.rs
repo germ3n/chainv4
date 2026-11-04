@@ -223,7 +223,7 @@ mod planning {
     const CHANGE: [u8; 34] = [0; 34];
 
     fn queued(id: u64, sats: u64, most_fee: u64) -> NamedWithdrawal {
-        NamedWithdrawal { id, script: p2wpkh(&[id as u8; 20]), sats, most_fee, state: "queued".to_string(), anchor: None }
+        NamedWithdrawal { id, script: p2wpkh(&[id as u8; 20]), sats, most_fee, state: "queued".to_string(), anchor: None, lowering: None }
     }
 
     fn held(n: u8, sats: u64) -> (String, SpentOutput) {
@@ -243,12 +243,54 @@ mod planning {
         assert_eq!(first, plan(&withdrawals, &outputs, ReleaseFee::Rate(5)));
         let tx = first.tx.unwrap();
         assert_eq!(first.ids, [1, 2]);
-        assert_eq!(tx.inputs.iter().map(|input| input.txid[0]).collect::<Vec<_>>(), [1, 2], "what it took first, as far as it needs");
+        assert_eq!(tx.inputs.iter().map(|input| input.txid[0]).collect::<Vec<_>>(), [3], "the largest first, as far as it needs");
         // What it spends past what they burned is change, so the fee is theirs.
-        assert_eq!(tx.outputs[2].value, 100_000 - 50_000);
+        assert_eq!(tx.outputs[2].value, 70_000 - 50_000);
         assert_eq!(tx.outputs[0].value + tx.outputs[1].value, 50_000 - first.fee);
         assert_eq!(first.fee % 5, 0, "at this rate");
         assert!(first.waiting.is_empty());
+    }
+
+    #[test]
+    fn a_release_takes_the_largest_outputs_first_and_none_worth_less_than_it_costs_to_spend() {
+        // Dust ahead of what pays: it is passed over, and what is worth spending is taken largest first.
+        let mut outputs: Vec<(String, SpentOutput)> = (0..200).map(|n| held(n, 330)).collect();
+        outputs.extend([held(200, 30_000), held(201, 15_000), held(202, 40_000)]);
+        let chosen = plan(&[queued(1, 50_000, 5_000)], &outputs, ReleaseFee::Rate(5));
+        let tx = chosen.tx.unwrap();
+
+        assert_eq!(tx.inputs.iter().map(|input| input.txid[0]).collect::<Vec<_>>(), [202, 200], "{:?}", chosen.waiting);
+        assert_eq!(tx.outputs[1].value, 70_000 - 50_000);
+
+        // What one input costs at a rate, signed: dust is worth spending at the floor, and not at 5.
+        let input = btc_input_vbytes(2, 180);
+        assert_eq!(input, (4 * 41 + 2 + 2 * 74 + 1 + 180_u64).div_ceil(4));
+        assert!(330 > input * FLOOR && 330 < input * 5);
+        assert_eq!(btc_release_vbytes(141, &[(2, 180)]) - btc_release_vbytes(100, &[]), input, "an input adds as much to a release");
+
+        // Nothing but dust at this rate: nothing goes, and it says why.
+        let starved = plan(&[queued(1, 20_000, 5_000)], &outputs[..200], ReleaseFee::Rate(5));
+        assert!(starved.tx.is_none() && starved.waiting[0].1.contains("too little"), "{:?}", starved.waiting);
+
+        // An anchor is spent whatever it is worth, as the release must conflict with the one cancelled.
+        let anchored = NamedWithdrawal { anchor: Some(outputs[0].0.clone()), ..queued(1, 20_000, 5_000) };
+        let tx = plan(&[anchored], &outputs, ReleaseFee::Rate(5)).tx.unwrap();
+        assert_eq!(tx.inputs.iter().map(|input| input.txid[0]).collect::<Vec<_>>(), [0, 202]);
+    }
+
+    #[test]
+    fn the_planner_goes_by_a_lowered_limit_before_it_holds_and_a_signer_by_the_limit_a_release_was_proposed_under() {
+        let lowering = NamedWithdrawal { lowering: Some((100, 50)), ..queued(1, 20_000, 2_000) };
+        let chosen = plan(std::slice::from_ref(&lowering), &[held(1, 100_000)], ReleaseFee::Rate(5));
+
+        assert_eq!(chosen.tx, None, "a release it plans now could land once the lower limit holds");
+        assert!(chosen.waiting[0].1.contains("agreed to lose 100"), "{:?}", chosen.waiting);
+        assert_eq!((lowering.most_fee_at(49), lowering.most_fee_at(50)), (2_000, 100));
+
+        // Proposed under the old one, a signer checks it by that, as the gateway does.
+        let plan = plan_btc_release(&[queued(1, 20_000, 2_000)], &[held(1, 100_000)], &fed_change(), CAP, FLOOR, ReleaseFee::Rate(5), &ReleaseRepay::default()).unwrap();
+        let facts = proposed(&plan, &[lowering], &[held(1, 100_000)]);
+        assert_eq!(check_btc_release(&facts), Ok(()));
     }
 
     #[test]
