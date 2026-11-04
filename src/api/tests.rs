@@ -3301,6 +3301,7 @@ fn ethereum_tools_see_a_batch_s_logs_in_order_and_never_as_one_call() {
 }
 
 
+#[cfg(feature = "secp256k1")]
 #[test]
 fn an_address_s_multisigs_are_listed_from_the_member_index_by_its_address_or_its_key() {
     use crate::registry::multisig::MultisigMember;
@@ -3471,6 +3472,7 @@ fn api_max_page_holds_every_listing_to_it_and_its_default_below_it() {
     assert_eq!(ok(fixture.address, "/blocks?limit=100")["blocks"].as_array().unwrap().len(), 15, "the uncapped node lists them all");
 }
 
+#[cfg(feature = "ethereum")]
 #[test]
 fn suggest_multiplier_is_what_eth_gas_price_and_an_open_offer_ask_over_the_base_price() {
     let authority = DevAuthority::dev_keypair();
@@ -3501,6 +3503,7 @@ fn suggest_multiplier_is_what_eth_gas_price_and_an_open_offer_ask_over_the_base_
     assert_eq!(asked(1), (base, base));
 }
 
+#[cfg(feature = "ethereum")]
 #[test]
 fn rpc_limits_hold_a_batch_to_the_operators_size() {
     let db = Arc::new(MemoryDb::default());

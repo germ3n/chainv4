@@ -415,6 +415,8 @@ mod voting {
         assert_eq!(history_for(u64::MAX, 2), 4_096, "and never past what memory holds");
 
         // A chain whose bonds stay slashable 80 epochs after their validators leave.
+        // A build with FFG alone has no other kind, so the else can never run there.
+        #[allow(irrefutable_let_patterns)]
         let FinalityConfig::Ffg(config) = ffg() else { unreachable!() };
         let finality = FinalityConfig::Ffg(FfgConfig { withdrawal_delay: 80, ..config });
         let db = Arc::new(MemoryDb::default());

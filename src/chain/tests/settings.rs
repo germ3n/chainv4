@@ -114,6 +114,7 @@ fn contract_limits_rise_never_fall_and_bound_the_transaction_and_multisig() {
     assert_eq!(crate::params::vm::VmRules::default().tx_bytes_limit(true), Some(crate::params::vm::ETHEREUM_TX_BYTES), "unset, Ethereum's own bound");
 }
 
+#[cfg(feature = "evm")]
 #[test]
 fn an_evm_spec_runs_from_the_height_its_change_names_and_never_goes_back() {
     let mut chain = governed(genesis());

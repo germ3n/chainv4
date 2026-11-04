@@ -652,6 +652,8 @@ fn a_step_left_with_no_fuel_at_all_runs_nothing() {
 }
 
 
+// It needs an Edwards key, which from_seed makes, beside the secp256k1 one that weighs more.
+#[cfg(all(feature = "secp256k1", any(feature = "ed25519", feature = "edblake")))]
 #[test]
 fn a_multisig_s_proposal_is_priced_for_its_heaviest_quorum_whoever_proposes_signs_and_carries_it() {
     use crate::crypto::keypair::{PrivateKey, PublicKey};

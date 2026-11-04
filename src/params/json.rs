@@ -977,6 +977,8 @@ pub fn governance_from_value(value: &Value) -> Result<crate::governance::Governa
     governance_from_json(Fields::of(value, "governance")?)
 }
 
+/// Reads governance, whichever kind its "type" names.
+#[cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unreachable_code, unused_variables))]
 pub(crate) fn governance_from_json(mut governance: Fields) -> Result<crate::governance::GovernanceConfig, String> {
     let config = match governance.text("type")?.as_str() {
         #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
@@ -1003,6 +1005,7 @@ pub(crate) fn governance_from_json(mut governance: Fields) -> Result<crate::gove
 }
 
 /// A quorum, which genesis files from before it leave out for none.
+#[cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(dead_code))]
 fn quorum(governance: &mut Fields) -> Result<u32, String> {
     let quorum = governance.later_whole("quorum_permille")?.unwrap_or(0);
 

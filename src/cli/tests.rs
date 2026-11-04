@@ -19,6 +19,7 @@ impl Drop for TempDir {
     }
 }
 
+#[cfg(feature = "client")]
 #[test]
 fn a_multisigs_deploys_are_where_its_nonce_puts_them_before_anyone_signs() {
     use crate::structs::code::Code;
@@ -37,7 +38,7 @@ fn a_multisigs_deploys_are_where_its_nonce_puts_them_before_anyone_signs() {
     assert!(crate::cli::send::landings(&Tx::Burn { from: account, amount: crate::structs::amount::Amount::U128(1) }, &account, 4, hash).is_empty());
 }
 
-#[cfg(feature = "sha256")]
+#[cfg(all(feature = "client", feature = "sha256"))]
 #[test]
 fn a_batchs_steps_show_a_deploy_by_its_engine_size_hash_and_address_not_its_source() {
     use crate::cli::multisig::{step_lines, step_text};
@@ -72,6 +73,7 @@ fn a_batchs_steps_show_a_deploy_by_its_engine_size_hash_and_address_not_its_sour
     assert!(step_lines(&burn, &[], false).is_empty());
 }
 
+#[cfg(feature = "client")]
 #[test]
 fn a_member_names_an_xpub_an_evm_address_both_or_neither() {
     let key = Keypair::from_seed([1; 32]).public().to_string();
@@ -866,6 +868,7 @@ mod send {
         shown.unwrap();
     }
 
+    #[cfg(all(feature = "secp256k1", any(feature = "ed25519", feature = "edblake")))]
     #[test]
     fn an_ed25519_members_proposal_signed_and_carried_by_a_secp256k1_member_is_priced_to_run() {
         use crate::cli::multisig::{MultisigAction, MultisigArgs};

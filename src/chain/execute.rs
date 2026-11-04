@@ -148,6 +148,9 @@ impl GovernanceRules {
             finality = "The chain's finality from genesis.",
         },
     )]
+    // A node built without either kind of governance has an empty GovernanceConfig, so build
+    // never returns and what follows it goes unused.
+    #[cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unused_variables))]
     pub fn new(config: &crate::governance::GovernanceConfig, checkpoint_interval: u64, finality: &FinalityConfig) -> GovernanceRules {
         GovernanceRules {
             governance: config.build(finality),

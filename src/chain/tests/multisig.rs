@@ -2,9 +2,10 @@
 //! members' signatures, approvals on chain, or both, refused before they run when they fall short,
 //! and its members changed by its own quorum.
 
+#[cfg(feature = "secp256k1")]
+use crate::crypto::keypair::KeyType;
 use {
     super::*,
-    crate::crypto::keypair::KeyType,
     crate::registry::multisig::{MultisigBody, MultisigMember, MultisigPolicy, Multisigs},
     crate::structs::address::multisig_address,
     crate::structs::tx::MemberSignature,
@@ -320,17 +321,23 @@ fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
 }
 
 /// A key of a scheme, from a seed: one of each for a multisig whose members use every scheme.
+#[cfg(feature = "secp256k1")]
 fn of_scheme(scheme: KeyType, seed: u8) -> Keypair {
     use crate::crypto::keypair::PrivateKey;
 
     Keypair::from_private(match scheme {
+        #[cfg(feature = "ed25519")]
         KeyType::Ed25519 => PrivateKey::Ed25519([seed; 32]),
+        #[cfg(feature = "edblake")]
         KeyType::EdBlake => PrivateKey::EdBlake([seed; 32]),
+        #[cfg(feature = "secp256k1")]
         KeyType::Secp256k1 => PrivateKey::Secp256k1([seed; 32]),
+        #[cfg(feature = "bitcoin")]
         KeyType::Bitcoin => PrivateKey::Bitcoin([seed; 32]),
     })
 }
 
+#[cfg(all(feature = "ed25519", feature = "edblake", feature = "secp256k1", feature = "bitcoin"))]
 #[test]
 fn a_multisig_of_one_member_of_every_scheme_signs_and_approves_with_each() {
     let mut chain = open(&Arc::new(MemoryDb::default()));
@@ -378,7 +385,7 @@ fn a_multisig_of_one_member_of_every_scheme_signs_and_approves_with_each() {
     assert_eq!(balance(&chain, &Address::Ed25519([9; 32])), u256::new(3));
 }
 
-#[cfg(feature = "bitcoin")]
+#[cfg(all(feature = "bitcoin", feature = "ed25519", feature = "mnemonic"))]
 #[test]
 fn a_multisig_reaches_here_evm_alone_bitcoin_alone_or_both() {
     use crate::crypto::mnemonic::Phrase;
@@ -421,7 +428,12 @@ fn the_member_index_lists_each_multisig_under_its_members_through_changes_reorgs
     let creator = authority();
     let miner = Address::Ed25519([9; 32]);
     let [alice, bob, carol] = members();
-    let (ethereum, dave) = (of_scheme(KeyType::Secp256k1, 34), Keypair::from_seed([35; 32]));
+    // An Ethereum key where the build has secp256k1, so the index holds a scheme of its own too.
+    #[cfg(feature = "secp256k1")]
+    let ethereum = of_scheme(KeyType::Secp256k1, 34);
+    #[cfg(not(feature = "secp256k1"))]
+    let ethereum = Keypair::from_seed([34; 32]);
+    let dave = Keypair::from_seed([35; 32]);
     let make = |keys: &[&Keypair], threshold: u32, nonce: u64| {
         let create = Tx::CreateMultisig { members: keys.iter().map(|keypair| member(keypair)).collect(), threshold, testnet: false };
 

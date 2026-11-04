@@ -2089,6 +2089,8 @@ mod names;
 mod multisig;
 mod batch;
 mod range;
+// A council governs them, on the dev chain, whose finality votes only under FFG.
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
 mod settings;
 
 /// The state at a main-chain height, through history.

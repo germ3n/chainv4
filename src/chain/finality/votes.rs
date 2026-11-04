@@ -37,6 +37,7 @@ use {
 pub(super) const MAX_HISTORY: usize = 64;
 /// The most epochs that may stretch to, whatever withdrawal_delay governance votes: each voter
 /// keeps a vote an epoch in memory, so this bounds what a thousand validators take.
+#[cfg(feature = "finality-ffg")]
 const MOST_HISTORY: u64 = 4_096;
 /// How far back a producer looks for justifications whose voters are still unpaid.
 const UNPAID_WINDOW: u64 = 64;
@@ -97,6 +98,7 @@ pub(super) trait Electorate: Send {
 }
 
 /// The history a kind's slashable window asks for, held between MAX_HISTORY and MOST_HISTORY.
+#[cfg(feature = "finality-ffg")]
 pub(super) fn history_for(withdrawal_delay: u64, vote_depth: u64) -> u64 {
     withdrawal_delay.saturating_add(vote_depth).clamp(MAX_HISTORY as u64, MOST_HISTORY)
 }
