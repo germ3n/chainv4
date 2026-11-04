@@ -51,11 +51,13 @@ pub enum ReportField {
     Uptime,
     #[document(summary = "Whether the node produces blocks and whether it validates.")]
     Role,
+    #[document(summary = "What its operator tuned: every value of KNOBS as it stands, GET /node's limits.")]
+    Limits,
 }
 
 impl ReportField {
     #[document(parent = "ReportField", summary = "Every field.")]
-    pub const ALL: [ReportField; 15] = [
+    pub const ALL: [ReportField; 16] = [
         ReportField::PeerAddresses,
         ReportField::PeerIds,
         ReportField::Peers,
@@ -71,6 +73,7 @@ impl ReportField {
         ReportField::Syncing,
         ReportField::Uptime,
         ReportField::Role,
+        ReportField::Limits,
     ];
 
     #[document(parent = "ReportField", summary = "Its name, as --hide and --show take it and an answer's hidden lists it.")]
@@ -91,6 +94,7 @@ impl ReportField {
             ReportField::Syncing => "syncing",
             ReportField::Uptime => "uptime",
             ReportField::Role => "role",
+            ReportField::Limits => "limits",
         }
     }
 
@@ -123,14 +127,14 @@ pub enum ReportPreset {
     #[document(summary = "All but the addresses of its peers, its workers and itself, and its workers' names: the default.")]
     #[default]
     Public,
-    #[document(summary = "Its own state alone, how long it has been up, its role, its mempool and whether it syncs: no peers, no mining, no counters, no backlog.")]
+    #[document(summary = "Its own state alone, how long it has been up, its role, its mempool and whether it syncs: no peers, no mining, no counters, no backlog, no limits.")]
     Minimal,
 }
 
 impl ReportPreset {
     fn hidden(self) -> &'static [ReportField] {
         const PUBLIC: [ReportField; 4] = [ReportField::PeerAddresses, ReportField::Listening, ReportField::WorkerAddresses, ReportField::WorkerNames];
-        const MINIMAL: [ReportField; 8] = [ReportField::PeerAddresses, ReportField::Listening, ReportField::WorkerAddresses, ReportField::WorkerNames, ReportField::Peers, ReportField::Mining, ReportField::Counters, ReportField::Backlog];
+        const MINIMAL: [ReportField; 9] = [ReportField::PeerAddresses, ReportField::Listening, ReportField::WorkerAddresses, ReportField::WorkerNames, ReportField::Peers, ReportField::Mining, ReportField::Counters, ReportField::Backlog, ReportField::Limits];
 
         match self {
             ReportPreset::Full => &[],

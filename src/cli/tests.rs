@@ -1461,7 +1461,7 @@ mod send {
                     threads: 0,
                     gpu: false,
                     gpus: None,
-                    port: Some(MiningPort { listen, token: OPEN_TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true }),
+                    port: Some(MiningPort { listen, token: OPEN_TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true, limits: crate::mining::pool::PortLimits::DEFAULT }),
                 }),
                 sign: None,
             })
@@ -1581,7 +1581,7 @@ mod send {
                     threads: 0,
                     gpu: false,
                     gpus: None,
-                    port: Some(MiningPort { listen, token: OPEN_TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true }),
+                    port: Some(MiningPort { listen, token: OPEN_TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true, limits: crate::mining::pool::PortLimits::DEFAULT }),
                 }),
                 sign: None,
             })

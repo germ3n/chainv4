@@ -87,12 +87,40 @@ const MAX_TOKENS: u64 = 500;
 const DEFAULT_MEMPOOL: u64 = 100;
 /// The most waiting transactions /mempool returns.
 const MAX_MEMPOOL: u64 = 1_000;
-/// The largest request body: room for the largest deploy, hex-encoded.
-const MAX_BODY: usize = 2 * 1024 * 1024;
-/// How many block ranges one client may have under way at once: a scan asks for one at a time.
-const RANGE_PER_IP: usize = 2;
-/// How long a block range waits its turn before the node says it is too busy.
-const RANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+#[document(
+    summary = "The least the largest request body may be: 2 MiB, room for the largest deploy, hex-encoded, as a module or source is at most half the least block. On a chain whose limits name a max_tx_bytes, the cap is room for one of those hex-encoded instead, whenever that is more, following governance's limits as they stand.",
+    category = "Node",
+    see_also = "body_cap",
+)]
+pub const MAX_BODY: usize = 2 * 1024 * 1024;
+/// What a body holds besides a transaction's hex: its JSON, and a few fields beside it.
+const BODY_SLACK: usize = 64 * 1024;
+
+#[document(
+    summary = "The largest request body the API takes for a chain's most bytes a transaction may take: room for one hex-encoded in its JSON, and never less than MAX_BODY. Past it, 413.",
+    category = "Node",
+    params = { max_tx_bytes = "The chain's max_tx_bytes as it stands, or None when its limits name none." },
+    see_also = "MAX_BODY",
+)]
+pub fn body_cap(max_tx_bytes: Option<u64>) -> usize {
+    match max_tx_bytes {
+        Some(bytes) => usize::try_from(bytes).unwrap_or(usize::MAX).saturating_mul(2).saturating_add(BODY_SLACK).max(MAX_BODY),
+        None => MAX_BODY,
+    }
+}
+
+#[document(
+    summary = "How many block ranges one client may have under way at once unless --tune http.range-per-ip says otherwise: a scan asks for one at a time.",
+    category = "Node",
+    see_also = "ApiLimits::range_per_ip",
+)]
+pub const RANGE_PER_IP: usize = 2;
+#[document(
+    summary = "How long a block range waits its turn before the node says it is too busy, unless --tune http.range-wait says otherwise.",
+    category = "Node",
+    see_also = "ApiLimits::range_wait",
+)]
+pub const RANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[document(
     summary = "How many requests one client may have in flight at once unless --http-per-ip says otherwise: past it, 429. A client is its IP, or behind a proxy on the node's own network, the one the proxy says it forwards for.",
@@ -101,10 +129,146 @@ const RANGE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 )]
 pub const DEFAULT_PER_IP: usize = 64;
 
-/// How many mining WebSocket relays one client may hold open at once. Each opens a connection into
-/// the mining port on this machine, which sees them all as loopback, so they are capped here by who
-/// asked rather than there. Past it, 503, as the port itself answers when full.
-const MINING_RELAYS_PER_IP: usize = 32;
+#[document(
+    summary = "How many mining WebSocket relays one client may hold open at once unless --tune http.relays-per-ip says otherwise. Each opens a connection into the mining port on this machine, which sees them all as loopback, so they are capped here by who asked rather than there. Past it, 503, as the port itself answers when full.",
+    category = "Node",
+    see_also = "ApiLimits::relays_per_ip",
+)]
+pub const MINING_RELAYS_PER_IP: usize = 32;
+
+#[document(
+    summary = "What JSON-RPC at POST /rpc answers within, as geth's --rpc.* flags set: set with --tune's rpc. keys. Public providers refuse filters past such limits too.",
+    category = "Node",
+    see_also = "ApiLimits::rpc",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpcLimits {
+    #[document(summary = "The most blocks one eth_getLogs scans: 10,000 by default.")]
+    pub log_blocks: u64,
+    #[document(summary = "The most addresses an eth_getLogs filter may name: 1,000 by default.")]
+    pub log_addresses: usize,
+    #[document(summary = "The most topics an eth_getLogs filter may name at one place: 1,000 by default.")]
+    pub log_topics: usize,
+    #[document(summary = "The most requests one batch may hold: 100 by default. Each is answered in order, and one may run a contract under the whole fuel cap, so a body may not line up more than a client could send as separate requests.")]
+    pub batch: usize,
+    #[document(summary = "The most blocks of fee history one eth_feeHistory gives: 1,024 by default.")]
+    pub fee_history: u64,
+}
+
+impl RpcLimits {
+    #[document(parent = "RpcLimits", summary = "What every node answered within before these were tuned.")]
+    pub const DEFAULT: RpcLimits = RpcLimits { log_blocks: 10_000, log_addresses: 1_000, log_topics: 1_000, batch: 100, fee_history: 1_024 };
+}
+
+impl Default for RpcLimits {
+    fn default() -> RpcLimits {
+        RpcLimits::DEFAULT
+    }
+}
+
+#[document(
+    summary = "What the API takes from each client and answers within, beside --http-per-ip: requests a second, the largest listing page, block ranges and mining relays under way at once, what a block range answers within, JSON-RPC's limits, how much a filtered listing scans, and what a suggested fee offers over the base price. None of it is consensus. Set with --http-rate, --api-max-page, --suggest-multiplier and --tune's http., range., rpc. and filter. keys.",
+    category = "Node",
+    see_also = "ApiOptions::limits",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApiLimits {
+    #[document(summary = "How many requests one client may make a second, --http-rate: a bucket that holds a second's worth and fills at that rate, so a page asking for several things at once goes through, and a client that keeps asking faster gets 429 with Retry-After. 0, the default, counts nothing.")]
+    pub rate: u32,
+    #[document(summary = "The most any listing returns at once, --api-max-page, in place of each listing's own maximum, its default never above it: None keeps each listing's own, 100 to 1,000.")]
+    pub max_page: Option<u64>,
+    #[document(summary = "How many block ranges one client may have under way at once: RANGE_PER_IP by default.")]
+    pub range_per_ip: usize,
+    #[document(summary = "How long a block range waits its turn before the node says it is too busy: RANGE_WAIT by default.")]
+    pub range_wait: std::time::Duration,
+    #[document(summary = "How many mining WebSocket relays one client may hold open at once: MINING_RELAYS_PER_IP by default.")]
+    pub relays_per_ip: usize,
+    #[document(summary = "What GET /blocks/range answers within: RangeLimits::SERVED by default.")]
+    pub range: RangeLimits,
+    #[document(summary = "What POST /rpc answers within.")]
+    pub rpc: RpcLimits,
+    #[document(summary = "The most index entries a filtered listing, GET /accounts/{address}/txs, looks at, matches or not, before it answers with fewer and a cursor: 1,000 by default.")]
+    pub filter_scan: usize,
+    #[document(summary = "How many times the next base price a suggested fee offers, --suggest-multiplier: what eth_gasPrice says, and the max price POST /offer and the faucet fill in when left open, under a base fee. 2 by default, so an offer outlasts a few blocks of the base price rising. A chain whose senders bid suggests the base price plus the tip whatever this is.")]
+    pub suggest: u64,
+}
+
+impl ApiLimits {
+    #[document(parent = "ApiLimits", summary = "What every node took and answered within before these were tuned.")]
+    pub const DEFAULT: ApiLimits = ApiLimits {
+        rate: 0,
+        max_page: None,
+        range_per_ip: RANGE_PER_IP,
+        range_wait: RANGE_WAIT,
+        relays_per_ip: MINING_RELAYS_PER_IP,
+        range: RangeLimits::SERVED,
+        rpc: RpcLimits::DEFAULT,
+        filter_scan: filters::MAX_TXS_SCANNED,
+        suggest: 2,
+    };
+}
+
+impl Default for ApiLimits {
+    fn default() -> ApiLimits {
+        ApiLimits::DEFAULT
+    }
+}
+
+/// How many a listing returns: what the client asked for, or the listing's default, at most its
+/// own maximum or --api-max-page's in its place.
+fn page(tuned: &ApiLimits, query: &HashMap<String, String>, default: u64, most: u64) -> Result<u64, ApiError> {
+    let most = tuned.max_page.unwrap_or(most);
+
+    Ok(number(query, "limit")?.unwrap_or(default.min(most)).min(most))
+}
+
+/// Requests each client may make a second, as a bucket per client that holds a second's worth and
+/// fills at that rate. A bucket left alone for a second is full, the same as none, so those go
+/// once there are many.
+struct Rate {
+    per_second: u32,
+    buckets: std::sync::Mutex<HashMap<IpAddr, Bucket>>,
+}
+
+struct Bucket {
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+/// How many clients' buckets are kept before the full ones are let go.
+const MOST_BUCKETS: usize = 4_096;
+
+impl Rate {
+    fn new(per_second: u32) -> Rate {
+        Rate { per_second, buckets: Default::default() }
+    }
+
+    /// Takes one request from the client's bucket: false when it is empty.
+    fn take(&self, ip: IpAddr, now: std::time::Instant) -> bool {
+        if self.per_second == 0 {
+            return true;
+        }
+
+        let rate = f64::from(self.per_second);
+        let mut buckets = self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        if buckets.len() >= MOST_BUCKETS {
+            buckets.retain(|_, bucket| now.saturating_duration_since(bucket.at) < std::time::Duration::from_secs(1));
+        }
+
+        let bucket = buckets.entry(ip).or_insert(Bucket { tokens: rate, at: now });
+        bucket.tokens = (bucket.tokens + now.saturating_duration_since(bucket.at).as_secs_f64() * rate).min(rate);
+        bucket.at = now;
+
+        match bucket.tokens >= 1.0 {
+            true => {
+                bucket.tokens -= 1.0;
+                true
+            }
+            false => false,
+        }
+    }
+}
 
 /// What every handler reads from.
 #[derive(Clone)]
@@ -187,6 +351,12 @@ struct Api {
     /// Mining WebSocket relays open now, by client, so one cannot open a flood of them into the
     /// mining port, which sees them all as loopback.
     mining_relays: Arc<InFlight>,
+    /// What it takes from each client and answers within, beside the requests in flight.
+    tuned: ApiLimits,
+    /// Everything its operator tuned, node and API alike, for GET /node's limits.
+    tuning: Arc<crate::node::Tuning>,
+    /// How many requests each client has made lately, for --http-rate.
+    rate: Arc<Rate>,
 }
 
 /// Requests in flight, by client, and how many each may have.
@@ -250,14 +420,31 @@ fn asker(peer: SocketAddr, headers: &HeaderMap, trusted_proxies: &proxies::Trust
     }
 }
 
-/// Turns away a client with too many requests in flight already, 429, so one cannot keep the rest
-/// waiting. A stream, open for as long as the client listens, is not counted.
+/// Turns away a client asking faster than --http-rate, or with too many requests in flight
+/// already, 429, so one cannot keep the rest waiting; and holds a body to what the chain's largest
+/// transaction takes, 413 past it. A stream, open for as long as the client listens, is not
+/// counted.
 async fn per_client(Live(api): Live<Api>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, request: Request, next: Next) -> Response {
     if request.uri().path() == "/stream" {
         return next.run(request).await;
     }
 
-    match InFlight::enter(&api.in_flight, asker(peer, request.headers(), &api.trusted_proxies)) {
+    let ip = asker(peer, request.headers(), &api.trusted_proxies);
+
+    if !api.rate.take(ip, std::time::Instant::now()) {
+        let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": format!("more than {} requests a second from you: slow down", api.rate.per_second) }))).into_response();
+        response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+
+        return response;
+    }
+
+    let cap = match request.method() == Method::POST {
+        true => api.body_cap(),
+        false => MAX_BODY,
+    };
+    let request = request.map(|body| axum::body::Body::new(http_body_util::Limited::new(body, cap)));
+
+    match InFlight::enter(&api.in_flight, ip) {
         Some(_counted) => next.run(request).await,
         None => (StatusCode::TOO_MANY_REQUESTS, Json(json!({ "error": "too many requests at once from you: wait for some to answer" }))).into_response(),
     }
@@ -280,9 +467,9 @@ struct RangeTurn {
 }
 
 impl RangeGate {
-    fn new(builders: usize, wait: std::time::Duration) -> RangeGate {
+    fn new(builders: usize, wait: std::time::Duration, per_ip: usize) -> RangeGate {
         RangeGate {
-            asks: Arc::new(InFlight { per_ip: RANGE_PER_IP, counts: Default::default() }),
+            asks: Arc::new(InFlight { per_ip, counts: Default::default() }),
             builders: Arc::new(tokio::sync::Semaphore::new(builders)),
             wait,
         }
@@ -374,6 +561,27 @@ impl Api {
         Ok(())
     }
 
+    /// The largest body a POST may carry: room for the chain's largest transaction, as its limits
+    /// stand now, read from the live database so a change governance just decided applies at once.
+    fn body_cap(&self) -> usize {
+        let genesis = self.rules.vm.max_tx_bytes;
+
+        if self.rules.governance.is_none() {
+            return body_cap(genesis);
+        }
+
+        let state = State::new(self.live.snapshot());
+
+        match Changes::new(&state).limits() {
+            Ok(limits) => body_cap(limits.and_then(|limits| limits.max_tx_bytes).or(genesis)),
+            Err(err) => {
+                log::warn!("[http] reading the chain's limits for a body's size: {err}");
+
+                body_cap(genesis)
+            }
+        }
+    }
+
     /// What this asker is shared of the node, and whether it bore a token the node does not take.
     fn shared_with(&self, peer: SocketAddr, headers: &HeaderMap) -> (sharing::Sharing, bool) {
         sharing::shared_with(self.sharing, self.report_token.as_deref().map(Vec::as_slice), peer, headers)
@@ -450,6 +658,12 @@ pub struct ApiOptions {
     pub report_token: Option<Vec<u8>>,
     #[document(summary = "Besides loopback, the reverse proxies whose X-Forwarded-For the API believes, --trusted-proxy, each an address or a host's name looked up again every few seconds. Empty trusts loopback alone, so no other host on a shared private network can spoof a client's address past the per-IP limits.")]
     pub trusted_proxies: Vec<String>,
+    #[document(summary = "What it takes from each client and answers within, beside per_ip: ApiLimits::DEFAULT unless set.")]
+    pub limits: ApiLimits,
+    #[document(summary = "How big the engines it runs read-only calls on are: the node's own --lua-states and --wasm-cache-mb, so the API's take what the node's do.")]
+    pub pools: crate::vm::EnginePools,
+    #[document(summary = "Everything the node's operator tuned, which GET /node shows under limits.")]
+    pub tuning: crate::node::Tuning,
 }
 
 #[document(
@@ -484,7 +698,7 @@ pub fn start(
     #[cfg(feature = "governance")]
     let whole = Arc::new(genesis.clone());
     let vm = Arc::new(
-        Vm::new(&genesis.engines, genesis.hash)
+        Vm::with_pools(&genesis.engines, genesis.hash, options.pools)
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?
             .with_names(genesis.names.clone())
             .with_federation(genesis.federation.clone())
@@ -555,13 +769,16 @@ pub fn start(
                     #[cfg(feature = "updates")]
                     releases: options.releases,
                     in_flight: Arc::new(InFlight { per_ip, counts: Default::default() }),
-                    ranges: RangeGate::new((threads / 2).max(1), RANGE_WAIT),
+                    ranges: RangeGate::new((threads / 2).max(1), options.limits.range_wait, options.limits.range_per_ip.max(1)),
                     mining_public: options.mining_public.map(Arc::new),
                     mining_onion: options.mining_onion.map(Arc::new),
                     sharing: options.sharing,
                     report_token: options.report_token.map(Arc::new),
                     trusted_proxies,
-                    mining_relays: Arc::new(InFlight { per_ip: MINING_RELAYS_PER_IP, counts: Default::default() }),
+                    mining_relays: Arc::new(InFlight { per_ip: options.limits.relays_per_ip.max(1), counts: Default::default() }),
+                    tuned: options.limits,
+                    tuning: Arc::new(options.tuning),
+                    rate: Arc::new(Rate::new(options.limits.rate)),
                 })
                 // Who connects, for the faucet's limits by IP.
                 .into_make_service_with_connect_info::<SocketAddr>())
@@ -633,7 +850,9 @@ fn router(api: Api) -> Router {
     let router = router.route("/claims/{pool}/{address}", get(claims)).route("/mining", get(mining::about)).route(mining::SOCKET_PATH, get(mining::socket));
     #[cfg(feature = "pool")]
     let router = router.route("/pool", get(pool)).route("/pool/{address}", get(pool_miner)).route("/pool/claim/{address}", get(pool_claim));
-    let router = router.fallback(apps).layer(DefaultBodyLimit::max(MAX_BODY)).layer(middleware::from_fn_with_state(api.clone(), per_client));
+    // Bodies are held to body_cap in per_client, which follows the chain's limits, rather than to one
+    // size fixed as the router is built.
+    let router = router.fallback(apps).layer(DefaultBodyLimit::disable()).layer(middleware::from_fn_with_state(api.clone(), per_client));
 
     match cors {
         true => router.layer(middleware::from_fn_with_state(api.clone(), allow_origins)).with_state(api),
@@ -1352,7 +1571,7 @@ async fn supply(Shared(api): Shared<Api>) -> Answer {
 /// The accounts that hold the most coin at the tip, richest first, at most ?limit, and how many
 /// hold any: a scan of every account, which the node reports and nothing proves as a list.
 async fn rich(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_PAGE, MAX_PAGE)?.max(1) as usize;
     let db = api.db.clone();
     let height = tip(&*db)?.header.height;
     let mut richest: Vec<(u256, Address)> = Vec::new();
@@ -1399,7 +1618,7 @@ async fn governance_history(Shared(api): Shared<Api>, Query(query): Query<HashMa
     let db = api.db.clone();
     let tip = tip(&*db)?.header.height;
     let newest = Changes::new(&State::new(db.clone())).decided()?.version;
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_PAGE, MAX_PAGE)? as usize;
     let mut decisions = Vec::new();
 
     for (version, id) in stored_decisions(&*db, newest, number(&query, "before")?, limit)? {
@@ -1449,7 +1668,7 @@ async fn governance_rejections(Shared(api): Shared<Api>, Query(query): Query<Has
     let db = api.db.clone();
     let tip = tip(&*db)?.header.height;
     let newest = Changes::new(&State::new(db.clone())).rejections()?;
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_PAGE, MAX_PAGE)? as usize;
     let mut rejections = Vec::new();
 
     for (rejection, id) in crate::chain::stored_rejections(&*db, newest, number(&query, "before")?, limit)? {
@@ -1559,7 +1778,7 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
     let db = api.db;
     let top = tip(&*db)?.header.height + 1;
     let before = number(&query, "before")?.unwrap_or(top).min(top);
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).min(MAX_PAGE);
+    let limit = page(&api.tuned, &query, DEFAULT_PAGE, MAX_PAGE)?;
     let first = before.saturating_sub(limit);
     let mut summaries = Vec::new();
 
@@ -1580,11 +1799,12 @@ async fn blocks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 /// Blocks from ?from= on, at most ?count=, each with what recomputes its header's roots and proofs
 /// of the state entries it changed, a BlockRange, encoded; ?entry= goes on through a block's entries
 /// as the answer before said to. Each is built in its turn, on the blocking pool, where it holds up
-/// no other request, and within RangeLimits::SERVED.
+/// no other request, and within the limits it serves ranges within, RangeLimits::SERVED by default.
 async fn blocks_range(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
     let from = number(&query, "from")?.ok_or_else(|| ApiError::BadRequest("from is the height to start at".to_string()))?;
     let entry = u32::try_from(number(&query, "entry")?.unwrap_or(0)).map_err(|_| ApiError::BadRequest("entry is too big".to_string()))?;
-    let count = number(&query, "count")?.unwrap_or(RangeLimits::SERVED.blocks);
+    let served = api.tuned.range;
+    let count = number(&query, "count")?.unwrap_or(served.blocks);
     let turn = match api.ranges.enter(asker(peer, &headers, &api.trusted_proxies)).await {
         Ok(turn) => turn,
         // As nginx's own 429 does, it says when to come back.
@@ -1600,7 +1820,7 @@ async fn blocks_range(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<S
     let range = tokio::task::spawn_blocking(move || {
         let _turn = turn;
 
-        Ok::<_, DbError>(match stored_block_range(db, hash, from, entry, count, &RangeLimits::SERVED)? {
+        Ok::<_, DbError>(match stored_block_range(db, hash, from, entry, count, &served)? {
             Ok(range) => Ok(wincode::serialize(&range).map_err(|err| DbError::Corrupt(format!("a block range: {err}")))?),
             Err(problem) => Err(problem),
         })
@@ -1825,7 +2045,7 @@ async fn claims(Shared(api): Shared<Api>, Path((pool, address)): Path<(String, S
 /// leaf back to where its branch meets the main chain.
 async fn forks(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let db = api.db;
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_FORKS).min(MAX_FORKS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_FORKS, MAX_FORKS)? as usize;
     let mut seen = HashSet::new();
     let mut side = Vec::new();
 
@@ -1884,7 +2104,7 @@ async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
             ));
         }
     };
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_EVENTS).clamp(1, MAX_EVENTS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_EVENTS, MAX_EVENTS)?.max(1) as usize;
     let cursor = query
         .get("cursor")
         .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
@@ -1905,7 +2125,7 @@ async fn events(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, St
 async fn node(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap) -> Answer {
     let (sharing, refused) = api.shared_with(peer, &headers);
     let report = report(&api, 0).await?;
-    let mut answer = json::node(&report, sharing);
+    let mut answer = json::node(&report, sharing, &api.tuning);
     answer["token_refused"] = refused.into();
 
     Ok(Json(answer))
@@ -1913,7 +2133,7 @@ async fn node(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAdd
 
 /// The transactions waiting in the node's mempool, by sender and nonce.
 async fn mempool(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_MEMPOOL).min(MAX_MEMPOOL) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_MEMPOOL, MAX_MEMPOOL)? as usize;
     let report = report(&api, limit).await?;
 
     Ok(Json(json!({
@@ -2034,7 +2254,7 @@ async fn names_list(Shared(api): Shared<Api>, Query(query): Query<HashMap<String
     use crate::registry::names::{NameStatus, Names, record_key};
 
     let names = names_config(&api)?;
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_PAGE, MAX_PAGE)?.max(1) as usize;
     let db = api.db.clone();
     let now = tip(&*db)?.header.timestamp;
     let prefix = record_key("");
@@ -2086,7 +2306,7 @@ async fn account_names(Shared(api): Shared<Api>, Path(address): Path<String>, Qu
 
     let names = names_config(&api)?;
     let address = parse_address(&address)?;
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_ACCOUNT_TXS).clamp(1, MAX_ACCOUNT_TXS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_ACCOUNT_TXS, MAX_ACCOUNT_TXS)?.max(1) as usize;
     let start = query.get("cursor").map_or("", String::as_str);
     let db = api.db.clone();
     let now = tip(&*db)?.header.timestamp;
@@ -2130,7 +2350,7 @@ async fn account_multisigs(Shared(api): Shared<Api>, Path(address): Path<String>
         Ok(key) => key.address(),
         Err(_) => parse_address(&address)?,
     };
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_ACCOUNT_TXS).clamp(1, MAX_ACCOUNT_TXS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_ACCOUNT_TXS, MAX_ACCOUNT_TXS)?.max(1) as usize;
     let after = query.get("cursor").map(|cursor| parse_address(cursor)).transpose()?;
     let (found, next) = stored_multisigs_of(&*db, &member, after.as_ref(), limit)?;
     let state = State::new(db);
@@ -2164,7 +2384,7 @@ async fn account_txs(Shared(api): Shared<Api>, Path(address): Path<String>, Quer
         return Err(ApiError::NotFound("this node keeps no address index; start it with --index-addresses".to_string()));
     };
     let address = parse_address(&address)?;
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_ACCOUNT_TXS).clamp(1, MAX_ACCOUNT_TXS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_ACCOUNT_TXS, MAX_ACCOUNT_TXS)?.max(1) as usize;
     let cursor = query
         .get("cursor")
         .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
@@ -2178,7 +2398,7 @@ async fn account_txs(Shared(api): Shared<Api>, Path(address): Path<String>, Quer
         (cursor, seek) => cursor.or(seek),
     };
     let mut txs = Vec::new();
-    let scan = scan_address_txs(&*db, &address, start.as_deref(), lowest, limit, filters::MAX_TXS_SCANNED, &mut |indexed| {
+    let scan = scan_address_txs(&*db, &address, start.as_deref(), lowest, limit, api.tuned.filter_scan.max(1), &mut |indexed| {
         let block = stored_block(&*db, &indexed.block)?;
         let receipt = stored_receipt(&*db, &indexed.tx)?;
 
@@ -2448,7 +2668,7 @@ async fn receipt_proof(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answ
 /// The token registry by symbol, a page at a time: every token, or those whose symbol starts with
 /// ?symbol=, ignoring ASCII case.
 async fn tokens(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_TOKENS).clamp(1, MAX_TOKENS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_TOKENS, MAX_TOKENS)?.max(1) as usize;
     let cursor = query
         .get("cursor")
         .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
@@ -2479,7 +2699,7 @@ fn federation_json(api: &Api, state: &State) -> Result<Value, ApiError> {
 
 /// The collection registry by symbol, a page at a time, as /tokens lists tokens.
 async fn collections(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
-    let limit = number(&query, "limit")?.unwrap_or(DEFAULT_TOKENS).clamp(1, MAX_TOKENS) as usize;
+    let limit = page(&api.tuned, &query, DEFAULT_TOKENS, MAX_TOKENS)?.max(1) as usize;
     let cursor = query
         .get("cursor")
         .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
@@ -2540,7 +2760,7 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let (max_price, tip_chosen) = (amount("max_price")?, amount("tip")?);
     let header = tip(&*api.db)?.header;
     let base = api.fees.as_ref().map_or(u256::ZERO, |fees| fees.pricing().next_price(header.base_price, header.gas_used, fees.block_gas_limit()));
-    let open = api.fees.as_ref().map_or(0, |fees| fees.offer(base, api.tx_fuel, &probe, OfferChoice::default()).gas_limit);
+    let open = api.fees.as_ref().map_or(0, |fees| fees.offer_times(base, api.tx_fuel, &probe, OfferChoice::default(), api.tuned.suggest).gas_limit);
     // What runs code, or names, is tried first: what it would use, and whether it would fail.
     let ran = match &probe.tx {
         Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } | Tx::Batch { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
@@ -2569,7 +2789,7 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
 
             let chosen = OfferChoice { gas_limit: gas_limit.or(estimated), max_price, tip: tip_chosen };
 
-            fees.offer(base, api.tx_fuel, &probe, chosen)
+            fees.offer_times(base, api.tx_fuel, &probe, chosen, api.tuned.suggest)
         }
     };
     let mut answer = json::fee_offer(&offer);

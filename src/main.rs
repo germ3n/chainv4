@@ -1,5 +1,5 @@
 #[cfg(feature = "node")]
-use chainv4::{chain::{IndexKind, Indexing}, cli, structs};
+use chainv4::{chain::{IndexKind, Indexing}, cli, node::tuning, structs};
 #[cfg(feature = "http")]
 use chainv4::api;
 
@@ -108,9 +108,15 @@ struct NodeArgs {
     #[arg(long)]
     bootnode: Vec<libp2p::Multiaddr>,
     /// How many peers to look for: while it has fewer, the node dials bootnodes and peers it
-    /// learns of from the others, a few at a time. Peers that dial in are taken regardless.
+    /// learns of from the others, a few at a time. Peers that dial in are taken up to
+    /// --max-peers-in.
     #[arg(long, default_value_t = chainv4::net::DEFAULT_TARGET_PEERS as u32, value_parser = clap::value_parser!(u32).range(1..=1000))]
     target_peers: u32,
+    /// The most connections peers that dial in may hold at once, 1 to 10,000: past it a new one is
+    /// refused as it is made. Peers this node dials are not counted. Without it, every one is
+    /// taken.
+    #[arg(long, value_parser = tuning::flag("net.max-peers-in"))]
+    max_peers_in: Option<u64>,
     /// Do not look for peers on the local network with mDNS: for a server, whose network holds no
     /// nodes of yours, so peers come from --peer and Kademlia alone.
     #[arg(long)]
@@ -120,9 +126,16 @@ struct NodeArgs {
     #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(1..))]
     max_gossip_backlog: u32,
     /// The most of those any one peer's may be. More are dropped, and a peer that goes over
-    /// 10 times in a minute is disconnected.
+    /// --max-strikes times within --strike-window is disconnected.
     #[arg(long, default_value_t = 1_000, value_parser = clap::value_parser!(u32).range(1..))]
     max_gossip_per_peer: u32,
+    /// How many times a peer may go over its share of the backlog within --strike-window before it
+    /// is disconnected, 1 to 10,000: raise it for peers that relay bursts.
+    #[arg(long, default_value = tuning::default_text("backlog.strikes"), value_parser = tuning::flag("backlog.strikes"))]
+    max_strikes: u64,
+    /// The window --max-strikes are counted in, 1s to 1d.
+    #[arg(long, default_value = tuning::default_text("backlog.strike-window"), value_parser = tuning::flag("backlog.strike-window"))]
+    strike_window: u64,
     /// The node's network key file, which its peer id is of, so the id is the same each start:
     /// made at the first start, readable by its owner alone. net.key beside --db unless given.
     #[arg(long)]
@@ -131,6 +144,15 @@ struct NodeArgs {
     /// invalid blocks or ten bad signatures within ten minutes: 1h, 30m, 90s or 2d.
     #[arg(long, default_value = "1h", value_parser = cli::parse_duration)]
     ban_for: u64,
+    /// How much a peer's faults may add up to within --ban-window before it is banned, 10 to
+    /// 1,000,000: an invalid block or bytes that do not decode weigh 50, a flood 25, a bad
+    /// signature 10.
+    #[arg(long, default_value = tuning::default_text("ban.score"), value_parser = tuning::flag("ban.score"))]
+    ban_score: u64,
+    /// The window a peer's faults add up in, 1s to 7d: one with none for this long starts again
+    /// from nothing.
+    #[arg(long, default_value = tuning::default_text("ban.window"), value_parser = tuning::flag("ban.window"))]
+    ban_window: u64,
     /// Ban a peer's IP as well as its peer id, so a new id from the same machine is refused too.
     /// It can catch honest nodes behind the same NAT or VPN.
     #[arg(long)]
@@ -148,7 +170,11 @@ struct NodeArgs {
     /// there, then told to peers as the node's address.
     #[arg(long)]
     onion_file: Option<std::path::PathBuf>,
-    /// Where to look for releases every hour: a manifest's URL, or off. Defaults to the one the
+    /// How long a dial through --tor-proxy may take, 5s to 10m: Tor builds a circuit to an onion
+    /// first, which on a slow relay can take a while.
+    #[arg(long, default_value = tuning::default_text("tor.timeout"), value_parser = tuning::flag("tor.timeout"))]
+    tor_timeout: u64,
+    /// Where to look for releases every --update-every: a manifest's URL, or off. Defaults to the one the
     /// release keys built in name; a build with no release keys looks nowhere. The node warns
     /// while it is behind, stops at an upgrade a release announces for its chain, and serves the
     /// release at GET /release.
@@ -161,6 +187,10 @@ struct NodeArgs {
     #[cfg(feature = "updates")]
     #[arg(long)]
     auto_update: bool,
+    /// How often to look for releases, 1m to 7d.
+    #[cfg(feature = "updates")]
+    #[arg(long, default_value = tuning::default_text("updates.every"), value_parser = tuning::flag("updates.every"))]
+    update_every: u64,
     /// Do not wait for the disk on each commit: faster, but a power cut can lose the last few
     /// blocks, which peers give back. For benchmarks and tests.
     #[arg(long)]
@@ -169,16 +199,31 @@ struct NodeArgs {
     /// state in memory between blocks.
     #[arg(long, default_value_t = chainv4::db::DEFAULT_CACHE_MB)]
     db_cache: usize,
-    /// How many blocks back to keep state to read and prove at: balances, calls and proofs at a
-    /// past block, over the API and JSON-RPC.
-    #[arg(long, default_value_t = chainv4::chain::DEFAULT_STATE_HISTORY, value_parser = clap::value_parser!(u64).range(1..))]
-    state_history: u64,
+    /// How many pristine Lua states to keep ready for contract calls, 1 to 1,024: more takes
+    /// memory for calls back to back. It changes no call's outcome.
+    #[arg(long, default_value = tuning::default_text("lua.states"), value_parser = tuning::flag("lua.states"))]
+    lua_states: u64,
+    /// How many threads build those states, 1 to 64.
+    #[arg(long, default_value = tuning::default_text("lua.builders"), value_parser = tuning::flag("lua.builders"))]
+    lua_builders: u64,
+    /// The WebAssembly module cache, in MiB of modules, 1 to 4,096: more keeps more contracts
+    /// compiled between calls.
+    #[arg(long, default_value = tuning::default_text("wasm.cache-mb"), value_parser = tuning::flag("wasm.cache-mb"))]
+    wasm_cache_mb: u64,
+    /// The most modules that cache holds, 1 to 1,000,000.
+    #[arg(long, default_value = tuning::default_text("wasm.cache-modules"), value_parser = tuning::flag("wasm.cache-modules"))]
+    wasm_cache_modules: u64,
+    /// How far back to keep state to read and prove at: balances, calls and proofs at a past
+    /// block, over the API and JSON-RPC. In blocks, or as a time, such as 14h, turned into blocks
+    /// at the chain's block time as the node starts.
+    #[arg(long, default_value = "10000")]
+    state_history: chainv4::node::Span,
     /// Keep the state of every height from now on, never pruning it: an archive node.
     #[arg(long, conflicts_with = "state_history")]
     archive: bool,
     /// The most transactions a block this node produces may hold. Without it, blocks fill to the
-    /// chain's max_block_bytes and gas limit, which every node checks; this only caps this node's
-    /// own blocks.
+    /// chain's max_block_bytes and gas limit, which every node checks; on a chain that bounds
+    /// neither, 1,000. This only caps this node's own blocks.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     max_block_txs: Option<u32>,
     /// How many milliseconds this node spends running transactions for each block it produces.
@@ -204,6 +249,11 @@ struct NodeArgs {
     /// one of its sender's waiting at its nonce.
     #[arg(long, default_value_t = chainv4::mempool::MempoolLimits::DEFAULT.replace_bump, value_parser = clap::value_parser!(u32).range(0..=1_000))]
     replace_bump_percent: u32,
+    /// How long a transaction may offer less than the base price before the mempool drops it: in
+    /// blocks, 32 unless given, or as a time, such as 3m, turned into blocks at the chain's block
+    /// time as the node starts. 1 to 100,000 blocks.
+    #[arg(long)]
+    underpriced_for: Option<chainv4::node::Span>,
     /// The most bytes of blocks this node answers a syncing peer's request with, past its first
     /// block: it sends fewer blocks, and the peer asks again from there. 1 MiB to 32 MiB.
     #[arg(long, default_value_t = chainv4::net::SYNC_BATCH_BYTES, value_parser = clap::value_parser!(u64).range(1024 * 1024..=chainv4::net::MOST_SYNC_BATCH_BYTES))]
@@ -279,7 +329,7 @@ struct NodeArgs {
     report: chainv4::api::sharing::ReportPreset,
     /// Keep these fields to the node on top of --report, such as counters,devices: peer-addresses,
     /// peer-ids, peers, listening, worker-addresses, worker-names, worker-payouts, workers, devices,
-    /// mining, counters, backlog, syncing, uptime, role.
+    /// mining, counters, backlog, syncing, uptime, role, limits.
     #[cfg(feature = "http")]
     #[arg(long, value_delimiter = ',')]
     hide: Vec<chainv4::api::sharing::ReportField>,
@@ -351,6 +401,22 @@ struct NodeArgs {
     #[cfg(feature = "http")]
     #[arg(long, requires = "http", default_value_t = chainv4::api::DEFAULT_PER_IP)]
     http_per_ip: usize,
+    /// How many requests one client may make a second, 0 to 100,000, beside --http-per-ip: a
+    /// burst of up to a second's worth goes through, then 429 with Retry-After. 0 counts nothing.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http", default_value = tuning::default_text("http.rate"), value_parser = tuning::flag("http.rate"))]
+    http_rate: u64,
+    /// The most any listing returns at once, 10 to 10,000, in place of each listing's own
+    /// maximum, 100 to 1,000; the apps page on past it. Without it, each listing keeps its own.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http", value_parser = tuning::flag("http.max-page"))]
+    api_max_page: Option<u64>,
+    /// How many times the next base price a suggested fee offers, 1 to 100: what eth_gasPrice says,
+    /// and the max price POST /offer fills in when left open, under a base fee. More outlasts a
+    /// faster rise of the base price, and holds more of the sender's funds back while it waits.
+    #[cfg(feature = "http")]
+    #[arg(long, requires = "http", default_value = tuning::default_text("http.suggest-multiplier"), value_parser = tuning::flag("http.suggest-multiplier"))]
+    suggest_multiplier: u64,
     /// Let web pages from this origin call the API, such as http://localhost:8081, or * for any.
     /// Repeat to allow several.
     #[cfg(feature = "http")]
@@ -423,16 +489,27 @@ struct NodeArgs {
     #[arg(long, value_name = "on|off", num_args = 0..=1, require_equals = true, default_missing_value = "on", value_parser = on_or_off)]
     index_multisigs: Option<bool>,
     /// On a database that holds only genesis, sync from a snapshot: check every header peers have,
-    /// take the state of a block 16 below the best tip from them, and run only the blocks after
-    /// it. The node then keeps headers alone for the blocks before it.
+    /// take the state of a block --snapshot-depth below the best tip from them, and run only the
+    /// blocks after it. The node then keeps headers alone for the blocks before it.
     #[arg(long)]
     snapshot: bool,
+    /// How far below the best tip --snapshot takes its state: 16 blocks unless given, at most half
+    /// the chain's max_reorg_depth. Peers serve any block their --state-history still holds, so
+    /// they need not agree on it. A chain shorter than twice it is synced by running its blocks.
+    #[arg(long, requires = "snapshot", value_parser = tuning::flag("snapshot.depth"))]
+    snapshot_depth: Option<u64>,
     /// With --snapshot, a finalized checkpoint's block id, as 0x hex, from someone you trust: the
     /// node fetches no header below it, holds it as final, and syncs on from there, so a
     /// long-range fork below it cannot reach the node. GET /status of a node you trust shows one
     /// under finality.finalized.block.
     #[arg(long, requires = "snapshot")]
     checkpoint: Option<String>,
+    /// Tune what the node takes on and how fast, as KEY=VALUE, repeated or comma-separated, such
+    /// as sync.headers=512,gossip.wait=20ms: the keys are sync., gossip., dial., peers., node.,
+    /// mining., http., range., rpc., filter., finality. and chain., in docs/node.md with their
+    /// defaults and bounds. None of it is consensus; unset, each is what every node did before.
+    #[arg(long, value_name = "KEY=VALUE", value_delimiter = ',', value_parser = tuning::setting)]
+    tune: Vec<(&'static str, u64)>,
 }
 
 /// How many events a slow /stream client may fall behind by before it misses some.
@@ -501,12 +578,36 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         chainv4::chain::{self, Genesis},
         chainv4::consensus::{ConsensusConfig, DevAuthority},
         chainv4::db::{Database, RocksDb},
-        chainv4::net::{self, BacklogLimits, NetConfig},
+        chainv4::net::{self, NetConfig},
         chainv4::node::{Mining, MiningPort, Node, Producing},
         std::sync::Arc,
     };
 
     let dev = DevAuthority::dev_keypair();
+    // Everything tuned past the plain flags, which each part of the node takes its piece of.
+    let mut tuned = chainv4::node::Tuning::new().with(&args.tune);
+    tuned.set("ban.score", args.ban_score).set("ban.window", args.ban_window).set("backlog.strikes", args.max_strikes).set("backlog.strike-window", args.strike_window).set("tor.timeout", args.tor_timeout);
+    tuned.set("lua.states", args.lua_states).set("lua.builders", args.lua_builders).set("wasm.cache-mb", args.wasm_cache_mb).set("wasm.cache-modules", args.wasm_cache_modules);
+
+    if let Some(most) = args.max_peers_in {
+        tuned.set("net.max-peers-in", most);
+    }
+
+    if let Some(depth) = args.snapshot_depth {
+        tuned.set("snapshot.depth", depth);
+    }
+
+    #[cfg(feature = "updates")]
+    tuned.set("updates.every", args.update_every);
+    #[cfg(feature = "http")]
+    {
+        tuned.set("http.rate", args.http_rate).set("http.suggest-multiplier", args.suggest_multiplier);
+
+        if let Some(most) = args.api_max_page {
+            tuned.set("http.max-page", most);
+        }
+    }
+
     let genesis: Genesis = match &args.genesis {
         Some(path) => cli::genesis::read(path)?,
         None => cli::genesis::dev(args.consensus),
@@ -535,6 +636,19 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         genesis.engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(" and ")
     );
 
+    // The snapshot's depth is the syncing node's alone, but held to half the chain's reorg depth,
+    // as the block whose state it takes must stay where the chain can no longer roll back past.
+    if let Some(depth) = args.snapshot_depth
+        && depth > (genesis.max_reorg_depth / 2).max(1)
+    {
+        return Err(format!("--snapshot-depth {depth} is past half this chain's max_reorg_depth, {}", (genesis.max_reorg_depth / 2).max(1)).into());
+    }
+
+    if !tuned.changed().is_empty() {
+        let changed: Vec<String> = tuned.changed().into_iter().map(|(key, value)| format!("{key}={value}")).collect();
+        log::info!("[node] tuned {}", changed.join(", "));
+    }
+
     // The network key, beside the database's directory unless --net-key names its file.
     let net_key = args.net_key.clone().unwrap_or_else(|| {
         let parent = args.db.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
@@ -555,21 +669,17 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         hash: genesis.hash,
         network,
         protocol: args.protocol.clone(),
-        backlog: BacklogLimits {
-            total: args.max_gossip_backlog as usize,
-            per_peer: args.max_gossip_per_peer as usize,
-        },
+        backlog: tuned.backlog(args.max_gossip_backlog as usize, args.max_gossip_per_peer as usize),
         key: Some(net::net_key(&net_key)?),
         remembered: chainv4::node::remembered(db.as_ref())?,
-        bans: net::BanLimits {
-            ban_for: std::time::Duration::from_millis(args.ban_for),
-            ips: args.ban_ips,
-        },
+        bans: tuned.bans(std::time::Duration::from_millis(args.ban_for), args.ban_ips),
         tor: net::tor::TorConfig {
             proxy: args.tor_proxy.clone(),
             only: args.tor_only,
             onion_file: args.onion_file.clone(),
+            timeout: tuned.tor_timeout(),
         },
+        tuning: tuned.net(),
     })?;
     // A container stops its node with SIGTERM, which a process with no handler ignores as PID 1;
     // Ctrl-C sends SIGINT. Either stops the loop, and the database closes as the node is dropped.
@@ -593,8 +703,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             (true, Some(url)) => {
                 // Over Tor whenever the node keeps its IP to itself, and for an onion's manifest.
                 let proxy = (args.tor_only || url.contains(".onion/")).then(|| args.tor_proxy.clone()).flatten();
-                log::info!("[updates] looking for releases at {url} every hour{}", if args.auto_update { ", updating on its own" } else { "" });
-                let config = chainv4::node::UpdateConfig { url, proxy, auto: args.auto_update, binary: binary.clone() };
+                log::info!("[updates] looking for releases at {url} every {} s{}", args.update_every / 1_000, if args.auto_update { ", updating on its own" } else { "" });
+                let config = chainv4::node::UpdateConfig { url, proxy, auto: args.auto_update, binary: binary.clone(), every_ms: tuned.update_every_ms() };
                 chainv4::node::spawn_updates(config, releases.clone(), stop.clone(), restart.clone())?;
             }
             (false, _) if args.updates.is_some() || args.auto_update => log::warn!("[updates] this build trusts no release keys, so it looks for no releases"),
@@ -636,6 +746,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(feature = "updates")]
             releases: Some(releases.clone()),
             solo: args.mining_solo,
+            limits: tuned.port(),
         }),
         _ => None,
     };
@@ -666,7 +777,25 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let producing = (mine.is_some() || sign.is_some()).then_some(Producing { mine, sign });
-    let mut node = Node::new(db.clone(), &genesis, None, net)?
+    let mut node = Node::new_with(db.clone(), &genesis, None, net, tuned.chain())?;
+    // What is counted in blocks but may be given as a time goes by the chain's block time now.
+    let block_ms = node.chain().consensus_config_at(node.chain().tip().height + 1)?.block_ms();
+    let underpriced = match args.underpriced_for {
+        Some(span) => span.blocks(block_ms),
+        None => u64::from(chainv4::mempool::MAX_UNDERPRICED_BLOCKS),
+    };
+
+    if !(1..=100_000).contains(&underpriced) {
+        return Err(format!("--underpriced-for is {underpriced} blocks at {block_ms} ms a block: give 1 to 100,000 blocks").into());
+    }
+
+    let state_history = args.state_history.blocks(block_ms);
+
+    if state_history == 0 {
+        return Err("--state-history keeps at least one block".into());
+    }
+
+    node = node
         .max_block_txs(args.max_block_txs.map(|most| most as usize))
         .max_build_ms(args.max_build_ms)
         .mempool_limits(chainv4::mempool::MempoolLimits {
@@ -674,8 +803,10 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             per_sender: args.mempool_per_sender as usize,
             nonce_gap: args.max_nonce_gap,
             replace_bump: args.replace_bump_percent,
+            underpriced_blocks: underpriced as u32,
         })
-        .sync_batch_bytes(args.sync_batch_bytes);
+        .sync_batch_bytes(args.sync_batch_bytes)
+        .tuning(tuned.node());
 
     #[cfg(feature = "updates")]
     {
@@ -724,7 +855,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         node = node.stream(STREAM_BACKLOG);
     }
 
-    node = node.keep_state_history((!args.archive).then_some(args.state_history));
+    node = node.keep_state_history((!args.archive).then_some(state_history));
 
     for (kind, asked) in [(IndexKind::Events, args.index_events), (IndexKind::Addresses, args.index_addresses)] {
         match asked {
@@ -784,6 +915,9 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             sharing: api::sharing::Sharing::new(args.report, &args.hide, &args.show)?,
             report_token: args.report_token.as_deref().map(chainv4::mining::read_token).transpose()?,
             trusted_proxies: args.trusted_proxy.clone(),
+            limits: tuned.api(),
+            pools: tuned.pools(),
+            tuning: tuned.clone(),
         };
         let address = api::start(db, Some(node.handle()), &genesis, address, options)?;
         log::info!("[http] listening on {address}");
@@ -852,5 +986,73 @@ fn evm_bytes(text: &str) -> Result<[u8; 20], String> {
     match text.trim().strip_prefix("0x").filter(|hex| hex.len() == 40) {
         Some(_) => structs::hex::from_hex(text.trim()).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{text} is not hex")),
         None => Err(format!("{text} is not 0x and 40 hex digits")),
+    }
+}
+
+#[cfg(all(test, feature = "node", feature = "http"))]
+mod tests {
+    use {super::*, clap::Parser};
+
+    fn parse(flags: &[&str]) -> Result<NodeArgs, String> {
+        Cli::try_parse_from(std::iter::once("chainv4").chain(flags.iter().copied())).map(|cli| cli.node).map_err(|err| err.to_string())
+    }
+
+    #[test]
+    fn a_node_with_none_of_the_new_flags_takes_every_default_as_before() {
+        let args = parse(&[]).unwrap();
+
+        assert_eq!((args.ban_score, args.ban_window, args.max_strikes, args.strike_window), (100, 600_000, 10, 60_000));
+        assert_eq!((args.tor_timeout, args.http_rate, args.suggest_multiplier), (90_000, 0, 2));
+        assert_eq!((args.lua_states, args.lua_builders, args.wasm_cache_mb, args.wasm_cache_modules), (16, 2, 32, 1_024));
+        assert_eq!((args.max_peers_in, args.api_max_page, args.snapshot_depth, args.underpriced_for), (None, None, None, None));
+        assert_eq!(args.state_history, chainv4::node::Span::Blocks(chainv4::chain::DEFAULT_STATE_HISTORY));
+        #[cfg(feature = "updates")]
+        assert_eq!(args.update_every, chainv4::node::CHECK_EVERY_MS);
+        assert!(args.tune.is_empty());
+    }
+
+    #[test]
+    fn the_new_flags_read_their_units_and_refuse_what_would_break_the_node() {
+        let args = parse(&["--max-peers-in", "40", "--ban-score", "300", "--ban-window", "30m", "--max-strikes", "50", "--strike-window", "5m", "--tor-timeout", "3m", "--lua-states", "64", "--wasm-cache-mb", "256", "--state-history", "14h", "--underpriced-for", "3m"]).unwrap();
+
+        assert_eq!((args.max_peers_in, args.ban_score, args.ban_window, args.max_strikes, args.strike_window), (Some(40), 300, 1_800_000, 50, 300_000));
+        assert_eq!((args.tor_timeout, args.lua_states, args.wasm_cache_mb), (180_000, 64, 256));
+        assert_eq!((args.state_history, args.underpriced_for), (chainv4::node::Span::Ms(14 * 3_600_000), Some(chainv4::node::Span::Ms(180_000))));
+
+        let http = parse(&["--http", "127.0.0.1:0", "--http-rate", "20", "--api-max-page", "50", "--suggest-multiplier", "3"]).unwrap();
+        assert_eq!((http.http_rate, http.api_max_page, http.suggest_multiplier), (20, Some(50), 3));
+
+        for refused in [
+            &["--max-peers-in", "0"][..],
+            &["--ban-score", "0"],
+            &["--ban-window", "soon"],
+            &["--max-strikes", "0"],
+            &["--tor-timeout", "1s"],
+            &["--lua-states", "0"],
+            &["--lua-builders", "100"],
+            &["--wasm-cache-mb", "0"],
+            &["--wasm-cache-modules", "0"],
+            &["--http", "127.0.0.1:0", "--suggest-multiplier", "0"],
+            &["--http", "127.0.0.1:0", "--api-max-page", "5"],
+            &["--http-rate", "5"],
+            &["--snapshot-depth", "4"],
+            &["--snapshot", "--snapshot-depth", "0"],
+            &["--state-history", "later"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn tune_takes_keys_repeated_or_comma_separated_and_refuses_what_it_does_not_know() {
+        let args = parse(&["--tune", "sync.headers=512,gossip.wait=20ms", "--tune", "rpc.batch=200"]).unwrap();
+
+        assert_eq!(args.tune, vec![("sync.headers", 512), ("gossip.wait", 20), ("rpc.batch", 200)]);
+        let tuned = chainv4::node::Tuning::new().with(&args.tune);
+        assert_eq!((tuned.node().sync_headers, tuned.net().tx_batch_wait, tuned.api().rpc.batch), (512, std::time::Duration::from_millis(20), 200));
+
+        for refused in ["sync.headers=2048", "nothing=1", "rpc.batch", "ban.score=200", "gossip.batch=1000"] {
+            assert!(parse(&["--tune", refused]).is_err(), "{refused}");
+        }
     }
 }

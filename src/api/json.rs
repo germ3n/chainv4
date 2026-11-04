@@ -172,8 +172,10 @@ pub fn block(block: &Block, receipts: &[Option<TxReceipt>], hash: HashType, rewa
 }
 
 /// How a node is doing, as GET /node answers, less what it keeps to itself: each such field stays,
-/// empty, so apps from before still read the answer, and `hidden` names them.
-pub fn node(report: &NodeReport, sharing: Sharing) -> Value {
+/// empty, so apps from before still read the answer, and `hidden` names them. Its limits are every
+/// value its operator may tune, by key, times in milliseconds and sizes in bytes, null for one
+/// unset.
+pub fn node(report: &NodeReport, sharing: Sharing, tuning: &crate::node::Tuning) -> Value {
     let counters = &report.counters;
     let shown = |field: ReportField| !sharing.hides(field);
     let uptime = shown(ReportField::Uptime);
@@ -215,7 +217,13 @@ pub fn node(report: &NodeReport, sharing: Sharing) -> Value {
             "waiting": report.backlog.0,
             "total": report.backlog.1.total,
             "per_peer": report.backlog.1.per_peer,
+            "strikes": report.backlog.1.strikes,
+            "strike_window_ms": report.backlog.1.strike_window.as_millis() as u64,
         })),
+        "limits": match shown(ReportField::Limits) {
+            true => Value::Object(tuning.values().into_iter().map(|(key, value)| (key.to_string(), value.map_or(Value::Null, Value::from))).collect()),
+            false => json!({}),
+        },
         "peers": if shown(ReportField::Peers) { report.peers.iter().map(|one| peer(one, sharing)).collect::<Vec<_>>() } else { Vec::new() },
         "mining": report.mining.as_ref().filter(|_| shown(ReportField::Mining)).map(|report| mining(report, sharing)),
     })

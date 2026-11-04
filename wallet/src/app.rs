@@ -232,6 +232,17 @@ pub struct Settings {
     pub mine_token: String,
     /// Whether a phone mines on battery too, rather than pausing off its charger.
     pub mine_on_battery: bool,
+    /// Low data: ask the node a few times less often, for a metered connection or a phone's battery.
+    /// See chainv4_ui::pace.
+    pub low_data: bool,
+    /// How many times as long as usual a request may take before a page says it got no answer:
+    /// chainv4_ui::net::waits. 1 is the usual.
+    pub patience: u32,
+    /// How many minutes a trade or a deposit on the Trade page may wait to land before the DEX
+    /// refuses it.
+    pub trade_deadline_minutes: u32,
+    /// The most transactions a wallet reading checked blocks keeps, the newest: see crate::reading.
+    pub reading_txs: usize,
     /// What a wallet from before there could be several kept: its one vault, and the account in
     /// use. Read, to become the first wallet, and never written again.
     #[serde(skip_serializing)]
@@ -335,9 +346,36 @@ impl Default for Settings {
             mine_port: String::new(),
             mine_token: String::new(),
             mine_on_battery: false,
+            low_data: false,
+            patience: 1,
+            trade_deadline_minutes: TRADE_DEADLINE_MINUTES,
+            reading_txs: crate::reading::MOST_TXS,
             vault: None,
             current: String::new(),
         }
+    }
+}
+
+/// How many minutes a trade may wait to land unless Settings says otherwise, and the most it may
+/// say: a trade that lands a day after it was priced is a trade at a price nobody chose.
+pub const TRADE_DEADLINE_MINUTES: u32 = 20;
+pub const MOST_TRADE_DEADLINE_MINUTES: u32 = 24 * 60;
+
+impl Settings {
+    /// How often the wallet asks its node, by Low data.
+    pub fn pace(&self) -> chainv4_ui::pace::Pace {
+        chainv4_ui::pace::Pace::new(self.low_data)
+    }
+
+    /// How long a trade may wait to land, in milliseconds, within the bounds Settings offers.
+    #[cfg_attr(not(feature = "dex"), allow(dead_code))]
+    pub fn trade_deadline_ms(&self) -> u64 {
+        u64::from(self.trade_deadline_minutes.clamp(1, MOST_TRADE_DEADLINE_MINUTES)) * 60_000
+    }
+
+    /// The most transactions a reading keeps, within the bounds Settings offers.
+    pub fn reading_txs(&self) -> usize {
+        self.reading_txs.clamp(crate::reading::LEAST_TXS, crate::reading::MOST_TXS_SET)
     }
 }
 
@@ -912,6 +950,7 @@ impl Wallet {
 
         let listening = self.node.listen();
         self.chain.streamed = listening.open;
+        self.chain.pace = self.settings.pace();
 
         if listening.moved {
             self.chain.nudge();
@@ -931,7 +970,7 @@ impl Wallet {
             return;
         }
 
-        if self.asked_status.is_none_or(|asked| time - asked >= STATUS_EVERY) {
+        if self.asked_status.is_none_or(|asked| time - asked >= self.settings.pace().every(STATUS_EVERY)) {
             self.asked_status = Some(time);
             self.node.ask(Ask::Status);
         }
@@ -967,7 +1006,7 @@ impl Wallet {
             return;
         };
 
-        if !self.chain.caught_up() || time - self.asked_history < HISTORY_EVERY {
+        if !self.chain.caught_up() || time - self.asked_history < self.settings.pace().every(HISTORY_EVERY) {
             return;
         }
 
@@ -978,11 +1017,11 @@ impl Wallet {
         // it only in an EVM log's topics, which the event index knows and the address index does not.
         for address in &current {
             if self.chain.indexes_addresses != Some(false) {
-                self.node.ask(Ask::History(address.clone()));
+                self.node.ask(Ask::History { address: address.clone(), cursor: None });
             }
 
             if self.chain.indexes_events != Some(false) {
-                self.node.ask(Ask::Events(address.clone()));
+                self.node.ask(Ask::Events { address: address.clone(), cursor: None });
             }
         }
 
@@ -1007,6 +1046,7 @@ impl Wallet {
     /// once the light client has something to check them against. A chain with no finality has no
     /// final blocks to read, which the setting's card says.
     fn read_blocks(&mut self, time: f64) {
+        self.reading.keep_most_txs(self.settings.reading_txs());
         let wallet = self.settings.wallets.get(self.settings.wallet);
         let (Some(client), Some(genesis), Some(vault), Some(wallet)) = (&self.chain.client, self.chain.genesis, &self.vault, wallet) else {
             return;
@@ -1051,7 +1091,7 @@ impl Wallet {
         let hash = client.params().hash;
         self.reading.show(hash, &mut self.chain, &mut self.settings.checked);
 
-        if time - self.asked_history >= HISTORY_EVERY {
+        if time - self.asked_history >= self.settings.pace().every(HISTORY_EVERY) {
             self.asked_history = time;
             let genesis = self.settings.chain_shown(self.chain.genesis);
             let unknown: Vec<String> = self.settings.sent.iter().filter(|sent| self.settings.checked_on(&sent.id, genesis.as_deref()).is_none()).map(|sent| sent.id.clone()).take(40).collect();
@@ -1645,7 +1685,7 @@ impl eframe::App for Wallet {
         }
 
         // What is due comes due even when nothing arrives.
-        ui.ctx().request_repaint_after(Duration::from_millis(400));
+        ui.ctx().request_repaint_after(self.settings.pace().wake_after(Duration::from_millis(400)));
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1708,8 +1748,8 @@ impl eframe::App for Wallet {
 pub(crate) fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
     match (settings.role, cfg!(target_arch = "wasm32")) {
         (Some(Role::Signer), _) => Err("an offline signer makes no requests".to_string()),
-        (_, true) => Ok(chainv4_ui::net::Client::direct()),
-        (_, false) => chainv4_ui::net::Client::for_setting(&settings.proxy),
+        (_, true) => chainv4_ui::net::Client::patient(None, settings.patience),
+        (_, false) => chainv4_ui::net::Client::for_settings(&settings.proxy, settings.patience),
     }
 }
 
@@ -1983,6 +2023,30 @@ mod tests {
         assert_eq!(kept.proxy, chainv4_ui::net::Proxy::ORBOT);
         assert_eq!(client(&kept).unwrap().proxy().map(chainv4_ui::net::Proxy::as_str), Some(chainv4_ui::net::Proxy::ORBOT));
         assert!(client(&Settings { proxy: "tor".to_string(), ..Settings::default() }).is_err(), "never direct instead");
+    }
+
+    #[test]
+    fn settings_from_before_network_use_trade_and_reading_caps_keep_todays_values_and_choices_are_kept() {
+        let old = serde_json::from_value::<Settings>(json!({ "node": "http://node", "proxy": chainv4_ui::net::Proxy::ORBOT })).unwrap();
+
+        assert_eq!((old.low_data, old.patience, old.trade_deadline_minutes, old.reading_txs), (false, 1, 20, 20_000));
+        assert_eq!(old.pace(), chainv4_ui::pace::Pace::default(), "every timer as before");
+        assert_eq!(old.trade_deadline_ms(), 20 * 60_000);
+        assert_eq!(client(&old).unwrap().whole(), chainv4_ui::net::limit(true), "and every wait");
+
+        let set = Settings { low_data: true, patience: 4, trade_deadline_minutes: 5, reading_txs: 100_000, ..old };
+        let kept = serde_json::from_value::<Settings>(serde_json::to_value(&set).unwrap()).unwrap();
+
+        assert_eq!((kept.low_data, kept.patience, kept.trade_deadline_minutes, kept.reading_txs), (true, 4, 5, 100_000));
+        assert!(kept.pace().low_data);
+        assert_eq!(client(&kept).unwrap().whole(), chainv4_ui::net::waits(true, 4).0, "requests through the proxy wait four times as long");
+        assert_eq!(kept.trade_deadline_ms(), 5 * 60_000);
+        assert_eq!(kept.reading_txs(), 100_000);
+
+        // What a settings file says past the bounds Settings offers is held to them.
+        let wild = Settings { trade_deadline_minutes: 0, reading_txs: 3, ..Settings::default() };
+
+        assert_eq!((wild.trade_deadline_ms(), wild.reading_txs()), (60_000, crate::reading::LEAST_TXS));
     }
 }
 

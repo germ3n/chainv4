@@ -1316,6 +1316,7 @@ dependencies = [
  "ethnum",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "http-body-util",
  "k256 0.14.0",
  "libp2p",
  "log",

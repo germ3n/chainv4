@@ -4,7 +4,7 @@
 //! at the door instead of queueing without end.
 //!
 //! A peer that goes over its own share is struck; MAX_STRIKES strikes within STRIKE_WINDOW and it
-//! is disconnected. Going over the whole backlog's limit strikes nobody, since no one peer filled
+//! is disconnected, or as many as --max-strikes and --strike-window say. Going over the whole backlog's limit strikes nobody, since no one peer filled
 //! it.
 
 use {
@@ -16,17 +16,17 @@ use {
 };
 
 #[document(
-    summary = "How many times a peer may go over its share of the backlog within STRIKE_WINDOW before it is disconnected.",
+    summary = "How many times a peer may go over its share of the backlog within STRIKE_WINDOW before it is disconnected, unless --max-strikes says otherwise.",
     category = "Node",
-    see_also = "Backlog",
+    see_also = "Backlog, BacklogLimits::strikes",
 )]
 pub const MAX_STRIKES: u32 = 10;
 
-#[document(summary = "The window strikes against a peer are counted in.", category = "Node", see_also = "Backlog")]
+#[document(summary = "The window strikes against a peer are counted in, unless --strike-window says otherwise.", category = "Node", see_also = "Backlog, BacklogLimits::strike_window")]
 pub const STRIKE_WINDOW: Duration = Duration::from_secs(60);
 
 #[document(
-    summary = "How much gossip may wait for the node: in all, and from any one peer. Set with --max-gossip-backlog and --max-gossip-per-peer.",
+    summary = "How much gossip may wait for the node: in all, and from any one peer; and how often a peer may go over its share before it is disconnected. Set with --max-gossip-backlog, --max-gossip-per-peer, --max-strikes and --strike-window.",
     category = "Node",
     see_also = "Backlog",
 )]
@@ -36,6 +36,10 @@ pub struct BacklogLimits {
     pub total: usize,
     #[document(summary = "Transactions and votes waiting from any one peer.")]
     pub per_peer: usize,
+    #[document(summary = "How many times a peer may go over its share within strike_window before it is disconnected: MAX_STRIKES by default.")]
+    pub strikes: u32,
+    #[document(summary = "The window strikes are counted in: STRIKE_WINDOW by default.")]
+    pub strike_window: Duration,
 }
 
 impl Default for BacklogLimits {
@@ -43,6 +47,8 @@ impl Default for BacklogLimits {
         BacklogLimits {
             total: 10_000,
             per_peer: 1_000,
+            strikes: MAX_STRIKES,
+            strike_window: STRIKE_WINDOW,
         }
     }
 }
@@ -63,7 +69,7 @@ pub enum Admission {
     Admitted,
     #[document(summary = "Dropped: the backlog is full, or this peer's share of it is.")]
     Dropped,
-    #[document(summary = "Dropped, and the peer went over its share MAX_STRIKES times within STRIKE_WINDOW: disconnect it.")]
+    #[document(summary = "Dropped, and the peer went over its share BacklogLimits::strikes times within its strike_window: disconnect it.")]
     Disconnect,
 }
 
@@ -137,14 +143,14 @@ impl Backlog {
                 share.dropped += 1;
                 *dropped += 1;
 
-                if share.since.is_none_or(|since| now.duration_since(since) > STRIKE_WINDOW) {
+                if share.since.is_none_or(|since| now.duration_since(since) > self.limits.strike_window) {
                     share.since = Some(now);
                     share.strikes = 0;
                 }
 
                 share.strikes += 1;
 
-                if share.strikes < MAX_STRIKES {
+                if share.strikes < self.limits.strikes {
                     return Admission::Dropped;
                 }
 
@@ -231,7 +237,7 @@ mod tests {
     use super::*;
 
     fn backlog(total: usize, per_peer: usize) -> Backlog {
-        Backlog::new(BacklogLimits { total, per_peer })
+        Backlog::new(BacklogLimits { total, per_peer, ..BacklogLimits::default() })
     }
 
     #[test]
@@ -301,5 +307,25 @@ mod tests {
         backlog.forget(&peer);
 
         assert_eq!((backlog.waiting(), backlog.dropped_from(&peer)), (0, 0));
+    }
+
+    #[test]
+    fn more_strikes_in_a_shorter_window_take_longer_to_disconnect_a_peer() {
+        let backlog = Backlog::new(BacklogLimits { total: 100, per_peer: 1, strikes: 3, strike_window: Duration::from_secs(5) });
+        let peer = PeerId::random();
+        let start = Instant::now();
+        backlog.admit(Origin::Peer(peer), start);
+
+        // Ten seconds apart, past the 5-second window, strikes never add up, though within the
+        // default minute ten would disconnect the peer.
+        for n in 1..=12u32 {
+            assert_eq!(backlog.admit(Origin::Peer(peer), start + Duration::from_secs(u64::from(n) * 10)), Admission::Dropped);
+        }
+
+        // Three within the window do, where the default takes ten.
+        let now = start + Duration::from_secs(1_000);
+        assert_eq!(backlog.admit(Origin::Peer(peer), now), Admission::Dropped);
+        assert_eq!(backlog.admit(Origin::Peer(peer), now), Admission::Dropped);
+        assert_eq!(backlog.admit(Origin::Peer(peer), now), Admission::Disconnect);
     }
 }

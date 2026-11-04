@@ -15,7 +15,7 @@ use {
     std::time::Duration,
 };
 
-#[document(summary = "How often a node fetches the manifest, in milliseconds: an hour.", category = "Releases", see_also = "UpdateConfig")]
+#[document(summary = "How often a node fetches the manifest, in milliseconds, unless --update-every says otherwise: an hour.", category = "Releases", see_also = "UpdateConfig::every_ms")]
 pub const CHECK_EVERY_MS: u64 = 3_600_000;
 /// The most a manifest may be.
 const MOST_MANIFEST: u64 = 1 << 20;
@@ -23,7 +23,7 @@ const MOST_MANIFEST: u64 = 1 << 20;
 const MOST_BINARY: u64 = 1 << 30;
 
 #[document(
-    summary = "Where a node looks for releases, and what it does with one: --updates, its proxy, and --auto-update.",
+    summary = "Where a node looks for releases, how often, and what it does with one: --updates, its proxy, --update-every and --auto-update.",
     category = "Releases",
     see_also = "Releases, spawn_updates",
 )]
@@ -37,6 +37,8 @@ pub struct UpdateConfig {
     pub auto: bool,
     #[document(summary = "The binary to replace: the running one.")]
     pub binary: PathBuf,
+    #[document(summary = "How often to fetch the manifest, in milliseconds: CHECK_EVERY_MS by default, --update-every.")]
+    pub every_ms: u64,
 }
 
 #[document(
@@ -217,7 +219,7 @@ fn get(url: &str, proxy: Option<&str>, most: u64) -> Result<Vec<u8>, String> {
 }
 
 #[document(
-    summary = "Starts the thread that fetches releases every CHECK_EVERY_MS and warns while this build is behind; with --auto-update it puts a newer chainv4 in place and sets restart and stop, so the node stops and main starts it again on the new binary.",
+    summary = "Starts the thread that fetches releases every UpdateConfig::every_ms, CHECK_EVERY_MS by default, and warns while this build is behind; with --auto-update it puts a newer chainv4 in place and sets restart and stop, so the node stops and main starts it again on the new binary.",
     category = "Releases",
     params = {
         config = "Where to look, and whether to update.",
@@ -231,7 +233,8 @@ pub fn spawn_updates(config: UpdateConfig, releases: Arc<Releases>, stop: Arc<At
         while !stop.load(Ordering::Relaxed) {
             check(&config, &releases, &stop, &restart);
 
-            for _ in 0..CHECK_EVERY_MS / 1_000 {
+            // A second at a time, so a stop is seen within one however long the wait.
+            for _ in 0..config.every_ms.div_ceil(1_000).max(1) {
                 if stop.load(Ordering::Relaxed) {
                     return;
                 }

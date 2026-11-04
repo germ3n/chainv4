@@ -416,7 +416,7 @@ fn transactions_are_submitted_as_hex() {
 fn a_node_with_no_room_says_it_is_busy() {
     let db = Arc::new(MemoryDb::default());
     Chain::open(db.clone(), &free()).unwrap();
-    let full = fake_node_with(BacklogLimits { total: 0, per_peer: 0 });
+    let full = fake_node_with(BacklogLimits { total: 0, per_peer: 0, ..BacklogLimits::default() });
     let address = start(db, Some(full), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
     let (status, body) = post_tx(address, &wincode::serialize(&signed(5)).unwrap());
 
@@ -1229,7 +1229,9 @@ fn the_node_tells_how_it_is_doing_and_what_waits() {
     assert_eq!(node["peers"][0]["heard"], json!({ "blocks": 3, "txs": 4, "votes": 0 }));
     assert_eq!(node["peers"][0]["chain"], json!({ "height": 5, "work": "5", "justified": 0 }));
     assert_eq!((node["peers"][0]["dropped"].clone(), node["counters"]["gossip_dropped"].clone()), (json!(7), json!(7)));
-    assert_eq!(node["backlog"], json!({ "waiting": 12, "total": 10_000, "per_peer": 1_000 }));
+    assert_eq!(node["backlog"], json!({ "waiting": 12, "total": 10_000, "per_peer": 1_000, "strikes": 10, "strike_window_ms": 60_000 }));
+    assert_eq!((node["limits"]["ban.score"].clone(), node["limits"]["sync.headers"].clone(), node["limits"]["net.max-peers-in"].clone()), (json!(100), json!(1_024), Value::Null), "every knob, at its default here");
+    assert_eq!(node["limits"].as_object().unwrap().len(), crate::node::tuning::KNOBS.len());
     assert_eq!(node["syncing"], Value::Null);
     assert_eq!(node["mining"]["rate"], 300_001_000.0);
     assert_eq!(node["mining"]["listening"], "0.0.0.0:4002");
@@ -1848,6 +1850,9 @@ fn a_node_shares_what_its_operator_chose_with_all_but_the_operator() {
     assert_eq!(minimal["mining"], Value::Null);
     assert_eq!(minimal["counters"], json!({}));
     assert_eq!(minimal["backlog"], Value::Null);
+    assert_eq!(minimal["limits"], json!({}), "nor what its operator tuned");
+    assert!(minimal["hidden"].as_array().unwrap().contains(&json!("limits")));
+    assert_eq!(afar["limits"]["http.rate"], 0, "the public preset shows them");
     assert_eq!((minimal["uptime_ms"].clone(), minimal["producing"].clone(), minimal["mempool"]["count"].clone()), (json!(60_000), json!(true), json!(2)));
 
     // A preset, tweaked; and full.
@@ -2751,7 +2756,7 @@ fn a_range_asked_for_wrongly_is_told_why_in_json_as_every_error_is() {
 #[tokio::test]
 async fn a_client_waits_its_turn_for_a_range_or_is_told_to_come_back() {
     let wait = std::time::Duration::from_millis(50);
-    let gate = RangeGate::new(1, wait);
+    let gate = RangeGate::new(1, wait, RANGE_PER_IP);
     let (one, other): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
     let turn = gate.enter(one).await.ok().expect("nobody else is building");
 
@@ -3349,4 +3354,162 @@ fn an_address_s_multisigs_are_listed_from_the_member_index_by_its_address_or_its
     for bad in ["/accounts/nope/multisigs".to_string(), format!("/accounts/{alice_at}/multisigs?cursor=zz"), format!("/accounts/{alice_at}/multisigs?limit=x")] {
         assert_eq!(get(address, &bad).0, 400, "{bad}");
     }
+}
+
+#[test]
+fn a_client_asking_faster_than_http_rate_waits_for_its_bucket_to_fill() {
+    let rate = super::Rate::new(3);
+    let (one, other): (std::net::IpAddr, std::net::IpAddr) = ("203.0.113.1".parse().unwrap(), "203.0.113.2".parse().unwrap());
+    let now = std::time::Instant::now();
+
+    // A second's worth at once, then nothing until the bucket fills a third of a second later.
+    assert!((0..3).all(|_| rate.take(one, now)));
+    assert!(!rate.take(one, now), "a fourth within the second");
+    assert!(rate.take(other, now), "another client has a bucket of its own");
+    assert!(!rate.take(one, now + std::time::Duration::from_millis(300)));
+    assert!(rate.take(one, now + std::time::Duration::from_millis(340)));
+
+    // Left alone for a second, it is full again, and never holds more than a second's worth.
+    let later = now + std::time::Duration::from_secs(10);
+    assert!((0..3).all(|_| rate.take(one, later)));
+    assert!(!rate.take(one, later));
+
+    // 0 counts nothing.
+    let unlimited = super::Rate::new(0);
+    assert!((0..1_000).all(|_| unlimited.take(one, now)));
+}
+
+#[test]
+fn a_node_started_with_http_rate_turns_a_fast_client_away_with_retry_after() {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let options = ApiOptions { limits: ApiLimits { rate: 2, ..ApiLimits::DEFAULT }, ..ApiOptions::default() };
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let from = |ip: &str| raw(address, "GET", "/status", &format!("X-Forwarded-For: {ip}\r\n"));
+
+    assert_eq!(from("203.0.113.5").0, 200);
+    assert_eq!(from("203.0.113.5").0, 200);
+    let (status, head, body) = from("203.0.113.5");
+    assert_eq!(status, 429, "the third within the second");
+    assert!(head.contains("retry-after: 1"), "{head}");
+    assert!(serde_json::from_slice::<Value>(&body).unwrap()["error"].as_str().unwrap().contains("2 requests a second"));
+    assert_eq!(from("203.0.113.6").0, 200, "another client is not held up");
+
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(from("203.0.113.5").0, 200, "and served again once its bucket fills");
+
+    // Without the flag, as before, nothing is counted.
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let open = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    assert!((0..20).all(|_| get(open, "/status").0 == 200));
+}
+
+/// Posts a body of about so many bytes to /txs and reads the status alone: the node may close the
+/// connection before it has all of a body it refuses.
+fn post_bytes(address: SocketAddr, bytes: usize) -> u16 {
+    let mut stream = TcpStream::connect(address).unwrap();
+    let body = format!("{{\"tx\": \"0x{}\"}}", "ab".repeat(bytes.saturating_sub(12) / 2));
+    let head = format!("POST /txs HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len());
+    let mut writer = stream.try_clone().unwrap();
+    let sending = std::thread::spawn(move || {
+        let _ = writer.write_all(head.as_bytes()).and_then(|_| writer.write_all(body.as_bytes()));
+    });
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response);
+    let _ = sending.join();
+    let text = String::from_utf8_lossy(&response);
+
+    text.split(' ').nth(1).and_then(|status| status.parse().ok()).expect("an answer")
+}
+
+#[test]
+fn a_body_is_held_to_room_for_the_chains_largest_transaction_and_never_less_than_max_body() {
+    assert_eq!(body_cap(None), MAX_BODY);
+    assert_eq!(body_cap(Some(100_000)), MAX_BODY, "a small max_tx_bytes never lowers it");
+    assert_eq!(body_cap(Some(4 * 1024 * 1024)), 8 * 1024 * 1024 + 64 * 1024, "room for one hex-encoded");
+
+    // Past 2 MiB a node refuses a body as it reads it, before it is a transaction at all.
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let address = start(db, Some(fake_node()), &free(), "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    assert_eq!(post_bytes(address, 3 * 1024 * 1024), 413);
+    assert_eq!(post_bytes(address, 1024 * 1024), 400, "within it, read, and refused as no transaction");
+
+    // A chain whose limits take transactions of 2 MiB takes a body twice that, hex-encoded.
+    let big = Genesis { max_tx_bytes: Some(2 * 1024 * 1024), ..free() };
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &big).unwrap();
+    let address = start(db, Some(fake_node()), &big, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    assert_eq!(post_bytes(address, 3 * 1024 * 1024), 400, "read whole: room for the chain's largest");
+    assert_eq!(post_bytes(address, 5 * 1024 * 1024), 413);
+}
+
+#[test]
+fn api_max_page_holds_every_listing_to_it_and_its_default_below_it() {
+    let query = |limit: Option<&str>| limit.map_or_else(HashMap::new, |limit| HashMap::from([("limit".to_string(), limit.to_string())]));
+    let own = ApiLimits::DEFAULT;
+    let capped = ApiLimits { max_page: Some(10), ..ApiLimits::DEFAULT };
+
+    assert_eq!(super::page(&own, &query(Some("50")), DEFAULT_PAGE, MAX_PAGE).ok().unwrap(), 50);
+    assert_eq!(super::page(&own, &query(Some("500")), DEFAULT_PAGE, MAX_PAGE).ok().unwrap(), MAX_PAGE);
+    assert_eq!(super::page(&own, &query(None), DEFAULT_PAGE, MAX_PAGE).ok().unwrap(), DEFAULT_PAGE);
+    assert_eq!(super::page(&capped, &query(Some("50")), DEFAULT_PAGE, MAX_PAGE).ok().unwrap(), 10);
+    assert_eq!(super::page(&capped, &query(None), DEFAULT_PAGE, MAX_PAGE).ok().unwrap(), 10, "the default too");
+    assert_eq!(super::page(&ApiLimits { max_page: Some(2_000), ..ApiLimits::DEFAULT }, &query(Some("1500")), DEFAULT_MEMPOOL, MAX_MEMPOOL).ok().unwrap(), 1_500, "raised past a listing's own");
+
+    // Over HTTP, a node with a cap of 10 pages its blocks in tens.
+    let fixture = serve();
+    let mut chain = fixture.chain;
+    for _ in 0..12 {
+        produce(&mut chain, Vec::new());
+    }
+    let options = ApiOptions { limits: capped, ..ApiOptions::default() };
+    let address = start(chain.db().clone(), None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let first = ok(address, "/blocks?limit=100");
+    assert_eq!(first["blocks"].as_array().unwrap().len(), 10);
+    assert_eq!(ok(fixture.address, "/blocks?limit=100")["blocks"].as_array().unwrap().len(), 15, "the uncapped node lists them all");
+}
+
+#[test]
+fn suggest_multiplier_is_what_eth_gas_price_and_an_open_offer_ask_over_the_base_price() {
+    let authority = DevAuthority::dev_keypair();
+    let genesis = Genesis::dev_authority(authority.public());
+    let db = Arc::new(MemoryDb::default());
+    let chain = Chain::open(db.clone(), &genesis).unwrap();
+    let base = chain.next_base_price();
+    let probe = SignedTx::sign(
+        Tx::Transfer { from: authority.public().address(), to: Keypair::generate(authority.public().key_type()).unwrap().public().address(), amount: Amount::U128(1) },
+        0,
+        FeeOffer::NONE,
+        &authority,
+        &chain.genesis(),
+    );
+    let asked = |times: u64| {
+        let options = ApiOptions { limits: ApiLimits { suggest: times, ..ApiLimits::DEFAULT }, ..ApiOptions::default() };
+        let address = start(db.clone(), None, &genesis, "127.0.0.1:0".parse().unwrap(), options).unwrap();
+        let (_, _, price) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_gasPrice", "params": [] }).to_string());
+        let price = u256::from_str_radix(price["result"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+        let (_, _, offer) = request(address, "POST", "/offer", &json!({ "tx": to_hex(&wincode::serialize(&probe).unwrap()) }).to_string());
+
+        (price, u256::from_str_radix(offer["max_price"].as_str().unwrap(), 10).unwrap())
+    };
+
+    assert!(base > u256::ZERO);
+    assert_eq!(asked(2), (base * u256::from(2u64), base * u256::from(2u64)), "twice, as before");
+    assert_eq!(asked(3), (base * u256::from(3u64), base * u256::from(3u64)));
+    assert_eq!(asked(1), (base, base));
+}
+
+#[test]
+fn rpc_limits_hold_a_batch_to_the_operators_size() {
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &free()).unwrap();
+    let options = ApiOptions { limits: ApiLimits { rpc: RpcLimits { batch: 1, ..RpcLimits::DEFAULT }, ..ApiLimits::DEFAULT }, ..ApiOptions::default() };
+    let address = start(db, None, &free(), "127.0.0.1:0".parse().unwrap(), options).unwrap();
+    let (_, _, two) = request(address, "POST", "/rpc", r#"[{"jsonrpc":"2.0","id":1,"method":"eth_chainId"},{"jsonrpc":"2.0","id":2,"method":"eth_syncing"}]"#);
+    let (_, _, one) = request(address, "POST", "/rpc", r#"[{"jsonrpc":"2.0","id":1,"method":"eth_chainId"}]"#);
+
+    assert!(two["error"]["message"].as_str().unwrap().contains("at most 1 requests"), "{two}");
+    assert!(one[0]["result"].is_string(), "{one}");
 }

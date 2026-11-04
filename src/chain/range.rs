@@ -29,7 +29,7 @@ use {
     category = "Chain",
     see_also = "stored_block_range, BlockRange",
 )]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RangeLimits {
     #[document(summary = "The most blocks.")]
     pub blocks: u64,

@@ -239,10 +239,26 @@ impl Fees {
         see_also = "OfferChoice",
     )]
     pub fn offer(&self, base: u256, tx_fuel: u64, probe: &SignedTx, chosen: OfferChoice) -> FeeOffer {
+        self.offer_times(base, tx_fuel, probe, chosen, 2)
+    }
+
+    #[document(
+        parent = "Fees",
+        summary = "A fee offer as offer makes one, a max price left open under a base fee being this many times the base price plus the tip rather than twice: what a node's --suggest-multiplier suggests. When senders bid it is the base price plus the tip whatever the multiple. A suggestion only: what a block takes is the chain's rule, never this.",
+        params = {
+            base = "The base price the next block will have.",
+            tx_fuel = "The chain's fuel cap per transaction.",
+            probe = "The transaction, signed by its sender with any offer.",
+            chosen = "What the sender set itself.",
+            times = "How many times the base price a max price left open is, at least 1.",
+        },
+        see_also = "Fees::offer",
+    )]
+    pub fn offer_times(&self, base: u256, tx_fuel: u64, probe: &SignedTx, chosen: OfferChoice, times: u64) -> FeeOffer {
         let tip = chosen.tip.unwrap_or_default();
         let max_price = match (chosen.max_price, &self.config.pricing) {
             (Some(max_price), _) => max_price,
-            (None, PricingConfig::BaseFee(_)) => base * u256::from(2u64) + tip,
+            (None, PricingConfig::BaseFee(_)) => base.saturating_mul(u256::from(times.max(1))).saturating_add(tip),
             (None, PricingConfig::Bid(_)) => base + tip,
         };
         let gas_limit = chosen.gas_limit.unwrap_or_else(|| {

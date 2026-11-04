@@ -22,7 +22,8 @@ Start a node with `--http ADDR`, such as `127.0.0.1:8080`, to serve the API (`sr
 | 400 | A malformed request, or a transaction the mempool refuses for what it is: invalid, an offer that cannot pay, or a nonce too far past the account's. |
 | 404 | Nothing there, such as a transaction not on the main chain yet. |
 | 409 | A nonce already used, the same transaction already waiting, or one at its sender's nonce that does not raise both prices enough to replace the one waiting. |
-| 429 | A faucet asked again too soon, a client with too many requests in flight already, or a sender with as many transactions waiting as the node keeps of one. |
+| 413 | A body past room for the chain's largest transaction, hex-encoded: 2 MiB, or more on a chain whose `max_tx_bytes` takes more (`body_cap`). |
+| 429 | A faucet asked again too soon, a client with too many requests in flight already or asking faster than `--http-rate`, with `Retry-After: 1`, or a sender with as many transactions waiting as the node keeps of one. |
 | 500 | The database failed. |
 | 503 | No node behind the API, a full mempool that this offer could not make room in, or a node that stopped. |
 
@@ -649,7 +650,8 @@ How the node behind the API is doing. 503 when no node runs behind it.
 | `mempool` | `count` waiting and the `capacity`. |
 | `syncing` | `null`, or the `peer` it fetches blocks from and the height `from`. |
 | `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections; gossip and submissions the backlog dropped (`gossip_dropped`), peers disconnected for flooding (`flooders_disconnected`), and what it published that reached none of its connected peers (`gossip_unpublished`). |
-| `backlog` | What waits for the node loop now (`waiting`), and the backlog's limits, `total` and `per_peer` (see [Node](node.md#the-gossip-backlog)). |
+| `backlog` | What waits for the node loop now (`waiting`), and the backlog's limits, `total` and `per_peer`, and its strike rules, `strikes` within `strike_window_ms` (see [Node](node.md#the-gossip-backlog)). |
+| `limits` | What its operator tuned: every key of [Node's limits and tuning](node.md#limits-and-tuning), such as `ban.score`, `sync.headers` or `http.rate`, with its value, times in milliseconds and sizes in bytes, `null` for one unset such as `net.max-peers-in` without the flag. `{}` under `--report minimal` or `--hide limits`. |
 | `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), how much of it the backlog `dropped`, and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
 | `mining` | `null` for a node that does not mine. Otherwise the hashes a second of everything mining for it (`rate`); its own `devices`, each a `name` and `rate`, its GPUs or CPU threads; where it takes workers (`listening`), or `null`; its `workers`, each with its `name`, `address`, `since`, `rate`, `devices`, the seals it `found` and the nonces `refused`, and under a pool its `payout` address, the `shares` taken and its `share_difficulty` (see [Mining with workers](consensus.md#mining-with-workers)); and `pool`, `null` or the pool's `fee`, `window`, whether it is `open`, and how many `miners` and `blocks` it counts. Rates are measured over the last few seconds. |
 
@@ -913,10 +915,27 @@ the explorer.
   Docker's nginx; any other address is trusted only when `--trusted-proxy` named it, so a second
   container or box on a shared private network cannot spoof a client's address past the limit. `GET
   /stream` is not counted.
-- **A JSON-RPC batch at `POST /rpc` holds at most 100 requests.** Each is answered in order on the
-  one thread, and one may run a contract under the whole fuel cap, so a larger batch is refused with
-  code -32600 rather than letting one body line up far more work than the rate limit allows.
-- **Mining WebSocket relays are capped per client,** 16 open at once from one address. Each opens a
+- **A client may be held to so many requests a second** with `--http-rate`, none by default: a
+  bucket per client holds a second's worth, so a page asking for several things at once goes
+  through, and past it the answer is 429 with `Retry-After: 1`. Behind Docker's nginx, which limits
+  each address itself, it is a second line for a node reached around nginx.
+- **Every listing's page** is at most its own maximum, as each route says, unless `--api-max-page`
+  sets one for them all, 10 to 10,000; its default is never above it. The apps follow `next` or
+  `before` past a short page.
+- **Bodies** are at most `body_cap`: 2 MiB, room for the largest deploy hex-encoded, or room for
+  the chain's `max_tx_bytes` hex-encoded when that is more, as governance's limits stand when the
+  request comes; past it, 413.
+- **A JSON-RPC batch at `POST /rpc` holds at most 100 requests** (`--tune rpc.batch`). Each is
+  answered in order on the one thread, and one may run a contract under the whole fuel cap, so a
+  larger batch is refused with code -32600 rather than letting one body line up far more work than
+  the rate limit allows. `eth_getLogs` scans at most 10,000 blocks (`rpc.log-blocks`), with at most
+  1,000 addresses and 1,000 topics at a place (`rpc.log-addresses`, `rpc.log-topics`), and
+  `eth_feeHistory` gives at most 1,024 blocks (`rpc.fee-history`), as geth's `--rpc.*` flags bound
+  theirs.
+- **`eth_gasPrice` is twice the next base price,** and an open offer's max price twice it plus the
+  tip, unless `--suggest-multiplier` says how many times.
+- **Mining WebSocket relays are capped per client,** 32 open at once from one address
+  (`--tune http.relays-per-ip`). Each opens a
   connection into the mining port, which sees them all as loopback, so they are counted here by who
   asked; past the cap, 503.
 - **`/node`, `/mempool` and `/stream` ask the node.** The rest read the database; these go to

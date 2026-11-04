@@ -99,6 +99,8 @@ pub struct Light {
     followed: f64,
     /// Whether the node's stream is open, to say when there is more to follow.
     pub streamed: bool,
+    /// How often it follows again, by Low data: the app sets it from the setting.
+    pub pace: chainv4_ui::pace::Pace,
     heard: f64,
     retry_at: f64,
     /// Balances proven, by address, newest block last; or why a proof did not check.
@@ -219,7 +221,7 @@ impl Light {
 
     /// Whether to ask the node for more of the chain now.
     fn follow_due(&self, time: f64) -> bool {
-        time - self.followed >= if self.streamed { FOLLOW_STREAMED } else { FOLLOW_EVERY }
+        time - self.followed >= self.pace.every(if self.streamed { FOLLOW_STREAMED } else { FOLLOW_EVERY })
     }
 
     /// Whether it caught up at least once since it started: for saying it follows, as it asks after
@@ -826,6 +828,17 @@ mod tests {
         light.followed = 101.0;
         light.hear(&News::Closed { why: "gone".to_string(), unsupported: false }, 102.0);
         assert!(light.follow_due(101.0 + FOLLOW_EVERY), "lost, it goes back to asking");
+    }
+
+    #[test]
+    fn with_low_data_on_it_follows_a_quarter_as_often_and_still_at_once_when_the_stream_says() {
+        let mut light = Light { followed: 100.0, pace: chainv4_ui::pace::Pace::new(true), ..Light::default() };
+
+        assert!(!light.follow_due(100.0 + FOLLOW_EVERY), "not at the usual turn");
+        assert!(light.follow_due(100.0 + 4.0 * FOLLOW_EVERY), "four times later");
+
+        light.hear(&News::Event { name: "block".to_string(), data: Value::Null }, 101.0);
+        assert!(light.follow_due(101.0), "what the stream tells is not held back");
     }
 
     #[test]

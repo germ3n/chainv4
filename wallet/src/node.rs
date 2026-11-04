@@ -126,16 +126,16 @@ pub enum Ask {
     /// A page of the token registry, the first or the one after a cursor, to know which tokens to
     /// prove: each page's cursor is followed to the end.
     Tokens(Option<String>),
-    /// The transactions touching an address, newest first, from the node's address index: where
-    /// the history looks.
-    History(String),
+    /// The transactions touching an address, newest first, from the node's address index, the newest
+    /// page or the older one after a cursor: where the history looks.
+    History { address: String, cursor: Option<String> },
     /// The transactions touching an address that pass a filter, as the filter's query says, from
     /// the newest or from where a cursor says: where the history looks once filters are on. An
     /// older node ignores the filter, and lists everything.
     Filtered { address: String, query: String, cursor: Option<String> },
-    /// Events that mention an address, newest first: where it looks on a node with no address
-    /// index but an event index.
-    Events(String),
+    /// Events that mention an address, newest first, the newest page or the older one after a
+    /// cursor: where it looks on a node with no address index but an event index, and beside one.
+    Events { address: String, cursor: Option<String> },
     /// The chain's names: their suffix, prices and grace period, as the node says. Nothing proven
     /// rests on them but whether a name is in its grace period.
     Names,
@@ -222,13 +222,13 @@ impl Ask {
             Ask::Receipt(id) | Ask::SentReceipt(id) => format!("/proofs/receipts/{id}"),
             Ask::Tokens(cursor) => format!("/tokens?limit=500{}", after(cursor)),
             Ask::Collections(cursor) => format!("/collections?limit=500{}", after(cursor)),
-            Ask::History(address) => format!("/accounts/{address}/txs?limit=50"),
+            Ask::History { address, cursor } => format!("/accounts/{address}/txs?limit=50{}", after(cursor)),
             Ask::Filtered { address, query, cursor } => {
                 let cursor = cursor.as_ref().map_or_else(String::new, |cursor| format!("&cursor={cursor}"));
 
                 format!("/accounts/{address}/txs?limit=50&{query}{cursor}")
             }
-            Ask::Events(address) => format!("/events?address={address}&limit=50"),
+            Ask::Events { address, cursor } => format!("/events?address={address}&limit=50{}", after(cursor)),
             Ask::Named { contract, name } => format!("/events?contract={contract}&name={name}&limit=200"),
             Ask::Names => "/names".to_string(),
             Ask::OwnedNames { address, cursor } => format!("/accounts/{address}/names?limit=200{}", after(cursor)),
@@ -291,9 +291,9 @@ impl Ask {
             | Ask::Proof { .. }
             | Ask::Receipt(_)
             | Ask::Tokens(_)
-            | Ask::History(_)
+            | Ask::History { .. }
             | Ask::Filtered { .. }
-            | Ask::Events(_)
+            | Ask::Events { .. }
             | Ask::Names
             | Ask::OwnedNames { .. }
             | Ask::Contract(_)
@@ -869,9 +869,9 @@ mod tests {
             Ask::Receipt(text()),
             Ask::SentReceipt(text()),
             Ask::Tokens(None),
-            Ask::History(text()),
+            Ask::History { address: text(), cursor: None },
             Ask::Filtered { address: text(), query: text(), cursor: None },
-            Ask::Events(text()),
+            Ask::Events { address: text(), cursor: None },
             Ask::Names,
             Ask::OwnedNames { address: text(), cursor: None },
             Ask::Contract(text()),

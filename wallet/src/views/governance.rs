@@ -289,7 +289,7 @@ impl GovernanceState {
             *self = GovernanceState { node: ctx.settings.node.clone(), kind: std::mem::take(&mut self.kind), ..GovernanceState::default() };
         }
 
-        let due = self.asked.is_none_or(|at| ctx.now.saturating_sub(at) > REFRESH);
+        let due = self.asked.is_none_or(|at| ctx.now.saturating_sub(at) > ctx.settings.pace().every_ms(REFRESH));
         let governed = !matches!(&self.listing, Some(Err(failure)) if failure.status == NOT_FOUND);
 
         if due {

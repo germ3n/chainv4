@@ -23,16 +23,15 @@ use {
     std::collections::HashSet,
 };
 
-/// How far below the best tip the pivot sits, so the block whose state it takes is unlikely to
-/// come off in a reorg, yet recent enough for peers to serve: they read state as far back as their
-/// history keeps it, --state-history blocks, and at most half max_reorg_depth, which every node
-/// keeps undo records for.
-pub(super) const PIVOT_DEPTH: u64 = 16;
+#[document(
+    summary = "How far below the best tip a snapshot sync takes its pivot unless --snapshot-depth says otherwise: 16 blocks, so the block whose state it takes is unlikely to come off in a reorg, yet recent enough for peers to serve. The syncing node picks it alone: a peer serves the state of any main-chain block its --state-history still holds, so peers need not agree on it. It is held to half max_reorg_depth, and a chain shorter than twice it is synced by running its blocks.",
+    category = "Node",
+    see_also = "NodeTuning::snapshot_depth",
+)]
+pub const PIVOT_DEPTH: u64 = 16;
 /// How many times the pivot may move up before the node gives up on the snapshot and syncs by
 /// running blocks: peers that cannot serve any pivot would have it move forever.
 const MAX_MOVES: u32 = 8;
-/// A chain shorter than this is synced by running its blocks: a snapshot would save nothing.
-pub(super) const MIN_SNAPSHOT_HEIGHT: u64 = 2 * PIVOT_DEPTH;
 
 /// Where taking a snapshot stands.
 pub(super) struct SnapshotSync {
@@ -151,7 +150,7 @@ impl SnapshotSync {
 impl Node {
     #[document(
         parent = "Node",
-        summary = "Syncs from a snapshot rather than running every block: checks every header its peers have, as a light client of its own chain fed over the peer protocol, takes the state of a block PIVOT_DEPTH below the best tip a part at a time, and makes that block its tip. Only for a node that holds genesis alone; on a chain shorter than MIN_SNAPSHOT_HEIGHT it syncs as usual. Under a rotating authority or production by stake it learns each epoch's producers from the finality peers serve, as a light client does, and takes the pivot among the headers it could check. Given a checkpoint it trusts, it fetches no header below it: it takes the checkpoint's headers from a peer, trusted by their hashes alone, holds the checkpoint as finalized, and checks on from there, so a long-range fork below the checkpoint cannot reach it; it then never falls back to running from genesis.",
+        summary = "Syncs from a snapshot rather than running every block: checks every header its peers have, as a light client of its own chain fed over the peer protocol, takes the state of a block NodeTuning::snapshot_depth below the best tip, PIVOT_DEPTH by default, a part at a time, and makes that block its tip. Only for a node that holds genesis alone; on a chain shorter than twice that depth it syncs as usual, as a snapshot would save nothing. Under a rotating authority or production by stake it learns each epoch's producers from the finality peers serve, as a light client does, and takes the pivot among the headers it could check. Given a checkpoint it trusts, it fetches no header below it: it takes the checkpoint's headers from a peer, trusted by their hashes alone, holds the checkpoint as finalized, and checks on from there, so a long-range fork below the checkpoint cannot reach it; it then never falls back to running from genesis.",
         params = { checkpoint = "A finalized checkpoint's block id, from someone the operator trusts, or None to check every header from genesis." },
         returns = "Whether it will: false for a node past genesis.",
     )]
@@ -377,14 +376,15 @@ impl Node {
         }
     }
 
-    /// Picks the pivot once every header is checked: PIVOT_DEPTH below the newest, never below
-    /// the checkpoint, and starts taking its state. A chain too short for a snapshot is run instead.
+    /// Picks the pivot once every header is checked: the snapshot depth below the newest, never
+    /// below the checkpoint, and starts taking its state. A chain shorter than twice the depth is
+    /// run instead, as a snapshot would save nothing.
     fn pick_pivot(&mut self) -> Result<(), NodeError> {
-        let depth = PIVOT_DEPTH.min(self.chain.max_reorg_depth() / 2);
+        let depth = self.tuning.snapshot_depth.min(self.chain.max_reorg_depth() / 2);
         let snapshot = self.sync.snapshot.as_mut().expect("taking one");
         let height = snapshot.checked();
 
-        if height < MIN_SNAPSHOT_HEIGHT && !snapshot.starts_at_checkpoint() {
+        if height < 2 * self.tuning.snapshot_depth && !snapshot.starts_at_checkpoint() {
             log::info!("[node] the chain is only {height} blocks long: syncing by running them instead");
             self.sync.snapshot = None;
 

@@ -431,3 +431,18 @@ fn a_full_cache_lets_go_of_the_module_used_longest_ago() {
     assert!(cache.entries.contains_key(&c[..]));
     assert!(cache.bytes <= a.len() + b.len());
 }
+
+#[test]
+fn a_cache_sized_on_the_node_holds_no_more_modules_than_it_was_given() {
+    let [a, b, c] = ["a", "b", "c"].map(|name| module(&format!(r#"(func (export "{name}"))"#)));
+    let engine = WasmEngine::with_cache_of(MODULE_CACHE_BYTES, 2);
+
+    for code in [&a, &b, &c] {
+        engine.load(code, LIMITS).result.unwrap();
+    }
+
+    // Room for all three by bytes, but only two by count: the one used longest ago goes.
+    assert_eq!(engine.cache().entries.len(), 2);
+    assert!(!engine.cache().entries.contains_key(&a[..]));
+    assert_eq!(engine.run(&a, "a", &[], host(state()), LIMITS).result, WasmEngine::new().run(&a, "a", &[], host(state()), LIMITS).result, "and a call runs the same whatever it holds");
+}

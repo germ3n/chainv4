@@ -328,3 +328,20 @@ fn a_request_through_a_proxy_is_given_longer_as_tor_takes_a_while_to_build_a_cir
     assert_eq!(Client::direct().whole, limit(false));
     assert_eq!(Client::for_setting(Proxy::ORBOT).unwrap().whole, limit(true));
 }
+
+#[test]
+fn wait_for_answers_gives_every_request_so_many_times_as_long_and_usual_is_as_before() {
+    assert_eq!((waits(false, 1), waits(true, 1)), ((30, 12), (90, 60)), "the usual, as before");
+    assert_eq!((waits(false, 4), waits(true, 4)), ((120, 48), (360, 240)));
+    assert_eq!(waits(true, 0), waits(true, 1), "none counts as the usual");
+    assert_eq!(waits(true, 1_000), waits(true, MOST_PATIENCE), "and too many as the most");
+
+    for (setting, proxied) in [("", false), (Proxy::ORBOT, true)] {
+        let usual = Client::for_setting(setting).unwrap();
+        let patient = Client::for_settings(setting, 10).unwrap();
+
+        assert_eq!((usual.whole(), usual.connect), waits(proxied, 1));
+        assert_eq!((patient.whole(), patient.connect), waits(proxied, 10));
+        assert_eq!(patient.proxy(), usual.proxy(), "the same way to the node");
+    }
+}

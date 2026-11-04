@@ -6,7 +6,7 @@
 //! counts the votes it hears. Catching up with peers lives in sync.rs.
 
 use {
-    crate::chain::{BlockError, Chain, ChainError, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
+    crate::chain::{BlockError, Chain, ChainError, ChainOptions, FinalityError, FinalityUpdate, Genesis, ImportError, Imported, IndexKind, KeepFrom},
     crate::consensus::{ConsensusConfig, Producer},
     crate::crypto::keypair::Keypair,
     crate::db::{Database, DbError},
@@ -41,12 +41,15 @@ mod report;
 mod snapshot;
 mod stream;
 mod sync;
+pub mod tuning;
 #[cfg(feature = "updates")]
 mod updates;
 mod verifier;
 
 pub use crate::mining::pool::MiningPort;
 pub use peers::{MAX_REMEMBERED, remembered};
+pub use snapshot::PIVOT_DEPTH;
+pub use tuning::{Span, Tuning};
 pub use report::{Counters, Heard, NodeReport, PeerReport};
 pub use stream::NodeEvent;
 #[cfg(feature = "pool")]
@@ -54,11 +57,18 @@ pub use push::PoolPush;
 #[cfg(feature = "updates")]
 pub use updates::{CHECK_EVERY_MS, KnownRelease, Releases, UpdateConfig, check, download, fetch_release, spawn_updates};
 
-/// The most events handled per pass, so a flood cannot starve block production.
-const EVENT_BUDGET: usize = 256;
-/// The most transactions a block carries on a chain that bounds blocks by neither bytes nor gas,
-/// so its producer never tries to run the whole mempool at once.
-const UNBOUNDED_CHAIN_TXS: usize = 1_000;
+#[document(
+    summary = "The most events the node loop handles in one pass, so a flood cannot starve block production, unless --tune node.event-budget says otherwise.",
+    category = "Node",
+    see_also = "NodeTuning::event_budget",
+)]
+pub const EVENT_BUDGET: usize = 256;
+#[document(
+    summary = "The most transactions a block this node produces carries on a chain that bounds blocks by neither bytes nor gas, so its producer never tries to run the whole mempool at once: what --max-block-txs is when not given on such a chain. On a chain bounded by bytes or gas, an unset --max-block-txs caps nothing.",
+    category = "Node",
+    see_also = "Node::max_block_txs",
+)]
+pub const UNBOUNDED_CHAIN_TXS: usize = 1_000;
 /// The longest the loop sleeps with nothing scheduled, so it still notices a dead network.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How often the node logs where it stands, in milliseconds.
@@ -67,12 +77,66 @@ const REPORT_EVERY: u64 = 30_000;
 const STATUS_EVERY: u64 = 60_000;
 /// How often a node an upgrade will stop says so, in milliseconds.
 const UPGRADE_WARN_EVERY: u64 = 600_000;
-/// How long a miner works on one template before it is rebuilt with newer transactions and a
-/// newer timestamp, in milliseconds.
-const TEMPLATE_REFRESH: u64 = 2_000;
-/// The most workers' payouts mining alone a node builds templates for: each is a block built every
-/// TEMPLATE_REFRESH.
+#[document(
+    summary = "How long a miner works on one template before it is rebuilt with newer transactions and a newer timestamp, in milliseconds, unless --tune mining.template says otherwise.",
+    category = "Node",
+    see_also = "NodeTuning::template_ms",
+)]
+pub const TEMPLATE_REFRESH: u64 = 2_000;
+#[document(
+    summary = "The most workers' payouts mining alone a node builds templates for, unless --tune mining.solo says otherwise: each is a block built every template refresh.",
+    category = "Node",
+    see_also = "NodeTuning::most_solo, PortLimits::solo",
+)]
 pub const MOST_SOLO: usize = 16;
+
+#[document(
+    summary = "What an operator may tune of the node loop: what it serves syncing peers at most, how many events it handles a pass, how often a miner's template is rebuilt, how many payouts may mine alone, how many peers it remembers, and how far below the tip a snapshot is taken. None of it is consensus. Set with --snapshot-depth and --tune's sync., node., mining. and peers. keys.",
+    category = "Node",
+    see_also = "Node::tuning",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeTuning {
+    #[document(summary = "The most blocks it answers one SyncRequest::Blocks with: MAX_SYNC_BLOCKS at most, which is what peers ask for.")]
+    pub sync_blocks: u32,
+    #[document(summary = "The most justifications it answers one SyncRequest::Justifications with: MAX_SYNC_JUSTIFICATIONS at most.")]
+    pub sync_justifications: u32,
+    #[document(summary = "The most headers it answers one SyncRequest::Headers with: MAX_SYNC_HEADERS at most.")]
+    pub sync_headers: u32,
+    #[document(summary = "The most state entries it answers one SyncRequest::State with before it sends a position's two halves instead: MAX_SYNC_ENTRIES at most, which keeps the largest answer within a response.")]
+    pub sync_entries: usize,
+    #[document(summary = "The most events the loop handles in one pass: EVENT_BUDGET by default.")]
+    pub event_budget: usize,
+    #[document(summary = "How long a miner works on one template before it is rebuilt, in milliseconds: TEMPLATE_REFRESH by default.")]
+    pub template_ms: u64,
+    #[document(summary = "The most payouts mining alone it builds templates for: MOST_SOLO by default. The mining port refuses one more by its own PortLimits::solo, which main sets the same.")]
+    pub most_solo: usize,
+    #[document(summary = "How many peers it remembers between starts: MAX_REMEMBERED by default.")]
+    pub remembered: usize,
+    #[document(summary = "How far below the best tip a snapshot sync takes its pivot's state: PIVOT_DEPTH by default, and never past half max_reorg_depth. A chain shorter than twice this is synced by running its blocks.")]
+    pub snapshot_depth: u64,
+}
+
+impl NodeTuning {
+    #[document(parent = "NodeTuning", summary = "What every node did before these were tuned.")]
+    pub const DEFAULT: NodeTuning = NodeTuning {
+        sync_blocks: MAX_SYNC_BLOCKS,
+        sync_justifications: MAX_SYNC_JUSTIFICATIONS,
+        sync_headers: MAX_SYNC_HEADERS,
+        sync_entries: MAX_SYNC_ENTRIES,
+        event_budget: EVENT_BUDGET,
+        template_ms: TEMPLATE_REFRESH,
+        most_solo: MOST_SOLO,
+        remembered: MAX_REMEMBERED,
+        snapshot_depth: PIVOT_DEPTH,
+    };
+}
+
+impl Default for NodeTuning {
+    fn default() -> NodeTuning {
+        NodeTuning::DEFAULT
+    }
+}
 /// How long a miner just started, with peers connected, waits to hear how far their chains got
 /// before it mines: long enough for their status, short enough not to matter on a chain of its own.
 const LISTEN_FIRST_MS: u64 = 10_000;
@@ -135,6 +199,8 @@ pub struct Node {
     max_build_ms: Option<u64>,
     /// The most bytes of blocks it answers one SyncRequest::Blocks with, past its first block.
     sync_batch_bytes: u64,
+    /// What it serves syncing peers at most, and the rest an operator tuned.
+    tuning: NodeTuning,
     /// The releases it fetches, which may announce an upgrade of its chain.
     #[cfg(feature = "updates")]
     releases: Option<Arc<Releases>>,
@@ -500,7 +566,22 @@ impl Node {
         producer: Option<Box<dyn Producer>>,
         net: NetLink,
     ) -> Result<Node, NodeError> {
-        let chain = Chain::open(db.clone(), genesis).map_err(NodeError::Chain)?;
+        Node::new_with(db, genesis, producer, net, ChainOptions::DEFAULT)
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Opens the chain as new does, with what this node's operator sized of it: the engines' pools, and how many bad blocks, waiting votes and pieces of evidence it remembers.",
+        see_also = "ChainOptions, Chain::open_with",
+    )]
+    pub fn new_with(
+        db: Arc<dyn Database>,
+        genesis: &Genesis,
+        producer: Option<Box<dyn Producer>>,
+        net: NetLink,
+        options: ChainOptions,
+    ) -> Result<Node, NodeError> {
+        let chain = Chain::open_with(db.clone(), genesis, options).map_err(NodeError::Chain)?;
         let NetLink {
             commands,
             events,
@@ -550,6 +631,7 @@ impl Node {
             max_block_txs: None,
             max_build_ms: None,
             sync_batch_bytes: SYNC_BATCH_BYTES,
+            tuning: NodeTuning::DEFAULT,
             #[cfg(feature = "updates")]
             releases: None,
             decided_upgrade: None,
@@ -609,7 +691,7 @@ impl Node {
 
     #[document(
         parent = "Node",
-        summary = "Caps the transactions in each block this node produces. Without a cap, blocks fill to the chain's max_block_bytes and gas limit; a chain that bounds neither takes 1,000 a block.",
+        summary = "Caps the transactions in each block this node produces. Without a cap, blocks fill to the chain's max_block_bytes and gas limit; a chain that bounds neither takes UNBOUNDED_CHAIN_TXS, 1,000, a block.",
         params = { most = "The most, or None for no cap of this node's own." },
     )]
     pub fn max_block_txs(mut self, most: Option<usize>) -> Node {
@@ -646,6 +728,31 @@ impl Node {
     pub fn sync_batch_bytes(mut self, bytes: u64) -> Node {
         self.sync_batch_bytes = bytes;
         self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Sets what an operator tuned of the loop: what it serves syncing peers at most, events a pass, the template refresh, payouts mining alone, peers remembered and the snapshot's depth. NodeTuning::DEFAULT unless set. Each sync cap is held to its protocol maximum, and the snapshot's depth to half max_reorg_depth.",
+        see_also = "NodeTuning",
+    )]
+    pub fn tuning(mut self, tuning: NodeTuning) -> Node {
+        self.tuning = NodeTuning {
+            sync_blocks: tuning.sync_blocks.clamp(1, MAX_SYNC_BLOCKS),
+            sync_justifications: tuning.sync_justifications.clamp(1, MAX_SYNC_JUSTIFICATIONS),
+            sync_headers: tuning.sync_headers.clamp(1, MAX_SYNC_HEADERS),
+            sync_entries: tuning.sync_entries.clamp(1, MAX_SYNC_ENTRIES),
+            event_budget: tuning.event_budget.max(1),
+            template_ms: tuning.template_ms.max(1),
+            most_solo: tuning.most_solo.max(1),
+            remembered: tuning.remembered.max(1),
+            snapshot_depth: tuning.snapshot_depth.max(1),
+        };
+        self
+    }
+
+    #[document(parent = "Node", summary = "What an operator tuned of the loop, as it stands.")]
+    pub fn tuned(&self) -> NodeTuning {
+        self.tuning
     }
 
     /// Whether a miner holds off for now: while a peer says its chain holds more work, so it
@@ -830,7 +937,7 @@ impl Node {
         self.check_upgrade(now)?;
         self.gate.set_syncing(self.snapshotting());
 
-        for _ in 0..EVENT_BUDGET {
+        for _ in 0..self.tuning.event_budget {
             let Some(arrival) = self.held.take().or_else(|| self.arrivals.try_next()) else {
                 break;
             };
@@ -1026,7 +1133,7 @@ impl Node {
                     }
                 }
             }
-            NetEvent::Addresses { peer, addresses } => peers::remember(self.chain.db().as_ref(), &peer, &addresses, now_ms()).map_err(NodeError::Db)?,
+            NetEvent::Addresses { peer, addresses } => peers::remember(self.chain.db().as_ref(), &peer, &addresses, now_ms(), self.tuning.remembered).map_err(NodeError::Db)?,
             NetEvent::Banned(peer) => {
                 self.counters.peers_banned += 1;
                 peers::forget(self.chain.db().as_ref(), &peer).map_err(NodeError::Db)?;
@@ -1117,7 +1224,7 @@ impl Node {
             SyncRequest::Blocks { from, count } => {
                 let (mut blocks, mut bytes) = (Vec::new(), 0u64);
 
-                for height in from..from.saturating_add(u64::from(count.min(MAX_SYNC_BLOCKS))) {
+                for height in from..from.saturating_add(u64::from(count.min(self.tuning.sync_blocks))) {
                     let Some(block) = self.chain.block_at(height)? else {
                         break;
                     };
@@ -1138,13 +1245,13 @@ impl Node {
             }
             SyncRequest::Justifications { from, count } => SyncResponse::Justifications(
                 self.chain
-                    .justifications_from(from, count.min(MAX_SYNC_JUSTIFICATIONS) as usize)?,
+                    .justifications_from(from, count.min(self.tuning.sync_justifications) as usize)?,
             ),
-            SyncRequest::Headers { from, count } => SyncResponse::Headers(self.chain.headers_from(from, count.min(MAX_SYNC_HEADERS))?),
+            SyncRequest::Headers { from, count } => SyncResponse::Headers(self.chain.headers_from(from, count.min(self.tuning.sync_headers))?),
             SyncRequest::State { block, depth, prefix } => SyncResponse::State(match self.snapshotting() {
                 // Its own state is half a pivot's while it takes one.
                 true => None,
-                false => self.chain.state_part(&block, depth, &prefix, MAX_SYNC_ENTRIES)?,
+                false => self.chain.state_part(&block, depth, &prefix, self.tuning.sync_entries)?,
             }),
             SyncRequest::Checkpoint { block } => SyncResponse::Checkpoint(
                 self.chain
@@ -1298,7 +1405,7 @@ impl Node {
     }
 
     /// Builds a block for the producer once it may produce, and starts sealing it. A miner keeps
-    /// one template at a time, rebuilt when the tip moves or TEMPLATE_REFRESH passes.
+    /// one template at a time, rebuilt when the tip moves or the template refresh passes.
     fn produce_if_due(&mut self, now: u64) -> Result<(), NodeError> {
         self.ensure_producer()?;
 
@@ -1314,14 +1421,14 @@ impl Node {
             return Ok(());
         };
         let tip = self.chain.tip().clone();
-        // The solo workers' payouts, at most MOST_SOLO: a template for each is built every time.
+        // The solo workers' payouts, at most most_solo: a template for each is built every time.
         let mut solo = producer.solo();
         solo.dedup();
-        solo.truncate(MOST_SOLO);
+        solo.truncate(self.tuning.most_solo);
 
         if let Some(template) = &self.template
             && template.header.parent == tip.id()
-            && now < template.header.timestamp + TEMPLATE_REFRESH
+            && now < template.header.timestamp + self.tuning.template_ms
             && self.solo.iter().map(|block| block.header.producer).eq(solo.iter().copied())
         {
             return Ok(());
@@ -1523,7 +1630,7 @@ impl Node {
 
         self.ensure_producer()?;
         let wake = match (&self.producer, &self.template) {
-            (Some(_), Some(template)) => Some(template.header.timestamp + TEMPLATE_REFRESH),
+            (Some(_), Some(template)) => Some(template.header.timestamp + self.tuning.template_ms),
             (Some(producer), None) => Some(producer.start_at(self.chain.tip(), &self.chain.producers_for(self.chain.tip().height + 1)?)),
             (None, _) => None,
         };

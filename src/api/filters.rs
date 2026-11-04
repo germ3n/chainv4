@@ -14,8 +14,9 @@ use {
     std::collections::HashMap,
 };
 
-/// The most index entries one request looks at, matches or not: a query that matches rarely comes
-/// back with fewer than its limit and a cursor, rather than tying up the node.
+/// The most index entries one request looks at, matches or not, unless --tune filter.scan says
+/// otherwise: a query that matches rarely comes back with fewer than its limit and a cursor, rather
+/// than tying up the node.
 pub(super) const MAX_TXS_SCANNED: usize = 1_000;
 
 /// How many blocks past a time range a scan looks: a chain's timestamps need only pass the median

@@ -11,9 +11,9 @@ use {
 };
 
 #[document(
-    summary = "How many peers a node remembers between starts: the most recently seen.",
+    summary = "How many peers a node remembers between starts, the most recently seen, unless --tune peers.remembered says otherwise.",
     category = "Node",
-    see_also = "remembered",
+    see_also = "remembered, NodeTuning::remembered",
 )]
 pub const MAX_REMEMBERED: usize = 64;
 
@@ -58,8 +58,8 @@ pub fn remembered(db: &dyn Database) -> Result<Vec<Multiaddr>, DbError> {
         .collect())
 }
 
-/// Keeps a peer's addresses, seen now, letting the oldest go past MAX_REMEMBERED.
-pub(super) fn remember(db: &dyn Database, peer: &PeerId, addresses: &[Multiaddr], now: u64) -> Result<(), DbError> {
+/// Keeps a peer's addresses, seen now, letting the oldest go past the most it remembers.
+pub(super) fn remember(db: &dyn Database, peer: &PeerId, addresses: &[Multiaddr], now: u64, most: usize) -> Result<(), DbError> {
     if addresses.is_empty() {
         return Ok(());
     }
@@ -72,7 +72,7 @@ pub(super) fn remember(db: &dyn Database, peer: &PeerId, addresses: &[Multiaddr]
     let mut changes = Changes::new();
     let others = self::kept(db)?.into_iter().filter(|(other, _)| *other != key).collect::<Vec<_>>();
 
-    for (old, _) in others.iter().take((others.len() + 1).saturating_sub(MAX_REMEMBERED)) {
+    for (old, _) in others.iter().take((others.len() + 1).saturating_sub(most.max(1))) {
         changes.insert((Column::Peers, old.clone()), None);
     }
 
@@ -105,7 +105,7 @@ mod tests {
         let peers: Vec<PeerId> = (0..MAX_REMEMBERED + 3).map(|_| PeerId::random()).collect();
 
         for (n, peer) in peers.iter().enumerate() {
-            remember(&db, peer, &[address(n as u16 + 1000, peer)], n as u64).unwrap();
+            remember(&db, peer, &[address(n as u16 + 1000, peer)], n as u64, MAX_REMEMBERED).unwrap();
         }
 
         let dialed = remembered(&db).unwrap();
@@ -115,7 +115,7 @@ mod tests {
 
         // Seen again, a peer moves up, and keeps one entry.
         let again = &peers[10];
-        remember(&db, again, &[address(1, again), address(2, again)], 1_000).unwrap();
+        remember(&db, again, &[address(1, again), address(2, again)], 1_000, MAX_REMEMBERED).unwrap();
         let dialed = remembered(&db).unwrap();
         assert_eq!(&dialed[..2], &[address(1, again), address(2, again)]);
         assert_eq!(dialed.len(), MAX_REMEMBERED + 1, "two addresses for it now, no new entry");

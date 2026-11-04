@@ -792,8 +792,8 @@ with.
   address would close that.
 - [ ] **Blocks and sync requests are not counted in the backlog.** Gossiped blocks and requests
   from syncing peers still queue without bound.
-- [ ] **The strike rules are fixed.** `MAX_STRIKES` and `STRIKE_WINDOW` are constants, and a small
-  share can cut off an honest peer relaying a burst.
+- [x] **The strike rules are fixed.** `--max-strikes` and `--strike-window` set them now, 10 within
+  a minute unless given.
 - [x] **The node keeps its identity.** Its libp2p key is `net.key`, beside the database or where
   `--net-key` says, so its peer id is the same each start and `--peer` can pin `/p2p/<id>`.
 - [x] **Bootnodes, and discovery past the peers given.** Genesis's `bootnodes`, replaced on a live
@@ -812,10 +812,36 @@ with.
 - [x] **Peers given are dialed again.** A `--peer` with no connection is dialed every 15 seconds,
   so a node behind NAT finds a restarted server again, and `--no-mdns` keeps a server off its
   network's multicast. `docker/pow.sh` runs a chain across a VPS and a machine at home.
-- [ ] **No connection or request limits.**
+- [x] **No connection or request limits.** `--max-peers-in` caps connections dialed in, and
+  `--http-rate` requests a second per client beside `--http-per-ip`'s concurrency.
 - [ ] **No NAT traversal** (relay, hole punching, AutoNAT).
 
 ### Node, API and tooling
+
+- [x] **Every limit the node fixed is a flag or a `--tune` key, and the apps' are settings.** Done
+  2026-11-04, from section 3 of `docs/hardcoded-values.md`. Node-local and app-only: no new
+  genesis, no consensus change, no contract redeployed; every default is the old value.
+  - Flags: `--max-peers-in` (libp2p's connection limits on connections dialed in), `--ban-score`,
+    `--ban-window`, `--max-strikes`, `--strike-window`, `--tor-timeout`, `--http-rate` (a bucket
+    per client a second, 429 with `Retry-After`), `--api-max-page`, `--suggest-multiplier`,
+    `--update-every`, `--snapshot-depth`, `--underpriced-for`, `--lua-states`, `--lua-builders`,
+    `--wasm-cache-mb` and `--wasm-cache-modules`, each bounded. `--state-history` and
+    `--underpriced-for` take a time too, turned into blocks at the block time.
+  - `--tune KEY=VALUE` for the rest, in one table (`node::tuning::KNOBS`): `sync.*` (down only),
+    `gossip.*`, `dial.*`, `peers.remembered`, `node.event-budget`, `mining.*`, `http.*`, `range.*`,
+    `rpc.*`, `filter.scan`, `finality.*` and `chain.bad-blocks`.
+  - `MAX_BODY` follows the governed `max_tx_bytes`, never under 2 MiB; `MAX_HISTORY` follows FFG's
+    `withdrawal_delay + vote_depth`, at most 4,096 epochs; `PIVOT_DEPTH` turned out the syncing
+    node's alone.
+  - `GET /node` shows every knob under `limits` (a new `limits` report field, hidden by
+    `minimal`), and `backlog` its strike rules. Docker passes each as an optional variable,
+    the mempool's and `--sync-batch-bytes` among them, and `TUNE`.
+  - The apps: Low data (one switch stretching every refresh timer four times), Wait for answers
+    (the HTTP timeouts 1, 2, 4 or 10 times), the wallet's trade deadline, and the reading caps; the
+    wallet's Activity pages its address and event indexes with Older transactions, and the Trade
+    page says when a DEX has more than the 40 pools it lists.
+  - Left: the bridges' and swaps' rows (another batch), the faucet's budget, `SHARE_EVERY`,
+    `MOST_SHARES` and `KEPT_BLOCKS`; a per-IP limit on peers.
 
 - [x] **The explorer shows voided and refunded transfers.** Done 2026-11-03. Apps only: no new genesis, no
   contract redeployed.
@@ -944,9 +970,7 @@ with.
     under the base price, hold the mempool for `MAX_UNDERPRICED_BLOCKS` blocks.
   - Pushed-out and pruned transactions are not told to anyone: `GET /stream` shows what joined,
     not what left.
-  - `MAX_GAPPED_BLOCKS` and `MAX_UNDERPRICED_BLOCKS` count blocks, not time.
-  - `--sync-batch-bytes` and the mempool's flags are not in the Docker image's `.env`; give them
-    through `EXTRA_ARGS`.
+  - `MAX_GAPPED_BLOCKS` counts blocks, not time; `--underpriced-for` takes a time now.
 
 - [x] **Multisigs in the wallet: every one you are in, anything to propose, any key to sign with.**
   Done 2026-11-03, from the user's reports and a testnet run. In the node: a member index,
@@ -1229,13 +1253,10 @@ with.
   [Faucet](faucet.md).
 - [ ] **The faucet's limits survive a restart.** They live in memory; a column of their own would
   keep them.
-- [ ] **Engine pools sized on the node.** Each engine's per-node resources are constants in the
-  code: Lua keeps `POOL_SIZE` (16) pristine Luau states built ahead by `BUILDERS` (2) threads,
-  WebAssembly a module cache of `MODULE_CACHE_BYTES` (32 MiB) and `MODULE_CACHE_ENTRIES` (1024),
-  and the EVM builds its context fresh for every call. Node flags, such as `--lua-pool`,
-  `--lua-builders`, `--wasm-cache-mb` and an EVM equivalent for a pool of contexts kept warm,
-  would let an operator trade memory for throughput. They change no consensus, so each node
-  picks its own; the `Vm` would take them at `Chain::open`.
+- [x] **Engine pools sized on the node.** `--lua-states` (16), `--lua-builders` (2),
+  `--wasm-cache-mb` (32) and `--wasm-cache-modules` (1,024), which the `Vm` takes at
+  `Chain::open_with` (`EnginePools`), the API's own engines too. The EVM still builds its context
+  fresh for every call: a pool of warm contexts is still open.
 
 - [x] **The container's node stops on SIGTERM.** It stops its loop on SIGTERM or SIGINT and
   returns, so `docker/compose.sh stop` takes a second rather than ten and a kill.

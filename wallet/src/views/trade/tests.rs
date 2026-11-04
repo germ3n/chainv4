@@ -50,6 +50,53 @@ fn trades_go_to_the_send_page_as_calls_to_the_dex_or_the_router() {
     assert_eq!(approve_input([0xd; 20], u256::new(5))[..4], keccak(b"approve(address,uint256)")[..4]);
 }
 
+/// The deadline a trade on the native DEX is sent with, with this many minutes set, if any.
+fn deadline_with(minutes: Option<u32>) -> TxCallArgumentType {
+    let dex: &'static str = Box::leak(Address::Contract([0xd; 32]).to_string().into_boxed_str());
+    let mut world = crate::views::drawn::World::default();
+    let (mut book, mut holders, mut sent) = (crate::vault::Book::default(), Vec::new(), None);
+
+    if let Some(minutes) = minutes {
+        world.settings.trade_deadline_minutes = minutes;
+    }
+
+    crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| {
+        ctx.dex = (Some(dex), None);
+        sent = swap(ctx, &TradeState::default(), Address::Ed25519([1; 32]), u256::new(5), Address::Contract([7; 32]), None, u256::new(1)).map(|prepared| prepared.tx);
+    });
+
+    match sent {
+        Some(Tx::ContractCall { data, .. }) => data[4].clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_dex_of_more_pools_than_are_listed_says_so_rather_than_look_like_all_there_are() {
+    let dex = Address::Contract([0xd; 32]);
+    let count = |state: &mut TradeState, count: u64| {
+        let said = Ok(json!({ "status": "returned", "values": [{ "type": "i64", "value": count.to_string() }] }));
+
+        assert!(state.answered(&call_ask(&dex, "pool_count", json!([])), &said));
+    };
+    let mut state = TradeState::default();
+
+    count(&mut state, MAX_POOLS);
+    assert_eq!((state.wanted, state.left_out()), (Some(MAX_POOLS), None), "all of them listed");
+
+    count(&mut state, 55);
+    assert_eq!(state.wanted, Some(MAX_POOLS), "still the first 40 asked about");
+    assert!(state.left_out().is_some_and(|said| said.contains("55 pools") && said.contains("first 40")), "{:?}", state.left_out());
+}
+
+#[test]
+fn a_trade_waits_to_land_as_long_as_settings_say_and_twenty_minutes_unless_they_say() {
+    assert_eq!(deadline_with(None), TxCallArgumentType::I64(20 * 60_000), "as before");
+    assert_eq!(deadline_with(Some(5)), TxCallArgumentType::I64(5 * 60_000));
+    assert_eq!(deadline_with(Some(0)), TxCallArgumentType::I64(60_000), "a minute at least");
+    assert_eq!(deadline_with(Some(100_000)), TxCallArgumentType::I64(i64::from(crate::app::MOST_TRADE_DEADLINE_MINUTES) * 60_000), "a day at most");
+}
+
 #[test]
 fn the_evm_dexs_answers_list_its_pairs_with_wdev_as_the_coin() {
     let mut state = TradeState { venue: Venue::Evm, ..TradeState::default() };

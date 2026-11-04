@@ -902,7 +902,8 @@ fn when(time: u64, now: u64) -> String {
 /// Asks a leg's contract where it stands, when it was not asked lately.
 fn ask_leg(ctx: &mut Ctx, state: &mut SwapsState, terms: &Terms, leg: &Leg, now: f64) {
     let hash = to_hex(&terms.hash);
-    let stale = |asked: Option<&f64>| asked.is_none_or(|asked| now - asked > ASK_EVERY);
+    let every = ctx.settings.pace().every(ASK_EVERY);
+    let stale = |asked: Option<&f64>| asked.is_none_or(|asked| now - asked > every);
 
     match leg {
         Leg::Chain(leg) if stale(state.asked.get(&hash)) => {

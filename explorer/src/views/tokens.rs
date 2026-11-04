@@ -106,7 +106,7 @@ pub fn first_page<'a>(ctx: &'a mut Ctx, symbol: &str) -> Option<&'a TokenList> {
         .store
         .token_lists
         .get(symbol)
-        .is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH);
+        .is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > ctx.settings.pace().every_ms(REFRESH));
 
     if stale {
         ctx.api.ask(first);

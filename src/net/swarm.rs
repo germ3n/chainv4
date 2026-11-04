@@ -1,6 +1,6 @@
 use {
     super::codec::SyncCodec,
-    super::{Admission, Backlog, Bans, Fault, Gossip, NetCommand, NetConfig, NetEvent, NetLink, Origin, SyncResponse, Verdict},
+    super::{Admission, Backlog, Bans, Fault, Gossip, NetCommand, NetConfig, NetEvent, NetLink, NetTuning, Origin, SyncResponse, Verdict},
     crate::crypto::hasher::Hasher,
     crate::structs::block::Block,
     crate::structs::tx::SignedTx,
@@ -52,11 +52,12 @@ impl Names {
         })
     }
 }
-#[document(summary = "The most transactions one gossiped batch holds.", category = "Node")]
+#[document(summary = "The most transactions one gossiped batch holds: what every node takes, so a batch past it is refused as garbage, and what a node sends unless --tune gossip.batch sends fewer.", category = "Node", see_also = "NetTuning::tx_batch")]
 pub const TX_BATCH: usize = 256;
 #[document(
-    summary = "The longest a transaction waits for others to share its batch.",
+    summary = "The longest a transaction waits for others to share its batch, unless --tune gossip.wait says otherwise.",
     category = "Node",
+    see_also = "NetTuning::tx_batch_wait",
 )]
 pub const TX_BATCH_WAIT: Duration = Duration::from_millis(50);
 
@@ -107,23 +108,37 @@ impl Seen {
 
 /// The largest gossip message: a block with plenty of transactions.
 const MAX_GOSSIP: usize = 8 * 1024 * 1024;
-/// How often a peer given with --peer is dialed again while no connection to it stands: after it
-/// restarts, after this node's network comes back, and while it is not up yet. Discovery runs on
-/// the same tick.
-const REDIAL_EVERY: Duration = Duration::from_secs(15);
+#[document(
+    summary = "How often a peer given with --peer is dialed again while no connection to it stands, unless --tune dial.redial says otherwise: after it restarts, after this node's network comes back, and while it is not up yet. Discovery runs on the same tick.",
+    category = "Node",
+    see_also = "NetTuning::redial_every",
+)]
+pub const REDIAL_EVERY: Duration = Duration::from_secs(15);
 /// How long a peer may stay connected without having told this node its topics. Any peer of this
 /// network tells them as it connects, within a round trip or two, over Tor too.
 const TOPICS_WITHIN: Duration = Duration::from_secs(30);
 /// How often the node warns that what it publishes reaches none of its connected peers.
 const UNPUBLISHED_EVERY: Duration = Duration::from_secs(60);
-/// How often Kademlia looks for peers near this node, which fills its table with the network's.
-const BOOTSTRAP_EVERY: Duration = Duration::from_secs(120);
+#[document(
+    summary = "How often Kademlia looks for peers near this node, which fills its table with the network's, unless --tune dial.bootstrap says otherwise.",
+    category = "Node",
+    see_also = "NetTuning::bootstrap_every",
+)]
+pub const BOOTSTRAP_EVERY: Duration = Duration::from_secs(120);
 /// How often a bootnode is dialed at most, while the node has fewer peers than it wants.
 const BOOTNODE_EVERY: Duration = Duration::from_secs(60);
-/// How many peers Kademlia knows the node dials at once, while it has fewer than it wants.
-const DIALS_AT_ONCE: usize = 3;
-/// How long before a peer Kademlia knows, dialed once, is dialed again.
-const RETRY_PEER_AFTER: Duration = Duration::from_secs(300);
+#[document(
+    summary = "How many peers Kademlia knows the node dials at once, while it has fewer than it wants, unless --tune dial.at-once says otherwise.",
+    category = "Node",
+    see_also = "NetTuning::dials_at_once",
+)]
+pub const DIALS_AT_ONCE: usize = 3;
+#[document(
+    summary = "How long before a peer Kademlia knows, dialed once, is dialed again, unless --tune dial.retry says otherwise.",
+    category = "Node",
+    see_also = "NetTuning::retry_after",
+)]
+pub const RETRY_PEER_AFTER: Duration = Duration::from_secs(300);
 
 /// Where an address to dial came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +177,8 @@ impl Wanted {
 
 #[derive(NetworkBehaviour)]
 struct Behaviour {
+    /// Refuses a connection a peer dials in past --max-peers-in, as it is made.
+    limits: libp2p::connection_limits::Behaviour,
     gossipsub: gossipsub::Behaviour,
     kad: kad::Behaviour<kad::store::MemoryStore>,
     mdns: Toggle<mdns::tokio::Behaviour>,
@@ -255,6 +272,8 @@ struct Net {
     wanted: Vec<Wanted>,
     /// How many peers the node looks for.
     target_peers: usize,
+    /// How gossip is batched and peers dialed.
+    tuning: NetTuning,
     /// The peers Kademlia knows that discovery dialed, and when, so it moves on to others.
     tried: HashMap<PeerId, Instant>,
     /// Peers' faults and bans.
@@ -340,7 +359,7 @@ impl Net {
         let (sync_protocol, kad_protocol, identify_protocol) = (names.sync.clone(), names.kad.clone(), names.identify.clone());
         // The node's own key, the same each start; a new one when none is given, as in tests.
         let identity = config.key.clone().unwrap_or_else(libp2p::identity::Keypair::generate_ed25519);
-        let tor = config.tor.clone();
+        let (tor, tuning) = (config.tor.clone(), config.tuning);
         let mut swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
             // QUIC, TCP and Tor, as the node's Tor settings say (net::tor).
@@ -363,7 +382,7 @@ impl Net {
                     gossip_config,
                 )?;
                 let mut kad_config = kad::Config::new(kad_protocol);
-                kad_config.set_periodic_bootstrap_interval(Some(BOOTSTRAP_EVERY));
+                kad_config.set_periodic_bootstrap_interval(Some(tuning.bootstrap_every));
                 let mut kad = kad::Behaviour::with_config(peer_id, kad::store::MemoryStore::new(peer_id), kad_config);
                 kad.set_mode(Some(kad::Mode::Server));
                 let mdns = match local {
@@ -380,7 +399,10 @@ impl Net {
                     request_response::Config::default().with_request_timeout(Duration::from_secs(30)),
                 );
 
+                let limits = libp2p::connection_limits::ConnectionLimits::default().with_max_established_incoming(tuning.max_peers_in);
+
                 Ok(Behaviour {
+                    limits: libp2p::connection_limits::Behaviour::new(limits),
                     gossipsub,
                     kad,
                     mdns: Toggle::from(mdns),
@@ -433,6 +455,7 @@ impl Net {
             backlog,
             wanted,
             target_peers: config.target_peers,
+            tuning,
             tried: HashMap::new(),
             bans: Bans::new(config.bans),
             onion_file: config.tor.onion_file.clone(),
@@ -506,7 +529,8 @@ impl Net {
     /// dialed lately: how a node meets the peers its peers know, past the ones it was given.
     fn discover(&mut self) {
         let missing = self.target_peers.saturating_sub(self.swarm.connected_peers().count());
-        self.tried.retain(|_, tried| tried.elapsed() < RETRY_PEER_AFTER);
+        let retry = self.tuning.retry_after;
+        self.tried.retain(|_, tried| tried.elapsed() < retry);
         let local = *self.swarm.local_peer_id();
         let mut known = Vec::new();
 
@@ -520,7 +544,7 @@ impl Net {
             .into_iter()
             .filter(|(peer, addresses)| *peer != local && !addresses.is_empty() && !self.swarm.is_connected(peer) && !self.tried.contains_key(peer))
             .filter(|(peer, addresses)| !self.bans.banned(peer, addresses.first().and_then(ip_of), Instant::now()))
-            .take(missing.min(DIALS_AT_ONCE))
+            .take(missing.min(self.tuning.dials_at_once))
             .collect();
 
         for (peer, addresses) in fresh {
@@ -552,9 +576,9 @@ impl Net {
         mut commands: async_mpsc::UnboundedReceiver<NetCommand>,
         events: mpsc::Sender<NetEvent>,
     ) {
-        let mut redial = tokio::time::interval(REDIAL_EVERY);
+        let mut redial = tokio::time::interval(self.tuning.redial_every);
         redial.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut batch = tokio::time::interval(TX_BATCH_WAIT);
+        let mut batch = tokio::time::interval(self.tuning.tx_batch_wait);
         batch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
@@ -800,7 +824,7 @@ impl Net {
 
                 match (wanted, peer_id) {
                     (Some(wanted), _) if wanted.given == Given::Peer => {
-                        log::warn!("[net] could not reach {}, trying again in {}s: {error}", wanted.address, REDIAL_EVERY.as_secs());
+                        log::warn!("[net] could not reach {}, trying again in {}s: {error}", wanted.address, self.tuning.redial_every.as_secs());
                         wanted.dialing = None;
                     }
                     (Some(wanted), _) => {
@@ -878,8 +902,8 @@ impl Net {
             NetCommand::Judge { peer, gossip, verdict } => self.judge(peer, gossip, verdict, events),
             NetCommand::PublishBlock(block) => self.publish(&self.blocks.clone(), &block, events),
             NetCommand::PublishTx(tx) => {
-                // Sent once, with the others that come within TX_BATCH_WAIT, or at once when
-                // TX_BATCH. One heard from a peer is marked seen as it came, so taken, it goes on
+                // Sent once, with the others that come within the batch's wait, or at once when
+                // it holds tx_batch. One heard from a peer is marked seen as it came, so taken, it goes on
                 // to the others; sent already, it does not go again.
                 let id = tx.id(self.hash);
 
@@ -889,7 +913,7 @@ impl Net {
 
                 self.outgoing.push(tx);
 
-                if self.outgoing.len() >= TX_BATCH {
+                if self.outgoing.len() >= self.tuning.tx_batch {
                     self.flush(events);
                 }
             }
@@ -1016,6 +1040,7 @@ mod tests {
             remembered: Vec::new(),
             bans: crate::net::BanLimits::default(),
             tor: Default::default(),
+            tuning: crate::net::NetTuning::DEFAULT,
         }
     }
 
@@ -1313,7 +1338,7 @@ mod tests {
         let hidden = spawn(NetConfig {
             mdns: false,
             listen: vec!["/ip4/127.0.0.1/tcp/0".parse().unwrap()],
-            tor: TorConfig { proxy: Some(proxy), only: true, onion_file: None },
+            tor: TorConfig { proxy: Some(proxy), only: true, onion_file: None, ..TorConfig::default() },
             ..config(&network, BacklogLimits::default(), vec![onion])
         })
         .unwrap();
@@ -1396,6 +1421,54 @@ mod tests {
 
     #[test]
     #[ignore = "opens real sockets on 127.0.0.1"]
+    fn a_node_takes_peers_dialing_in_up_to_max_peers_in_and_refuses_the_next() {
+        use libp2p::multiaddr::Protocol;
+
+        let network = format!("inbound-{}", PeerId::random());
+        let alone = |peers: Vec<Multiaddr>| NetConfig {
+            mdns: false,
+            ..config(&network, BacklogLimits::default(), peers)
+        };
+        let capped = spawn(NetConfig {
+            tuning: NetTuning { max_peers_in: Some(1), ..NetTuning::DEFAULT },
+            ..alone(Vec::new())
+        })
+        .unwrap();
+        let listening = wait_for(&capped, |event| match event {
+            NetEvent::Listening(address) => Some(address),
+            _ => None,
+        });
+        let address: Multiaddr = listening.iter().filter(|part| !matches!(part, Protocol::P2p(_))).collect();
+        let first = spawn(alone(vec![address.clone()])).unwrap();
+        let taken = wait_for(&capped, |event| match event {
+            NetEvent::PeerUp { peer, .. } => Some(peer),
+            _ => None,
+        });
+        wait_for(&first, |event| matches!(event, NetEvent::PeerUp { .. }).then_some(()));
+
+        // The second dials in past the cap: the capped node never takes it, and its dial fails.
+        let second = spawn(alone(vec![address])).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match capped.events.recv_timeout(left) {
+                Ok(NetEvent::PeerUp { peer, .. }) => panic!("took {peer} past --max-peers-in 1"),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+
+        // Its side may see the connection made before the capped node closes it: never one that stays.
+        let seen: Vec<NetEvent> = second.events.try_iter().collect();
+        let ups = seen.iter().filter(|event| matches!(event, NetEvent::PeerUp { .. })).count();
+        let downs = seen.iter().filter(|event| matches!(event, NetEvent::PeerDown(_))).count();
+        assert_eq!(ups, downs, "the second never stayed in: {seen:?}");
+        assert!(capped.events.try_iter().all(|event| !matches!(event, NetEvent::PeerDown(peer) if peer == taken)), "the first stays");
+        drop((first, second));
+    }
+
+    #[test]
+    #[ignore = "opens real sockets on 127.0.0.1"]
     fn a_peer_flooding_gossip_is_turned_away_then_disconnected() {
         // Its own network name, so no other node on this machine's network joins in.
         let network = format!("flood-{}", PeerId::random());
@@ -1405,7 +1478,7 @@ mod tests {
             _ => None,
         });
         // Nobody drains the victim's events, so two transactions fill the flooder's share.
-        let victim = spawn(config(&network, BacklogLimits { total: 1_000, per_peer: 2 }, vec![address])).unwrap();
+        let victim = spawn(config(&network, BacklogLimits { total: 1_000, per_peer: 2, ..BacklogLimits::default() }, vec![address])).unwrap();
         let flooder_id = wait_for(&victim, |event| match event {
             NetEvent::PeerUp { peer, .. } => Some(peer),
             _ => None,

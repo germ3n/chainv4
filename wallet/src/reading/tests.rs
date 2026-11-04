@@ -338,6 +338,30 @@ fn a_reading_shows_a_balance_from_its_first_proof_and_what_blocks_say_of_it_from
 }
 
 #[test]
+fn a_smaller_cap_on_transactions_lets_the_oldest_go_at_once_and_holds_as_reading_goes_on() {
+    let mut fixture = alices_chain();
+    fixture.final_height = 10;
+    let (_, mut reading) = shelf();
+
+    read_all(&mut reading, &fixture, &[alice()], Some(0));
+
+    assert_eq!(reading.txs_kept(), (2, crate::reading::MOST_TXS), "both of hers, under the usual cap");
+    assert_eq!(reading.standing().unwrap().cut_below, None);
+
+    reading.keep_most_txs(1);
+
+    assert_eq!(reading.txs_kept(), (1, 1), "the newest alone");
+    assert_eq!(reading.standing().unwrap().cut_below, Some(8), "and it says from where");
+
+    // A cap set before the index opens holds from its first block read.
+    let (_, mut capped) = shelf();
+    capped.keep_most_txs(1);
+    read_all(&mut capped, &fixture, &[alice()], Some(0));
+
+    assert_eq!(capped.txs_kept(), (1, 1));
+}
+
+#[test]
 fn a_new_wallet_reads_from_where_it_was_made_and_a_restored_one_is_asked() {
     let fixture = alices_chain();
     let (_, mut new) = shelf();

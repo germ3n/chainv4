@@ -635,6 +635,8 @@ impl Explorer {
     /// the index to answer. A page's own asks are turned off or answered here as they come, and nothing
     /// else is polled. A chain with no finality has no final blocks to read, which the pages say.
     fn poll_reading(&mut self, time: f64) {
+        self.reading.keep_most(self.settings.reading_bytes());
+
         if let Some(ask) = self.light.ask(time) {
             self.api.ask(ask);
         }
@@ -711,13 +713,15 @@ impl Explorer {
 
     /// Asks for whatever is due.
     fn poll(&mut self, time: f64) {
+        self.light.pace = self.settings.pace();
+
         if self.settings.read_blocks {
             self.poll_reading(time);
 
             return;
         }
 
-        let live = self.streaming == Streaming::Live;
+        let (live, pace) = (self.streaming == Streaming::Live, self.settings.pace());
         let due = |last: &mut f64, every: f64| {
             let due = time - *last >= every || *last == 0.0;
 
@@ -728,7 +732,7 @@ impl Explorer {
             due
         };
 
-        if due(&mut self.asked.status, if live { STATUS_STREAMED } else { STATUS_POLLED }) {
+        if due(&mut self.asked.status, pace.every(if live { STATUS_STREAMED } else { STATUS_POLLED })) {
             self.api.ask(Ask::Status);
         }
 
@@ -736,7 +740,7 @@ impl Explorer {
             self.api.ask(missing);
         }
 
-        if due(&mut self.asked.node, NODE_EVERY) {
+        if due(&mut self.asked.node, pace.every(NODE_EVERY)) {
             self.api.ask(Ask::Node);
         }
 
@@ -744,7 +748,7 @@ impl Explorer {
             self.api.ask(Ask::Release);
         }
 
-        if matches!(self.view, View::Map | View::Overview) && due(&mut self.asked.forks, FORKS_EVERY) {
+        if matches!(self.view, View::Map | View::Overview) && due(&mut self.asked.forks, pace.every(FORKS_EVERY)) {
             self.api.ask(Ask::Forks);
         }
 
@@ -781,7 +785,7 @@ impl Explorer {
             _ => Vec::new(),
         };
 
-        if !page.is_empty() && due(&mut self.asked.page, PAGE_EVERY) {
+        if !page.is_empty() && due(&mut self.asked.page, pace.every(PAGE_EVERY)) {
             for ask in page {
                 self.api.ask(ask);
             }
@@ -1310,7 +1314,7 @@ impl eframe::App for Explorer {
         }
 
         // Polls come due even when nothing arrives.
-        ui.ctx().request_repaint_after(Duration::from_millis(500));
+        ui.ctx().request_repaint_after(self.settings.pace().wake_after(Duration::from_millis(500)));
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1357,8 +1361,8 @@ fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Option<T> {
 /// browser makes its own requests, through its own proxy.
 fn client(settings: &Settings) -> Result<chainv4_ui::net::Client, String> {
     match cfg!(target_arch = "wasm32") {
-        true => Ok(chainv4_ui::net::Client::direct()),
-        false => chainv4_ui::net::Client::for_setting(&settings.proxy),
+        true => chainv4_ui::net::Client::patient(None, settings.patience),
+        false => chainv4_ui::net::Client::for_settings(&settings.proxy, settings.patience),
     }
 }
 
@@ -1799,5 +1803,58 @@ pub(crate) mod tests {
         assert_eq!(shown_name(Some(&unnamed), Some("chainv4 testnet")), "chainv4", "the node names none now");
         assert_eq!(window_title(shown_name(Some(&named), None)), "chainv4 mainnet explorer");
         assert_eq!(window_title(shown_name(None, None)), "chainv4 explorer");
+    }
+
+    /// When poll asked for the status and for the node's report, a second at a time for a minute,
+    /// with Low data on or off.
+    fn asked_over_a_minute(low_data: bool) -> (usize, usize) {
+        let mut explorer = an_explorer("http://127.0.0.1:1", false);
+        explorer.settings.low_data = low_data;
+        let (mut status, mut node) = (0, 0);
+
+        for second in 1..=60 {
+            let time = f64::from(second);
+            explorer.poll(time);
+            status += usize::from(explorer.asked.status == time);
+            node += usize::from(explorer.asked.node == time);
+        }
+
+        (status, node)
+    }
+
+    #[test]
+    fn low_data_has_the_explorer_ask_its_node_a_quarter_as_often_and_off_as_before() {
+        assert_eq!(asked_over_a_minute(false), (60, 30), "every second, and every two");
+        assert_eq!(asked_over_a_minute(true), (15, 8), "every four seconds, and every eight");
+    }
+
+    #[test]
+    fn settings_from_before_network_use_and_the_reading_cap_keep_todays_values_and_choices_are_kept() {
+        let old: Settings = serde_json::from_value(json!({ "node": "http://node", "proxy": chainv4_ui::net::Proxy::ORBOT })).unwrap();
+
+        assert_eq!((old.low_data, old.reading_bytes), (false, None));
+        assert_eq!(old.pace(), chainv4_ui::pace::Pace::default());
+        assert_eq!(old.reading_bytes(), crate::reading::MOST_BYTES, "the device's usual");
+        assert_eq!(client(&old).unwrap().whole(), chainv4_ui::net::limit(true), "and the usual wait");
+
+        let set = Settings { low_data: true, patience: 10, reading_bytes: Some(512_000_000), ..old };
+        let kept: Settings = serde_json::from_value(serde_json::to_value(&set).unwrap()).unwrap();
+
+        assert_eq!((kept.low_data, kept.patience, kept.reading_bytes()), (true, 10, 512_000_000));
+        assert_eq!(client(&kept).unwrap().whole(), chainv4_ui::net::waits(true, 10).0, "ten times as long through the proxy");
+
+        // What a settings file says past the bounds Settings offers is held to them.
+        let wild = Settings { reading_bytes: Some(1), ..Settings::default() };
+
+        assert_eq!(wild.reading_bytes(), crate::reading::LEAST_BYTES);
+    }
+
+    #[test]
+    fn the_cap_set_is_what_the_reading_keeps_once_it_polls() {
+        let mut explorer = an_explorer("http://127.0.0.1:1", true);
+        explorer.settings.reading_bytes = Some(16_000_000);
+        explorer.poll(1.0);
+
+        assert_eq!(explorer.reading.bytes_kept().1, 16_000_000);
     }
 }

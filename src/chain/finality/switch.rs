@@ -78,6 +78,17 @@ impl Electorate for Elected {
         self.genesis.leak()
     }
 
+    /// Under FFG, long enough to cover a bond's slashable window as the epoch's settings have it:
+    /// withdrawal_delay, with vote_depth to spare. Signers have no bonds, so they keep the least.
+    fn history(&self, state: &State, epoch: u64) -> Result<u64, DbError> {
+        match Changes::new(state).finality_in(epoch, &self.genesis)? {
+            #[cfg(feature = "finality-ffg")]
+            FinalityConfig::Ffg(config) => Ok(super::votes::history_for(config.withdrawal_delay, config.vote_depth)),
+            #[allow(unreachable_patterns)]
+            _ => Ok(super::votes::MAX_HISTORY as u64),
+        }
+    }
+
     /// Leaks stalled bonds under FFG, then fixes the voters activation_delay ahead by the kind
     /// that epoch runs, switching there when the epoch before it ran the other.
     fn at_checkpoint(&self, state: &Arc<State>, epoch: u64) -> Result<(), DbError> {

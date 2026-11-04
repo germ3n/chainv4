@@ -18,20 +18,20 @@ use {
 };
 
 #[document(
-    summary = "How much a peer's faults may add up to within SCORE_WINDOW before it is banned.",
+    summary = "How much a peer's faults may add up to within SCORE_WINDOW before it is banned, unless --ban-score says otherwise.",
     category = "Node",
-    see_also = "Fault, Bans",
+    see_also = "Fault, Bans, BanLimits::score",
 )]
 pub const BAN_SCORE: u32 = 100;
 
-#[document(summary = "The window a peer's faults are added up in: a peer with none for this long starts again from nothing.", category = "Node", see_also = "Bans")]
+#[document(summary = "The window a peer's faults are added up in, unless --ban-window says otherwise: a peer with none for this long starts again from nothing.", category = "Node", see_also = "Bans, BanLimits::window")]
 pub const SCORE_WINDOW: Duration = Duration::from_secs(600);
 
 #[document(summary = "How long a ban lasts unless --ban-for says otherwise.", category = "Node", see_also = "BanLimits")]
 pub const DEFAULT_BAN: Duration = Duration::from_secs(3600);
 
 #[document(
-    summary = "How peers are banned: for how long, and whether their IPs too. Set with --ban-for and --ban-ips.",
+    summary = "How peers are banned: how much their faults add up to, within what window, for how long, and whether their IPs too. Set with --ban-score, --ban-window, --ban-for and --ban-ips.",
     category = "Node",
     see_also = "Bans",
 )]
@@ -41,11 +41,15 @@ pub struct BanLimits {
     pub ban_for: Duration,
     #[document(summary = "Whether a ban covers the peer's IP as well as its peer id.")]
     pub ips: bool,
+    #[document(summary = "How much a peer's faults add up to, within window, before it is banned: BAN_SCORE by default.")]
+    pub score: u32,
+    #[document(summary = "The window faults are added up in: SCORE_WINDOW by default.")]
+    pub window: Duration,
 }
 
 impl Default for BanLimits {
     fn default() -> BanLimits {
-        BanLimits { ban_for: DEFAULT_BAN, ips: false }
+        BanLimits { ban_for: DEFAULT_BAN, ips: false, score: BAN_SCORE, window: SCORE_WINDOW }
     }
 }
 
@@ -125,18 +129,18 @@ impl Bans {
 
     #[document(
         parent = "Bans",
-        summary = "Counts a fault against a peer, at the IP it connects from when known. True when that bans it: its score reached BAN_SCORE within SCORE_WINDOW.",
+        summary = "Counts a fault against a peer, at the IP it connects from when known. True when that bans it: its score reached BanLimits::score within BanLimits::window.",
     )]
     pub fn fault(&mut self, peer: PeerId, ip: Option<IpAddr>, fault: Fault, now: Instant) -> bool {
         let score = self.scores.entry(peer).or_insert(Score { points: 0, since: now });
 
-        if now.duration_since(score.since) > SCORE_WINDOW {
+        if now.duration_since(score.since) > self.limits.window {
             *score = Score { points: 0, since: now };
         }
 
-        score.points += fault.weight();
+        score.points = score.points.saturating_add(fault.weight());
 
-        if score.points < BAN_SCORE {
+        if score.points < self.limits.score {
             return false;
         }
 
@@ -168,7 +172,8 @@ impl Bans {
     pub fn sweep(&mut self, now: Instant) {
         self.peers.retain(|_, until| *until > now);
         self.ips.retain(|_, until| *until > now);
-        self.scores.retain(|_, score| now.duration_since(score.since) <= SCORE_WINDOW);
+        let window = self.limits.window;
+        self.scores.retain(|_, score| now.duration_since(score.since) <= window);
     }
 
     #[document(parent = "Bans", summary = "How many peer ids and IPs are banned now, and how many bans there were since the node started.")]
@@ -231,10 +236,30 @@ mod tests {
         assert!(by_id.banned(&peer, Some(ip), now));
         assert!(!by_id.banned(&fresh, Some(ip), now), "a new peer id from the same IP is let in");
 
-        let mut by_ip = Bans::new(BanLimits { ips: true, ban_for: Duration::from_secs(60) });
+        let mut by_ip = Bans::new(BanLimits { ips: true, ban_for: Duration::from_secs(60), ..BanLimits::default() });
         by_ip.ban(peer, Some(ip), now);
         assert!(by_ip.banned(&fresh, Some(ip), now), "and here it is not");
         assert!(!by_ip.banned(&fresh, Some(ip), now + Duration::from_secs(61)), "for --ban-for alone");
         assert_eq!(by_ip.counts(now), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_higher_ban_score_and_a_shorter_window_take_more_faults_to_ban() {
+        let limits = BanLimits { score: 200, window: Duration::from_secs(60), ..BanLimits::default() };
+        let mut bans = Bans::new(limits);
+        let peer = PeerId::random();
+        let now = Instant::now();
+
+        // Two invalid blocks ban at the default score, but take four at 200.
+        for n in 0..3 {
+            assert!(!bans.fault(peer, None, Fault::Block, now + Duration::from_secs(n)));
+        }
+        assert!(bans.fault(peer, None, Fault::Block, now + Duration::from_secs(3)), "the fourth reaches 200");
+
+        // Spread out past the minute, they never add up, though they would in the default window.
+        let other = PeerId::random();
+        for n in 0..8 {
+            assert!(!bans.fault(other, None, Fault::Block, now + Duration::from_secs(61 * n)));
+        }
     }
 }

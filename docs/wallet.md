@@ -92,6 +92,22 @@ HiddenServicePort 80 127.0.0.1:8080
 Tor writes the address to `/var/lib/tor/chainv4/hostname`. In the wallet, set the proxy to Orbot
 and the node to `http://<that address>.onion`.
 
+## Network use
+
+**Settings → Network use** has two settings, shared with the explorer (`ui/src/pace.rs`,
+`ui::widgets::network_use`), both kept with the other settings:
+- **Low data:** one switch, off by default, for a metered connection or a phone's battery. Every
+  timer that asks the node again by itself waits four times as long: the status every 40 seconds
+  rather than 10, the history every 24 rather than 6, the light client's next headers every 12 rather
+  than 3, proofs every 16 rather than 4, and each page's own refresh (Trade, NFTs, Swaps, Bridge,
+  Multisig, Governance, Mining, filtered Activity). The app also wakes by itself every 1.6 seconds
+  rather than 0.4. What you ask for, a retry, a reload and what the node's stream tells are never held
+  back, so with `--stream` new blocks still come as they happen.
+- **Wait for answers:** how long a request may take before a page says it got no answer, for Tor or
+  I2P at their slowest: **Usual** (12 seconds to get connected and 30 in all; 60 and 90 through a
+  proxy), **2×**, **4×** or **10×**. The browser has no connect limit to set, and goes by the whole one.
+  A new wait connects afresh, as a new proxy does. The note under it says the times that apply now.
+
 ## Wallets and words
 
 **A wallet** is a seed phrase, or several, the accounts made from them, and one password that seals
@@ -435,8 +451,15 @@ line and nothing else:
 - **Never on a signer,** which has no such page and nothing to send a request by.
 
 **Activity:** for each address of the account in use, the node's address index lists the
-transactions that touched it (`GET /accounts/{address}/txs`), and the page merges them, newest
-first, or oldest with the order turned round. Each line says which of the account's addresses it is
+transactions that touched it (`GET /accounts/{address}/txs`), and its event index those whose events
+name it (`GET /events?address=`), and the page merges them, newest first, or oldest with the order
+turned round. Each list comes 50 at a time, the newest page asked again every few seconds:
+**Older transactions** under the list asks each index for the page after the one it ended, for every
+address at once, following the node's `cursor` as the explorer's history does. What older pages
+found stays as the newest page is asked again, and the button goes once every list is read to its
+end. Under a filter, **Look further back** does the same for what passes it. With
+[Read from checked blocks](#read-from-checked-blocks) on there is no button: no node's list is asked,
+and **Read further back** in Settings is what reaches older history. Each line says which of the account's addresses it is
 for, by its scheme: received to your Bitcoin, sent from your Ed25519, by your EdBlake. A transfer
 from one of its addresses to another, of the coin, a token or an NFT, shows as **Between your
 addresses**, from which to which, with what moved and no plus or minus, as the account holds as
@@ -512,7 +535,10 @@ thought of still does not leave.
 - **Balances and other state come from the proofs bundled with blocks.** One direct proof per account,
   at the final block it started at, sets where it starts from; what later blocks list updates it.
 - **History comes from the blocks' receipts:** everything that names your addresses, a token's
-  transfer in an EVM log's topics too. Filters and search on Activity work on what was read.
+  transfer in an EVM log's topics too. Filters and search on Activity work on what was read. It keeps
+  the newest 20,000 transactions unless **Keeps at most** in its card says 5,000, 100,000 or 500,000;
+  past the cap the oldest go, and it says from what block. A smaller cap than it holds asks first
+  (**Yes, let them go**), as reading them again costs their download.
 - **Your own sent transaction keeps one lookup,** its receipt proof, shown as *Included, not final*
   until the reading reaches it, when what the reading found takes over. It is checked, and the node
   already has that transaction.
@@ -1101,6 +1127,13 @@ Approving a token, trading, adding and taking out are calls the Send page review
 from the address the From picker names: what it holds of each asset and each pool's shares is what
 shows, asked again once another is picked.
 
+**Settings → Trade → Deadline:** how long a trade, or adding to a pool, may wait to land before the
+DEX refuses it: 20 minutes unless set, 1 minute to a day. A trade stuck behind others never goes
+through hours later at a price nobody chose. Slippage is chosen with each trade, on the page.
+
+The page lists the first 40 pools of each DEX, as each one listed is asked about every few seconds.
+A DEX with more says so above the tabs, with how many it has, rather than look like all there are.
+
 ### NFTs
 
 The **NFTs** page shows what the account holds of the chain's [collections](nft-standard.md):
@@ -1305,8 +1338,8 @@ mainnet".
 
 ## When a request fails
 
-Every request has a time limit: 30 seconds, or 90 through a proxy, as Tor builds a circuit first. A
-node that never answers ends in a failure, not a page that waits, however it fails to answer: the
+Every request has a time limit: 30 seconds, or 90 through a proxy, as Tor builds a circuit first,
+and so many times that under [Wait for answers](#network-use). A node that never answers ends in a failure, not a page that waits, however it fails to answer: the
 node itself, or a SOCKS or HTTP proxy on the way.
 
 **Retry:** what failed or took too long shows at the top of every page, in a sentence, with a
@@ -1336,7 +1369,9 @@ localStorage under one key, `chainv4-wallet`. Either way it holds:
 - the chain's name its node last said, by genesis, for the titles before the node answers;
 - what it sent that is not final yet, and what it proved, the newest 2,000;
 - what the coin is called on each chain, as a node last said, for [reading checked blocks](#read-from-checked-blocks);
-- the wallet last opened, the lock time, and the theme.
+- the wallet last opened, the lock time, and the theme;
+- Low data, Wait for answers, the trade deadline and how many transactions reading checked blocks
+  keeps.
 
 **A kill never loses a wallet.** Each file is written beside itself, flushed, read back, and only
 then renamed into place, so a kill or a lost battery leaves it as it was or as it became, and only

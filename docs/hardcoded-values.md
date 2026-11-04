@@ -15,6 +15,37 @@ with `MAX_RAW` folded in, and `multisig_members`; WebAssembly's recursion and st
 read). See [Governance](governance.md#what-else-each-kind-carries). See
 `docs/todo.md`, under Node, API and tooling, for what changed and what is still open.
 
+**Fixed since, by the settings batch:** every class C item of section 3 but the bridges' and the
+swaps' (the Bitcoin bridge's are another batch's), and section 2's fifth, sixth and eighth. Each is
+a flag or a `--tune` key defaulting to its old value, with bounds (see
+[Node](node.md#limits-and-tuning)):
+- **Network:** `--ban-score`, `--ban-window`, `--max-strikes`, `--strike-window`, `--tor-timeout`
+  and `--max-peers-in`; the server's sync caps (`sync.*`, which only go down), gossip batching
+  (`gossip.*`, the batch only down), the dial cadence (`dial.*`) and `peers.remembered`.
+- **HTTP and RPC:** `--http-rate` (per second, beside `--http-per-ip`), `--api-max-page`, the
+  per-client caps (`http.*`), `RangeLimits::SERVED` (`range.*`), the RPC limits (`rpc.*`), the
+  filter scan (`filter.scan`), and `MAX_BODY` derived from the governed `max_tx_bytes`, never under
+  2 MiB (`body_cap`).
+- **Mining:** the port's limits, the template refresh and solo payouts (`mining.*`), and the fee
+  suggestion's multiplier (`--suggest-multiplier`; the wallet's default tip stays 0).
+- **Node:** `--update-every`, `finality.pending` and `finality.evidence`, `chain.bad-blocks`, the
+  engine pools (`--lua-states`, `--lua-builders`, `--wasm-cache-mb`, `--wasm-cache-modules`) and
+  `node.event-budget`; `--underpriced-for` and `--state-history` take blocks or a time turned into
+  blocks at the block time, defaults unchanged; `UNBOUNDED_CHAIN_TXS` is documented as
+  `--max-block-txs`'s default on a chain bounded by neither bytes nor gas.
+- **Section 2's sixth:** `MAX_HISTORY` is now `max(64, withdrawal_delay + vote_depth)` epochs, at
+  most 4,096, as the finalized epoch's FFG settings have them. It is node-local: counted votes live
+  in `Column::Finality`, outside the state root.
+- **Section 4's snapshot `PIVOT_DEPTH` was moved out of "leave":** the syncing node picks its pivot
+  alone, and peers serve any block within their `--state-history`, so they need not agree. It is
+  `--snapshot-depth`, held to half `max_reorg_depth`, and the shortest chain a snapshot is taken of
+  follows it.
+- **Apps (class D):** the wallet's DEX trade deadline, one Low data switch for the refresh timers,
+  Wait for answers for the HTTP timeouts, and the reading caps (`MOST_BYTES`, `MOST_TXS`), in each
+  app's Settings.
+- **Left:** `MOST_SHARES` and `KEPT_BLOCKS` (bounded by `--pool-window` already), `SHARE_EVERY`, the
+  faucet's budget, the swaps' depths and deadlines (#10 and its rows), and the bridges' rows.
+
 **Classes:** A = governance (votable), B = genesis only, C = node operator flag or config, D = app setting, E = leave it.
 
 **Columns:**
@@ -180,7 +211,8 @@ The apps are already well covered: node, proxy, Esplora, EVM RPCs, IPFS gateway,
 - **Luau compiler levels and `MAX_INSTRUCTION_COST`** (`src/vm/lvm/compiler.rs:13-17`, `src/vm/lvm/mod.rs:37`): they change instruction counts and so fuel. That is consensus, and never a knob.
 - **`MOST_BOOTNODES` 32, `MOST_NAME_CHARS` 40, `MOST_EVM_GATEWAYS` 32.**
 - **DEX `MINIMUM_LIQUIDITY` 1000.**
-- **Snapshot `PIVOT_DEPTH` 16:** server and client must agree on it.
+- **Snapshot `PIVOT_DEPTH` 16:** listed here as needing server and client to agree, which they do
+  not; it is `--snapshot-depth` now (see above).
 - **The light client's step and bundle constants.**
 
 ---

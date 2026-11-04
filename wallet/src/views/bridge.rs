@@ -180,7 +180,7 @@ impl BridgeState {
         let key = key_of(&contract.to_string(), function, &args);
         let now = ctx.now as f64 / 1_000.0;
 
-        if self.asked.get(&key).is_none_or(|when| now - when > ASK_EVERY) {
+        if self.asked.get(&key).is_none_or(|when| now - when > ctx.settings.pace().every(ASK_EVERY)) {
             self.asked.insert(key.clone(), now);
             ctx.node.ask(Ask::Call(json!({ "contract": contract.to_string(), "function": function, "args": args, "purpose": "bridge" }).to_string()));
         }
@@ -634,7 +634,7 @@ fn sent(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Directo
             let key = (transfer.target, digest.clone());
 
             if let Some(url) = &url
-                && state.delivered_asked.get(&key).is_none_or(|when| ui.input(|input| input.time) - when > ASK_EVERY)
+                && state.delivered_asked.get(&key).is_none_or(|when| ui.input(|input| input.time) - when > ctx.settings.pace().every(ASK_EVERY))
             {
                 state.delivered_asked.insert(key.clone(), ui.input(|input| input.time));
                 let input = calldata("delivered(bytes32)", &[AbiType::FixedBytes(32)], &[AbiValue::FixedBytes(transfer.delivered_key())]);

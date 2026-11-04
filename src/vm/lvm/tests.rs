@@ -527,3 +527,17 @@ return M
     assert_eq!(run("read_by_address", &[]).unwrap(), [TxCallArgumentType::Bool(true)], "reading by one finds nothing");
 }
 
+
+#[test]
+fn a_pool_sized_on_the_node_gives_states_as_fresh_as_the_default_one() {
+    let small = LuaEngine::with_pool(1, 1);
+    let loaded = small.load(SCRIPT.as_bytes(), LIMITS).result.unwrap();
+    let fresh = contract().call(&func("count"), &[], host(), LIMITS);
+
+    // One state waiting, built by one thread: most calls build their own, and every one is the same.
+    for _ in 0..8 {
+        let pooled = small.run(&loaded.code, "count", &[], host(), LIMITS);
+
+        assert_eq!((pooled.result, pooled.fuel_used), (fresh.result.clone(), fresh.fuel_used));
+    }
+}

@@ -39,10 +39,15 @@ use {
     std::sync::{Arc, Mutex, PoisonError},
 };
 
-/// The most bytes an index holds, as encoded: its blocks but for their entries. About 18 days of the
-/// devnet's empty blocks on a desktop, and 4 on a phone or in a browser, whose room is another's, at
-/// about 400 bytes each. It is all in memory while the app is open.
+/// The most bytes an index holds, as encoded, unless Settings says otherwise: its blocks but for
+/// their entries. About 18 days of the devnet's empty blocks on a desktop, and 4 on a phone or in a
+/// browser, whose room is another's, at about 400 bytes each. It is all in memory while the app is
+/// open.
 pub const MOST_BYTES: u64 = if cfg!(any(target_os = "android", target_os = "ios", target_arch = "wasm32")) { 32_000_000 } else { 128_000_000 };
+/// The least and the most Settings may say: below the least, a bucket of blocks hardly fits; past
+/// the most, a phone or a browser runs out of memory long before.
+pub const LEAST_BYTES: u64 = 8_000_000;
+pub const MOST_BYTES_SET: u64 = 2_000_000_000;
 /// Seconds between writing out what changed.
 const SAVE_EVERY: f64 = 30.0;
 /// The most single blocks held that were fetched by themselves, outside the index.
@@ -371,6 +376,26 @@ impl Reading {
     /// Whether what it reads is kept for next time.
     pub fn lasts(&self) -> bool {
         self.lasting
+    }
+
+    /// Keeps at most this many bytes from now on: less than it holds lets the oldest blocks go at
+    /// once, and it says from what height it knows, as when it reads past the cap.
+    pub fn keep_most(&mut self, most: u64) {
+        if self.most == most {
+            return;
+        }
+
+        self.most = most;
+        let keeper = self.keeper.clone();
+
+        if let Some(open) = &mut self.open {
+            open.trim(&keeper, most);
+        }
+    }
+
+    /// How many bytes an index holds now, and the most it keeps.
+    pub fn bytes_kept(&self) -> (u64, u64) {
+        (self.open.as_ref().map_or(0, |open| open.index.bytes()), self.most)
     }
 
     /// Why the index could not be written, if it could not.

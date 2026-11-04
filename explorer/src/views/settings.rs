@@ -18,6 +18,21 @@ pub struct SettingsState {
     checkpoint: String,
 }
 
+/// How the explorer uses the network: Low data, and how long it waits for an answer. A new wait
+/// takes a new way to the node, as a new proxy does.
+pub(crate) fn network_use(ui: &mut Ui, ctx: &mut Ctx, connect: &mut Option<String>) {
+    let look = ctx.look;
+
+    super::section(ui, look, "Network use", |ui| {
+        let proxied = !cfg!(target_arch = "wasm32") && !ctx.settings.proxy.is_empty();
+        let (_, waits) = widgets::network_use(ui, &look.palette, &mut ctx.settings.low_data, &mut ctx.settings.patience, proxied);
+
+        if waits {
+            *connect = Some(ctx.settings.node.clone());
+        }
+    });
+}
+
 /// The settings page. The node being typed lives with the app, which connects to what is asked
 /// once the page is drawn, through the proxy then set.
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut SettingsState, streaming: &Streaming, connect: &mut Option<String>) {
@@ -117,6 +132,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
             *connect = Some(ctx.settings.node.clone());
         }
     });
+
+    network_use(ui, ctx, connect);
 
     super::section(ui, look, "Appearance", |ui| {
         ui.horizontal(|ui| {
@@ -223,4 +240,35 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::reading::tests::{SCREENS, drawn}};
+
+    /// The whole page, as Settings draws it, with Read from checked blocks on or off.
+    fn page(size: (f32, f32), on: bool) -> (f32, String) {
+        let mut state = SettingsState::default();
+        let (mut address, mut connect) = ("http://here".to_string(), None);
+
+        drawn(size, on, |ui, ctx| show(ui, ctx, &mut address, &mut state, &Streaming::Off, &mut connect))
+    }
+
+    #[test]
+    fn network_use_and_the_reading_cap_fit_every_screen_and_say_what_they_do() {
+        for size in SCREENS {
+            for on in [false, true] {
+                let (width, _) = page(size, on);
+                let (_, said) = page((size.0, 6_000.0), on);
+
+                assert!(width <= size.0 + 0.5, "{width} on a screen {} wide", size.0);
+
+                for words in ["NETWORK USE", "Low data", "Wait for answers", "Usual", "10×", "Keeps at most", "16 MB", "2 GB"] {
+                    assert!(said.contains(words), "{words} on {size:?}: {said}");
+                }
+
+                assert!(said.contains("gives up after 12 seconds without getting connected, and 30 seconds in all"), "today's waits: {said}");
+            }
+        }
+    }
 }

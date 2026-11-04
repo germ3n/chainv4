@@ -601,6 +601,29 @@ fn with_no_room_it_will_not_read_further_back_and_says_so_and_never_eats_what_it
 }
 
 #[test]
+fn a_smaller_cap_lets_the_oldest_blocks_go_at_once_and_says_from_where_it_knows() {
+    let fixture = long_chain(3 * BUCKET, &[]);
+    let mut reading = opened(&fixture);
+    reading.further_back(0);
+    fixture.read_all(&mut reading);
+    let (held, most) = reading.bytes_kept();
+
+    assert_eq!((most, reading.standing().unwrap().known_from), (MOST_BYTES, 0), "all of it, under the usual cap");
+
+    reading.keep_most(weight_of_blocks(&fixture, 3 * BUCKET / 2));
+    let standing = reading.standing().unwrap();
+
+    assert!(reading.bytes_kept().0 <= weight_of_blocks(&fixture, 3 * BUCKET / 2) && reading.bytes_kept().0 < held);
+    assert!(standing.known_from > 0 && standing.cut_below == Some(standing.known_from), "{standing:?}");
+    assert_eq!(standing.high, 3 * BUCKET, "the newest stay");
+
+    // Raised again, nothing comes back by itself, and nothing more goes.
+    reading.keep_most(MOST_BYTES);
+
+    assert_eq!(reading.standing().unwrap().known_from, standing.known_from);
+}
+
+#[test]
 fn what_a_block_keeps_is_what_the_pages_need_and_what_it_weighs_is_measured() {
     let mut fixture = Fixture::new();
 

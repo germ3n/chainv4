@@ -31,7 +31,7 @@ pub struct CollectionsState {
 
 /// The registry, asking again once it is old.
 pub fn registry(ctx: &mut Ctx) -> Option<Vec<RegisteredCollection>> {
-    let stale = ctx.store.collections.as_ref().is_none_or(|(_, when)| ctx.now.saturating_sub(*when) > REFRESH);
+    let stale = ctx.store.collections.as_ref().is_none_or(|(_, when)| ctx.now.saturating_sub(*when) > ctx.settings.pace().every_ms(REFRESH));
 
     if stale {
         ctx.api.ask(Ask::Collections(None));
@@ -316,7 +316,7 @@ fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
     let newest = Ask::Events { query: query.clone(), cursor: None };
     let found = ctx.store.events.get(&query);
 
-    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
+    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > ctx.settings.pace().every_ms(REFRESH)) {
         ctx.api.ask(newest.clone());
     }
 

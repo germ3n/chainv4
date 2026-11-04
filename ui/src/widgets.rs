@@ -642,6 +642,54 @@ pub fn bytes_said(count: u64) -> String {
     }
 }
 
+/// How much a reading of checked blocks keeps, in an app's settings: one of those offered, taken at
+/// once while it holds no more than that, and otherwise asked once, as what is past it goes at once
+/// and reading it again costs its download. `held` is what it holds now, in the cap's units, and
+/// `pending` the smaller cap waiting for that yes. Says whether the cap changed.
+pub fn reading_cap(ui: &mut Ui, palette: &Palette, set: &mut u64, offered: &[(u64, &str)], held: u64, pending: &mut Option<u64>) -> bool {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Keeps at most").color(palette.soft));
+
+        for (cap, words) in offered {
+            if ui.selectable_label(*set == *cap, *words).clicked() && *set != *cap {
+                picked = Some(*cap);
+            }
+        }
+    });
+
+    match picked {
+        Some(cap) if cap < held => *pending = Some(cap),
+        Some(cap) => {
+            *set = cap;
+            *pending = None;
+
+            return true;
+        }
+        None => {}
+    }
+
+    let Some(cap) = *pending else {
+        return false;
+    };
+    let words = offered.iter().find(|(offered, _)| *offered == cap).map_or("", |(_, words)| *words);
+    ui.add(egui::Label::new(RichText::new(format!("It holds more than {words}: the oldest past it go now, and reading them again costs their download.")).small().color(palette.warn)).wrap());
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        if quiet(ui, palette, "Yes, let them go").clicked() {
+            *set = cap;
+            *pending = None;
+            changed = true;
+        }
+
+        if quiet(ui, palette, "Keep them").clicked() {
+            *pending = None;
+        }
+    });
+
+    changed
+}
+
 /// What a page says that cannot work without asking a node, with the setting on: the reason in plain
 /// words, and the way to the setting. Whether that was pressed.
 pub fn needs_asking(ui: &mut Ui, palette: &Palette, why: &str) -> bool {
@@ -743,6 +791,42 @@ pub fn page_link(ui: &mut Ui, palette: &Palette, name: &str, about: &str) -> Res
         .response;
 
     ui.interact(drawn.rect, ui.scope_id().with(("page link", name)), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// What Wait for answers offers: as usual, and so many times as long.
+pub const PATIENCE_OFFERED: [(u32, &str); 4] = [(1, "Usual"), (2, "2×"), (4, "4×"), (10, "10×")];
+
+/// How an app uses the network, in its settings: Low data, which has it ask a few times less often,
+/// and Wait for answers, how long a request may take before the page says it got none, for Tor and
+/// I2P at their slowest. proxied says whether a proxy is set, which is given longer to start with.
+/// Says which changed: Low data, and how long requests wait, which takes a client made afresh.
+pub fn network_use(ui: &mut Ui, palette: &Palette, low_data: &mut bool, patience: &mut u32, proxied: bool) -> (bool, bool) {
+    let note = |ui: &mut Ui, text: String| ui.add(egui::Label::new(RichText::new(text).small().color(palette.muted)).wrap());
+    let low = ui.checkbox(low_data, "Low data").changed();
+    note(ui, format!(
+        "Asks the node {} times less often, and wakes {} times less often by itself, so balances, history and new blocks come in more slowly. For a metered connection, or to spare a phone's battery. What you ask for, retries and what the node's stream tells are not held back.",
+        crate::pace::LOW_DATA_TIMES, crate::pace::LOW_DATA_TIMES
+    ));
+    ui.add_space(8.0);
+    ui.label(RichText::new("Wait for answers").color(palette.soft));
+    // Settings kept before there was this say 0, which waits as 1 does.
+    let before = (*patience).max(1);
+    let mut picked = before;
+    segmented(ui, palette, &mut picked, &PATIENCE_OFFERED);
+
+    if picked != before {
+        *patience = picked;
+    }
+
+    let (whole, connect) = crate::net::waits(proxied, picked);
+    let (direct, through) = (crate::net::waits(false, picked).0, crate::net::waits(true, picked).0);
+    note(ui, match (cfg!(target_arch = "wasm32"), proxied) {
+        (true, _) => format!("A request gives up after {whole} seconds without an answer. Longer helps where the network is slow, as Tor Browser's often is; the page says it got none only once that is up."),
+        (false, true) => format!("Through the proxy, a request gives up after {connect} seconds without getting connected, and {whole} seconds in all: {direct} going direct. Longer helps over Tor or I2P at their slowest; a page says it got no answer only once that is up."),
+        (false, false) => format!("A request gives up after {connect} seconds without getting connected, and {whole} seconds in all: {through} through a proxy. Longer helps on a slow network; a page says it got no answer only once that is up."),
+    });
+
+    (low, picked != before)
 }
 
 /// Where a proxy is set, in an app's settings: a field with Use, which takes what is typed, then

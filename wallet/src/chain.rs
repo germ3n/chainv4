@@ -241,6 +241,8 @@ pub struct Chain {
     followed: f64,
     /// Whether the node's stream is open, to say when there is more to follow.
     pub streamed: bool,
+    /// How often it follows and proves again, by Low data: the app sets it from the setting.
+    pub pace: chainv4_ui::pace::Pace,
     proved: f64,
     /// Seconds until the next round of proofs, from the size of the last.
     prove_gap: f64,
@@ -272,9 +274,10 @@ pub struct Chain {
     pub receipts: HashMap<String, Proven<Landed>>,
     /// Transactions the node says touch an address, by address, newest first.
     pub mentions: HashMap<String, Vec<Mention>>,
-    /// What each of the node's indexes said of an address last, which mentions puts together.
-    by_address_index: HashMap<String, Vec<Mention>>,
-    by_event_index: HashMap<String, Vec<Mention>>,
+    /// What each of the node's indexes said of an address, the newest page and the older ones read
+    /// since, which mentions puts together.
+    by_address_index: HashMap<String, FilteredTxs>,
+    by_event_index: HashMap<String, FilteredTxs>,
     /// The chain's names, as the node said them, once it did; whether it has any, once known.
     pub names: Option<NamesConfig>,
     pub has_names: Option<bool>,
@@ -353,7 +356,7 @@ impl Chain {
 
     /// Whether to ask the node for more of the chain now.
     fn follow_due(&self, time: f64) -> bool {
-        time - self.followed >= if self.streamed { FOLLOW_STREAMED } else { FOLLOW_EVERY }
+        time - self.followed >= self.pace.every(if self.streamed { FOLLOW_STREAMED } else { FOLLOW_EVERY })
     }
 
     /// Asks again for all it follows and proves by, at once, whatever it is waiting for: for a
@@ -450,7 +453,7 @@ impl Chain {
         // The next pages of a listing go out as soon as the page before them came.
         let more = std::mem::take(&mut self.more);
 
-        if !self.caught_up() || time - self.proved < PROVE_EVERY.max(self.prove_gap) {
+        if !self.caught_up() || time - self.proved < self.pace.every(PROVE_EVERY).max(self.prove_gap) {
             return more;
         }
 
@@ -566,7 +569,7 @@ impl Chain {
         every.dedup();
 
         for name in every.into_iter().filter(|name| name_problem(name).is_none()) {
-            if self.named.get(&name).is_some_and(|asked| time - asked < PROVE_EVERY) {
+            if self.named.get(&name).is_some_and(|asked| time - asked < self.pace.every(PROVE_EVERY)) {
                 continue;
             }
 
@@ -613,7 +616,7 @@ impl Chain {
             };
             let key = to_hex(&key);
 
-            if self.nfts_asked.get(&key).is_some_and(|asked| time - asked < PROVE_EVERY) {
+            if self.nfts_asked.get(&key).is_some_and(|asked| time - asked < self.pace.every(PROVE_EVERY)) {
                 continue;
             }
 
@@ -666,6 +669,23 @@ impl Chain {
         (resolved.target().map(|target| target.to_string()).as_deref() == Some(address)).then(|| names.display(&chosen))
     }
 
+    /// What asks for the page after the last read of each of the node's indexes, for these
+    /// addresses: what Activity's Older transactions asks. None once every list was read to its end,
+    /// or before its newest page came.
+    pub fn older_pages(&self, addresses: &[String]) -> Vec<Ask> {
+        let next = |listed: &HashMap<String, FilteredTxs>, address: &String| listed.get(address).and_then(|listed| listed.next.clone());
+
+        addresses
+            .iter()
+            .flat_map(|address| {
+                let history = next(&self.by_address_index, address).map(|cursor| Ask::History { address: address.clone(), cursor: Some(cursor) });
+                let events = next(&self.by_event_index, address).map(|cursor| Ask::Events { address: address.clone(), cursor: Some(cursor) });
+
+                history.into_iter().chain(events)
+            })
+            .collect()
+    }
+
     /// Takes an answer meant for the chain. Returns false for one that is not.
     pub fn take(&mut self, ask: &Ask, result: &Result<Value, Failure>, trust: Trust, now: u64, time: f64) -> bool {
         let mine = matches!(
@@ -680,10 +700,10 @@ impl Chain {
                 | Ask::Receipt(_)
                 | Ask::SentReceipt(_)
                 | Ask::Tokens(_)
-                | Ask::History(_)
+                | Ask::History { .. }
                 | Ask::Filtered { .. }
                 | Ask::Finalized
-                | Ask::Events(_)
+                | Ask::Events { .. }
                 | Ask::Names
                 | Ask::OwnedNames { .. }
         );
@@ -699,7 +719,7 @@ impl Chain {
             (_, Err(failure)) if failure.status == crate::node::NEEDS_ASKING_STATUS => return true,
             // Not on the chain yet, or a node without the index asked of: nothing to show yet.
             (Ask::Receipt(_) | Ask::SentReceipt(_) | Ask::Proof { .. }, Err(failure)) if failure.status == 404 => return true,
-            (Ask::History(_) | Ask::Filtered { .. }, Err(failure)) if failure.status == 404 => {
+            (Ask::History { .. } | Ask::Filtered { .. }, Err(failure)) if failure.status == 404 => {
                 self.indexes_addresses = Some(false);
 
                 return true;
@@ -710,7 +730,7 @@ impl Chain {
 
                 return true;
             }
-            (Ask::Events(_), Err(failure)) if failure.status == 404 => {
+            (Ask::Events { .. }, Err(failure)) if failure.status == 404 => {
                 self.indexes_events = Some(false);
 
                 return true;
@@ -758,7 +778,7 @@ impl Chain {
                 Ask::Receipt(tx) | Ask::SentReceipt(tx) => {
                     self.refused.insert(tx.clone(), why);
                 }
-                Ask::Tokens(_) | Ask::History(_) | Ask::Filtered { .. } | Ask::Events(_) | Ask::Names | Ask::OwnedNames { .. } => {}
+                Ask::Tokens(_) | Ask::History { .. } | Ask::Filtered { .. } | Ask::Events { .. } | Ask::Names | Ask::OwnedNames { .. } => {}
                 _ => self.trouble = Some(why),
             },
         }
@@ -953,9 +973,9 @@ impl Chain {
 
                 Ok(())
             }
-            Ask::History(address) => {
+            Ask::History { address, cursor } => {
                 self.indexes_addresses = Some(true);
-                self.by_address_index.insert(address.clone(), mentions(&value["txs"], "id"));
+                self.by_address_index.entry(address.clone()).or_default().take(mentions(&value["txs"], "id"), value["next"].as_str().map(str::to_string), answered(value), cursor.is_some());
                 self.mentions.insert(address.clone(), together(self.by_address_index.get(address), self.by_event_index.get(address)));
 
                 Ok(())
@@ -968,9 +988,9 @@ impl Chain {
 
                 Ok(())
             }
-            Ask::Events(address) => {
+            Ask::Events { address, cursor } => {
                 self.indexes_events = Some(true);
-                self.by_event_index.insert(address.clone(), mentions(&value["events"], "tx"));
+                self.by_event_index.entry(address.clone()).or_default().take(mentions(&value["events"], "tx"), value["next"].as_str().map(str::to_string), Answered::default(), cursor.is_some());
                 self.mentions.insert(address.clone(), together(self.by_address_index.get(address), self.by_event_index.get(address)));
 
                 Ok(())
@@ -1259,8 +1279,8 @@ fn mentions(list: &Value, id_field: &str) -> Vec<Mention> {
 }
 
 /// What both of a node's indexes list of an address, newest first, each transaction once.
-fn together(first: Option<&Vec<Mention>>, second: Option<&Vec<Mention>>) -> Vec<Mention> {
-    let mut all: Vec<Mention> = first.into_iter().chain(second).flatten().cloned().collect();
+fn together(first: Option<&FilteredTxs>, second: Option<&FilteredTxs>) -> Vec<Mention> {
+    let mut all: Vec<Mention> = first.into_iter().chain(second).flat_map(|listed| &listed.mentions).cloned().collect();
     let mut seen = std::collections::HashSet::new();
 
     all.sort_by_key(|mention| std::cmp::Reverse(mention.height));
@@ -1385,6 +1405,21 @@ mod tests {
 
         chain.nudge();
         assert!(chain.follow_due(100.0), "it said");
+    }
+
+    #[test]
+    fn with_low_data_on_it_follows_a_quarter_as_often_and_still_at_once_when_the_stream_says() {
+        let mut chain = Chain { followed: 100.0, pace: chainv4_ui::pace::Pace::new(true), ..Chain::default() };
+
+        assert!(!chain.follow_due(100.0 + FOLLOW_EVERY), "not at the usual turn");
+        assert!(chain.follow_due(100.0 + 4.0 * FOLLOW_EVERY), "four times later");
+
+        chain.streamed = true;
+        assert!(!chain.follow_due(100.0 + FOLLOW_STREAMED));
+        assert!(chain.follow_due(100.0 + 4.0 * FOLLOW_STREAMED));
+
+        chain.nudge();
+        assert!(chain.follow_due(100.0), "what the stream tells is not held back");
     }
 
     struct Resumes {
@@ -1905,14 +1940,52 @@ mod mention_tests {
     #[test]
     fn what_both_indexes_list_of_an_address_comes_together_newest_first_each_once() {
         let mention = |tx: &str, height: u64| Mention { tx: tx.to_string(), height };
-        let by_address = vec![mention("0x03", 9), mention("0x01", 2)];
-        let by_event = vec![mention("0x04", 11), mention("0x03", 9), mention("0x02", 5)];
+        let listed = |mentions: Vec<Mention>| FilteredTxs { mentions, ..FilteredTxs::default() };
+        let by_address = listed(vec![mention("0x03", 9), mention("0x01", 2)]);
+        let by_event = listed(vec![mention("0x04", 11), mention("0x03", 9), mention("0x02", 5)]);
         let heights = |list: Vec<Mention>| list.iter().map(|mention| mention.height).collect::<Vec<_>>();
 
         assert_eq!(heights(together(Some(&by_address), Some(&by_event))), [11, 9, 5, 2], "a token's transfer only the event index found goes in");
         assert_eq!(heights(together(Some(&by_address), None)), [9, 2], "a node with one index lists what it lists");
         assert_eq!(heights(together(None, Some(&by_event))), [11, 9, 5]);
         assert!(together(None, None).is_empty());
+    }
+
+    #[test]
+    fn older_pages_of_both_indexes_go_on_from_their_cursors_and_newer_ones_go_in_front() {
+        let (mut pinned, checkpoints, saved) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let mut chain = Chain::default();
+        let address = "ed25519:0x01".to_string();
+        let mut answer = |chain: &mut Chain, ask: Ask, value: Value| {
+            let trust = Trust { node: "http://node", pinned: &mut pinned, checkpoints: &checkpoints, saved: &saved, fast_resume: false };
+
+            assert!(chain.take(&ask, &Ok(value), trust, 0, 0.0));
+        };
+        let txs = |list: &[(&str, u64)]| list.iter().map(|(id, height)| serde_json::json!({ "id": id, "height": height })).collect::<Vec<_>>();
+        let events = |list: &[(&str, u64)]| list.iter().map(|(tx, height)| serde_json::json!({ "tx": tx, "height": height })).collect::<Vec<_>>();
+        let heights = |chain: &Chain| chain.mentions[&address].iter().map(|mention| mention.height).collect::<Vec<_>>();
+        let newest = |cursor: Option<&str>| (Ask::History { address: address.clone(), cursor: cursor.map(str::to_string) }, Ask::Events { address: address.clone(), cursor: cursor.map(str::to_string) });
+
+        assert!(chain.older_pages(std::slice::from_ref(&address)).is_empty(), "nothing to go on from before the newest page");
+
+        let (history, event_list) = newest(None);
+        answer(&mut chain, history, serde_json::json!({ "txs": txs(&[("0x09", 9), ("0x08", 8)]), "next": "0xaa" }));
+        answer(&mut chain, event_list, serde_json::json!({ "events": events(&[("0x07", 7)]), "next": "0xbb" }));
+
+        assert_eq!(heights(&chain), [9, 8, 7]);
+        assert_eq!(chain.older_pages(std::slice::from_ref(&address)), [newest(Some("0xaa")).0, newest(Some("0xbb")).1], "each index's own cursor");
+
+        answer(&mut chain, newest(Some("0xaa")).0, serde_json::json!({ "txs": txs(&[("0x05", 5), ("0x03", 3)]), "next": null }));
+        answer(&mut chain, newest(Some("0xbb")).1, serde_json::json!({ "events": events(&[("0x04", 4)]), "next": "0xcc" }));
+
+        assert_eq!(heights(&chain), [9, 8, 7, 5, 4, 3], "older pages go after what was read");
+        assert_eq!(chain.older_pages(std::slice::from_ref(&address)), [newest(Some("0xcc")).1], "the address index is read to its end");
+
+        // The newest page asked again, as it is every few seconds, keeps what older pages found.
+        answer(&mut chain, newest(None).0, serde_json::json!({ "txs": txs(&[("0x10", 10), ("0x09", 9)]), "next": "0xaa" }));
+
+        assert_eq!(heights(&chain), [10, 9, 8, 7, 5, 4, 3]);
+        assert_eq!(chain.older_pages(std::slice::from_ref(&address)), [newest(Some("0xcc")).1], "and where they got to");
     }
 
     fn at(height: u64) -> Assurance {

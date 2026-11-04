@@ -109,6 +109,20 @@ the node failing.
 or `off`), and `EXTRA_ARGS` for anything else
 `chainv4` takes. `docker/entrypoint.sh` has them all.
 
+**The node's limits,** each the flag of its name and passed on only when set, so one left empty keeps
+chainv4's own default (see [Node](node.md#limits-and-tuning) for defaults and bounds):
+- the mempool's: `MEMPOOL_SIZE`, `MEMPOOL_PER_SENDER`, `MAX_NONCE_GAP`, `REPLACE_BUMP_PERCENT` and
+  `UNDERPRICED_FOR`;
+- sync's: `SYNC_BATCH_BYTES`;
+- peers': `MAX_PEERS_IN`, `BAN_SCORE`, `BAN_WINDOW`, `MAX_STRIKES`, `STRIKE_WINDOW` and `TOR_TIMEOUT`;
+- the API's: `HTTP_RATE`, `API_MAX_PAGE` and `SUGGEST_MULTIPLIER`. nginx in front already limits each
+  address to `RATE_API` a second; `HTTP_RATE` is the node's own, per client as nginx names it, for a
+  node reached around nginx too;
+- the engines': `LUA_STATES`, `LUA_BUILDERS`, `WASM_CACHE_MB` and `WASM_CACHE_MODULES`;
+- `UPDATE_EVERY`, and `TUNE`, `KEY=VALUE,...` for `--tune`.
+
+`docker/.env.example` lists each with its default.
+
 ### Firewall
 
 With `ufw` on, rootful Podman's containers stop working until it is told about them: they get no DNS,

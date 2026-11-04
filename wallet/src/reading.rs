@@ -61,8 +61,13 @@ const PROOF_AGAIN: f64 = 15.0;
 const CATCH_UP_EVERY: f64 = 300.0;
 /// The most proofs out at once.
 const PROOFS_AT_ONCE: usize = 8;
-/// The most transactions kept, the newest: an address that busy shows what it can.
-const MOST_TXS: usize = 20_000;
+/// The most transactions kept, the newest, unless Settings says otherwise: an address that busy shows
+/// what it can.
+pub(crate) const MOST_TXS: usize = 20_000;
+/// The fewest and the most Settings may say: they are all in memory while the wallet is open, sealed
+/// and written out whole each time they change.
+pub(crate) const LEAST_TXS: usize = 1_000;
+pub(crate) const MOST_TXS_SET: usize = 500_000;
 
 /// What an entry in the state is, to this wallet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +188,8 @@ struct Open {
     fresh: Vec<String>,
     /// What to start from, once it can: a wallet's height, or one someone picked.
     floor: Option<u64>,
+    /// The most transactions it keeps.
+    most_txs: usize,
 }
 
 /// What opening an index came to, once a shelf answers.
@@ -205,11 +212,13 @@ pub struct Reading {
     open: Option<Open>,
     /// What to tell someone of the index, until they have seen it.
     pub said: Vec<String>,
+    /// The most transactions an index keeps, as Settings says.
+    most_txs: usize,
 }
 
 impl Default for Reading {
     fn default() -> Reading {
-        Reading { keeper: Keeper::new(Arc::new(MemoryShelf::default())), lasting: false, opening: None, open: None, said: Vec::new() }
+        Reading { keeper: Keeper::new(Arc::new(MemoryShelf::default())), lasting: false, opening: None, open: None, said: Vec::new(), most_txs: MOST_TXS }
     }
 }
 
@@ -350,14 +359,14 @@ impl Index {
     }
 
     /// Lets go of the oldest transactions past what is kept.
-    fn trim(&mut self) {
-        if self.txs.len() <= MOST_TXS {
+    fn trim(&mut self, most: usize) {
+        if self.txs.len() <= most {
             return;
         }
 
         let mut heights: Vec<u64> = self.txs.values().map(|tx| tx.height).collect();
         heights.sort_unstable();
-        let cut = heights[heights.len() - MOST_TXS];
+        let cut = heights[heights.len() - most];
         self.txs.retain(|_, tx| tx.height >= cut);
         self.cut_below = Some(self.cut_below.map_or(cut, |below| below.max(cut)));
     }
@@ -483,7 +492,7 @@ fn names_in(tx: &Tx) -> Vec<String> {
 }
 
 impl Open {
-    fn new(name: String, vault_key: Zeroizing<[u8; 32]>, key: Zeroizing<[u8; 32]>, genesis: String, index: Index, floor: Option<u64>) -> Open {
+    fn new(name: String, vault_key: Zeroizing<[u8; 32]>, key: Zeroizing<[u8; 32]>, genesis: String, index: Index, floor: Option<u64>, most_txs: usize) -> Open {
         let scanner = index.place.clone().map(Scanner::new);
         let fresh = index.txs.keys().cloned().collect();
         let mut open = Open {
@@ -506,6 +515,7 @@ impl Open {
             addresses: Vec::new(),
             fresh,
             floor,
+            most_txs,
         };
 
         open.rewatch();
@@ -667,7 +677,7 @@ impl Open {
         }
 
         self.index.fees.take(height, &hints, price);
-        self.index.trim();
+        self.index.trim(self.most_txs);
         self.dirty = true;
         self.stale_view = true;
     }
@@ -706,7 +716,7 @@ impl Reading {
     /// A reading whose indexes are kept by this keeper. Whether they last says whether this keeper's
     /// shelf is more than memory, for the page to say.
     pub fn new(keeper: Keeper, lasting: bool) -> Reading {
-        Reading { keeper, lasting, opening: None, open: None, said: Vec::new() }
+        Reading { keeper, lasting, opening: None, open: None, said: Vec::new(), most_txs: MOST_TXS }
     }
 
     /// Whether an index is open: only while its wallet is unlocked.
@@ -717,6 +727,32 @@ impl Reading {
     /// Whether what it reads is kept for next time.
     pub fn lasts(&self) -> bool {
         self.lasting
+    }
+
+    /// Keeps at most this many transactions from now on, the newest: fewer than it holds lets the
+    /// oldest go at once, and what was cut is said, as when there are too many.
+    pub fn keep_most_txs(&mut self, most: usize) {
+        if self.most_txs == most {
+            return;
+        }
+
+        self.most_txs = most;
+
+        if let Some(open) = &mut self.open {
+            open.most_txs = most;
+            let held = open.index.txs.len();
+            open.index.trim(most);
+
+            if open.index.txs.len() < held {
+                open.dirty = true;
+                open.stale_view = true;
+            }
+        }
+    }
+
+    /// How many transactions an index holds, and the most it keeps.
+    pub fn txs_kept(&self) -> (usize, usize) {
+        (self.open.as_ref().map_or(0, |open| open.index.txs.len()), self.most_txs)
     }
 
     /// Whether it needs telling what height to start from: a restored wallet, whose history could
@@ -936,7 +972,7 @@ impl Reading {
             }
         };
 
-        self.open = Some(Open::new(opening.name, opening.vault_key, key, opening.genesis, index, None));
+        self.open = Some(Open::new(opening.name, opening.vault_key, key, opening.genesis, index, None, self.most_txs));
     }
 
     /// Takes what came of blocks asked for.

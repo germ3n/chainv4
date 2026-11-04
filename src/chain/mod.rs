@@ -25,7 +25,7 @@ use {
     crate::structs::u256::{U256Le, u256},
     crate::structs::vote::Checkpoint,
     crate::structs::vote::Justification,
-    crate::vm::{Limits, Vm},
+    crate::vm::{EnginePools, Limits, Vm},
     r#macro::document,
     std::collections::{BTreeSet, HashSet, VecDeque},
     std::fmt,
@@ -71,7 +71,7 @@ pub use finality::AuthorityConfig;
 #[cfg(feature = "finality-depth")]
 pub use finality::DepthConfig;
 pub use finality::{
-    Evidence, Finality, FinalityConfig, FinalityError, FinalityUpdate, View, stored_evidence, stored_finality,
+    Evidence, Finality, FinalityConfig, FinalityError, FinalityUpdate, View, VoteBounds, stored_evidence, stored_finality,
     stored_justification,
 };
 #[cfg(feature = "finality-ffg")]
@@ -128,11 +128,37 @@ const HISTORY_FROM_KEY: &[u8] = b"history-from";
 pub const DEFAULT_STATE_HISTORY: u64 = 10_000;
 
 #[document(
-    summary = "How many blocks that failed to run a node remembers across restarts, newest kept: 1,024. A branch past that is run again before it is refused, as every one was before the memory outlived a restart.",
+    summary = "How many blocks that failed to run a node remembers across restarts, newest kept, unless --tune chain.bad-blocks says otherwise: 1,024. A branch past that is run again before it is refused, as every one was before the memory outlived a restart.",
     category = "Chain",
-    see_also = "Chain::import, BlockError::Bad",
+    see_also = "Chain::import, BlockError::Bad, ChainOptions::bad_blocks",
 )]
 pub const MAX_BAD_BLOCKS: usize = 1_024;
+
+#[document(
+    summary = "What a node's operator sizes of its chain: the engines' pools and caches, and how many bad blocks, waiting votes and pieces of evidence it remembers. None of it is consensus: it changes how fast and with how much memory a node gets to the same state, never which. Chain::open_with takes it; Chain::open takes DEFAULT.",
+    category = "Chain",
+    see_also = "Chain::open_with, EnginePools, VoteBounds",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainOptions {
+    #[document(summary = "Lua's pool of states and WebAssembly's module cache: --lua-states, --lua-builders, --wasm-cache-mb and --wasm-cache-modules.")]
+    pub pools: EnginePools,
+    #[document(summary = "How many blocks that failed to run it remembers: MAX_BAD_BLOCKS by default.")]
+    pub bad_blocks: usize,
+    #[document(summary = "How many votes waiting and pieces of evidence finality holds.")]
+    pub votes: VoteBounds,
+}
+
+impl ChainOptions {
+    #[document(parent = "ChainOptions", summary = "What every node had before these were sized on the node.")]
+    pub const DEFAULT: ChainOptions = ChainOptions { pools: EnginePools::DEFAULT, bad_blocks: MAX_BAD_BLOCKS, votes: VoteBounds::DEFAULT };
+}
+
+impl Default for ChainOptions {
+    fn default() -> ChainOptions {
+        ChainOptions::DEFAULT
+    }
+}
 
 #[document(
     summary = "Funds an address holds from the start.",
@@ -1103,6 +1129,10 @@ pub struct Chain {
     /// is oldest.
     bad: HashSet<Hash>,
     bad_order: VecDeque<Hash>,
+    /// How many bad blocks it remembers, MAX_BAD_BLOCKS unless its operator said otherwise.
+    most_bad: usize,
+    /// How many votes waiting and pieces of evidence finality holds.
+    vote_bounds: VoteBounds,
     /// Stored blocks no stored block builds on yet, which a justification may move the chain to.
     /// Ordered, so they are kept, and GET /forks lists them, the same way every time.
     tips: BTreeSet<Hash>,
@@ -1205,6 +1235,16 @@ impl Chain {
         returns = "The chain; WrongGenesis when the database holds a different chain, MissingEngine when this node lacks an engine genesis allows.",
     )]
     pub fn open(db: Arc<dyn Database>, genesis: &Genesis) -> Result<Chain, ChainError> {
+        Chain::open_with(db, genesis, ChainOptions::DEFAULT)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Opens the chain as open does, with what this node's operator sized: the engines' pools, and how many bad blocks, waiting votes and pieces of evidence it remembers. None of it is consensus.",
+        returns = "As open.",
+        see_also = "ChainOptions",
+    )]
+    pub fn open_with(db: Arc<dyn Database>, genesis: &Genesis, options: ChainOptions) -> Result<Chain, ChainError> {
         if let Some(problem) = genesis.problem() {
             return Err(ChainError::BadGenesis(problem.to_string()));
         }
@@ -1212,7 +1252,7 @@ impl Chain {
         let block = genesis.block();
         let id = block.id();
         let vm = Arc::new(
-            Vm::new(&genesis.engines, genesis.hash)
+            Vm::with_pools(&genesis.engines, genesis.hash, options.pools)
                 .map_err(ChainError::MissingEngine)?
                 .with_names(genesis.names.clone())
                 .with_federation(genesis.federation.clone())
@@ -1271,7 +1311,7 @@ impl Chain {
         let tips = read_value::<Leaves>(&*db, Column::Meta, TIPS_KEY)?.map_or_else(|| vec![tip_id], |leaves| leaves.blocks);
         let workers = Arc::new(Workers::new());
         let finality = match &genesis.finality {
-            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers))?),
+            Some(config) => Some(config.build(&View::new(&db, &tip.header, id, genesis.max_reorg_depth, &workers, options.votes))?),
             None => None,
         };
         let events = index::events_up_to_date(&db, index::stored_index(&*db, IndexKind::Events)?, tip.header.height)?;
@@ -1305,6 +1345,8 @@ impl Chain {
             max_block_bytes: genesis.max_block_bytes,
             bad: bad_order.iter().copied().collect(),
             bad_order,
+            most_bad: options.bad_blocks.max(1),
+            vote_bounds: options.votes,
             tips: tips.into_iter().collect(),
             finality_config: genesis.finality.clone(),
             finality,
@@ -2298,7 +2340,7 @@ impl Chain {
             }
         }
 
-        while self.bad_order.len() > MAX_BAD_BLOCKS {
+        while self.bad_order.len() > self.most_bad {
             if let Some(oldest) = self.bad_order.pop_front() {
                 self.bad.remove(&oldest);
             }
@@ -2312,7 +2354,7 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "The blocks this node remembers as failing to run, oldest first: it refuses them and anything built on them without running them again. The last MAX_BAD_BLOCKS, kept across restarts.",
+        summary = "The blocks this node remembers as failing to run, oldest first: it refuses them and anything built on them without running them again. The last MAX_BAD_BLOCKS, or as many as ChainOptions::bad_blocks says, kept across restarts.",
     )]
     pub fn bad_blocks(&self) -> Vec<Hash> {
         self.bad_order.iter().copied().collect()

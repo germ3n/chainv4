@@ -14,6 +14,7 @@ use {
     libp2p::{Multiaddr, PeerId},
     r#macro::document,
     std::sync::{Arc, mpsc},
+    std::time::Duration,
     tokio::sync::mpsc as async_mpsc,
     tokio::sync::oneshot,
     wincode::{SchemaRead, SchemaWrite},
@@ -30,7 +31,7 @@ pub use backlog::{Admission, Backlog, BacklogLimits, MAX_STRIKES, Origin, STRIKE
 pub use bans::{BAN_SCORE, BanLimits, Bans, DEFAULT_BAN, Fault, SCORE_WINDOW, Verdict};
 pub use key::{NET_KEY_FILE, net_key};
 
-pub use swarm::{NetError, TX_BATCH, TX_BATCH_WAIT, spawn};
+pub use swarm::{BOOTSTRAP_EVERY, DIALS_AT_ONCE, NetError, REDIAL_EVERY, RETRY_PEER_AFTER, TX_BATCH, TX_BATCH_WAIT, spawn};
 
 /// The most blocks one sync response carries, fewer when SYNC_BATCH_BYTES binds first.
 pub const MAX_SYNC_BLOCKS: u32 = 128;
@@ -297,6 +298,50 @@ pub struct NetConfig {
     pub bans: BanLimits,
     #[document(summary = "Peer-to-peer over Tor: the proxy onions are dialed through, Tor alone, and the node's onion.")]
     pub tor: tor::TorConfig,
+    #[document(summary = "How many peers may dial in, and how gossip is batched and peers dialed: NetTuning::DEFAULT unless --max-peers-in or --tune say otherwise.")]
+    pub tuning: NetTuning,
+}
+
+#[document(
+    summary = "What an operator may tune of the network beyond NetConfig's own fields: how many connections peers that dial in may hold, how transactions are batched for gossip, and how often and how many peers are dialed. None of it is consensus; each node picks its own. Set with --max-peers-in and --tune's gossip. and dial. keys.",
+    category = "Node",
+    see_also = "NetConfig::tuning",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetTuning {
+    #[document(summary = "The most connections peers that dialed in may hold at once: past it, a new one is refused as it is made. None takes every one, as before. Peers this node dials are not counted.")]
+    pub max_peers_in: Option<u32>,
+    #[document(summary = "The most transactions one gossiped batch this node sends holds: TX_BATCH at most, which every node takes, and fewer sends smaller batches more often.")]
+    pub tx_batch: usize,
+    #[document(summary = "The longest a transaction waits for others to share its batch.")]
+    pub tx_batch_wait: Duration,
+    #[document(summary = "How often --peer's peers are dialed again while no connection to one stands, and discovery runs.")]
+    pub redial_every: Duration,
+    #[document(summary = "How often Kademlia looks for peers near this node.")]
+    pub bootstrap_every: Duration,
+    #[document(summary = "How many peers Kademlia knows are dialed at once while the node has fewer than it wants.")]
+    pub dials_at_once: usize,
+    #[document(summary = "How long before a peer Kademlia knows, dialed once, is dialed again.")]
+    pub retry_after: Duration,
+}
+
+impl NetTuning {
+    #[document(parent = "NetTuning", summary = "What every node did before these were tuned: no cap on peers that dial in, batches of TX_BATCH within TX_BATCH_WAIT, a redial every REDIAL_EVERY, a bootstrap every BOOTSTRAP_EVERY, DIALS_AT_ONCE dials at once and RETRY_PEER_AFTER between dials to one peer.")]
+    pub const DEFAULT: NetTuning = NetTuning {
+        max_peers_in: None,
+        tx_batch: TX_BATCH,
+        tx_batch_wait: TX_BATCH_WAIT,
+        redial_every: REDIAL_EVERY,
+        bootstrap_every: BOOTSTRAP_EVERY,
+        dials_at_once: DIALS_AT_ONCE,
+        retry_after: RETRY_PEER_AFTER,
+    };
+}
+
+impl Default for NetTuning {
+    fn default() -> NetTuning {
+        NetTuning::DEFAULT
+    }
 }
 
 #[document(

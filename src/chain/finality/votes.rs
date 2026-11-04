@@ -30,16 +30,17 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
-/// Votes a node holds while it cannot count them yet: their checkpoints are not on its main
-/// chain, or their source is not justified yet.
-const MAX_PENDING: usize = 4_096;
-/// Pieces of evidence a node keeps for operators to report.
-const MAX_EVIDENCE: usize = 64;
-/// Votes per validator kept to catch one vote surrounding another.
+/// Votes per validator kept, and epochs of counted votes behind the finalized checkpoint, to
+/// catch one vote surrounding another: at least this, and under FFG long enough to cover how long
+/// a bond stays slashable once its validator leaves, withdrawal_delay epochs, with vote_depth to
+/// spare, so a surround signed before the bond can be withdrawn is still caught.
 pub(super) const MAX_HISTORY: usize = 64;
+/// The most epochs that may stretch to, whatever withdrawal_delay governance votes: each voter
+/// keeps a vote an epoch in memory, so this bounds what a thousand validators take.
+const MOST_HISTORY: u64 = 4_096;
 /// How far back a producer looks for justifications whose voters are still unpaid.
 const UNPAID_WINDOW: u64 = 64;
-/// Counted votes, by target epoch and voter. Kept MAX_HISTORY epochs behind the finalized
+/// Counted votes, by target epoch and voter. Kept the history's epochs behind the finalized
 /// checkpoint, so a vote surrounding one of them is still caught after a restart.
 pub(super) const COUNTED: &[u8] = b"v:";
 /// Votes held back to count later, by target epoch and the whole vote, as many as the node holds
@@ -87,6 +88,17 @@ pub(super) trait Electorate: Send {
     fn leak(&self) -> Option<Leak> {
         None
     }
+
+    /// How many epochs of a voter's counted votes to keep, to catch one vote surrounding another,
+    /// as the kind an epoch runs: MAX_HISTORY, or more where a bond stays slashable for longer.
+    fn history(&self, _state: &State, _epoch: u64) -> Result<u64, DbError> {
+        Ok(MAX_HISTORY as u64)
+    }
+}
+
+/// The history a kind's slashable window asks for, held between MAX_HISTORY and MOST_HISTORY.
+pub(super) fn history_for(withdrawal_delay: u64, vote_depth: u64) -> u64 {
+    withdrawal_delay.saturating_add(vote_depth).clamp(MAX_HISTORY as u64, MOST_HISTORY)
 }
 
 /// Votes for one link, and the weight they add up to.
@@ -177,6 +189,9 @@ pub(super) struct Votes<E> {
     pending: Held,
     seen: HashMap<(PublicKey, u64), SignedVote>,
     history: HashMap<PublicKey, VecDeque<SignedVote>>,
+    /// How many epochs of counted votes are kept, and votes per voter: the electorate's history
+    /// as of the finalized checkpoint.
+    keep: u64,
 }
 
 /// Votes held back until they can be counted, oldest first, and by voter: what is held, and what
@@ -252,9 +267,11 @@ impl<E: Electorate> Votes<E> {
             pending: Held::default(),
             seen: HashMap::new(),
             history: HashMap::new(),
+            keep: MAX_HISTORY as u64,
         };
         let finalized = votes.finalized.epoch;
-        let counted = stored_votes(db, COUNTED, finalized.saturating_sub(MAX_HISTORY as u64))?;
+        votes.keep = votes.electorate.history(&chain.state(), finalized)?;
+        let counted = stored_votes(db, COUNTED, finalized.saturating_sub(votes.keep))?;
         let (past, open): (Vec<_>, Vec<_>) = counted.into_iter().partition(|vote| vote.vote.target.epoch <= finalized);
 
         // Votes for final epochs only feed double-vote detection; the rest are counted again,
@@ -356,7 +373,7 @@ impl<E: Electorate> Votes<E> {
         if !history.contains(vote) {
             history.push_back(*vote);
 
-            if history.len() > MAX_HISTORY {
+            if history.len() as u64 > self.keep {
                 history.pop_front();
             }
         }
@@ -397,7 +414,7 @@ impl<E: Electorate> Votes<E> {
         if !stored.contains(&evidence) {
             stored.push(evidence);
 
-            if stored.len() > MAX_EVIDENCE {
+            if stored.len() > chain.bounds().evidence.max(1) {
                 stored.remove(0);
             }
 
@@ -438,7 +455,7 @@ impl<E: Electorate> Votes<E> {
             if !self.pending.contains(&vote) {
                 let state = State::new(chain.db().clone());
 
-                if self.pending.len() >= MAX_PENDING
+                if self.pending.len() >= chain.bounds().pending.max(1)
                     && let Some(dropped) = self.pending.pop_front()
                 {
                     state.delete(Column::Finality, held_key(&dropped));
@@ -755,8 +772,11 @@ impl<E: Electorate> Finality for Votes<E> {
             self.links.retain(|(_, target), _| target.epoch > finalized);
             self.seen.retain(|(_, epoch), _| *epoch > finalized);
 
-            // Counted votes stay a while, to catch one vote surrounding another; then they go.
-            if let Some(oldest) = finalized.checked_sub(MAX_HISTORY as u64) {
+            // Counted votes stay a while, to catch one vote surrounding another; then they go. How
+            // long follows the slashable window as it stands now, which governance may change.
+            self.keep = self.electorate.history(&chain.state(), finalized)?;
+
+            if let Some(oldest) = finalized.checked_sub(self.keep) {
                 chain.db().scan(Column::Finality, COUNTED, COUNTED, &mut |key, _| {
                     let old = epoch_in(COUNTED, key) <= oldest;
 

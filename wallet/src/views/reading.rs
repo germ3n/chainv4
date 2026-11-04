@@ -53,10 +53,28 @@ pub struct ReadingState {
     trouble: Option<String>,
     /// Asked once whether to forget what was read.
     forgetting: bool,
+    /// A smaller cap on what it keeps, waiting to be asked whether to let the rest go.
+    cap_pending: Option<u64>,
 }
 
 /// Where the checks hold against whoever serves a page.
 const APPS_THAT_HOLD: &str = "the desktop and phone apps, and the browser extension";
+
+/// The caps on transactions kept that Settings offers, crate::reading::MOST_TXS the usual.
+const TXS_OFFERED: [(u64, &str); 4] = [(5_000, "5,000"), (20_000, "20,000"), (100_000, "100,000"), (500_000, "500,000")];
+
+/// How many transactions it keeps: one of TXS_OFFERED.
+fn cap(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReadingState) {
+    let palette = *ctx.palette;
+    let (held, _) = ctx.reading.txs_kept();
+    let mut set = ctx.settings.reading_txs() as u64;
+
+    if widgets::reading_cap(ui, &palette, &mut set, &TXS_OFFERED, held as u64, &mut state.cap_pending) {
+        ctx.settings.reading_txs = set as usize;
+    }
+
+    ui.add(egui::Label::new(RichText::new(format!("transactions, the newest, {} as usual. Past it the oldest go, and Activity says from what height it shows them. All are in memory while the wallet is open.", format::thousands(&crate::reading::MOST_TXS.to_string()))).small().color(palette.muted)).wrap());
+}
 
 /// The setting, in Settings: everything it does, costs and cannot do, then where it stands.
 pub fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReadingState) {
@@ -89,6 +107,8 @@ pub fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReadingState) {
                 ui.add_space(4.0);
             }
         });
+        ui.add_space(4.0);
+        cap(ui, ctx, state);
 
         if ctx.settings.read_blocks {
             ui.add_space(6.0);

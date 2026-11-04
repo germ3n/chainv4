@@ -29,17 +29,43 @@ const FIRST_RANGE: u64 = 1 << 60;
 pub const SPAN: u64 = 1 << 48;
 /// How many ranges there are before they come round again: they fit in a u64 from FIRST_RANGE.
 const RANGES: u64 = 1 << 15;
-/// The most connections, workers and handshakes together, the port takes at once.
-const MOST_CONNECTIONS: usize = 256;
-/// The most of those any one address but loopback may hold: a rig runs several workers from one
-/// place, but no host fills the port by itself. Loopback is exempt, as the node's own WebSocket
-/// relay comes from it; browsers mining through the relay are capped per address at the HTTP layer.
-const MOST_PER_IP: usize = 32;
-/// How long a connection has to finish its handshake.
-const HANDSHAKE: Duration = Duration::from_secs(10);
 pub use super::protocol::{PING, QUIET};
-/// The most devices one worker's rates may name.
-const MOST_DEVICES: usize = 64;
+
+#[document(
+    summary = "What the mining port takes at once, and from whom: set with --tune's mining. keys. None of it is consensus.",
+    category = "Node",
+    see_also = "MiningPort::limits",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortLimits {
+    #[document(summary = "The most connections, workers and handshakes together, the port takes at once: 256 by default.")]
+    pub connections: usize,
+    #[document(summary = "The most of those any one address but loopback may hold: 32 by default. A rig runs several workers from one place, but no host fills the port by itself. Loopback is exempt, as the node's own WebSocket relay comes from it; browsers mining through the relay are capped per address at the HTTP layer.")]
+    pub per_ip: usize,
+    #[document(summary = "How long a connection has to finish its handshake: 10 seconds by default.")]
+    pub handshake: Duration,
+    #[document(summary = "The most devices one worker's rates may name: 64 by default.")]
+    pub devices: usize,
+    #[document(summary = "The most payouts mining alone the node builds templates for, each a block built every template refresh: 16 by default, MOST_SOLO.")]
+    pub solo: usize,
+}
+
+impl PortLimits {
+    #[document(parent = "PortLimits", summary = "What every mining port took before these were tuned: 256 connections, 32 from one address, a 10-second handshake, 64 devices a worker and MOST_SOLO payouts mining alone.")]
+    pub const DEFAULT: PortLimits = PortLimits {
+        connections: 256,
+        per_ip: 32,
+        handshake: Duration::from_secs(10),
+        devices: 64,
+        solo: crate::node::MOST_SOLO,
+    };
+}
+
+impl Default for PortLimits {
+    fn default() -> PortLimits {
+        PortLimits::DEFAULT
+    }
+}
 /// How often a pool tells each worker how it stands.
 #[cfg(feature = "pool")]
 const STANDING_EVERY: Duration = Duration::from_secs(30);
@@ -73,6 +99,8 @@ pub struct MiningPort {
     pub releases: Option<Arc<crate::node::Releases>>,
     #[document(summary = "Whether it takes workers mining alone, --mining-solo: each is handed a block of its own, whose reward goes to its payout in full.")]
     pub solo: bool,
+    #[document(summary = "How many connections it takes at once and from one address, how long a handshake may take, how many devices a worker may name and how many payouts may mine alone.")]
+    pub limits: PortLimits,
 }
 
 impl std::fmt::Debug for MiningPort {
@@ -125,6 +153,8 @@ struct State {
     /// Whether it takes workers mining alone, and their payouts, by connection.
     solo: bool,
     solos: Mutex<BTreeMap<u64, Address>>,
+    /// What the port takes at once, and from whom.
+    limits: PortLimits,
     #[cfg(feature = "pool")]
     books: Option<Books>,
     /// The releases the node fetches, told to workers as they connect.
@@ -402,6 +432,7 @@ impl Pool {
             workers: Mutex::new(BTreeMap::new()),
             solo: port.solo,
             solos: Mutex::new(BTreeMap::new()),
+            limits: port.limits,
             #[cfg(feature = "updates")]
             releases: port.releases,
             #[cfg(feature = "pool")]
@@ -596,8 +627,10 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
             Ok((stream, peer)) => {
                 connections.retain(|(_, connection)| !connection.is_finished());
 
-                if connections.len() >= MOST_CONNECTIONS {
-                    log::warn!("[mining] {peer}: {MOST_CONNECTIONS} connections already; turned away");
+                let limits = state.limits;
+
+                if connections.len() >= limits.connections {
+                    log::warn!("[mining] {peer}: {} connections already; turned away", limits.connections);
 
                     continue;
                 }
@@ -607,8 +640,8 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
                 // machine comes from loopback, and its own per-IP cap stands at the HTTP layer.
                 let ip = peer.ip();
 
-                if !ip.is_loopback() && connections.iter().filter(|(had, _)| *had == ip).count() >= MOST_PER_IP {
-                    log::warn!("[mining] {peer}: {MOST_PER_IP} connections from this address already; turned away");
+                if !ip.is_loopback() && connections.iter().filter(|(had, _)| *had == ip).count() >= limits.per_ip {
+                    log::warn!("[mining] {peer}: {} connections from this address already; turned away", limits.per_ip);
 
                     continue;
                 }
@@ -663,7 +696,7 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
         streams.insert(number, stream.try_clone().map_err(|err| err.to_string())?);
     }
 
-    stream.set_read_timeout(Some(HANDSHAKE)).map_err(|err| err.to_string())?;
+    stream.set_read_timeout(Some(state.limits.handshake)).map_err(|err| err.to_string())?;
     #[cfg_attr(not(feature = "pool"), allow(unused_mut))]
     let (mut sender, mut receiver, hello) = protocol::accept(stream.try_clone().map_err(|err| err.to_string())?, &state.token, &state.protocol)?;
     stream.set_read_timeout(Some(QUIET)).map_err(|err| err.to_string())?;
@@ -677,13 +710,13 @@ fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -
                 let mut solos = State::lock(&state.solos);
                 let payouts: std::collections::BTreeSet<_> = solos.values().collect();
 
-                match payouts.contains(&payout) || payouts.len() < crate::node::MOST_SOLO {
+                match payouts.contains(&payout) || payouts.len() < state.limits.solo {
                     true => {
                         solos.insert(number, payout);
 
                         None
                     }
-                    false => Some(format!("this node builds blocks for {} payouts mining alone already", crate::node::MOST_SOLO)),
+                    false => Some(format!("this node builds blocks for {} payouts mining alone already", state.limits.solo)),
                 }
             }
         };
@@ -853,7 +886,7 @@ fn listen(state: &State, receiver: &mut Receiver, sender: &Mutex<Sender>, number
                     .map(|devices| {
                         devices
                             .iter()
-                            .take(MOST_DEVICES)
+                            .take(state.limits.devices)
                             .map(|device| DeviceReport {
                                 name: device["name"].as_str().unwrap_or("device").chars().filter(|c| !c.is_control()).take(128).collect(),
                                 rate: device["rate"].as_f64().filter(|rate| rate.is_finite() && *rate >= 0.0).unwrap_or(0.0),

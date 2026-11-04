@@ -759,7 +759,7 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false, limits: crate::mining::pool::PortLimits::DEFAULT }),
         }),
         sign: None,
     });
@@ -795,7 +795,7 @@ fn a_worker_mining_alone_is_handed_a_block_of_its_own_whose_reward_pays_it_in_fu
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true, limits: crate::mining::pool::PortLimits::DEFAULT }),
         }),
         sign: None,
     });
@@ -847,7 +847,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
                 threads: 0,
                 gpu: false,
                 gpus: None,
-                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None, solo: false }),
+                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None, solo: false, limits: crate::mining::pool::PortLimits::DEFAULT }),
             }),
             sign: None,
         })
@@ -1432,6 +1432,60 @@ fn a_new_node_syncs_from_a_snapshot_and_runs_only_the_blocks_after_it() {
 
     assert!(matches!(&above.body, RangeBody::Whole { txs, receipts: Some(receipts), .. } if txs.len() == 1 && receipts.len() == 1));
     assert!(!above.entries().is_empty());
+}
+
+#[test]
+fn a_node_syncs_from_a_snapshot_at_a_depth_of_its_own_from_a_peer_serving_in_small_answers() {
+    use crate::db::stored_root;
+    use super::snapshot::PIVOT_DEPTH;
+
+    let (producer, mut producer_net) = node(true);
+    // The peer serves little at a time: headers, blocks and state entries a few per answer.
+    let mut producer = producer.tuning(NodeTuning { sync_blocks: 3, sync_headers: 7, sync_entries: 2, ..NodeTuning::DEFAULT });
+    let authority = DevAuthority::dev_keypair();
+    let blocks = 40;
+    let mut paid = Vec::new();
+
+    for slot in 1..=blocks {
+        let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+        let tx = Tx::Transfer { from: authority.public().address(), to, amount: Amount::U128(u128::from(slot)) };
+        producer.submit(SignedTx::sign(tx, slot - 1, FeeOffer::NONE, &authority, &producer.chain().genesis())).unwrap();
+        paid.push((to, slot));
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    // Asked for a full batch, it answers with its own caps.
+    let answered = |request| producer.answer(request).unwrap();
+    assert!(matches!(answered(SyncRequest::Headers { from: 1, count: 1_024 }), SyncResponse::Headers(headers) if headers.len() == 7));
+    assert!(matches!(answered(SyncRequest::Blocks { from: 1, count: MAX_SYNC_BLOCKS }), SyncResponse::Blocks(found) if found.len() == 3));
+
+    sent(&mut producer_net);
+    let (late, mut late_net) = node(false);
+    let depth = 5;
+    let mut late = late.tuning(NodeTuning { snapshot_depth: depth, ..NodeTuning::DEFAULT });
+
+    assert!(late.sync_from_snapshot(None).unwrap());
+
+    let (producer_peer, late_peer) = (PeerId::random(), PeerId::random());
+    late_net.events.send(NetEvent::PeerUp { peer: producer_peer, address: Multiaddr::empty() }).unwrap();
+    late.step(SLOT * blocks).unwrap();
+    relay(
+        Side { node: &mut late, net: &mut late_net, peer: late_peer },
+        Side { node: &mut producer, net: &mut producer_net, peer: producer_peer },
+        SLOT * blocks,
+    );
+
+    // The pivot is its own depth below the tip, not the default's: the peer, which keeps its
+    // default, served the state of whatever block it was asked for.
+    assert_ne!(depth, PIVOT_DEPTH);
+    assert_eq!(late.chain().snapshot(), Some(blocks - depth));
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id(), "it ran the blocks after the pivot");
+    assert_eq!(stored_root(&**late.chain().db(), late.chain().hash()).unwrap(), late.chain().tip().state_root);
+    assert!(late.chain().block_at(blocks - depth - 1).unwrap().is_none(), "nor any before it");
+
+    for (to, amount) in &paid {
+        assert_eq!(Accounts::new(&late.chain().state()).get(to).unwrap().balance, u256::new(u128::from(*amount)));
+    }
 }
 
 // The dev chain's FFG finality makes height 40 a checkpoint that opens an epoch; without it,

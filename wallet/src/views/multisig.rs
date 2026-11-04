@@ -159,7 +159,7 @@ impl MultisigState {
             ctx.node.ask(Ask::Memberships { address, cursor: Some(cursor) });
         }
 
-        if self.listed_at != 0 && ctx.now.saturating_sub(self.listed_at) < LISTED_EVERY {
+        if self.listed_at != 0 && ctx.now.saturating_sub(self.listed_at) < ctx.settings.pace().every_ms(LISTED_EVERY) {
             return;
         }
 
@@ -333,7 +333,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
     followed(ui, ctx, state);
 
     if let Some(selected) = state.selected.clone() {
-        if ctx.now.saturating_sub(state.asked_at) > REFRESH {
+        if ctx.now.saturating_sub(state.asked_at) > ctx.settings.pace().every_ms(REFRESH) {
             ctx.node.ask(Ask::Multisig(selected.clone()));
             state.asked_at = ctx.now;
         }

@@ -67,6 +67,26 @@ pub struct ReadingState {
     trouble: Option<String>,
     /// Asked once whether to forget what was read.
     forgetting: bool,
+    /// A smaller cap on what it keeps, waiting to be asked whether to let the rest go.
+    cap_pending: Option<u64>,
+}
+
+/// The caps on what it keeps that Settings offers: crate::reading::MOST_BYTES is the usual, 32 MB on
+/// a phone or in a browser and 128 MB on a desktop.
+const BYTES_OFFERED: [(u64, &str); 5] = [(16_000_000, "16 MB"), (32_000_000, "32 MB"), (128_000_000, "128 MB"), (512_000_000, "512 MB"), (2_000_000_000, "2 GB")];
+
+/// How much it keeps: one of BYTES_OFFERED.
+fn cap(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReadingState) {
+    let palette = ctx.look.palette;
+    let (held, _) = ctx.reading.bytes_kept();
+    let mut set = ctx.settings.reading_bytes();
+
+    if widgets::reading_cap(ui, &palette, &mut set, &BYTES_OFFERED, held, &mut state.cap_pending) {
+        ctx.settings.reading_bytes = Some(set);
+    }
+
+    let usual = widgets::bytes_said(crate::reading::MOST_BYTES);
+    ui.add(egui::Label::new(RichText::new(format!("of blocks, {usual} as usual on this device. Past it the oldest go, and it says from what height it knows. All of it is in memory while the explorer is open.")).small().color(palette.muted)).wrap());
 }
 
 /// Where the checks hold against whoever serves a page.
@@ -77,7 +97,7 @@ const EXPLORER_LIMITS: &[&str] = &[
     "It follows no state from a block's entries, so neither a gap nor something left out can leave it showing a value out of date. A balance or a record shows only from a direct proof you press for, with the block it was proven at. The node sees what each is of.",
     "Only final blocks are read, so the newest few are not shown, nor is anything waiting in the mempool.",
     "A block commits to what a transaction did, not to why it failed, nor to the hops its contracts made: neither is shown.",
-    "It keeps each block but for its state entries, about 400 bytes an empty block, up to a cap: 128 MB on a desktop, 32 MB on a phone or in a browser, about 18 or 4 days of the devnet's empty blocks. Past the cap the oldest blocks go, and it says from what height it knows now.",
+    "It keeps each block but for its state entries, about 400 bytes an empty block, up to the cap set below: as usual 128 MB on a desktop, 32 MB on a phone or in a browser, about 18 or 4 days of the devnet's empty blocks. Past the cap the oldest blocks go, and it says from what height it knows now.",
     "What it read is kept on this device, private to this app, and not sealed, as the explorer has no vault: it holds no secrets, but whoever has this device can see what height it reads from. What you search for is kept nowhere. Losing it costs a rescan.",
     "Off while this is on: the mempool, the network, tokens' lists, NFTs, the DEX, swaps, bridges, multisigs, governance, the mining pool, the rich list and the faucet. The coin's name and decimals are as a node last said them on this device, or amounts show as plain units.",
     "Fast resume is off while this is on, and a node met for the first time gives no checkpoint: the light client walks every header, each time the app opens, unless you pasted a checkpoint.",
@@ -109,6 +129,8 @@ pub fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReadingState, connect: &mut 
                 ui.add_space(4.0);
             }
         });
+        ui.add_space(4.0);
+        cap(ui, ctx, state);
 
         if ctx.settings.read_blocks {
             ui.add_space(6.0);

@@ -50,9 +50,10 @@ pub const REENTRANT_SECTION: &str = "chainv4.reentrant";
     see_also = "rust/Layout",
 )]
 pub const LAYOUT_SECTION: &str = "chainv4.layout";
-/// How much code the module cache holds, in bytes of modules, and how many modules at most.
-const MODULE_CACHE_BYTES: usize = 32 * 1024 * 1024;
-const MODULE_CACHE_ENTRIES: usize = 1_024;
+#[document(summary = "How much code the WebAssembly module cache holds, in bytes of modules, unless --wasm-cache-mb says otherwise: 32 MiB.", category = "WASM VM", see_also = "EnginePools::wasm_bytes")]
+pub const MODULE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+#[document(summary = "How many modules the WebAssembly module cache holds at most, unless --wasm-cache-modules says otherwise: 1,024.", category = "WASM VM", see_also = "EnginePools::wasm_modules")]
+pub const MODULE_CACHE_ENTRIES: usize = 1_024;
 
 /// How deep functions may recurse, and how many values the stack may hold.
 const MAX_RECURSION_DEPTH: usize = 1_000;
@@ -83,6 +84,8 @@ struct Modules {
     /// Counts lookups, to tell which entry was used longest ago.
     clock: u64,
     budget: usize,
+    /// The most modules it holds.
+    most: usize,
 }
 
 struct Cached {
@@ -91,12 +94,13 @@ struct Cached {
 }
 
 impl Modules {
-    fn new(budget: usize) -> Modules {
+    fn new(budget: usize, most: usize) -> Modules {
         Modules {
             entries: HashMap::with_hasher(Xxh3Builder::new()),
             bytes: 0,
             clock: 0,
             budget,
+            most: most.max(1),
         }
     }
 
@@ -113,7 +117,7 @@ impl Modules {
             return;
         }
 
-        while self.bytes + code.len() > self.budget || self.entries.len() >= MODULE_CACHE_ENTRIES {
+        while self.bytes + code.len() > self.budget || self.entries.len() >= self.most {
             let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.used).map(|(code, _)| code.clone()) else {
                 break;
             };
@@ -139,6 +143,17 @@ impl WasmEngine {
         WasmEngine::with_cache(MODULE_CACHE_BYTES)
     }
 
+    #[document(
+        parent = "WasmEngine",
+        summary = "The engine, with a module cache of this many bytes of modules and this many modules at most: what --wasm-cache-mb and --wasm-cache-modules size. More keeps more contracts compiled between calls; the cache never changes what a call does.",
+    )]
+    pub fn with_cache_of(budget: usize, most: usize) -> WasmEngine {
+        let engine = WasmEngine::with_cache(budget);
+        *engine.modules.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Modules::new(budget, most);
+
+        engine
+    }
+
     /// The engine, with room for this many bytes of compiled modules.
     fn with_cache(budget: usize) -> WasmEngine {
         let mut config = Config::default();
@@ -157,7 +172,7 @@ impl WasmEngine {
         WasmEngine {
             engine,
             linker,
-            modules: Mutex::new(Modules::new(budget)),
+            modules: Mutex::new(Modules::new(budget, MODULE_CACHE_ENTRIES)),
         }
     }
 

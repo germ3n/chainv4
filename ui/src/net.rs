@@ -9,20 +9,33 @@ use std::ops::ControlFlow;
 
 /// How long a request may take in all, and how long to get connected, going direct: long enough for
 /// a slow phone network, short enough that a page says so while someone still waits for it.
+/// The browser has no limit to set on connecting, and goes by the whole one alone.
 const WHOLE: u64 = 30;
-#[cfg(not(target_arch = "wasm32"))]
 const CONNECT: u64 = 12;
 /// The same through a proxy: Tor builds a circuit first, which can take most of a minute.
 const WHOLE_PROXIED: u64 = 90;
-#[cfg(not(target_arch = "wasm32"))]
 const CONNECT_PROXIED: u64 = 60;
 /// How long a stream may take to answer at all, once it is open: how long it then stays is its own.
 #[cfg(not(target_arch = "wasm32"))]
 const STREAM_ANSWERS: u64 = 60;
 
+/// The most times as long as usual a request may be given, for Tor or I2P at their slowest: past
+/// it, a page that waits says nothing for a quarter of an hour.
+pub const MOST_PATIENCE: u32 = 10;
+
 /// How long a request may take, in seconds: what a page that waits for one waits at most.
 pub fn limit(proxied: bool) -> u64 {
-    if proxied { WHOLE_PROXIED } else { WHOLE }
+    waits(proxied, 1).0
+}
+
+/// How long a request may take in all, and to get connected, in seconds, given this many times as
+/// long as usual: the apps' Wait for answers. 1 is the usual; 0 counts as 1, and past MOST_PATIENCE
+/// as MOST_PATIENCE.
+pub fn waits(proxied: bool, patience: u32) -> (u64, u64) {
+    let times = u64::from(patience.clamp(1, MOST_PATIENCE));
+    let (whole, connect) = if proxied { (WHOLE_PROXIED, CONNECT_PROXIED) } else { (WHOLE, CONNECT) };
+
+    (whole * times, connect * times)
 }
 
 /// A proxy every request goes through: SOCKS5 with the proxy resolving names, or HTTP CONNECT.
@@ -161,7 +174,6 @@ pub struct Client {
     #[cfg(not(target_arch = "wasm32"))]
     lasting: ureq::Agent,
     /// How long a request may take in all, and to connect, in seconds.
-    #[cfg(not(target_arch = "wasm32"))]
     whole: u64,
     #[cfg(not(target_arch = "wasm32"))]
     connect: u64,
@@ -170,16 +182,23 @@ pub struct Client {
 impl Client {
     /// A client that sends everything through this proxy, or goes direct without one.
     pub fn new(proxy: Option<Proxy>) -> Result<Client, String> {
+        Client::patient(proxy, 1)
+    }
+
+    /// As new, its requests given this many times as long as usual: see waits.
+    pub fn patient(proxy: Option<Proxy>, patience: u32) -> Result<Client, String> {
+        let (whole, connect) = waits(proxy.is_some(), patience);
+
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (whole, connect) = if proxy.is_some() { (WHOLE_PROXIED, CONNECT_PROXIED) } else { (WHOLE, CONNECT) };
-
             Client::limited(proxy, whole, connect)
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            Ok(Client { proxy })
+            let _ = connect;
+
+            Ok(Client { proxy, whole })
         }
     }
 
@@ -199,14 +218,25 @@ impl Client {
 
     /// A client for a proxy setting as the apps keep it: a proxy, or empty to go direct.
     pub fn for_setting(setting: &str) -> Result<Client, String> {
+        Client::for_settings(setting, 1)
+    }
+
+    /// As for_setting, its requests given this many times as long as usual, as the apps' Wait for
+    /// answers keeps it.
+    pub fn for_settings(setting: &str, patience: u32) -> Result<Client, String> {
         match setting.trim() {
-            "" => Ok(Client::direct()),
-            text => Client::new(Some(Proxy::parse(text)?)),
+            "" => Client::patient(None, patience),
+            text => Client::patient(Some(Proxy::parse(text)?), patience),
         }
     }
 
     pub fn proxy(&self) -> Option<&Proxy> {
         self.proxy.as_ref()
+    }
+
+    /// How long a request may take in all, in seconds: what a page that waits for one waits at most.
+    pub fn whole(&self) -> u64 {
+        self.whole
     }
 
     /// Sends a GET, or a POST of JSON when there is a body, and calls done with the answer from
@@ -225,7 +255,7 @@ impl Client {
         }
 
         #[cfg(target_arch = "wasm32")]
-        web::fetch(url, body, token, done);
+        web::fetch(url, body, token, self.whole, done);
     }
 
     /// Opens a GET whose body keeps coming, such as an event stream, and calls on with each
@@ -367,7 +397,7 @@ mod native {
 #[cfg(target_arch = "wasm32")]
 mod web {
     use {
-        super::{Answer, Piece, TOO_LONG, WHOLE},
+        super::{Answer, Piece, TOO_LONG},
         std::ops::ControlFlow,
         std::sync::{Arc, Mutex, PoisonError},
         wasm_bindgen::{JsCast, closure::Closure},
@@ -375,18 +405,18 @@ mod web {
 
     /// Sends a request, and calls done once: with the answer, or when none came in time, as the
     /// browser's own fetch waits as long as the connection stays open.
-    pub fn fetch(url: String, body: Option<Vec<u8>>, token: Option<String>, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
+    pub fn fetch(url: String, body: Option<Vec<u8>>, token: Option<String>, whole: u64, done: impl FnOnce(Result<Answer, String>) + Send + 'static) {
         let once = Arc::new(Mutex::new(Some(done)));
         let late = once.clone();
         let take = |once: &Mutex<Option<_>>| once.lock().unwrap_or_else(PoisonError::into_inner).take();
         let timer = Closure::once_into_js(move || {
             if let Some(done) = take(&late) {
-                done(Err(format!("{TOO_LONG} {WHOLE} seconds")));
+                done(Err(format!("{TOO_LONG} {whole} seconds")));
             }
         });
 
         if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timer.unchecked_ref(), (WHOLE * 1_000) as i32);
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(timer.unchecked_ref(), (whole * 1_000) as i32);
         }
 
         // ehttp's own text/plain, which needs no preflight from a page on another origin.

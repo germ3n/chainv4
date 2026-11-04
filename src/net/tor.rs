@@ -26,8 +26,8 @@ use {
     tokio::io::{AsyncReadExt, AsyncWriteExt},
 };
 
-#[document(summary = "How the node uses Tor for peer-to-peer: the SOCKS5 proxy it dials through, whether everything goes through it, and where tor writes the node's onion.", category = "Node", see_also = "NetConfig")]
-#[derive(Clone, Debug, Default)]
+#[document(summary = "How the node uses Tor for peer-to-peer: the SOCKS5 proxy it dials through, whether everything goes through it, where tor writes the node's onion, and how long a dial through it may take.", category = "Node", see_also = "NetConfig")]
+#[derive(Clone, Debug)]
 pub struct TorConfig {
     #[document(summary = "Tor's SOCKS5 proxy, socks5h://host:port: /onion3 peers are dialed through it. None dials no onions.")]
     pub proxy: Option<String>,
@@ -35,10 +35,18 @@ pub struct TorConfig {
     pub only: bool,
     #[document(summary = "A file holding the node's onion as a multiaddr, /onion3/…:PORT, which tor writes once it made it: read until it is there, then told to peers as the node's address.")]
     pub onion_file: Option<PathBuf>,
+    #[document(summary = "How long Tor may take to reach a peer, building a circuit to an onion first: TOR_TIMEOUT unless --tor-timeout says otherwise.")]
+    pub timeout: Duration,
 }
 
-/// How long Tor may take to reach a peer: it builds a circuit to an onion first.
-const THROUGH: Duration = Duration::from_secs(90);
+impl Default for TorConfig {
+    fn default() -> TorConfig {
+        TorConfig { proxy: None, only: false, onion_file: None, timeout: TOR_TIMEOUT }
+    }
+}
+
+#[document(summary = "How long Tor may take to reach a peer unless --tor-timeout says otherwise: 90 seconds, as it builds a circuit to an onion first.", category = "Node", see_also = "TorConfig::timeout")]
+pub const TOR_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[document(summary = "Reads the node's onion address from the file tor writes: None until it is there, or while it holds no /onion3 multiaddr.", category = "Node", see_also = "TorConfig")]
 pub fn read_onion(file: &std::path::Path) -> Option<Multiaddr> {
@@ -121,6 +129,7 @@ async fn socks5(proxy: &str, host: &str, port: u16) -> std::io::Result<tokio::ne
 struct TorDial {
     proxy: String,
     everything: bool,
+    timeout: Duration,
 }
 
 impl Transport for TorDial {
@@ -141,10 +150,10 @@ impl Transport for TorDial {
         let Some((host, port)) = target(&address, self.everything) else {
             return Err(TransportError::MultiaddrNotSupported(address));
         };
-        let proxy = self.proxy.clone();
+        let (proxy, timeout) = (self.proxy.clone(), self.timeout);
 
         Ok(Box::pin(async move {
-            match tokio::time::timeout(THROUGH, socks5(&proxy, &host, port)).await {
+            match tokio::time::timeout(timeout, socks5(&proxy, &host, port)).await {
                 Ok(stream) => stream.map(tcp::tokio::TcpStream),
                 Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("Tor did not reach {host}:{port}"))),
             }
@@ -203,11 +212,11 @@ pub fn transport(key: &libp2p::identity::Keypair, tor: &TorConfig) -> Result<Box
     Ok(match (&tor.proxy, tor.only) {
         (None, _) => quic().or_transport(secured(direct().boxed())?).map(|either, _| either.into_inner()).boxed(),
         (Some(proxy), false) => {
-            let tcp = direct().or_transport(TorDial { proxy: proxy.clone(), everything: false }).map(|either, _| either.into_inner()).boxed();
+            let tcp = direct().or_transport(TorDial { proxy: proxy.clone(), everything: false, timeout: tor.timeout }).map(|either, _| either.into_inner()).boxed();
 
             quic().or_transport(secured(tcp)?).map(|either, _| either.into_inner()).boxed()
         }
-        (Some(proxy), true) => secured(ListenOnly(direct()).or_transport(TorDial { proxy: proxy.clone(), everything: true }).map(|either, _| either.into_inner()).boxed())?,
+        (Some(proxy), true) => secured(ListenOnly(direct()).or_transport(TorDial { proxy: proxy.clone(), everything: true, timeout: tor.timeout }).map(|either, _| either.into_inner()).boxed())?,
     })
 }
 
@@ -281,5 +290,24 @@ mod tests {
         assert_eq!(greeting, [5, 1, 0]);
         assert_eq!(head[..4], [5, 1, 0, 3], "CONNECT to a name");
         assert_eq!(asked, [b"peer.onion".as_slice(), &4001u16.to_be_bytes()].concat());
+    }
+
+    #[tokio::test]
+    async fn a_dial_through_a_proxy_that_never_answers_gives_up_at_the_tor_timeout() {
+        // A proxy that takes the connection and says nothing, as a Tor that cannot build a circuit.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = format!("socks5h://{}", listener.local_addr().unwrap());
+        let _held = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(stream);
+        });
+        let mut dial = TorDial { proxy, everything: false, timeout: Duration::from_millis(300) };
+        let started = std::time::Instant::now();
+        let failed = dial.dial(ONION.parse().unwrap(), DialOpts { role: libp2p::core::Endpoint::Dialer, port_use: libp2p::core::transport::PortUse::New }).unwrap().await;
+
+        assert_eq!(failed.err().map(|err| err.kind()), Some(std::io::ErrorKind::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(5), "at its own timeout, not the default 90 s");
+        assert_eq!(TorConfig::default().timeout, TOR_TIMEOUT);
     }
 }

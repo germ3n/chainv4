@@ -33,8 +33,6 @@ const ASK_EVERY: f64 = 15.0;
 const MAX_POOLS: u64 = 40;
 /// Where the Trade page's JSON-RPC ids start, apart from the dApp page's.
 const RPC_BASE: u64 = 1 << 40;
-/// How long a trade or a deposit may wait to land.
-const DEADLINE_MS: u64 = 20 * 60_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Venue {
@@ -70,6 +68,8 @@ struct EvmDex {
     factory: Option<[u8; 20]>,
     wdev: Option<[u8; 20]>,
     pairs: Vec<[u8; 20]>,
+    /// How many pairs the factory says it made, of which the first MAX_POOLS are read.
+    pair_count: u64,
     tokens: HashMap<[u8; 20], ([u8; 20], [u8; 20])>,
     reserves: HashMap<[u8; 20], (u256, u256)>,
 }
@@ -79,8 +79,9 @@ pub struct TradeState {
     venue: Venue,
     /// The native DEX's pools, by the order they opened in.
     pools: Vec<Option<DexPool>>,
-    /// How many pools to ask for, once pool_count answered.
+    /// How many pools to ask for, once pool_count answered, and how many it said there are.
     wanted: Option<u64>,
+    pool_count: u64,
     asked: f64,
     evm: EvmDex,
     reads: HashMap<u64, Read>,
@@ -119,6 +120,7 @@ impl Default for TradeState {
             venue: Venue::Native,
             pools: Vec::new(),
             wanted: None,
+            pool_count: 0,
             asked: f64::NEG_INFINITY,
             evm: EvmDex::default(),
             reads: HashMap::new(),
@@ -198,7 +200,8 @@ impl TradeState {
 
         match (body["function"].as_str(), values(result)) {
             (Some("pool_count"), Some(values)) => {
-                let count = values.first().and_then(|count| count.parse::<u64>().ok()).unwrap_or(0).min(MAX_POOLS);
+                self.pool_count = values.first().and_then(|count| count.parse::<u64>().ok()).unwrap_or(0);
+                let count = self.pool_count.min(MAX_POOLS);
                 self.wanted = Some(count);
                 self.pools.resize(count as usize, None);
             }
@@ -256,7 +259,8 @@ impl TradeState {
             Read::Factory => evm.factory = address_word(&output, 0),
             Read::Wdev => evm.wdev = address_word(&output, 0),
             Read::Count => {
-                let count = number_word(&output, 0).map_or(0, |count| u64::try_from(count).unwrap_or(0)).min(MAX_POOLS);
+                evm.pair_count = number_word(&output, 0).map_or(0, |count| u64::try_from(count).unwrap_or(u64::MAX));
+                let count = evm.pair_count.min(MAX_POOLS);
                 evm.pairs.truncate(count as usize);
             }
             Read::Pair(index) => {
@@ -302,6 +306,18 @@ impl TradeState {
         {
             self.syncs = events.clone();
         }
+    }
+
+    /// What the page says of pools it does not list, for the venue shown: each one listed is asked
+    /// about every few seconds, so past MAX_POOLS the rest are left out, and that is said rather than
+    /// left to look like all there are.
+    fn left_out(&self) -> Option<String> {
+        let count = match self.venue {
+            Venue::Native => self.pool_count,
+            Venue::Evm => self.evm.pair_count,
+        };
+
+        (count > MAX_POOLS).then(|| format!("This DEX has {count} pools: the first {MAX_POOLS} are listed and traded through, as each listed is asked about every few seconds."))
     }
 
     /// The pools of the venue shown: the EVM's with WDEV as the coin.
@@ -352,7 +368,7 @@ fn refresh(ctx: &mut Ctx, state: &mut TradeState, time: f64) {
     let me = state.sender;
 
     if let Some(dex) = dex(ctx) {
-        if time - state.asked > ASK_EVERY {
+        if time - state.asked > ctx.settings.pace().every(ASK_EVERY) {
             state.asked = time;
             ctx.node.ask(call_ask(&dex, "pool_count", json!([])));
 
@@ -377,7 +393,7 @@ fn refresh(ctx: &mut Ctx, state: &mut TradeState, time: f64) {
         return;
     };
 
-    if time - state.evm_asked <= ASK_EVERY {
+    if time - state.evm_asked <= ctx.settings.pace().every(ASK_EVERY) {
         return;
     }
 
@@ -410,7 +426,7 @@ fn refresh(ctx: &mut Ctx, state: &mut TradeState, time: f64) {
             state.read(ctx, router, calldata("factory()", none, &[]), Read::Factory);
             state.read(ctx, router, calldata("wdev()", none, &[]), Read::Wdev);
             // Soon again, for the pairs.
-            state.evm_asked = time - ASK_EVERY + 1.0;
+            state.evm_asked = time - ctx.settings.pace().every(ASK_EVERY) + 1.0;
         }
     }
 }
@@ -496,6 +512,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, send: &mut SendS
         }
     });
     theme::section_gap(ui);
+
+    if let Some(said) = state.left_out() {
+        ui.add(egui::Label::new(RichText::new(said).small().color(palette.warn)).wrap());
+        ui.add_space(6.0);
+    }
 
     let mut prepared = None;
     let pools = state.listed();
@@ -879,7 +900,7 @@ fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, m
                 TxCallArgumentType::Address(to),
                 TxCallArgumentType::U256(amount),
                 TxCallArgumentType::U256(least),
-                TxCallArgumentType::I64((ctx.now + DEADLINE_MS) as i64),
+                TxCallArgumentType::I64((ctx.now + ctx.settings.trade_deadline_ms()) as i64),
             ];
             args.extend(middle.map(TxCallArgumentType::Address));
             let coin = if state.from == COIN { amount } else { u256::ZERO };
@@ -894,7 +915,7 @@ fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, m
                 _ => None,
             };
             let path = AbiValue::Array([Some(state.from), middle, Some(to)].into_iter().flatten().map(|asset| token(&asset).map(AbiValue::Address)).collect::<Option<Vec<_>>>()?);
-            let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + DEADLINE_MS) / 1_000)));
+            let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + ctx.settings.trade_deadline_ms()) / 1_000)));
             let addresses = AbiType::Array(Box::new(AbiType::Address));
             let (input, value) = match (state.from == COIN, to == COIN) {
                 (true, _) => (calldata("swapExactDEVForTokens(uint256,address[],address,uint256)", &[AbiType::Uint(256), addresses, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(least), path, recipient, deadline]), amount),
@@ -1056,13 +1077,13 @@ fn add(ctx: &Ctx, state: &TradeState, me: Address, a: &Address, b: &Address, amo
                 TxCallArgumentType::U256(amount_b),
                 TxCallArgumentType::U256(least_out(amount_a, slip)),
                 TxCallArgumentType::U256(least_out(amount_b, slip)),
-                TxCallArgumentType::I64((ctx.now + DEADLINE_MS) as i64),
+                TxCallArgumentType::I64((ctx.now + ctx.settings.trade_deadline_ms()) as i64),
             ];
 
             Some(native_call(me, dex(ctx)?, "add_liquidity", args, coin, what))
         }
         Venue::Evm => {
-            let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + DEADLINE_MS) / 1_000)));
+            let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + ctx.settings.trade_deadline_ms()) / 1_000)));
             let n = AbiValue::Uint;
             let (input, value) = match (a, b) {
                 (coin, Address::Evm(token)) | (Address::Evm(token), coin) if *coin == COIN => {
@@ -1097,13 +1118,13 @@ fn remove(ctx: &Ctx, state: &TradeState, me: Address, pool: &DexPool, shares: u2
                 TxCallArgumentType::U256(shares),
                 TxCallArgumentType::U256(least_a),
                 TxCallArgumentType::U256(least_b),
-                TxCallArgumentType::I64((ctx.now + DEADLINE_MS) as i64),
+                TxCallArgumentType::I64((ctx.now + ctx.settings.trade_deadline_ms()) as i64),
             ];
 
             Some(native_call(me, dex(ctx)?, "remove_liquidity", args, u256::ZERO, what))
         }
         Venue::Evm => {
-            let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + DEADLINE_MS) / 1_000)));
+            let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + ctx.settings.trade_deadline_ms()) / 1_000)));
             let n = AbiValue::Uint;
             let input = match (pool.a, pool.b) {
                 (coin, Address::Evm(token)) | (Address::Evm(token), coin) if coin == COIN => {
@@ -1190,7 +1211,7 @@ fn chart(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool) {
     let palette = *ctx.palette;
     let time = ui.input(|input| input.time);
 
-    if time - state.charted > ASK_EVERY
+    if time - state.charted > ctx.settings.pace().every(ASK_EVERY)
         && let Some(dex) = dex(ctx)
     {
         state.charted = time;

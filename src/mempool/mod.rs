@@ -59,9 +59,9 @@ impl Waiting {
 }
 
 #[document(
-    summary = "How many blocks in a row a transaction may offer less than the base price before the mempool drops it: 32, about a minute of 2-second blocks and close to three of the devnet's 5-second ones, long enough for a base price that just rose to come back down.",
+    summary = "How many blocks in a row a transaction may offer less than the base price before the mempool drops it, unless --underpriced-for says otherwise: 32, about a minute of 2-second blocks and close to three of the devnet's 5-second ones, long enough for a base price that just rose to come back down.",
     category = "Node",
-    see_also = "Mempool::prune",
+    see_also = "Mempool::prune, MempoolLimits::underpriced_blocks",
 )]
 pub const MAX_UNDERPRICED_BLOCKS: u32 = 32;
 
@@ -73,7 +73,7 @@ pub const MAX_UNDERPRICED_BLOCKS: u32 = 32;
 pub const MAX_GAPPED_BLOCKS: u32 = 64;
 
 #[document(
-    summary = "What a node's mempool holds, and what it takes in place of what waits. Set with --mempool-size, --mempool-per-sender, --max-nonce-gap and --replace-bump-percent.",
+    summary = "What a node's mempool holds, what it takes in place of what waits, and how long it keeps an offer under the base price. Set with --mempool-size, --mempool-per-sender, --max-nonce-gap, --replace-bump-percent and --underpriced-for.",
     category = "Node",
     see_also = "Mempool, MempoolError",
 )]
@@ -87,15 +87,18 @@ pub struct MempoolLimits {
     pub nonce_gap: u64,
     #[document(summary = "How much a transaction replacing a waiting one of its sender's, at its nonce, must raise both its max price and its tip, in percent: 10 by default, as Ethereum's nodes ask. Its max price must rise at least 1 whatever the percent, so a replacement always costs more and cannot be sent round for free.")]
     pub replace_bump: u32,
+    #[document(summary = "How many blocks in a row a transaction may offer less than the base price before it is dropped: MAX_UNDERPRICED_BLOCKS by default. --underpriced-for takes it in blocks, or as a time turned into blocks at the chain's block time as the node starts.")]
+    pub underpriced_blocks: u32,
 }
 
 impl MempoolLimits {
-    #[document(parent = "MempoolLimits", summary = "The defaults: 50,000 in all, 64 per sender, 64 nonces ahead and a 10% bump to replace.")]
+    #[document(parent = "MempoolLimits", summary = "The defaults: 50,000 in all, 64 per sender, 64 nonces ahead, a 10% bump to replace and MAX_UNDERPRICED_BLOCKS blocks under the base price.")]
     pub const DEFAULT: MempoolLimits = MempoolLimits {
         capacity: 50_000,
         per_sender: 64,
         nonce_gap: 64,
         replace_bump: 10,
+        underpriced_blocks: MAX_UNDERPRICED_BLOCKS,
     };
 
     #[document(
@@ -607,7 +610,7 @@ impl Mempool {
 
     #[document(
         parent = "Mempool",
-        summary = "Brings the mempool in line with a new tip: drops transactions whose nonce is used; on a chain with fees, those that can no longer pay, as their sender's funds went since they were admitted, and those that have offered less than the base price for MAX_UNDERPRICED_BLOCKS blocks in a row; and those that have waited behind a missing nonce for MAX_GAPPED_BLOCKS blocks in a row. An offer under the base price is kept until then, since the base price moves a step a block and may come back down. What waits after a transaction dropped here is kept, behind a gap, so its sender need only send the one again; it goes too if it is not.",
+        summary = "Brings the mempool in line with a new tip: drops transactions whose nonce is used; on a chain with fees, those that can no longer pay, as their sender's funds went since they were admitted, and those that have offered less than the base price for MempoolLimits::underpriced_blocks blocks in a row; and those that have waited behind a missing nonce for MAX_GAPPED_BLOCKS blocks in a row. An offer under the base price is kept until then, since the base price moves a step a block and may come back down. What waits after a transaction dropped here is kept, behind a gap, so its sender need only send the one again; it goes too if it is not.",
         params = {
             state = "The state at the new tip.",
             fees = "The chain's fees, if it has any.",
@@ -631,6 +634,7 @@ impl Mempool {
         let before = self.txs.len();
 
         if let Some(fees) = fees {
+            let most = self.limits.underpriced_blocks;
             self.txs.retain(|(sender, _), waiting| {
                 if waiting.tx.fee.reserve().is_none_or(|reserve| reserve > senders[sender].1) {
                     return false;
@@ -641,7 +645,7 @@ impl Mempool {
                     None => waiting.underpriced + 1,
                 };
 
-                waiting.underpriced <= MAX_UNDERPRICED_BLOCKS
+                waiting.underpriced <= most
             });
         }
 
@@ -992,6 +996,23 @@ mod tests {
             assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 0);
         }
         assert_eq!(mempool.len(), 2);
+    }
+
+    #[test]
+    fn underpriced_for_keeps_an_offer_under_the_base_price_as_many_blocks_as_the_operator_said() {
+        let (state, fees, floor, keys) = paying(1);
+        let mut mempool = Mempool::with_limits(MempoolLimits { underpriced_blocks: 3, ..MempoolLimits::DEFAULT });
+        let tx = SignedTx::sign(Tx::Burn { from: keys[0].public().address(), amount: Amount::U128(1) }, 0, FeeOffer { gas_limit: 100_000, max_price: floor, tip: u256::ZERO }, &keys[0], &genesis());
+        mempool.add(tx, &genesis(), &state, Some(&fees)).unwrap();
+        let base = floor * u256::from(2u64);
+
+        // Three blocks under the base price it waits, where the default waits 32; the fourth drops it.
+        for _ in 0..3 {
+            assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 0);
+        }
+
+        assert_eq!(mempool.prune(&state, Some(&fees), base).unwrap(), 1);
+        assert!(mempool.is_empty());
     }
 
     /// A chain with fees, its floor, and senders each funded with plenty.

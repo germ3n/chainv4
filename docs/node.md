@@ -273,6 +273,121 @@ its branch is heavier, rather than taken for where it was when its gossip stoppe
 subscribes, counts as `gossip_unpublished` in `GET /node` and logs a warning at most once a
 minute; without peers, it is the usual best effort.
 
+## Limits and tuning
+
+Every limit and cadence the node once fixed in its code can be set now, each with a default that
+is what every node did before, and bounds that refuse a value that would break the node. None of
+them is consensus: they change how much a node takes on, how fast and with how much memory, never
+which blocks are valid or what state they make, so each node picks its own and a node given none
+behaves exactly as before. They live in one table (`src/node/tuning.rs`, `KNOBS`), which each part
+of the node takes its piece of (`Tuning::net`, `node`, `port`, `chain`, `api`), and which
+`GET /node` shows under `limits` (see [What a node shares of itself](#what-a-node-shares-of-itself)).
+
+**Why some are flags and the rest one `--tune`:** the ones an operator reaches for, a public
+node's inbound cap, its ban rules, its API's request rate, the engines' memory, have flags of
+their own, as the mempool's and the backlog's sizes already did. The rest, some thirty knobs few
+will touch, are keys of one `--tune KEY=VALUE` flag, repeated or comma-separated, grouped by what
+they tune, rather than thirty flags more in `--help`: their names say their group, the one table
+holds their bounds, and Docker passes them in one `TUNE` variable. A key with a flag of its own is
+refused by `--tune`, so each has one way in. A config file would have been one more format to read
+and keep in step for what a line of flags holds.
+
+**Times** are written `50ms`, `15s`, `2m`, `1h` or `1d`; **sizes** in bytes, or `KiB` or `MiB`.
+
+| Flag | Default | Bounds | What it bounds |
+| --- | --- | --- | --- |
+| `--max-peers-in N` | none | 1 to 10,000 | Connections peers that dial in may hold at once: past it a new one is refused as it is made (libp2p's connection limits). Peers this node dials are not counted. |
+| `--ban-score N` | 100 | 10 to 1,000,000 | What a peer's faults add up to before a ban. Below 10, the lightest fault, every fault bans at once. |
+| `--ban-window T` | 10m | 1s to 7d | The window faults add up in. |
+| `--max-strikes N` | 10 | 1 to 10,000 | Times a peer may go over its share of the backlog within `--strike-window` before it is cut off. |
+| `--strike-window T` | 60s | 1s to 1d | The window strikes add up in. |
+| `--tor-timeout T` | 90s | 5s to 10m | How long a dial through `--tor-proxy` may take. |
+| `--http-rate N` | 0, none | 0 to 100,000 | Requests a second one client may make, beside `--http-per-ip`'s concurrency: a bucket per client holding a second's worth, so a page asking several things at once goes through; past it, 429 with `Retry-After: 1`. `/stream` is not counted. |
+| `--api-max-page N` | each listing's own | 10 to 10,000 | The most any listing returns at once, in place of each one's own maximum (100 to 1,000), its default never above it. The apps page on past it. |
+| `--suggest-multiplier N` | 2 | 1 to 100 | How many times the next base price a suggested fee offers: `eth_gasPrice`, and the max price `POST /offer` and the faucet fill in when left open, under a base fee. A suggestion only; under bids it is the base price plus the tip whatever this is. |
+| `--update-every T` | 1h | 1m to 7d | How often the node looks for releases. |
+| `--snapshot-depth N` | 16 | 1 to half `max_reorg_depth` | How far below the best tip `--snapshot` takes its state; see [Syncing from a snapshot](#syncing-from-a-snapshot). |
+| `--underpriced-for N` or `T` | 32 blocks | 1 to 100,000 blocks | How long an offer under the base price waits before the mempool drops it. A time is turned into blocks at the chain's block time as the node starts. |
+| `--state-history N` or `T` | 10,000 blocks | at least 1 | As before, now also as a time, such as `14h`, turned into blocks the same way. |
+| `--max-block-txs N` | none; 1,000 on a chain bounded by neither bytes nor gas (`UNBOUNDED_CHAIN_TXS`) | 1 and up | As before. |
+| `--lua-states N` | 16 | 1 to 1,024 | Pristine Lua states kept ready for calls. |
+| `--lua-builders N` | 2 | 1 to 64 | Threads building them. |
+| `--wasm-cache-mb N` | 32 | 1 to 4,096 | MiB of compiled WebAssembly modules kept. |
+| `--wasm-cache-modules N` | 1,024 | 1 to 1,000,000 | Modules kept at most. |
+
+The engines' pools change no call's outcome: every Lua state is built the same and a cached module
+runs as a fresh one, so they trade memory for throughput alone. The API's own engines, for
+read-only calls, take the same sizes.
+
+**Blocks or time.** `--underpriced-for` and `--state-history` are counted in blocks, as the code
+does, but an operator reasons in time, and their old docs did so in 2-second blocks while the
+devnet runs 5-second ones (32 blocks is 64 s there, 160 s here). Each takes either: a plain number
+is blocks, as before, so the defaults do not move; a time is turned into blocks at the block time
+the chain's consensus has as the node starts (`ConsensusConfig::block_ms`), and kept as that count
+should governance change the block time later.
+
+**`--tune KEY=VALUE`:**
+
+| Key | Default | Bounds | What it bounds |
+| --- | --- | --- | --- |
+| `sync.blocks` | 128 | 1 to 128 | Blocks in one answer to a syncing peer, beside `--sync-batch-bytes`. |
+| `sync.justifications` | 64 | 1 to 64 | Justifications in one answer. |
+| `sync.headers` | 1,024 | 1 to 1,024 | Headers in one answer, what a snapshot sync checks. |
+| `sync.entries` | 512 | 1 to 512 | State entries in one answer before it sends a position's two halves instead. |
+| `gossip.batch` | 256 | 1 to 256 | Transactions in one gossiped batch this node sends. |
+| `gossip.wait` | 50ms | 1ms to 10s | The longest a transaction waits for others to share its batch. |
+| `dial.redial` | 15s | 1s to 1h | How often `--peer`s are dialed again while down, and discovery runs. |
+| `dial.bootstrap` | 120s | 10s to 1d | How often Kademlia looks for peers near the node. |
+| `dial.at-once` | 3 | 1 to 64 | Peers Kademlia knows dialed at once while short. |
+| `dial.retry` | 300s | 1s to 1d | Before a peer Kademlia knows is dialed again. |
+| `peers.remembered` | 64 | 1 to 10,000 | Peers kept between starts. |
+| `node.event-budget` | 256 | 16 to 65,536 | Events the loop handles a pass, so a flood cannot starve production. |
+| `mining.connections` | 256 | 1 to 65,536 | Connections the mining port takes at once. |
+| `mining.per-ip` | 32 | 1 to 65,536 | Of those, from one address but loopback. |
+| `mining.devices` | 64 | 1 to 1,024 | Devices one worker's rates may name. |
+| `mining.handshake` | 10s | 1s to 5m | How long a connection has to finish its handshake. |
+| `mining.template` | 2s | 100ms to 1m | How long a miner works on one template before it is rebuilt. |
+| `mining.solo` | 16 | 1 to 1,024 | Payouts mining alone the node builds templates for; the port refuses one more. |
+| `http.range-per-ip` | 2 | 1 to 64 | Block ranges one client may have under way. |
+| `http.range-wait` | 2s | 100ms to 1m | How long a range waits its turn before 503. |
+| `http.relays-per-ip` | 32 | 1 to 4,096 | Mining WebSocket relays one client may hold open. |
+| `range.blocks` | 100 | 1 to 10,000 | What `GET /blocks/range` answers within: blocks, |
+| `range.bytes` | 8MiB | 1MiB to 32MiB | bytes, |
+| `range.entries` | 4,096 | 1 to 1,000,000 | state entries proven, |
+| `range.time` | 1s | 100ms to 1m | and time spent (`RangeLimits::SERVED`). |
+| `rpc.log-blocks` | 10,000 | 1 to 1,000,000 | Blocks one `eth_getLogs` scans, as geth's `--rpc.*` flags bound theirs. |
+| `rpc.log-addresses` | 1,000 | 1 to 100,000 | Addresses a log filter may name. |
+| `rpc.log-topics` | 1,000 | 1 to 100,000 | Topics it may name at one place. |
+| `rpc.batch` | 100 | 1 to 10,000 | Requests in one batch. |
+| `rpc.fee-history` | 1,024 | 1 to 100,000 | Blocks one `eth_feeHistory` gives. |
+| `filter.scan` | 1,000 | 1 to 1,000,000 | Index entries a filtered `GET /accounts/{address}/txs` looks at before answering with fewer and a cursor. |
+| `finality.pending` | 4,096 | 1 to 1,000,000 | Votes held while they cannot be counted yet. |
+| `finality.evidence` | 64 | 1 to 100,000 | Pieces of evidence kept for operators to report. |
+| `chain.bad-blocks` | 1,024 | 1 to 1,000,000 | Blocks that failed to run remembered across restarts. |
+
+Why the bounds are where they are:
+- **The sync caps only go down.** A syncing node asks for at most 128 blocks, 64 justifications
+  and 1,024 headers, so more would serve nothing; and 512 entries of up to 64 KiB each is what
+  keeps the largest state answer within a response's 64 MiB. An asker takes short answers and
+  asks again from where they end.
+- **`gossip.batch` only goes down:** every node refuses a batch past `TX_BATCH`, 256, as garbage,
+  so a node sending bigger ones would be banned by its peers.
+- **`range.bytes`** holds a full 6 MiB block at 1 MiB and up, as an answer always carries its
+  first block, and stays under the 64 MiB a response may be.
+
+**The request body** is held to `body_cap`: 2 MiB (`MAX_BODY`), room for the largest deploy
+hex-encoded, as a module or source is at most half the least block; and on a chain whose limits
+name a `max_tx_bytes`, room for one of those hex-encoded whenever that is more. It follows
+governance's limits as they stand, read for each POST, so a `Change::Limits` raising
+`max_tx_bytes` applies at once. Past it, 413.
+
+**How long counted votes are kept** for catching one vote surrounding another is not a flag: it
+follows the chain. It is at least 64 epochs (`MAX_HISTORY`), and under FFG
+`withdrawal_delay + vote_depth` epochs as the finalized epoch's settings have them, so a surround
+signed while a bond can still be slashed is caught however long governance makes the delay, at
+most 4,096 epochs, a vote a voter kept in memory. It is node-local, `Column::Finality` being
+outside the state root, and a `Tx::Slash` is checked on its own two votes whoever kept them.
+
 ## What a node shares of itself
 
 `GET /node`, which the explorer's Network page reads, could say where a node's peers and miners
@@ -284,7 +399,7 @@ named both to hide and to show, stops the node at start.
 | --- | --- |
 | `public`, the default | `peer-addresses`, `listening`, `worker-addresses`, `worker-names` |
 | `full` | Nothing. |
-| `minimal` | The above, and `peers`, `mining`, `counters`, `backlog`: only its uptime, role, mempool and whether it syncs remain. |
+| `minimal` | The above, and `peers`, `mining`, `counters`, `backlog`, `limits`: only its uptime, role, mempool and whether it syncs remain. |
 
 | Field | What it is |
 | --- | --- |
@@ -298,6 +413,7 @@ named both to hide and to show, stops the node at start.
 | `workers` | The workers altogether: the lists in `GET /node` and `GET /pool/{address}`, and `GET /mining`'s count. |
 | `devices` | The GPUs and CPUs mining, by name, its own and its workers'. |
 | `mining` | `GET /node`'s mining section altogether. |
+| `limits` | What its operator tuned: every key of [Limits and tuning](#limits-and-tuning) and its value, times in milliseconds and sizes in bytes, null for one unset. `backlog` carries the strike rules too. |
 | `counters`, `backlog` | What it counted since it started; the gossip waiting for it, and its limits. |
 | `syncing`, `uptime`, `role` | Whether it syncs; how long it has been up; whether it produces and validates. |
 
@@ -338,6 +454,7 @@ with Noise and Yamux, through a Tor SOCKS5 proxy (`src/net/tor.rs`):
 | `--tor-proxy socks5h://host:port` | `/onion3` peers and bootnodes are dialed through it; everything else directly, as before. |
 | `--tor-only` | Every dial through the proxy and no QUIC: the node never shows its IP. It reaches onion peers, and TCP ones through Tor's exits, not QUIC ones. It must listen on TCP alone, `--listen /ip4/127.0.0.1/tcp/4001`. |
 | `--onion-file PATH` | The file tor writes the node's onion into, `/onion3/NAME:PORT`, read every redial until it is there and then told to peers as the node's address. |
+| `--tor-timeout T` | How long a dial through the proxy may take, 90 s unless given (5 s to 10 m): Tor builds a circuit to an onion first. |
 
 **Reachable as an onion:** listen on TCP too, have tor publish that port in a hidden service
 (`HiddenServicePort 4001 127.0.0.1:4001`), and give `--onion-file` the address, so identify tells
@@ -358,9 +475,10 @@ chainv4 … --listen /ip4/127.0.0.1/tcp/4001 --tor-proxy socks5h://127.0.0.1:905
 
 ## Bans
 
-Faults add up per peer within `SCORE_WINDOW`, 10 minutes, by weight: an invalid block or
-undecodable gossip 50, a flood 25, a bad signature on a transaction or vote 10. At `BAN_SCORE`,
-100 (two invalid blocks, or ten bad signatures), the peer is banned:
+Faults add up per peer within `--ban-window`, 10 minutes unless given (`SCORE_WINDOW`), by
+weight: an invalid block or undecodable gossip 50, a flood 25, a bad signature on a transaction or
+vote 10. At `--ban-score`, 100 unless given (`BAN_SCORE`: two invalid blocks, or ten bad
+signatures), the peer is banned:
 - **Cut off:** disconnected, forgotten in Kademlia and in the remembered peers, and never dialed.
 - **Refused:** a connection from it, whoever dialed, is closed as soon as it stands.
 - **For `--ban-for`,** an hour unless given (`30m`, `2d`); bans live in memory, so a restart lifts
@@ -388,7 +506,8 @@ A node finds peers five ways:
   dials 3 of those it knows every 15 seconds, each at most once in 5 minutes. So a node given one
   bootnode meets the peers the bootnode knows, and theirs.
 - **mDNS** on the local network, unless `--no-mdns`.
-- **Peers that dial in,** however many it has: `--target-peers` bounds only what it looks for.
+- **Peers that dial in,** up to `--max-peers-in` connections, every one without it:
+  `--target-peers` bounds only what it looks for.
 
 Only nodes of the same chain take part: Kademlia speaks `/{protocol}/{network}/kad/1`, so the DHT
 holds the chain's nodes alone, and a peer of another chain is dropped once identify says so.
@@ -399,10 +518,15 @@ holds the chain's nodes alone, and a peer of another chain is dropped once ident
 | `--bootnode ADDR` | none | A bootnode of this node's own, beside the chain's; repeat for several. |
 | `--target-peers N` | 15 | How many peers to look for. |
 | `--no-mdns` | off | Do not look on the local network, as on a server. |
+| `--max-peers-in N` | none | The most connections peers that dial in may hold at once. |
+
+The cadences, a redial every 15 seconds, a bootstrap every 2 minutes, 3 dials at once and 5
+minutes before one is dialed again, and the 64 peers remembered, are `--tune`'s `dial.` and
+`peers.` keys (see [Limits and tuning](#limits-and-tuning)).
 
 **Peers remembered:** each peer's listen addresses, as identify gives them, are kept in the
 database's `peers` column by peer id with when it was last seen, the 64 most recent
-(`MAX_REMEMBERED`). A restarted node dials them as it does bootnodes, while short of peers, each
+(`MAX_REMEMBERED`, `--tune peers.remembered`). A restarted node dials them as it does bootnodes, while short of peers, each
 at most once a minute, so it finds its old peers even when its `--peer`s are gone. A banned peer
 is forgotten.
 
@@ -440,8 +564,8 @@ counts them, so a flood is turned away at the door instead of queueing without e
 **Over a limit:**
 - **Gossip is dropped.** It is best effort: honest peers gossip it again, and the transaction is
   still out there.
-- **A peer over its own share is struck.** `MAX_STRIKES` (10) strikes within `STRIKE_WINDOW` (a
-  minute) and the network disconnects it. A full backlog strikes nobody, since no one peer
+- **A peer over its own share is struck.** `--max-strikes` (10) strikes within `--strike-window`
+  (a minute) and the network disconnects it. A full backlog strikes nobody, since no one peer
   filled it.
 - **Submissions are refused:** `POST /txs` answers 503, "the node is busy; try again shortly".
 
@@ -450,16 +574,16 @@ peers were disconnected for it. The explorer's Network page shows them too.
 
 **Hardening still to do.** The backlog bounds memory and the loop's work, and bans keep out a
 peer that floods or sends what breaks the rules, but a determined peer still has ways around it:
-- **Shares are per peer id.** Ids are free, so one host with many ids gets many shares. Limits per
-  IP address, or on connections, would close that.
+- **Shares are per peer id.** Ids are free, so one host with many ids gets many shares.
+  `--max-peers-in` caps the connections dialing in altogether; a limit per IP address would close
+  the rest.
 - **gossipsub's own peer scoring is off.** The node's verdicts feed the bans above; gossipsub's
   mesh scoring, which could build on the same verdicts, is not configured.
 - **Blocks and sync requests are not counted.** Only transactions and votes are; gossiped blocks
   and requests from syncing peers still queue without bound.
-- **The strike rules are fixed.** `MAX_STRIKES` and `STRIKE_WINDOW` are constants; a share small
-  enough to stop a flood can also cut off an honest peer relaying a burst.
-- **The API has no per-client limit.** Submissions share the backlog's total, so one client can
-  still keep others out, if not the node.
+- **The API's per-client limits are opt in past concurrency.** `--http-per-ip` bounds what one
+  client has in flight and `--http-rate` what it asks a second, but submissions still share the
+  backlog's total, so many clients can keep others out, if not the node.
 
 ## Sync
 
@@ -500,6 +624,12 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
 
 Kinds of finality that take no votes never ask for justifications.
 
+The counts are the most it serves, and what an asker asks for: an operator may lower each with
+`--tune sync.blocks`, `sync.justifications`, `sync.headers` and `sync.entries`, for a node on a weak
+machine or link, never raise them. An asker takes a short answer as it takes one cut by bytes, and
+asks again from where it ended; a smaller `sync.entries` just has it walk the state tree a level
+deeper.
+
 **Big blocks.** A response may be at most 64 MiB (`MAX_SYNC_RESPONSE`), past which the asker's
 codec refuses it, and a block may hold up to 6 MiB of transactions, so 128 full ones would never
 arrive: the asker would ask the same peer for the same run again and again. So an answer of
@@ -538,11 +668,14 @@ the tip. Then it syncs the rest as usual.
    name: it asks the peer for finality (`Finality`, as `GET /light/finality` serves it), an epoch
    at a time, and checks on once it knows them, so it follows `activation_delay` epochs behind
    what finality has justified, as any light client does.
-2. **The pivot.** Once a peer has no more, the pivot is the block `PIVOT_DEPTH` (16) below the
-   last header, or half `max_reorg_depth` below when that is less. Deep enough not to come off in
-   a reorg, and recent enough for peers to serve: they read state at any height their history
-   keeps, `--state-history` blocks back. A chain shorter than `MIN_SNAPSHOT_HEIGHT` (32) is
-   synced by running its blocks instead.
+2. **The pivot.** Once a peer has no more, the pivot is the block `--snapshot-depth` below the
+   last header, 16 unless given (`PIVOT_DEPTH`), or half `max_reorg_depth` below when that is
+   less; given past half `max_reorg_depth`, the node refuses to start. Deep enough not to come off
+   in a reorg, and recent enough for peers to serve: they read state at any height their history
+   keeps, `--state-history` blocks back. The syncing node picks it alone: a peer serves the state
+   of whatever main-chain block it is asked for, so peers need not agree on the depth, and one
+   that no longer holds the pivot moves it as below. A chain shorter than twice the depth (32 by
+   default) is synced by running its blocks instead.
 3. **State.** It walks the pivot's state tree down from the root (`SnapshotWalk`), a position at a
    time:
    - **What it gets:** a peer answers with the position's entries, when there are at most 512, or
@@ -641,7 +774,8 @@ cores runs blocks slower, and links slower than a laptop's loopback carry fewer 
 - **Stopping is between steps.** Ctrl-C or SIGTERM sets a flag the loop checks after each step,
   within a second, and the node returns and closes its database. Peers and API clients see their
   connections drop with the process, not a goodbye.
-- **No NAT traversal,** and no limits on connections or requests.
+- **No NAT traversal.** Connections and requests are bounded by `--max-peers-in`,
+  `--http-per-ip` and `--http-rate`, each a node's own; see [Limits and tuning](#limits-and-tuning).
 - **The indexes are opt in, each on its own.** `--index-events` and `--index-addresses` keep
   theirs, from genesis or the height or `latest-N` window given, and once on, the database keeps
   it on. `=off` deletes one at startup, in one atomic write however big it is, and leaves the

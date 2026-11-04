@@ -26,20 +26,10 @@ use {
     std::sync::Arc,
 };
 
-/// The most blocks one eth_getLogs scans.
-const MAX_LOG_BLOCKS: u64 = 10_000;
-/// The most addresses an eth_getLogs filter may name, and the most topics it may name at one
-/// place: past these it is refused, as public providers refuse them.
-const MAX_LOG_ADDRESSES: usize = 1_000;
-const MAX_LOG_TOPICS: usize = 1_000;
 /// The most places a log has topics at: a filter asking past them never matches.
 const LOG_TOPIC_PLACES: usize = 4;
-/// The most fee history one eth_feeHistory gives.
-const MAX_FEE_HISTORY: u64 = 1_024;
-/// The most requests one POST /rpc batch may hold. Each is answered in order on the API's one
-/// thread, and one may run a contract under the whole fuel cap, so a body may not line up more of
-/// them than a client could send as separate requests against the per-address rate limit.
-const MAX_BATCH: usize = 100;
+// The rest of what /rpc answers within, the blocks one eth_getLogs scans, the addresses and topics
+// a filter may name, a batch's requests and eth_feeHistory's blocks, are RpcLimits, the node's own.
 
 /// A JSON-RPC error: its code, as Ethereum's nodes use them, its message, and any data.
 struct RpcError {
@@ -85,7 +75,7 @@ pub(super) async fn rpc(api: Arc<Api>, body: &[u8]) -> Value {
 
     match request {
         Value::Array(batch) if batch.is_empty() => reply(&Value::Null, Err(RpcError { code: -32600, message: "an empty batch".to_string(), data: None })),
-        Value::Array(batch) if batch.len() > MAX_BATCH => reply(&Value::Null, Err(RpcError { code: -32600, message: format!("a batch holds at most {MAX_BATCH} requests"), data: None })),
+        Value::Array(batch) if batch.len() > api.tuned.rpc.batch => reply(&Value::Null, Err(RpcError { code: -32600, message: format!("a batch holds at most {} requests", api.tuned.rpc.batch), data: None })),
         Value::Array(batch) => {
             let mut replies = Vec::with_capacity(batch.len());
 
@@ -136,7 +126,7 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
         "eth_blockNumber" => Ok(quantity(u256::from(tip(&*db)?.header.height))),
         "eth_syncing" => Ok(false.into()),
         "eth_accounts" | "eth_requestAccounts" => Ok(json!([])),
-        "eth_gasPrice" => Ok(quantity(next_base(api)? * u256::from(2u64))),
+        "eth_gasPrice" => Ok(quantity(next_base(api)?.saturating_mul(u256::from(api.tuned.suggest)))),
         "eth_maxPriorityFeePerGas" => Ok(quantity(u256::ZERO)),
         "eth_feeHistory" => fee_history(api, param(0), param(1), param(2)),
         "eth_getBalance" => {
@@ -453,7 +443,7 @@ fn fee_history(api: &Api, count: &Value, newest: &Value, percentiles: &Value) ->
         Value::Number(count) => count.as_u64().unwrap_or(1),
         count => u64::try_from(number(count, "the block count")?).unwrap_or(1),
     }
-    .clamp(1, MAX_FEE_HISTORY);
+    .clamp(1, api.tuned.rpc.fee_history.max(1));
     let tip = tip(&*api.db)?.header.height;
     let newest = match newest.as_str() {
         Some(named @ ("safe" | "finalized")) => tagged(api, named)?.unwrap_or(tip),
@@ -808,8 +798,8 @@ fn logs(api: &Api, filter: &Value) -> Answer {
     // The filter first, so a bad one costs no block read: sets, so each log is matched at once.
     let addresses: HashSet<[u8; 20]> = match filter.get("address") {
         None | Some(Value::Null) => HashSet::new(),
-        Some(Value::Array(list)) if list.len() > MAX_LOG_ADDRESSES => {
-            return Err(RpcError::invalid(format!("a filter names at most {MAX_LOG_ADDRESSES} addresses")));
+        Some(Value::Array(list)) if list.len() > api.tuned.rpc.log_addresses => {
+            return Err(RpcError::invalid(format!("a filter names at most {} addresses", api.tuned.rpc.log_addresses)));
         }
         Some(Value::Array(list)) => list.iter().map(address).collect::<Result<_, _>>()?,
         Some(one) => HashSet::from([address(one)?]),
@@ -824,7 +814,7 @@ fn logs(api: &Api, filter: &Value) -> Answer {
             .iter()
             .map(|place| match place {
                 Value::Null => Ok(None),
-                Value::Array(any) if any.len() > MAX_LOG_TOPICS => Err(RpcError::invalid(format!("a filter names at most {MAX_LOG_TOPICS} topics at a place"))),
+                Value::Array(any) if any.len() > api.tuned.rpc.log_topics => Err(RpcError::invalid(format!("a filter names at most {} topics at a place", api.tuned.rpc.log_topics))),
                 Value::Array(any) => any.iter().map(|topic| bytes(topic, "a topic")).collect::<Result<_, _>>().map(Some),
                 one => bytes(one, "a topic").map(|topic| Some(HashSet::from([topic]))),
             })
@@ -841,8 +831,8 @@ fn logs(api: &Api, filter: &Value) -> Answer {
                 return Ok(json!([]));
             }
 
-            if to - from >= MAX_LOG_BLOCKS {
-                return Err(RpcError::server(format!("ask for at most {MAX_LOG_BLOCKS} blocks of logs at once")));
+            if to - from >= api.tuned.rpc.log_blocks {
+                return Err(RpcError::server(format!("ask for at most {} blocks of logs at once", api.tuned.rpc.log_blocks)));
             }
 
             (None, Some(from..=to))

@@ -238,12 +238,43 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     {
         further(ui, ctx, query, listed, state.filter.on(), shown);
     }
+
+    // Reading checked blocks asks no node for its lists, so there is no page of one to go on with:
+    // what it shows is what it read, and Settings reads further back, as the note above says.
+    if under.is_none() && !reading {
+        older(ui, ctx, &addresses);
+    }
+}
+
+/// Below the whole history: asking the node for the page after the one each of its lists ended for
+/// each address, as it lists the newest first, a page at a time. Each line still waits for its proof.
+fn older(ui: &mut Ui, ctx: &mut Ctx, addresses: &[String]) {
+    let asks = ctx.chain.older_pages(addresses);
+
+    if asks.is_empty() {
+        return;
+    }
+
+    let palette = *ctx.palette;
+    ui.horizontal(|ui| match asks.iter().any(|ask| ctx.node.asking(ask)) {
+        true => {
+            ui.spinner();
+        }
+        false => {
+            if theme::quiet(ui, &palette, "Older transactions").clicked() {
+                for ask in asks {
+                    ctx.node.retry(ask);
+                }
+            }
+        }
+    });
+    theme::section_gap(ui);
 }
 
 /// Asks the node what passes the filters, and for proof of what it listed: the filter's own page,
 /// so nothing goes on while it is not looked at.
 fn ask_filtered(ctx: &mut Ctx, state: &mut ActivityState, addresses: &[String], query: &str, under: Option<&Listed>) {
-    if state.asked.as_ref().is_none_or(|(asked, at)| asked != query || ctx.now.saturating_sub(*at) >= FILTERED_EVERY) {
+    if state.asked.as_ref().is_none_or(|(asked, at)| asked != query || ctx.now.saturating_sub(*at) >= ctx.settings.pace().every_ms(FILTERED_EVERY)) {
         state.asked = Some((query.to_string(), ctx.now));
 
         for address in addresses {
@@ -251,7 +282,7 @@ fn ask_filtered(ctx: &mut Ctx, state: &mut ActivityState, addresses: &[String], 
         }
     }
 
-    if !ctx.chain.caught_up() || ctx.now.saturating_sub(state.proved) < PROVEN_EVERY {
+    if !ctx.chain.caught_up() || ctx.now.saturating_sub(state.proved) < ctx.settings.pace().every_ms(PROVEN_EVERY) {
         return;
     }
 
@@ -1601,5 +1632,53 @@ mod tests {
 
         assert!(said[0].contains("to your Ethereum"), "{}", said[0]);
         assert!(said[1].contains("from your EdBlake"), "{}", said[1]);
+    }
+
+    /// A chain whose node listed the newest page of this address's history, with more behind it.
+    fn listed_a_page_of(address: &str) -> crate::chain::Chain {
+        let (mut chain, _) = following();
+        let (mut pinned, checkpoints, saved) = (std::collections::HashMap::new(), std::collections::HashMap::new(), std::collections::HashMap::new());
+        let trust = crate::chain::Trust { node: "http://node", pinned: &mut pinned, checkpoints: &checkpoints, saved: &saved, fast_resume: false };
+        let page = serde_json::json!({ "txs": [{ "id": "0x09", "height": 9 }], "next": "0xaa" });
+
+        assert!(chain.take(&Ask::History { address: address.to_string(), cursor: None }, &Ok(page), trust, 0, 0.0));
+
+        chain
+    }
+
+    #[test]
+    fn older_transactions_shows_while_the_node_has_more_and_asks_for_the_next_page() {
+        use crate::views::drawn;
+
+        let (holder, _) = watching();
+        let address = holder.addresses()[0].to_string();
+        let mut world = drawn::World { chain: listed_a_page_of(&address), ..drawn::World::default() };
+        world.settings.role = Some(Role::Online);
+        let (mut book, mut holders) = (crate::vault::Book::default(), vec![holder]);
+
+        for size in drawn::SCREENS {
+            let said = drawn::said_in(&mut world, &mut book, &mut holders, size, |ui, ctx| show(ui, ctx, &mut ActivityState::default()));
+
+            assert!(said.contains("Older transactions"), "{size:?}: {said}");
+        }
+
+        // Pressed, the next page is out, and the button waits for it.
+        let tapped = drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 740.0), "Older transactions", |ui, ctx| show(ui, ctx, &mut ActivityState::default()));
+
+        assert!(!tapped.contains("Older transactions"), "asking: {tapped}");
+        assert_eq!(world.chain.older_pages(std::slice::from_ref(&address)), [Ask::History { address: address.clone(), cursor: Some("0xaa".to_string()) }]);
+
+        // Reading checked blocks, no node's list is followed: Settings reads further back instead.
+        world.settings.read_blocks = true;
+        let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |ui, ctx| show(ui, ctx, &mut ActivityState::default()));
+
+        assert!(!said.contains("Older transactions") && said.contains("Reading checked blocks"), "{said}");
+
+        // Read to its end, there is nothing older to offer.
+        world.settings.read_blocks = false;
+        world.chain = crate::chain::Chain::default();
+        let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |ui, ctx| show(ui, ctx, &mut ActivityState::default()));
+
+        assert!(!said.contains("Older transactions"), "{said}");
     }
 }

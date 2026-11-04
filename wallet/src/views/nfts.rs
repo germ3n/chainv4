@@ -275,7 +275,7 @@ fn want(ctx: &mut Ctx, state: &mut NftsState, uri: &str) {
 fn refresh(ctx: &mut Ctx, state: &mut NftsState, time: f64) {
     state.addresses = ctx.addresses();
 
-    if time - state.asked < ASK_EVERY {
+    if time - state.asked < ctx.settings.pace().every(ASK_EVERY) {
         return;
     }
 

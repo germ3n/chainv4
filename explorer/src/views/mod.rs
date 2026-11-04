@@ -226,6 +226,26 @@ pub struct Settings {
     /// The coin's symbol and decimals as a node last said them, by chain (its genesis id): what shows
     /// with Read from checked blocks on, when no node is asked and nothing checked says them.
     pub coins: HashMap<String, (String, u8)>,
+    /// Low data: ask the node a few times less often, for a metered connection or a phone's battery.
+    /// See chainv4_ui::pace.
+    pub low_data: bool,
+    /// How many times as long as usual a request may take before a page says it got no answer:
+    /// chainv4_ui::net::waits. 0, from settings kept before there was this, is the usual, as 1 is.
+    pub patience: u32,
+    /// The most bytes Read from checked blocks keeps, or None for crate::reading::MOST_BYTES.
+    pub reading_bytes: Option<u64>,
+}
+
+impl Settings {
+    /// How often the explorer asks its node, by Low data.
+    pub fn pace(&self) -> chainv4_ui::pace::Pace {
+        chainv4_ui::pace::Pace::new(self.low_data)
+    }
+
+    /// The most bytes Read from checked blocks keeps, within the bounds Settings offers.
+    pub fn reading_bytes(&self) -> u64 {
+        self.reading_bytes.unwrap_or(crate::reading::MOST_BYTES).clamp(crate::reading::LEAST_BYTES, crate::reading::MOST_BYTES_SET)
+    }
 }
 
 /// The look a page is drawn in: its colors, and whether the screen is a phone's.

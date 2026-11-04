@@ -198,7 +198,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, send: &mut Send
             }
         }
 
-        if state.rig.port_asked.as_ref().is_none_or(|(asked, at)| *asked != node || ctx.now.saturating_sub(*at) > mine::PORT_REFRESH) {
+        if state.rig.port_asked.as_ref().is_none_or(|(asked, at)| *asked != node || ctx.now.saturating_sub(*at) > ctx.settings.pace().every_ms(mine::PORT_REFRESH)) {
             match &mut state.remote {
                 Some((_, _, remote)) => remote.ask(Ask::Mining),
                 None => ctx.node.ask(Ask::Mining),
@@ -210,7 +210,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, send: &mut Send
         mine::card(ui, ctx, &mut state.rig, &from, &node);
     }
 
-    if state.asked.as_ref().is_none_or(|(asked, at)| *asked != address || ctx.now.saturating_sub(*at) > REFRESH) {
+    if state.asked.as_ref().is_none_or(|(asked, at)| *asked != address || ctx.now.saturating_sub(*at) > ctx.settings.pace().every_ms(REFRESH)) {
         let node = match &mut state.remote {
             Some((_, _, node)) => node,
             None => &mut *ctx.node,

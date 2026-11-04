@@ -294,6 +294,44 @@ pub trait ScriptEngine: Send + Sync {
 }
 
 #[document(
+    summary = "How big each engine's per-node resources are: Lua's pool of pristine states and the threads that build them, and WebAssembly's cache of compiled modules. They trade memory for throughput and change no call's outcome, so each node picks its own, with --lua-states, --lua-builders, --wasm-cache-mb and --wasm-cache-modules. The EVM builds its context fresh for every call and has nothing to size.",
+    category = "VM",
+    see_also = "Vm::with_pools",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnginePools {
+    #[document(summary = "How many pristine Lua states are kept ready: lvm::POOL_SIZE by default.")]
+    pub lua_states: usize,
+    #[document(summary = "How many threads build them: lvm::BUILDERS by default.")]
+    pub lua_builders: usize,
+    #[document(summary = "How many bytes of WebAssembly modules the cache holds: wasm::MODULE_CACHE_BYTES by default.")]
+    pub wasm_bytes: usize,
+    #[document(summary = "How many WebAssembly modules the cache holds at most: wasm::MODULE_CACHE_ENTRIES by default.")]
+    pub wasm_modules: usize,
+}
+
+impl EnginePools {
+    #[document(parent = "EnginePools", summary = "What every node had before the pools were sized on the node: 16 Lua states built by 2 threads, and 32 MiB and 1,024 WebAssembly modules.")]
+    pub const DEFAULT: EnginePools = EnginePools {
+        lua_states: 16,
+        lua_builders: 2,
+        wasm_bytes: 32 * 1024 * 1024,
+        wasm_modules: 1_024,
+    };
+}
+
+impl Default for EnginePools {
+    fn default() -> EnginePools {
+        EnginePools::DEFAULT
+    }
+}
+
+#[cfg(feature = "lvm")]
+const _: () = assert!(EnginePools::DEFAULT.lua_states == lvm::POOL_SIZE && EnginePools::DEFAULT.lua_builders == lvm::BUILDERS);
+#[cfg(feature = "wasm")]
+const _: () = assert!(EnginePools::DEFAULT.wasm_bytes == wasm::MODULE_CACHE_BYTES && EnginePools::DEFAULT.wasm_modules == wasm::MODULE_CACHE_ENTRIES);
+
+#[document(
     summary = "The engines one chain runs contracts on, built once from its genesis and owned by the Chain. Every call, and every call those calls make, goes through the same Vm.",
     category = "VM",
     see_also = "ScriptEngine, Genesis, Chain::open",
@@ -323,6 +361,21 @@ impl Vm {
         returns = "The Vm, or the first engine this node was built without.",
     )]
     pub fn new(allowed: &[Engine], hash: HashType) -> Result<Vm, Engine> {
+        Vm::with_pools(allowed, hash, EnginePools::DEFAULT)
+    }
+
+    #[document(
+        parent = "Vm",
+        summary = "Builds the engines a chain allows, each sized as this node's operator asked: Lua's pool of states and WebAssembly's module cache. What they hold changes no call's outcome.",
+        params = {
+            allowed = "The engines from the chain's genesis.",
+            hash = "The chain's hash, from genesis, which contract addresses are derived with.",
+            pools = "How big each engine's per-node resources are.",
+        },
+        returns = "The Vm, or the first engine this node was built without.",
+    )]
+    pub fn with_pools(allowed: &[Engine], hash: HashType, pools: EnginePools) -> Result<Vm, Engine> {
+        let _ = pools;
         let mut engines: Vec<(Engine, Box<dyn ScriptEngine>)> = Vec::new();
         // revm runs a transaction start to end itself, so the EVM is no ScriptEngine.
         let evm = cfg!(feature = "evm") && allowed.contains(&Engine::Evm);
@@ -332,9 +385,9 @@ impl Vm {
                 #[cfg(feature = "evm")]
                 Engine::Evm => continue,
                 #[cfg(feature = "lvm")]
-                Engine::Lua => Box::new(lvm::LuaEngine::new()),
+                Engine::Lua => Box::new(lvm::LuaEngine::with_pool(pools.lua_states, pools.lua_builders)),
                 #[cfg(feature = "wasm")]
-                Engine::Wasm => Box::new(wasm::WasmEngine::new()),
+                Engine::Wasm => Box::new(wasm::WasmEngine::with_cache_of(pools.wasm_bytes, pools.wasm_modules)),
                 #[allow(unreachable_patterns)]
                 _ => return Err(*kind),
             };

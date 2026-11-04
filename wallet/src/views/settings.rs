@@ -143,8 +143,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
     // An offline signer follows no node and no chain.
     if ctx.settings.role() != Role::Signer {
         online(ui, ctx, state, node);
+        network_use(ui, ctx);
         super::reading::card(ui, ctx, &mut state.reading);
         super::dapp::settings(ui, ctx);
+        #[cfg(feature = "dex")]
+        trade(ui, ctx);
         #[cfg(feature = "swap")]
         swaps(ui, ctx);
         #[cfg(feature = "nft")]
@@ -944,6 +947,36 @@ fn your_chain(ui: &mut Ui, ctx: &mut Ctx) {
     ui.data_mut(|data| data.insert_temp(id, typed));
 }
 
+/// How the wallet uses the network: Low data, and how long it waits for an answer. A new wait takes
+/// a new way to the node, as a new proxy does.
+fn network_use(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Network use");
+        let proxied = !cfg!(target_arch = "wasm32") && !ctx.settings.proxy.is_empty();
+        let (_, waits) = chainv4_ui::widgets::network_use(ui, &palette, &mut ctx.settings.low_data, &mut ctx.settings.patience, proxied);
+
+        if waits {
+            *ctx.connect = Some(ctx.settings.node.clone());
+        }
+    });
+}
+
+/// The Trade page's settings: how long a trade may wait to land. Slippage is chosen with each trade.
+#[cfg(feature = "dex")]
+fn trade(ui: &mut Ui, ctx: &mut Ctx) {
+    let palette = *ctx.palette;
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Trade");
+        ui.label(RichText::new("How long a trade, or adding to a pool, may wait to land: past it, the DEX refuses it, so a trade stuck behind others never goes through later at a price nobody chose. Slippage is chosen with each trade.").small().color(palette.muted));
+        ui.add_space(6.0);
+        super::row(ui, &palette, "Deadline", |ui| {
+            ui.add(egui::DragValue::new(&mut ctx.settings.trade_deadline_minutes).range(1..=crate::app::MOST_TRADE_DEADLINE_MINUTES).suffix(" min"));
+            ui.label(RichText::new(format!("{} as usual", crate::app::TRADE_DEADLINE_MINUTES)).small().color(palette.muted));
+        });
+    });
+}
+
 /// The Swaps page's settings: the swap contract, when not the node's, an Esplora API to look
 /// Bitcoin up at, and EVM chains' JSON-RPC.
 #[cfg(feature = "swap")]
@@ -1147,6 +1180,62 @@ mod tests {
         state.hide();
 
         assert_eq!((state.showing_words, state.asking_words.is_none(), state.removing_words.is_none()), (None, true, true), "out of sight as the page goes");
+    }
+
+    /// Network use, the reading's cap and, with the DEX built in, the trade deadline, as Settings
+    /// draws them one after another.
+    fn new_cards(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
+        network_use(ui, ctx);
+        super::super::reading::card(ui, ctx, &mut state.reading);
+        #[cfg(feature = "dex")]
+        trade(ui, ctx);
+    }
+
+    #[test]
+    fn network_use_the_reading_cap_and_the_trade_deadline_fit_every_screen_and_say_what_they_do() {
+        use crate::views::drawn::{self, World};
+
+        for size in drawn::SCREENS {
+            let mut world = World::default();
+            world.settings.role = Some(Role::Online);
+            let (mut book, mut holders, mut state) = (Book::default(), Vec::new(), SettingsState::default());
+            let (width, changed) = drawn::page_in(&mut world, &mut book, &mut holders, size, |ui, ctx| new_cards(ui, ctx, &mut state));
+            let said = drawn::said_in(&mut world, &mut book, &mut holders, (size.0, 4_000.0), |ui, ctx| new_cards(ui, ctx, &mut state));
+
+            assert!(width <= size.0 + 0.5, "{width} on a screen {} wide", size.0);
+            assert!(!changed);
+
+            for words in ["NETWORK USE", "Low data", "Wait for answers", "Usual", "10×", "Keeps at most", "20,000", "500,000"] {
+                assert!(said.contains(words), "{words} on {size:?}: {said}");
+            }
+
+            assert!(said.contains("gives up after 12 seconds without getting connected, and 30 seconds in all"), "today's waits: {said}");
+            #[cfg(feature = "dex")]
+            assert!(said.contains("Deadline") && said.contains("20 as usual"), "{said}");
+        }
+    }
+
+    #[test]
+    fn low_data_wait_for_answers_and_the_reading_cap_are_set_by_a_tap() {
+        use crate::views::drawn::{self, World};
+
+        let mut world = World::default();
+        world.settings.role = Some(Role::Online);
+        let (mut book, mut holders, mut state) = (Book::default(), Vec::new(), SettingsState::default());
+        let screen = (1200.0, 4_000.0);
+
+        drawn::tap_in(&mut world, &mut book, &mut holders, screen, "Low data", |ui, ctx| new_cards(ui, ctx, &mut state));
+        assert!(world.settings.low_data);
+
+        let said = drawn::tap_in(&mut world, &mut book, &mut holders, screen, "4×", |ui, ctx| new_cards(ui, ctx, &mut state));
+        assert_eq!(world.settings.patience, 4);
+        assert!(said.contains("48 seconds without getting connected, and 120 seconds in all"), "{said}");
+
+        // Nothing is held yet, so a cap of any size takes at once, with nothing to ask.
+        drawn::tap_in(&mut world, &mut book, &mut holders, screen, "100,000", |ui, ctx| new_cards(ui, ctx, &mut state));
+        assert_eq!(world.settings.reading_txs, 100_000);
+        drawn::tap_in(&mut world, &mut book, &mut holders, screen, "5,000", |ui, ctx| new_cards(ui, ctx, &mut state));
+        assert_eq!(world.settings.reading_txs, 5_000);
     }
 
     #[test]

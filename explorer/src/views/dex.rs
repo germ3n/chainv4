@@ -175,7 +175,7 @@ fn router(ctx: &Ctx) -> Option<[u8; 20]> {
 
 /// Asks a question when it was never asked, or not lately.
 fn ask(ctx: &mut Ctx, state: &mut DexState, asked: Ask) {
-    let stale = state.asked.get(&asked).is_none_or(|when| ctx.now.saturating_sub(*when) > REFRESH);
+    let stale = state.asked.get(&asked).is_none_or(|when| ctx.now.saturating_sub(*when) > ctx.settings.pace().every_ms(REFRESH));
 
     if stale && !ctx.api.asking(&asked) {
         state.asked.insert(asked.clone(), ctx.now);
@@ -326,7 +326,7 @@ fn events_of(ctx: &mut Ctx, query: EventQuery) -> Vec<FoundEvent> {
     let newest = Ask::Events { query: query.clone(), cursor: None };
     let found = ctx.store.events.get(&query);
 
-    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > REFRESH) {
+    if found.is_none_or(|found| ctx.now.saturating_sub(found.refreshed) > ctx.settings.pace().every_ms(REFRESH)) {
         ctx.api.ask(newest);
     }
 

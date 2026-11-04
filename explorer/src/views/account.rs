@@ -511,7 +511,7 @@ fn transactions(ui: &mut Ui, ctx: &mut Ctx, address: &str, filter: &mut TxFilter
 
     let on = if problem.is_none() { filter.on() } else { 0 };
     let query = if on > 0 { filter.query(ctx.now) } else { String::new() };
-    let refresh = if on > 0 { FILTERED_REFRESH } else { REFRESH };
+    let refresh = ctx.settings.pace().every_ms(if on > 0 { FILTERED_REFRESH } else { REFRESH });
     let newest = Ask::AccountTxs {
         address: address.to_string(),
         query: query.clone(),

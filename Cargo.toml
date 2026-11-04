@@ -51,7 +51,7 @@ evm = ["vm", "keccak256", "abi", "dep:revm"]
 # ABI, for the CLI and the apps; and EVM and CREATE addresses, worked out without an EVM.
 abi = ["keccak256", "json"]
 rocksdb = ["dep:rocksdb", "dep:self_cell"]
-http = ["dep:axum", "json", "node"]
+http = ["dep:axum", "dep:http-body-util", "json", "node"]
 # A faucet for dev and test chains: the node's --faucet-key pays POST /faucet, a drip per address
 # and per IP each window, each asked with a moment's proof of work (src/faucet.rs).
 faucet = ["http", "sha256"]
@@ -138,6 +138,8 @@ clap = { version = "4.6.7", features = ["derive"], optional = true }
 log = { version = "0.4.34", optional = true }
 env_logger = { version = "0.11.11", optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "ws"], optional = true }
+# What holds a request body to the chain's largest transaction as it reads, axum's own.
+http-body-util = { version = "0.1.5", optional = true }
 serde_json = { version = "1.0.154", optional = true }
 tokio-stream = { version = "0.1.19", features = ["sync"], optional = true }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"], optional = true }

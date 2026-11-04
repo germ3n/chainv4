@@ -27,10 +27,10 @@ pub mod compiler;
 pub mod libs;
 mod value;
 
-/// How many pristine states the engine keeps ready, and how many threads build them. Building one
-/// takes about twice as long as a call that uses it, so two keep up with calls back to back.
-const POOL_SIZE: usize = 16;
-const BUILDERS: usize = 2;
+#[document(summary = "How many pristine Lua states the engine keeps ready, unless --lua-states says otherwise: 16.", category = "Lua VM", see_also = "EnginePools::lua_states")]
+pub const POOL_SIZE: usize = 16;
+#[document(summary = "How many threads build pristine Lua states, unless --lua-builders says otherwise: 2. Building one takes about twice as long as a call that uses it, so two keep up with calls back to back.", category = "Lua VM", see_also = "EnginePools::lua_builders")]
+pub const BUILDERS: usize = 2;
 
 /// The most fuel one instruction costs in the forked Luau. When an out-of-fuel error leaves less
 /// than this, the script really ran dry.
@@ -201,9 +201,17 @@ impl Contract {
     category = "Lua VM",
     see_also = "Contract, ScriptEngine, compile",
 )]
-#[derive(Default)]
 pub struct LuaEngine {
     pool: OnceLock<Pool>,
+    /// How many states the pool keeps ready, and how many threads build them.
+    size: usize,
+    builders: usize,
+}
+
+impl Default for LuaEngine {
+    fn default() -> LuaEngine {
+        LuaEngine::with_pool(POOL_SIZE, BUILDERS)
+    }
 }
 
 impl LuaEngine {
@@ -212,8 +220,16 @@ impl LuaEngine {
         LuaEngine::default()
     }
 
+    #[document(
+        parent = "LuaEngine",
+        summary = "The engine, its pool keeping this many states ready, built by this many threads, once it starts on the first call: what --lua-states and --lua-builders size. More takes memory for calls back to back; the pool never changes what a call does, as every state is built the same.",
+    )]
+    pub fn with_pool(size: usize, builders: usize) -> LuaEngine {
+        LuaEngine { pool: OnceLock::new(), size: size.max(1), builders: builders.max(1) }
+    }
+
     fn pool(&self) -> &Pool {
-        self.pool.get_or_init(Pool::start)
+        self.pool.get_or_init(|| Pool::start(self.size, self.builders))
     }
 }
 
@@ -314,7 +330,7 @@ impl Pristine {
     }
 }
 
-/// Pristine states built ahead on threads of their own, POOL_SIZE of them waiting at most, and
+/// Pristine states built ahead on threads of their own, the pool's size of them waiting at most, and
 /// used ones closed on another, since closing a state costs a good part of a call too. The
 /// threads stop when the pool, and with it their channels, is dropped.
 struct Pool {
@@ -323,11 +339,11 @@ struct Pool {
 }
 
 impl Pool {
-    fn start() -> Pool {
-        let (built, ready) = mpsc::sync_channel(POOL_SIZE);
-        let (used, closing) = mpsc::sync_channel::<Pristine>(POOL_SIZE);
+    fn start(size: usize, builders: usize) -> Pool {
+        let (built, ready) = mpsc::sync_channel(size);
+        let (used, closing) = mpsc::sync_channel::<Pristine>(size);
         // If a thread cannot start, or stops, calls build and close their own states.
-        for _ in 0..BUILDERS {
+        for _ in 0..builders {
             let built = built.clone();
             let _ = std::thread::Builder::new().name("lua states".to_string()).spawn(move || {
                 while let Ok(state) = Pristine::new() {

@@ -186,7 +186,7 @@ async fn send(api: &Api, faucet: &Arc<Faucet>, node: crate::node::NodeHandle, to
             account.nonce.max(*next)
         };
         let probe = SignedTx::sign(tx.clone(), nonce, FeeOffer::NONE, key, &genesis);
-        let offer = api.fees.as_ref().map_or(FeeOffer::NONE, |fees| fees.offer(base, api.tx_fuel, &probe, Default::default()));
+        let offer = api.fees.as_ref().map_or(FeeOffer::NONE, |fees| fees.offer_times(base, api.tx_fuel, &probe, Default::default(), api.tuned.suggest));
         let most = faucet.config.amount.saturating_add(u256::from(offer.gas_limit).saturating_mul(offer.max_price));
 
         if account.balance < most {

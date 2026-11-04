@@ -30,7 +30,7 @@ fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
 }
 
 fn port() -> MiningPort {
-    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false }
+    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false, limits: PortLimits::DEFAULT }
 }
 
 /// A pool on a port of its own, its seals coming out of the channel.
@@ -493,4 +493,33 @@ fn a_solo_worker_is_turned_away_by_a_port_that_takes_none_or_without_a_payout() 
 
     assert!(refused["why"].as_str().unwrap().contains("--payout"), "{refused}");
     assert!(solo.solo().is_empty());
+}
+
+#[test]
+fn a_port_tuned_to_one_payout_mining_alone_refuses_a_second() {
+    let found: Found = Arc::new(|_, _| {});
+    let limits = PortLimits { solo: 1, ..PortLimits::DEFAULT };
+    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, limits, ..port() }, found).unwrap();
+    let (_first_sender, _first, first) = alone(&pool, Some(Address::Ed25519([4; 32])));
+    let (_again_sender, _again, again) = alone(&pool, Some(Address::Ed25519([4; 32])));
+    let (_, _, second) = alone(&pool, Some(Address::Ed25519([5; 32])));
+
+    assert_eq!((first["type"].as_str(), again["type"].as_str()), (Some("solo"), Some("solo")), "one payout, mined for twice");
+    assert_eq!(second["type"], "refused");
+    assert!(second["why"].as_str().unwrap().contains("for 1 payouts mining alone already"), "{second}");
+}
+
+#[test]
+fn a_port_tuned_to_few_connections_turns_the_next_away() {
+    let found: Found = Arc::new(|_, _| {});
+    let limits = PortLimits { connections: 2, ..PortLimits::DEFAULT };
+    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { limits, ..port() }, found).unwrap();
+    let _one = raw(&pool, "one");
+    let _two = raw(&pool, "two");
+    until(&pool, |report| report.workers.len() == 2);
+
+    // The third connects at TCP, but the port closes it without a handshake.
+    let stream = TcpStream::connect(pool.listening()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    assert!(protocol::connect(stream, TOKEN, "chainv4", "three", None).is_err());
 }

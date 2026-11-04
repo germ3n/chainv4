@@ -372,6 +372,33 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   response may be, and a node asking for them never got them. Nodes old and new sync from each
   other: an older asker takes a shorter answer as it always did. Only an older node still answers
   with 128 however big, so big blocks asked of one can still fail.
+- **Every limit the node fixed is a flag or a `--tune` key now,** each defaulting to what every
+  node did before, so a node given none behaves exactly as it did: `--max-peers-in`, `--ban-score`,
+  `--ban-window`, `--max-strikes`, `--strike-window`, `--tor-timeout`, `--http-rate`,
+  `--api-max-page`, `--suggest-multiplier`, `--update-every`, `--snapshot-depth`,
+  `--underpriced-for`, `--lua-states`, `--lua-builders`, `--wasm-cache-mb` and
+  `--wasm-cache-modules`, and `--tune KEY=VALUE` for some thirty more, `sync.headers=512` and the
+  like. None is consensus, so nodes need not agree. A value past its bounds stops the node at
+  start; `GET /node` shows every one under `limits`, unless `--report minimal`.
+- **`--tune`'s sync caps and `gossip.batch` only go down.** Askers ask for no more than the
+  defaults, and peers refuse a batch of more than 256 transactions as garbage, which would get the
+  node banned.
+- **`--max-peers-in` counts connections, not peers,** and only those dialed in: a peer connected
+  both ways holds one of each, and `--peer`s and bootnodes this node dials always get through.
+- **`--http-rate` is per client as `--http-per-ip` is:** behind a proxy on the node's machine with
+  no `X-Forwarded-For`, every visitor is one client. Docker's nginx forwards it, and limits each
+  address already (`RATE_API`).
+- **`--underpriced-for` and `--state-history` take a time too,** `3m` or `14h`, turned into blocks
+  at the chain's block time as the node starts: a plain number is blocks, as before.
+- **A snapshot's depth is the syncing node's own** (`--snapshot-depth`): peers serve the state of
+  whatever block they still hold, so they need not agree on it. It is held to half the chain's
+  `max_reorg_depth`, and a chain shorter than twice it is run instead.
+- **Surround votes are caught as far back as a bond can be slashed:** counted votes stay
+  `max(64, withdrawal_delay + vote_depth)` epochs behind the finalized one, at most 4,096, so a
+  `Change::Finality` that raises `withdrawal_delay` past 64 no longer leaves surrounds signed in
+  the gap unpunished. Node-local; the slash itself is checked on its two votes.
+- **The largest request body follows the chain's `max_tx_bytes`:** 2 MiB unless its hex takes more,
+  read as governance's limits stand for each POST, 413 past it.
 
 ## How the chain behaves
 
@@ -1706,6 +1733,23 @@ voting finality it now goes back to the checkpoint and follows the node from the
   Nothing with a body is ever sent again by Retry or Reload.
 - **The pull is only a pull from the very top.** A finger that lands while the page is scrolled scrolls,
   even if it reaches the top on the way. Drags something on the page took, such as a slider, are out.
+
+- **Low data is one switch for every timer.** Settings → Network use → Low data has the wallet and
+  explorer ask their node four times less often by themselves (`ui/src/pace.rs`) and wake by
+  themselves less often. What you ask for, retries, reloads and what `/stream` pushes are never
+  held back, so a node with `--stream` still shows blocks as they come.
+- **Wait for answers** multiplies every request's limits (30 s, or 90 s through a proxy; 12 s or 60 s
+  to connect) by 2, 4 or 10 for slow Tor or I2P. The browser has no connect limit and uses the
+  whole one. Changing it reconnects, as a new proxy does.
+- **Reading caps are settings now:** the explorer keeps 16 MB to 2 GB of blocks (128 MB desktop and
+  32 MB phone or browser as usual), the wallet 5,000 to 500,000 transactions (20,000 as usual).
+  Lowering below what is held asks first, then lets the oldest go at once; reading them again costs
+  their download.
+- **The wallet's Activity pages now.** Address-index and event-index lists come 50 at a time;
+  "Older transactions" follows each one's `cursor`. With Read from checked blocks on there is no
+  such button: Settings → Read further back is what reaches older history.
+- **The wallet's DEX trade deadline is a setting,** 20 minutes unless changed, 1 minute to a day,
+  beside slippage.
 
 ## App store builds
 

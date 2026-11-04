@@ -56,6 +56,12 @@
 #   DEX_CONTRACT     the DEX deployed on this chain, contracts/lua/dex.lua, for GET /status
 #   DEX_ROUTER       the EVM DEX's router, DexRouter from contracts/evm/Dex.sol, 0x and 40 hex
 #   TRUSTED_PROXY    the proxies whose X-Forwarded-For the API believes: their names or addresses
+#   MEMPOOL_SIZE, MEMPOOL_PER_SENDER, MAX_NONCE_GAP, REPLACE_BUMP_PERCENT, UNDERPRICED_FOR,
+#   SYNC_BATCH_BYTES, MAX_PEERS_IN, BAN_SCORE, BAN_WINDOW, MAX_STRIKES, STRIKE_WINDOW,
+#   TOR_TIMEOUT, HTTP_RATE, API_MAX_PAGE, SUGGEST_MULTIPLIER, UPDATE_EVERY, LUA_STATES,
+#   LUA_BUILDERS, WASM_CACHE_MB, WASM_CACHE_MODULES and TUNE
+#                    the node's limits, each the flag of its name (TUNE is --tune KEY=VALUE,...),
+#                    set only when given: unset, each keeps chainv4's default (docs/node.md)
 #   EXTRA_ARGS       anything else, passed on to chainv4
 set -eu
 
@@ -259,6 +265,35 @@ if [ "${TOR:-0}" = 1 ]; then
     set -- "$@" --listen "/ip4/0.0.0.0/tcp/${P2P_PORT:-4001}" --tor-proxy socks5h://tor:9050 --onion-file /onion/p2p
     echo "[docker] peer-to-peer over Tor too: TCP ${P2P_PORT:-4001} for the onion, onions dialed through tor"
 fi
+
+# The node's limits, each passed on only when set, so one left unset keeps chainv4's own default.
+for pair in \
+    MEMPOOL_SIZE:--mempool-size \
+    MEMPOOL_PER_SENDER:--mempool-per-sender \
+    MAX_NONCE_GAP:--max-nonce-gap \
+    REPLACE_BUMP_PERCENT:--replace-bump-percent \
+    UNDERPRICED_FOR:--underpriced-for \
+    SYNC_BATCH_BYTES:--sync-batch-bytes \
+    MAX_PEERS_IN:--max-peers-in \
+    BAN_SCORE:--ban-score \
+    BAN_WINDOW:--ban-window \
+    MAX_STRIKES:--max-strikes \
+    STRIKE_WINDOW:--strike-window \
+    TOR_TIMEOUT:--tor-timeout \
+    HTTP_RATE:--http-rate \
+    API_MAX_PAGE:--api-max-page \
+    SUGGEST_MULTIPLIER:--suggest-multiplier \
+    UPDATE_EVERY:--update-every \
+    LUA_STATES:--lua-states \
+    LUA_BUILDERS:--lua-builders \
+    WASM_CACHE_MB:--wasm-cache-mb \
+    WASM_CACHE_MODULES:--wasm-cache-modules \
+    TUNE:--tune; do
+    name=${pair%%:*}
+    flag=${pair#*:}
+    eval "value=\${$name:-}"
+    if [ -n "$value" ]; then set -- "$@" "$flag" "$value"; fi
+done
 
 # The proxies whose X-Forwarded-For the API believes, by name, as a container's address can change:
 # nginx in this stack, without which every visitor counts as one against the per-IP limits.

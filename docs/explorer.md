@@ -111,7 +111,16 @@ taken for dead and opened again. A connection left behind on another network nev
 
 At most 20,000 main-chain blocks are kept; older ones are let go.
 
-**When a request fails:** every request has a time limit, 30 seconds, or 90 through a proxy, so one
+**Low data and Wait for answers:** Settings → Network use has the wallet's two settings (see
+[Network use](wallet.md#network-use)). **Low data** has the explorer ask four times less often by
+itself: the status every 4 seconds rather than 1 (12 rather than 3 with a stream), the node's report
+every 8, forks every 20, a page's own every 10 rather than 2.5 and each page's refresh (tokens,
+events, an account's history, the DEX, swaps, bridges, collections), the light client every 16, and
+it wakes by itself every 2 seconds rather than half of one. What the stream tells, a retry and a
+reload are not held back. **Wait for answers** gives every request 2, 4 or 10 times as long.
+
+**When a request fails:** every request has a time limit, 30 seconds, or 90 through a proxy (times
+Wait for answers), so one
 that never answers ends in a failure rather than a page that waits, through a proxy too. A page shows
 what went wrong in a sentence with a **Retry** button, the same widget as the wallet's, and goes on
 showing it until it is answered; while the node itself does not answer, every page says so at its top.
@@ -193,7 +202,8 @@ recomputes a block's roots, so what is read back from a device is checked again 
 is.
 
 - **It is bounded:** 128 MB on a desktop, about 18 days of the devnet's empty blocks, and 32 MB on a phone or in
-  a browser, about 4. Transactions weigh what they weigh, a deploy's code among them. Past the cap the
+  a browser, about 4, unless **Keeps at most** in its card says 16 MB, 32 MB, 128 MB, 512 MB or 2 GB.
+  A smaller cap than it holds asks first (**Yes, let them go**), and then lets the oldest go at once. Transactions weigh what they weigh, a deploy's code among them. Past the cap the
   oldest blocks go, 1,024 heights at a time, and the height it knows from moves up to say so. It is all
   in memory while the app is open. With no room left, reading further back says so.
 - **It is on the device, private to the app,** in `explorer-index` in the app's folder, written a bucket of
@@ -396,7 +406,7 @@ hour. An older node answers 404, and the explorer shows nothing.
 | Finality | The kind, the epoch, and the justified and finalized checkpoints. Who votes and with what weight, the bonded validators, the signers under authority finality, and any conflicting votes the node caught. |
 | Governance | Who votes on changes, what one needs and the quorum, each voter's turnout, the changes being voted on as cards with their votes and what each would move, every setting in force and the change that set it, the decisions and rejections along the chain, and every decision and rejection, each proven by the light client. See [Governance](#governance). |
 | Send | Signs and sends transfers, contract calls, deploys and burns, for the chain the light client follows: until it says which, it says so and signs nothing. |
-| Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, dark or light, and the genesis the light client pinned there, which it can forget. |
+| Settings | The node, whether it answers and how updates arrive, the chain it is on, the proxy every request goes through, Low data and Wait for answers, dark or light, and the genesis the light client pinned there, which it can forget. |
 | More | On a phone, the pages the tabs have no room for. |
 
 **Faucet,** under Tools, on a node that runs a [faucet](faucet.md): coins for an address, an
@@ -668,7 +678,7 @@ it cannot find; a deploy that lands and fails says where, in the files it came f
 
 ## What it remembers
 
-The node address, the proxy, dark or light, any token decimals set by hand, the nodes trusted for
+The node address, the proxy, Low data, Wait for answers, the cap on what reading checked blocks keeps, dark or light, any token decimals set by hand, the nodes trusted for
 fast resume, whether to read from checked blocks, the coin's name each chain's node last gave, and the
 genesis the light client pinned and the chain's name last seen for each node. What it read from
 checked blocks it keeps apart (see [Read from checked blocks](#read-from-checked-blocks)). It keeps them where eframe keeps app data: the platform's app-data directory

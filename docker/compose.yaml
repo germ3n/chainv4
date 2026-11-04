@@ -59,6 +59,28 @@ services:
       SWAP_CONTRACT: ${SWAP_CONTRACT:-}
       DEX_CONTRACT: ${DEX_CONTRACT:-}
       DEX_ROUTER: ${DEX_ROUTER:-}
+      # The node's limits: unset, each keeps chainv4's default.
+      MEMPOOL_SIZE: ${MEMPOOL_SIZE:-}
+      MEMPOOL_PER_SENDER: ${MEMPOOL_PER_SENDER:-}
+      MAX_NONCE_GAP: ${MAX_NONCE_GAP:-}
+      REPLACE_BUMP_PERCENT: ${REPLACE_BUMP_PERCENT:-}
+      UNDERPRICED_FOR: ${UNDERPRICED_FOR:-}
+      SYNC_BATCH_BYTES: ${SYNC_BATCH_BYTES:-}
+      MAX_PEERS_IN: ${MAX_PEERS_IN:-}
+      BAN_SCORE: ${BAN_SCORE:-}
+      BAN_WINDOW: ${BAN_WINDOW:-}
+      MAX_STRIKES: ${MAX_STRIKES:-}
+      STRIKE_WINDOW: ${STRIKE_WINDOW:-}
+      TOR_TIMEOUT: ${TOR_TIMEOUT:-}
+      HTTP_RATE: ${HTTP_RATE:-}
+      API_MAX_PAGE: ${API_MAX_PAGE:-}
+      SUGGEST_MULTIPLIER: ${SUGGEST_MULTIPLIER:-}
+      UPDATE_EVERY: ${UPDATE_EVERY:-}
+      LUA_STATES: ${LUA_STATES:-}
+      LUA_BUILDERS: ${LUA_BUILDERS:-}
+      WASM_CACHE_MB: ${WASM_CACHE_MB:-}
+      WASM_CACHE_MODULES: ${WASM_CACHE_MODULES:-}
+      TUNE: ${TUNE:-}
       EXTRA_ARGS: ${EXTRA_ARGS:-}
       # Who says who is asking: nginx, or every visitor counts as one against the per-IP limits.
       TRUSTED_PROXY: ${TRUSTED_PROXY:-nginx}

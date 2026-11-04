@@ -26,6 +26,7 @@ pub mod filters;
 pub mod kept;
 pub mod layout;
 pub mod net;
+pub mod pace;
 pub mod power;
 pub mod pull;
 pub mod secret;

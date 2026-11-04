@@ -185,6 +185,31 @@ pub struct View<'a> {
     genesis: Hash,
     max_reorg_depth: u64,
     workers: &'a Arc<Workers>,
+    bounds: VoteBounds,
+}
+
+#[document(
+    summary = "How much of what finality learns a node holds, set with --tune finality.pending and finality.evidence: none of it is consensus. Votes held because they cannot be counted yet, the oldest let go past pending; and evidence of cheating kept for operators to report, the oldest let go past evidence.",
+    category = "Finality",
+    see_also = "ChainOptions::votes",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoteBounds {
+    #[document(summary = "The most votes held while they cannot be counted yet, as their checkpoints are not on the main chain or their source is not justified: 4,096 by default.")]
+    pub pending: usize,
+    #[document(summary = "The most pieces of evidence kept for operators to report: 64 by default.")]
+    pub evidence: usize,
+}
+
+impl VoteBounds {
+    #[document(parent = "VoteBounds", summary = "What every node held before these were tuned: 4,096 votes waiting and 64 pieces of evidence.")]
+    pub const DEFAULT: VoteBounds = VoteBounds { pending: 4_096, evidence: 64 };
+}
+
+impl Default for VoteBounds {
+    fn default() -> VoteBounds {
+        VoteBounds::DEFAULT
+    }
 }
 
 impl<'a> View<'a> {
@@ -194,6 +219,7 @@ impl<'a> View<'a> {
         genesis: Hash,
         max_reorg_depth: u64,
         workers: &'a Arc<Workers>,
+        bounds: VoteBounds,
     ) -> View<'a> {
         View {
             db,
@@ -201,7 +227,13 @@ impl<'a> View<'a> {
             genesis,
             max_reorg_depth,
             workers,
+            bounds,
         }
+    }
+
+    #[document(parent = "View", summary = "How many votes waiting and pieces of evidence this node holds.")]
+    pub fn bounds(&self) -> VoteBounds {
+        self.bounds
     }
 
     #[document(parent = "View", summary = "The chain's worker threads, for checking many signatures at once.")]
@@ -435,7 +467,7 @@ pub fn stored_evidence(db: &dyn Read) -> Result<Vec<Evidence>, DbError> {
 
 impl Chain {
     pub(super) fn view(&self) -> View<'_> {
-        View::new(&self.db, &self.tip, self.genesis, self.max_reorg_depth, &self.workers)
+        View::new(&self.db, &self.tip, self.genesis, self.max_reorg_depth, &self.workers, self.vote_bounds)
     }
 
     /// The finality and a view of the rest of the chain, borrowed apart so finality can learn
@@ -448,10 +480,11 @@ impl Chain {
             genesis,
             max_reorg_depth,
             workers,
+            vote_bounds,
             ..
         } = self;
 
-        (finality.as_deref_mut(), View::new(db, tip, *genesis, *max_reorg_depth, workers))
+        (finality.as_deref_mut(), View::new(db, tip, *genesis, *max_reorg_depth, workers, *vote_bounds))
     }
 
     /// Lets finality catch up with the tip, then lets go of the side branches the chain can no

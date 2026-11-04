@@ -405,6 +405,38 @@ mod voting {
         assert_eq!(reopen(&db, &finality).finalized(), chain.finalized());
     }
 
+    #[cfg(feature = "finality-ffg")]
+    #[test]
+    fn counted_votes_stay_as_long_as_a_bond_is_slashable_when_that_is_past_the_least_history() {
+        use crate::chain::finality::votes::history_for;
+
+        assert_eq!(history_for(3, 1), MAX_HISTORY as u64, "a short delay keeps the least");
+        assert_eq!(history_for(100, 2), 102, "a bond slashable for 100 epochs keeps votes past them");
+        assert_eq!(history_for(u64::MAX, 2), 4_096, "and never past what memory holds");
+
+        // A chain whose bonds stay slashable 80 epochs after their validators leave.
+        let FinalityConfig::Ffg(config) = ffg() else { unreachable!() };
+        let finality = FinalityConfig::Ffg(FfgConfig { withdrawal_delay: 80, ..config });
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = reopen(&db, &finality);
+        let keep = 80 + 1;
+        let last = keep + 3;
+        finalize_through(&mut chain, last);
+        let finalized = chain.finalized().unwrap().epoch;
+        let kept = stored_votes(&*db, COUNTED, 0).unwrap();
+
+        assert!(kept.iter().any(|vote| vote.vote.target.epoch <= finalized - MAX_HISTORY as u64), "older than the least history, still kept");
+        assert!(kept.iter().all(|vote| vote.vote.target.epoch > finalized - keep));
+        assert_eq!(kept.len() as u64, 2 * (keep + 1), "two votes for each epoch kept");
+
+        // A surround of a vote further back than 64 epochs is still caught.
+        let mut chain = reopen(&db, &finality);
+        let [alice, ..] = voters();
+        let old = kept.iter().find(|vote| vote.vote.voter == alice.public() && vote.vote.target.epoch == finalized - MAX_HISTORY as u64 - 2).unwrap();
+        let surround = signed(&chain, &alice, start(&chain), checkpoint(&chain, old.vote.target.epoch + 1));
+        assert!(chain.add_vote(surround).unwrap().evidence.is_some(), "a surround of a vote {} epochs back", MAX_HISTORY + 2);
+    }
+
     #[test]
     fn votes_that_cannot_count_yet_wait_and_count_later() {
         for finality in kinds() {

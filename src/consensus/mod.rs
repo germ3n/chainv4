@@ -254,6 +254,14 @@ impl ConsensusConfig {
             ConsensusConfig::Staked { .. } => "staked",
         }
     }
+
+    #[document(parent = "ConsensusConfig", summary = "Milliseconds between blocks, as the scheme aims for: proof of work's target_block_ms, or the slot of the others. What a node turns a time given for something counted in blocks into blocks by.")]
+    pub fn block_ms(&self) -> u64 {
+        match self {
+            ConsensusConfig::ProofOfWork(config) => config.target_block_ms,
+            ConsensusConfig::Authority { slot_ms, .. } | ConsensusConfig::Rotating { slot_ms } | ConsensusConfig::Staked { slot_ms, .. } => *slot_ms,
+        }
+    }
 }
 
 #[document(
