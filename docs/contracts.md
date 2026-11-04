@@ -376,6 +376,7 @@ what its storage or calls cost (`vm::cost`).
 | The address a key controls | 100 |
 | RIPEMD-160, HASH160 or double SHA-256 | As a hash: 20, plus 1 per 64 bytes |
 | Checking a state proof or a Merkle path | 200, plus 60 per 32 bytes of it |
+| Checking an Ethereum BLS aggregate signature | 103,000 (`bls_verify`), plus 5,000 per public key (`bls_key`) and 1 per 64 bytes of message: in proportion to a signature's 3,000, as measured |
 | Reading the federation, in force or of any version | 200 |
 | Reading the chain's id | 20 |
 
@@ -486,6 +487,10 @@ through the [crypto precompile](evm.md#crypto), the EVM (`vm::crypto`):
 | `crypto.ripemd160`, `hash160`, `sha256d` | `ripemd160`, `hash160`, `sha256d` | Bitcoin's hashes, as bytes: what its addresses, blocks and transactions are made of. |
 | `crypto.check_state(root, column, key, value, proof)` | `check_state` | Whether a [state proof](light-client.md), as `GET /proofs` encodes it, shows an entry holds a value, or with `nil`, nothing, under a state root. |
 | `crypto.check_merkle(root, data, index, count, path)` | `check_merkle` | Whether data is the index-th of `count` leaves under a Merkle root, by its audit path: how a header holds its transactions and receipts. |
+| `crypto.fast_aggregate_verify(pubkeys, message, signature)` | `fast_aggregate_verify` | Ethereum's BLS check, FastAggregateVerify with the ciphersuite `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`: whether a 96-byte signature on G2 is the aggregate of every 48-byte key's on G1 over one message, as a sync committee signs. Keys come as one string back to back or, in Lua, a table of them. No keys, wrong lengths, a key or signature that is no point of its group or is the point at infinity, and keys that sum to infinity all give false. A build without `bls12-381` fails the call. |
+
+The SDK also has `sha256`, SHA-256 on the node as `hash` with `Algorithm::Sha256`, into 32 bytes
+without allocating: what SSZ hashes with.
 
 Proofs are checked by the chain's own hash, so they take this chain's headers, or another chainv4
 chain's made with the same hash. What a header the contract trusts says is the contract's to
@@ -670,6 +675,7 @@ into its exported memory.
 | `evm_call` | Calls an [EVM](evm.md) contract: `evm_call(address, value, input, input_len)`, with what it returned in the result buffer and 0, or why it reverted and 1. |
 | `abi_encode`, `abi_decode` | Solidity's ABI, on the node: `abi_encode(signature, len, values, values_len)` writes calldata or arguments from a list of values, `abi_decode(types, len, data, data_len)` reads them back into one. |
 | `verify`, `recover`, `key_address`, `crypto_hash`, `check_state`, `check_merkle` | [Crypto](#crypto): a signature checked, 1 or 0; the key a secp256k1 signature recovers, 33 bytes at `out`, 1 or 0; a key's address at `out`; `ripemd160`, `hash160` or `sha256d` at `out`, returning its length; a state proof or a Merkle path checked, 1 or 0. |
+| `fast_aggregate_verify` | [Crypto](#crypto): `fast_aggregate_verify(pubkeys, pubkeys_len, message, message_len, signature, signature_len)`, Ethereum's BLS aggregate check, 1 or 0. Traps in a build without `bls12-381`. |
 | `federation` | The federation in force into the result buffer, its length, or -1 for none: its version (u64), threshold and signer count (u32s), then 33-byte keys. |
 | `chain_id` | The chain's id, as an `i64`: what `chain.id()` gives in Lua, the SDK's `chain_id()`. |
 | `abort` | Stops the call with an error. Only the first 1,024 bytes of the message are kept. |
@@ -716,8 +722,8 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 - `sender`, `this`, `value`, `balance`, `transfer`;
 - `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
   `refresh_token`, `resolve_name` and `name_of`, `evm_call`, `abi_encode` and `abi_decode`,
-  `verify`, `recover`, `key_address`, `ripemd160`, `hash160`, `sha256d`, `check_state`,
-  `check_merkle`, `federation` and `chain_id`, and
+  `verify`, `recover`, `key_address`, `ripemd160`, `hash160`, `sha256d`, `sha256`,
+  `check_state`, `check_merkle`, `fast_aggregate_verify`, `federation` and `chain_id`, and
   `storage`, with `storage::namespace(name)`
   and `storage::own()`;
 - `namespace!` and `retired!`, which declare the storage layout, and typed methods on a
@@ -765,12 +771,53 @@ the repo root, pass `--target wasm32-unknown-unknown`.
 | `contracts/examples/upgradable`, `contracts/lua/proxy.lua` | A proxy built on `fallback` and `delegate`, with its owner and implementation in its own space, that checks a new implementation's layout. |
 | `contracts/examples/token`, `contracts/lua/token.lua` | The [token standard](token-standard.md), held to it by one shared test. |
 | `contracts/examples/btc_relay`, `contracts/lua/btc_gateway.lua` | Bitcoin's headers as a contract, checked by its own rules, and the [bridge](bridges.md#bitcoin) that mints wBTC for deposits proven to it and checks BIP143 signatures over its releases. |
+| `contracts/examples/eth_relay` | Ethereum's beacon chain as a contract, a light client of its sync committees on the shared `ethlight` crate: finalized headers kept from updates two thirds of the committee signed, their ancestors proven by block roots, and transactions proven in them. See [Ethereum's light client](#ethereums-light-client). |
 | `contracts/lua/swap.lua` | An [atomic swap](swaps.md)'s chainv4 leg: the coin or a token locked under a SHA-256 hash for a recipient until a deadline by `ctx.time`, claimed with the secret or refunded after, with `transfer_from` for tokens. |
 | `contracts/lua/dex.lua`, `contracts/lua/lp_token.lua` | The [DEX](dex.md): constant-product pools of the coin, tokens and ERC-20s through `evm.call`, each pool's share token a clone of `lp_token.lua` made with `contracts.clone`. |
 | `contracts/lua/guestbook.lua` | Events with addresses in them, for the event index and the explorer; value passed on with `accounts.transfer`; and a storage layout of a map and a record. |
 | `contracts/lua/names/` | A contract split across files with `--@include`, its storage layout declared in an included file. |
 | `contracts/examples/integers`, `contracts/lua/integers.lua` | The integer types in both engines, with one layout: operators, the `checked_`, `saturating_` and `wrapping_` methods, comparisons with plain numbers, and the `i128`, `u128`, `i256` and `u256` kinds. One test runs both and upgrades each into the other's storage. |
 | `contracts/lua/points/`, `contracts/examples/points` | Three versions of one contract: the second keeps the first's layout, adds to it, retires a key and moves its value in `migrate`; the third is the second in Rust, keeping the Lua version's text kinds and units. [Contract storage](contract-storage.md) walks through them. |
+
+## Ethereum's light client
+
+`contracts/examples/eth_relay` follows Ethereum's beacon chain as its light clients do, by the
+consensus specs' sync protocol cut down to finality. Its rules are the `ethlight` crate's, at the
+repository's root, `no_std`, which the node can run too: SSZ's roots and branches, the light
+client's containers in each fork's layout, networks as whole definitions (slot timing and fork
+schedule, SSZ-encoded, with mainnet, Sepolia and Hoodi built in), the store's rules, and
+transactions proven in a payload and read from their RLP. SHA-256 and the BLS
+check are passed in: the contract makes them host calls, the node runs them natively.
+
+| Function | Who | Does |
+| --- | --- | --- |
+| `start(bootstrap, network_name, trusted_root)` | The deployer, once | Starts from a `LightClientBootstrap`, SSZ as `/eth/v1/beacon/light_client/bootstrap/{root}` serves it, on `mainnet`, `sepolia` or `hoodi`. Its header must be the trusted block root, and hold its execution header and its committee. |
+| `submit(update)` | Anyone | Takes a `LightClientUpdate`, SSZ, signed by at least two thirds of the current committee, or across a period boundary of the next one it learned; its finalized header must be newer, or it must bring the next committee while that is unknown. Its finality, next committee and execution branches are checked, and the signature under the fork of the slot before its signature slot. A finality update counts written as an update with zeros for the next committee and its branch. Returns the finalized slot. |
+| `prove_header(held_root, header, branch)` | Anyone | Keeps an ancestor of a header it holds, within the 8,192 slots before it, by the held state's `block_roots`. Returns its slot. |
+| `finalized()` | | The finalized slot, its beacon root, and its execution block's number and hash. |
+| `header_at(slot)`, `header(root)` | | A kept header's 288-byte record, or nil. |
+| `includes(beacon_root, transaction, index, branch)` | | Whether a transaction's bytes are the index-th of a kept block's payload, by its 21-node SSZ branch to `transactions_root`. |
+| `calldata(transaction)` | | What a transaction says: its recipient, nil for a creation, its calldata, and its chain id. Legacy, 0x01, 0x02, 0x03 and 0x04 transactions. |
+| `network_name()`, `period()` | | Its network; the current committee's period and whether the next is known. |
+
+**What it stores** is bounded and laid out for the node to read natively, as it reads the Bitcoin
+relay's (the layout is in the contract's doc comment): its own `store` and `finalized`, the
+current and next committees in `committees` by period, and at most 8,192 headers in `headers` by
+slot, with `roots` from root to slot and `order` saying which to drop next.
+
+**What it costs,** measured in `vm::tests::eth_relay` with the default costs:
+
+| `submit` | Fuel |
+| --- | --- |
+| 512 signers, bringing the next committee, which it stores | 2,970,260 |
+| 512 signers, bringing the next committee it already knows | 3,042,590 |
+| 342 signers, the fewest it takes, with no committee | 2,046,509 |
+
+The BLS check is most of it: `bls_verify` and `bls_key` for each signer, 2,663,000 for 512. The
+rest, about 300,000, is the module's load, hashing the committee's root through the host's SHA-256,
+and reading the committees. Both fit a transaction's 10,000,000 by default. The contract and
+`ethlight` are built at `opt-level = "s"` (`contracts/Cargo.toml`): at the workspace's `"z"` their
+hashing and copying loops cost about twice the fuel, more than a larger module's load fee.
 
 ## What to keep in mind
 

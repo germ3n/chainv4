@@ -180,5 +180,34 @@ pub fn check_merkle(hash: HashType, root: &[u8], data: &[u8], index: u64, count:
     crate::crypto::merkle::verify(&root, &crate::crypto::merkle::leaf(hash, data), index, count, &path)
 }
 
+#[document(
+    summary = "FastAggregateVerify as Ethereum checks its sync committees: whether a BLS signature is the aggregate of every key's over one message, by the ciphersuite BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_, keys on G1 and the signature on G2, both compressed.",
+    params = {
+        pubkeys = "The public keys, 48 bytes each, back to back.",
+        message = "The bytes signed: for a sync committee, a 32-byte signing root.",
+        signature = "The aggregate signature, 96 bytes.",
+    },
+    returns = "Whether it holds: false for no keys, bytes that are not whole keys, a signature not 96 bytes, any key or signature that is no point of its group or is the point at infinity, and keys that sum to infinity. An error in a build without bls12-381.",
+    category = "VM",
+    see_also = "bls_fuel",
+)]
+#[cfg_attr(not(feature = "bls12-381"), allow(unused_variables))]
+pub fn fast_aggregate_verify(pubkeys: &[u8], message: &[u8], signature: &[u8]) -> Result<bool, String> {
+    #[cfg(feature = "bls12-381")]
+    return Ok(crate::crypto::bls::fast_aggregate_verify(pubkeys, message, signature));
+
+    #[cfg(not(feature = "bls12-381"))]
+    Err("bls12-381 is not in this build".to_string())
+}
+
+#[document(
+    summary = "What a BLS check costs in fuel, in every engine: bls_verify, bls_key for each whole 48-byte key, and 1 for every hash_bytes_per_fuel bytes of message.",
+    category = "VM",
+    see_also = "fast_aggregate_verify, HostCosts::bls_verify",
+)]
+pub fn bls_fuel(costs: &crate::params::vm::HostCosts, pubkeys_len: u64, message_len: u64) -> u64 {
+    costs.bls_verify.saturating_add(costs.bls_key.saturating_mul(pubkeys_len / 48)).saturating_add(message_len / costs.hash_bytes_per_fuel.max(1))
+}
+
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,20 @@
+[package]
+name = "ethlight"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "A light client of Ethereum's beacon chain, no_std: SSZ, sync committee updates, and transactions proven in finalized blocks. The node and the eth_relay contract run it alike."
+
+[features]
+# Synthetic sync committees signing real-format updates, and a native SHA-256 and BLS check, for
+# tests here and in the node. Never in a contract.
+testing = ["dep:bls12_381", "dep:sha2"]
+
+[dependencies]
+bls12_381 = { version = "0.9.0", default-features = false, features = ["groups", "pairings", "alloc", "experimental"], optional = true }
+sha2 = { version = "0.10.9", default-features = false, optional = true }
+
+[dev-dependencies]
+bls12_381 = { version = "0.9.0", default-features = false, features = ["groups", "pairings", "alloc", "experimental"] }
+sha2 = { version = "0.10.9", default-features = false }

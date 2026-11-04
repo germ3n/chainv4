@@ -55,6 +55,7 @@ pub(super) const NAMES: &[&str] = &[
     "crypto_hash",
     "check_state",
     "check_merkle",
+    "fast_aggregate_verify",
     "federation",
     "chain_id",
     "abort",
@@ -516,6 +517,24 @@ fn chain_check_merkle() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "fast_aggregate_verify",
+    summary = "FastAggregateVerify as Ethereum checks its sync committees: whether a BLS signature is the aggregate of every key's over one message, by the ciphersuite BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_. Costs 103,000 fuel, plus 5,000 per public key and 1 per 64 bytes of message. Traps in a build without bls12-381.",
+    params = {
+        pubkeys = { ty = "i32", desc = "The public keys, 48 bytes each, compressed, back to back." },
+        pubkeys_len = { ty = "i32", desc = "Their length." },
+        message = { ty = "i32", desc = "The bytes signed." },
+        message_len = { ty = "i32", desc = "Their length." },
+        signature = { ty = "i32", desc = "The aggregate signature, 96 bytes, compressed." },
+        signature_len = { ty = "i32", desc = "Its length." },
+    },
+    returns = { ty = "i32", desc = "1 when it holds; 0 when not, and for no keys, wrong lengths, a key or signature that is no point of its group or is the point at infinity, and keys that sum to infinity." },
+    see_also = "rust/fast_aggregate_verify",
+)]
+fn chain_fast_aggregate_verify() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "federation",
     summary = "The bridges' federation in force, into the result buffer: its version as a u64, its threshold and how many signers as u32s, little-endian, then each signer's 33-byte compressed secp256k1 key. Costs 200 fuel.",
     returns = { ty = "i32", desc = "The length in the result buffer, or -1 on a chain with no federation." },
@@ -696,6 +715,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "crypto_hash", crypto_hash).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "check_state", check_state).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "check_merkle", check_merkle).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "fast_aggregate_verify", fast_aggregate_verify).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "federation", federation).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "chain_id", chain_id).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
@@ -1031,6 +1051,17 @@ fn check_merkle(mut caller: Caller<'_, Run>, root: u32, root_len: u32, data: u32
     let (root, data, path) = (read(&mut caller, root, root_len)?, read(&mut caller, data, data_len)?, read(&mut caller, path, path_len)?);
 
     Ok(u32::from(crate::vm::crypto::check_merkle(hash, &root, &data, index, count, &path)))
+}
+
+fn fast_aggregate_verify(mut caller: Caller<'_, Run>, pubkeys: u32, pubkeys_len: u32, message: u32, message_len: u32, signature: u32, signature_len: u32) -> Result<u32> {
+    let fuel = crate::vm::crypto::bls_fuel(&costs(&caller), u64::from(pubkeys_len), u64::from(message_len));
+    charge(&mut caller, fuel)?;
+    let (pubkeys, message, signature) = (read(&mut caller, pubkeys, pubkeys_len)?, read(&mut caller, message, message_len)?, read(&mut caller, signature, signature_len)?);
+
+    match crate::vm::crypto::fast_aggregate_verify(&pubkeys, &message, &signature) {
+        Ok(holds) => Ok(u32::from(holds)),
+        Err(why) => Err(stop(&mut caller, VmError::BadArgument(why))),
+    }
 }
 
 /// The federation in force into the result buffer: its version, u64, its threshold, u32, how many

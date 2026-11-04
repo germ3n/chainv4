@@ -33,6 +33,12 @@ crate or file it expects is gone. A crate that names a license and ships no text
 - the SDK's own tests run on the host: `cargo test -p chainv4-sdk --target <host>` inside
   `contracts/`.
 
+**The `ethlight` crate,** `ethlight/`, a member of the node's workspace, is Ethereum's light
+client: `no_std`, without hashing or signatures of its own, so the node and
+`contracts/examples/eth_relay` run the same rules from one source. Its `testing` feature makes
+synthetic sync committees from BLS keys of its own, which sign real-format updates, for its tests
+and the node's; `cargo test -p ethlight` runs its own.
+
 **Tests that open sockets** are ignored by default: `cargo test -- --ignored net::` floods one
 real libp2p node from another on 127.0.0.1 and checks the flooder is turned away, then
 disconnected.
@@ -108,6 +114,7 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | --- | --- |
 | `sha256`, `blake3`, `blake2s`, `blake2b`, `keccak256`, `xxh3` | Hash algorithms. |
 | `ed25519`, `edblake`, `secp256k1` | Key schemes. |
+| `bls12-381` | Ethereum's BLS signatures, on zkcrypto's `bls12_381` in pure Rust: FastAggregateVerify with the ciphersuite `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_`, for contracts following Ethereum's sync committees (`fast_aggregate_verify`, see [Contracts](contracts.md#ethereums-light-client)). Without it the host call stays, so modules link alike, but fails the call. |
 | `mnemonic` | Seed phrases: BIP39 words, and keys derived from them for every scheme built in. |
 | `lvm`, `wasm`, `evm` | The contract engines; any pulls in `vm`. `evm` is revm, and pulls in `keccak256`. |
 | `rocksdb` | The RocksDB backend. |
@@ -126,7 +133,7 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `names` | The [name registry](names.md): running name transactions, `GET /names`, `chainv4 send name` and names in `transfer --to`, and the EVM's names precompile. A build without it refuses a chain whose genesis has names. |
 | `swap` | [Atomic swaps](swaps.md): the terms, Bitcoin's HTLC, Swap.sol's calls, `--swap-contract` and, with `client`, `chainv4 swap`. Brings `bitcoin`. |
 | `anchoring-btc` | [Anchoring](anchoring.md) into Bitcoin: `Tx::Anchor`'s checks and reward, nodes refusing branches that leave an enforced anchor, `--anchored`, `GET /anchors`, serving anchors and Bitcoin headers to peers, and, with `bridge`, `chainv4 bridge btc anchor`. Brings `bitcoin`. Without it the types stay, so nothing encodes differently, but the node takes, serves and enforces no anchors. |
-| `anchoring-eth` | The anchorer writing each anchor to an EVM chain too, which the chain does not count until a light client of Ethereum's finality is in. Brings `anchoring-btc` for now, where the anchor list and the anchorer live. |
+| `anchoring-eth` | The anchorer writing each anchor to an EVM chain too, which the chain does not count until a light client of Ethereum's finality is in. Brings `anchoring-btc` for now, where the anchor list and the anchorer live, and `bls12-381`, which Ethereum's light client checks with. |
 | `dex` | The [DEX](dex.md)'s arithmetic, `--dex-contract` and `--dex-router`, and, with `client` and `evm`, `chainv4 dex`. |
 | `bridge` | [Bridges](bridges.md) for the apps and the federation's tools: transfers as the gateways hash and the signers sign them, and, with `client` and `swap`, `chainv4 bridge`, `chainv4 bridge btc` among it. The gateways and the federation are contracts and consensus, in every build. |
 | `nft` | [NFTs](nft-standard.md) for the apps: where a token URI leads and the metadata it names, and, with `client`, `chainv4 nft`. The collection registry itself is every build's, as it is consensus. |

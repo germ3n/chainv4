@@ -2259,6 +2259,9 @@ mod btc_relay;
 #[cfg(feature = "bitcoin")]
 mod btc_gateway;
 
+#[cfg(all(feature = "bls12-381", feature = "sha256"))]
+mod eth_relay;
+
 /// A regtest header mined here, for the CLI's Bitcoin tests, which need more features than this.
 #[cfg(feature = "bitcoin")]
 #[allow(dead_code)]

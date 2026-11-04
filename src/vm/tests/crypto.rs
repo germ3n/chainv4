@@ -250,3 +250,58 @@ fn contracts_read_a_federation_of_any_version_with_when_it_was_decided_and_repla
     let costs = crate::params::vm::HostCosts::default();
     assert!((costs.federation..costs.federation + 20).contains(&charged), "{charged}");
 }
+
+const LUA_BLS: &str = r#"
+local M = {}
+
+function M.check(keys, message, signature) return crypto.fast_aggregate_verify(keys, message, signature) end
+function M.pair(a, b, message, signature) return crypto.fast_aggregate_verify({a, b}, message, signature) end
+
+return M
+"#;
+
+#[cfg(feature = "bls12-381")]
+#[test]
+fn lua_checks_ethereum_bls_aggregates_and_pays_for_each_key() {
+    use bls12_381::Scalar;
+
+    let mut world = World::new();
+    let lua = world.lua_code(LUA_BLS);
+    let secrets = [Scalar::from(11u64), Scalar::from(13u64), Scalar::from(17u64)];
+    let keys: Vec<[u8; 48]> = secrets.iter().map(ethlight::testing::public_key).collect();
+    let message = [0x42; 32];
+    let both = ethlight::testing::sign(&(secrets[0] + secrets[1]), &message);
+    let all = ethlight::testing::sign(&(secrets[0] + secrets[1] + secrets[2]), &message);
+    let check = |keys: &[u8], message: &[u8], signature: &[u8]| world.call(lua, "check", &[bytes(keys), bytes(message), bytes(signature)]);
+    let yes = [TxCallArgumentType::Bool(true)];
+    let no = [TxCallArgumentType::Bool(false)];
+
+    // Keys back to back, or a table of them.
+    assert_eq!(check(&keys.concat(), &message, &all).result.unwrap(), yes);
+    assert_eq!(world.call(lua, "pair", &[bytes(&keys[0]), bytes(&keys[1]), bytes(&message), bytes(&both)]).result.unwrap(), yes);
+    assert_eq!(check(&keys[..2].concat(), &message, &all).result.unwrap(), no, "a key short");
+    assert_eq!(check(&keys.concat(), &[0x43; 32], &all).result.unwrap(), no, "another message");
+    assert_eq!(check(&keys.concat()[1..], &message, &all).result.unwrap(), no, "not whole keys");
+    assert_eq!(check(&keys.concat(), &message, &all[..95]).result.unwrap(), no, "a signature short");
+
+    let mut infinity = [0u8; 96];
+    infinity[0] = 0xc0;
+    assert_eq!(check(&keys.concat(), &message, &infinity).result.unwrap(), no, "the signature at infinity");
+
+    // Each key costs bls_key more, whether the check holds or not.
+    let costs = crate::params::vm::HostCosts::DEFAULT;
+    let three = check(&keys.concat(), &message, &all).fuel_used;
+    let two = check(&keys[..2].concat(), &message, &all).fuel_used;
+    assert!((costs.bls_key..costs.bls_key + 20).contains(&(three - two)), "{three} - {two}");
+    assert!(two > costs.bls_verify + 2 * costs.bls_key);
+}
+
+#[cfg(not(feature = "bls12-381"))]
+#[test]
+fn without_bls12_381_the_check_fails_the_call() {
+    let mut world = World::new();
+    let lua = world.lua_code(LUA_BLS);
+    let failed = world.call(lua, "check", &[bytes(&[0; 48]), bytes(&[0; 32]), bytes(&[0; 96])]).result.unwrap_err();
+
+    assert!(failed.to_string().contains("bls12-381 is not in this build"), "{failed}");
+}

@@ -79,13 +79,46 @@ fn check_merkle(lua: &Lua, (root, data, index, count, path): (Value, mlua::Strin
     Ok(crypto::check_merkle(hash, &bytes(&root, "the root")?, &data.as_bytes(), whole(&index, "the index")?, whole(&count, "the count")?, &path))
 }
 
+/// Public keys a script hands over: one string of 48-byte keys back to back, or a table of them.
+fn pubkeys(value: &Value) -> mlua::Result<Vec<u8>> {
+    let refused = || Error::runtime("the public keys are a string of 48-byte keys, or a table of them");
+
+    match value {
+        Value::String(keys) => Ok(keys.as_bytes().to_vec()),
+        Value::Table(keys) => {
+            let mut joined = Vec::with_capacity(keys.raw_len() * 48);
+
+            for key in keys.sequence_values::<mlua::String>() {
+                joined.extend_from_slice(&key.map_err(|_| refused())?.as_bytes());
+            }
+
+            Ok(joined)
+        }
+        _ => Err(refused()),
+    }
+}
+
+fn fast_aggregate_verify(lua: &Lua, (keys, message, signature): (Value, Value, mlua::String)) -> mlua::Result<bool> {
+    // Charged by the keys' count before they are joined: a table's length is known up front.
+    let count = match &keys {
+        Value::Table(table) => table.raw_len() as u64 * 48,
+        Value::String(text) => text.as_bytes().len() as u64,
+        _ => 0,
+    };
+    let message = bytes(&message, "the message")?;
+    charge(lua, crypto::bls_fuel(&costs(lua), count, message.len() as u64))?;
+    let keys = pubkeys(&keys)?;
+
+    crypto::fast_aggregate_verify(&keys, &message, &signature.as_bytes()).map_err(Error::runtime)
+}
+
 #[document(
     lua,
     kind = "library",
     name = "crypto",
     category = "Chain",
     summary = "Signatures of every scheme the chain has, secp256k1 recovery as Ethereum's ecrecover does, the address a key controls, Bitcoin's hashes, and chainv4's own proofs: what a contract checks of another chain, a signer, or a header, without trusting whoever sends it.",
-    note = "verify and recover cost 3,000 fuel, as the EVM's ecrecover does, verify 1 more for every 64 bytes of message; the hashes cost what the hash library's do; a proof 200, and 60 for every 32 bytes of it.",
+    note = "verify and recover cost 3,000 fuel, as the EVM's ecrecover does, verify 1 more for every 64 bytes of message; the hashes cost what the hash library's do; a proof 200, and 60 for every 32 bytes of it; fast_aggregate_verify 103,000, 5,000 for each key and 1 for every 64 bytes of message.",
     example = "local key = crypto.recover(digest, signature)\nassert(key and key == storage.get(\"signer\"), \"not the signer\")",
     see_also = "hash",
 )]
@@ -174,6 +207,21 @@ fn crypto_check_state() {}
 )]
 fn crypto_check_merkle() {}
 
+#[document(
+    lua,
+    parent = "crypto",
+    name = "fast_aggregate_verify",
+    summary = "FastAggregateVerify as Ethereum checks its sync committees: whether a BLS signature is the aggregate of every key's over one message, by the ciphersuite BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_, keys on G1 and the signature on G2, compressed.",
+    params = {
+        pubkeys = { ty = "string | table", desc = "The public keys, 48 bytes each: one string of them back to back, or a table of strings." },
+        message = { ty = "string | Hash", desc = "The bytes signed: a sync committee signs a 32-byte signing root." },
+        signature = { ty = "string", desc = "The aggregate signature, 96 bytes." },
+    },
+    returns = { ty = "boolean", desc = "Whether it holds: false for no keys, wrong lengths, a key or signature that is no point of its group or is the point at infinity, and keys that sum to infinity." },
+    panics = "Errors on a chain built without bls12-381.",
+)]
+fn crypto_fast_aggregate_verify() {}
+
 pub fn register_crypto_lib(lua: &Lua) {
     let table = lua.create_table().expect("[crypto] Failed to create crypto table");
     let set = |name: &str, function: mlua::Function| table.set(name, function).expect("[crypto] Failed to set a function");
@@ -189,6 +237,7 @@ pub fn register_crypto_lib(lua: &Lua) {
 
     set("check_state", lua.create_function(check_state).expect("[crypto] Failed to create check_state"));
     set("check_merkle", lua.create_function(check_merkle).expect("[crypto] Failed to create check_merkle"));
+    set("fast_aggregate_verify", lua.create_function(fast_aggregate_verify).expect("[crypto] Failed to create fast_aggregate_verify"));
 
     lua.globals().set("crypto", table).expect("[crypto] Failed to set crypto table");
 }

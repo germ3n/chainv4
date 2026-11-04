@@ -5,13 +5,13 @@ edition = "2024"
 license = "MIT"
 
 [workspace]
-members = ["macro", "wiki", "gpu"]
+members = ["macro", "wiki", "gpu", "ethlight"]
 # Contracts build for wasm32, and the explorer for the desktop and the browser; each has a
 # workspace of its own, so neither shares the node's lockfile.
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -22,6 +22,11 @@ ed25519 = []
 edblake = ["dep:blake3", "dep:digest", "dep:curve25519-dalek", "ed25519-dalek/hazmat"]
 # Ethereum's keys: ECDSA on secp256k1 over keccak256, and addresses of keccak256's last 20 bytes.
 secp256k1 = ["dep:k256", "dep:sha3"]
+# BLS signatures over BLS12-381 as Ethereum's consensus layer makes them: FastAggregateVerify with
+# the ciphersuite BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_, for contracts following its sync
+# committees (contracts/examples/eth_relay). zkcrypto's bls12_381, in pure Rust; its hash to G2
+# takes digest 0.10's SHA-256.
+bls12-381 = ["dep:bls12_381", "dep:sha2-010"]
 # Bitcoin's keys: ECDSA on secp256k1 over double SHA-256, and addresses of the key's HASH160,
 # written bc1q… as Bitcoin's native segwit (P2WPKH) ones are.
 bitcoin = ["secp256k1", "dep:sha2", "dep:ripemd", "dep:hmac"]
@@ -36,7 +41,7 @@ anchoring-btc = ["bitcoin"]
 # Anchoring into Ethereum: the anchorer writing each anchor to an EVM chain too, which the chain
 # does not count until a light client of Ethereum's finality is in. It builds on anchoring-btc for
 # now, as the anchor list, the guard and the anchorer live there.
-anchoring-eth = ["anchoring-btc", "secp256k1"]
+anchoring-eth = ["anchoring-btc", "secp256k1", "bls12-381"]
 swap = ["bitcoin", "dep:ur"]
 # The DEX's arithmetic for the apps: the trade formula and routes through pools, quoting
 # contracts/lua/dex.lua and the EVM's contracts/evm/Dex.sol alike, and the node naming them.
@@ -127,6 +132,9 @@ sha3 = { version = "0.12.0", optional = true }
 k256 = { version = "0.14.0", default-features = false, features = ["ecdsa", "std"], optional = true }
 bip39 = { version = "3.0.0", default-features = false, features = ["std", "zeroize"], optional = true }
 hmac = { version = "0.13.0", optional = true }
+# Ethereum's BLS signatures: hash to G2 and the pairing are behind experimental and pairings.
+bls12_381 = { version = "0.9.0", default-features = false, features = ["groups", "pairings", "alloc", "experimental"], optional = true }
+sha2-010 = { package = "sha2", version = "0.10.9", default-features = false, optional = true }
 # HASH160's second half, for BIP32 key fingerprints: what an extended public key names its parent by.
 ripemd = { version = "0.2.0", default-features = false, optional = true }
 wincode = { version = "0.6.3", features = ["derive"] }
@@ -168,6 +176,8 @@ tungstenite = { version = "0.29.0", default-features = false, features = ["hands
 
 [dev-dependencies]
 wat = "1.262.0"
+# The Ethereum light client's rules, with the synthetic sync committees its tests sign with.
+ethlight = { path = "ethlight", features = ["testing"] }
 # Tests read JSON whatever features the build has.
 serde_json = "1.0.154"
 # A WebSocket client, mining over GET /mining/ws as a browser does.

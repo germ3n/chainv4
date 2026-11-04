@@ -114,3 +114,56 @@ fn proofs_check_against_their_root_alone() {
     assert!(!check_merkle(hash, &root, b"two!", 1, 3, &path));
     assert!(!check_merkle(hash, &root, b"two", 1, 3, &path[1..]), "not whole hashes");
 }
+
+/// Times the BLS check against check_signature, whose 3,000 fuel is the EVM's ecrecover, to set
+/// bls_verify and bls_key in proportion. Run in a release build:
+/// `cargo test --release --lib vm::crypto::tests::bls_costs -- --ignored --nocapture`.
+#[cfg(all(feature = "bls12-381", feature = "secp256k1", feature = "ed25519"))]
+#[test]
+#[ignore]
+fn bls_costs_are_measured_against_check_signature() {
+    use std::time::Instant;
+
+    let time = |runs: u32, work: &dyn Fn()| {
+        work();
+        let start = Instant::now();
+
+        for _ in 0..runs {
+            work();
+        }
+
+        start.elapsed().as_secs_f64() * 1e6 / f64::from(runs)
+    };
+    let check = |private: crate::crypto::keypair::PrivateKey| {
+        let keypair = crate::crypto::keypair::Keypair::from_private(private);
+        let key = match keypair.public() {
+            PublicKey::Secp256k1(key) => key.to_vec(),
+            PublicKey::Ed25519(key) => key.to_vec(),
+            _ => unreachable!(),
+        };
+        let signature = match keypair.sign(b"pay alice 5") {
+            Signature::Secp256k1(bytes) | Signature::Ed25519(bytes) => bytes.to_vec(),
+            _ => unreachable!(),
+        };
+        let scheme = if key.len() == 33 { "secp256k1" } else { "ed25519" };
+
+        time(2_000, &|| assert!(check_signature(scheme, &key, b"pay alice 5", &signature).unwrap()))
+    };
+    let secp = check(crate::crypto::keypair::PrivateKey::Secp256k1([7; 32]));
+    let ed = check(crate::crypto::keypair::PrivateKey::Ed25519([7; 32]));
+
+    let secrets: Vec<bls12_381::Scalar> = (1..=512u64).map(|n| bls12_381::Scalar::from(n * 7919)).collect();
+    let keys: Vec<u8> = secrets.iter().flat_map(ethlight::testing::public_key).collect();
+    let message = [0x42; 32];
+    let signed = |count: usize| ethlight::testing::sign(&secrets[..count].iter().fold(bls12_381::Scalar::zero(), |sum, secret| sum + secret), &message);
+    let (one, all) = (signed(1), signed(512));
+    let single = time(200, &|| assert!(fast_aggregate_verify(&keys[..48], &message, &one).unwrap()));
+    let full = time(50, &|| assert!(fast_aggregate_verify(&keys, &message, &all).unwrap()));
+    let per_key = (full - single) / 511.0;
+    let base = single - per_key;
+    let fuel_per_us = 3_000.0 / secp;
+
+    println!("secp256k1 verify {secp:.1} µs, ed25519 verify {ed:.1} µs: {fuel_per_us:.1} fuel a µs");
+    println!("BLS: one key {single:.1} µs, 512 keys {full:.1} µs: base {base:.1} µs, {per_key:.2} µs a key");
+    println!("in proportion: bls_verify {:.0}, bls_key {:.0}", base * fuel_per_us, per_key * fuel_per_us);
+}

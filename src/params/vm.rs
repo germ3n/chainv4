@@ -75,6 +75,10 @@ pub struct HostCosts {
     pub evm_native_word: u64,
     #[document(summary = "EVM gas for a lookup through the names precompile.")]
     pub evm_name_lookup: u64,
+    #[document(summary = "Checking an Ethereum BLS aggregate signature (FastAggregateVerify): hashing the message to G2, decompressing the signature and the pairing check, plus bls_key for each public key and 1 for every hash_bytes_per_fuel bytes of message.")]
+    pub bls_verify: u64,
+    #[document(summary = "Each public key a BLS check aggregates: decompressing it, checking it is in its group, and adding it.")]
+    pub bls_key: u64,
 }
 
 impl Hashable for HostCosts {}
@@ -111,6 +115,10 @@ impl HostCosts {
         evm_native_call: 2_600,
         evm_native_word: 3,
         evm_name_lookup: 3_000,
+        // Measured against check_signature: secp256k1 verifies in 58.8 µs for 3,000 fuel, so 51 a µs;
+        // FastAggregateVerify took 2,017 µs plus 97 µs a key (src/vm/crypto/tests.rs, release).
+        bls_verify: 103_000,
+        bls_key: 5_000,
     };
 
     #[document(parent = "HostCosts", summary = "Why no chain could charge them: a divisor of 0.")]

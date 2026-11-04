@@ -97,6 +97,9 @@ unsafe extern "C" {
     /// 1 when data is the index-th of count leaves under root by path.
     #[allow(clippy::too_many_arguments)]
     pub fn check_merkle(root: *const u8, root_len: u32, data: *const u8, data_len: u32, index: u64, count: u64, path: *const u8, path_len: u32) -> u32;
+    /// 1 when signature is the BLS aggregate of every 48-byte key in pubkeys over message, as
+    /// Ethereum's FastAggregateVerify has it; 0 when not.
+    pub fn fast_aggregate_verify(pubkeys: *const u8, pubkeys_len: u32, message: *const u8, message_len: u32, signature: *const u8, signature_len: u32) -> u32;
     /// The federation's length in the result buffer, encoded, or -1 for none.
     pub fn federation() -> i32;
     /// The chain's id: what its EVM answers CHAINID with.

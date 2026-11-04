@@ -294,6 +294,23 @@ offline; these would make that hold up as a treasury.
   hold, by their work. `bridge btc anchor` is the anchorer. Each part switches on its own under
   `Change::Anchoring`, all off when unset. No Bitcoin height went into headers: the relay's tip is
   chain state already. See [Anchoring](anchoring.md).
+- [ ] **Validity proofs: other chains check our blocks, not just our timestamps (owner, 2026-11-05).**
+  Anchoring proves that a checkpoint existed by a certain time. It doesn't prove the checkpoint was
+  right: two thirds of the current validators could still finalize an invalid state. Validity proofs
+  close that. A zero-knowledge proof that each block (or a run of them) followed the rules is checked
+  on Ethereum, and perhaps on Bitcoin through BitVM-style fraud proofs, so a bad block is refused
+  there whatever the validators signed. In stages, each useful on its own:
+  1. **Finality on Ethereum:** a contract follows our finality by checking the votes, if voters sign
+     with secp256k1 (`ecrecover`, cheap), or a ZK proof of the Ed25519/BLAKE3 votes. That is what the
+     trustless-bridge note under the bridges needs too.
+  2. **State roots by ZK:** a zkVM (SP1, RISC Zero or the like) proves the state transition: the
+     native transactions first, then Lua, Wasm and the EVM, whose metering must run the same inside
+     the prover. It is checked by a verifier contract on Ethereum.
+  3. **Bridges and light clients by proof:** the gateways and the light client take a proven state root
+     in place of the federation's word or a vote count.
+  Questions for when it starts: which zkVM; proving every block or batches; who pays for proving; and
+  whether the engines can be proven at all at a sane cost, Luau's C++ VM above all. A large project,
+  queued after the todo, with the second pentest.
 - [ ] **Anchoring: next.**
   - **Ethereum anchors that count.** The anchorer writes them already, but the chain cannot check
     them without a light client of Ethereum's finality: BLS12-381 checks of the sync committee and

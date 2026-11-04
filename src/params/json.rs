@@ -473,6 +473,8 @@ pub fn costs_json(costs: &crate::params::vm::HostCosts) -> Value {
         "evm_native_call": costs.evm_native_call,
         "evm_native_word": costs.evm_native_word,
         "evm_name_lookup": costs.evm_name_lookup,
+        "bls_verify": costs.bls_verify,
+        "bls_key": costs.bls_key,
     })
 }
 
@@ -510,6 +512,8 @@ pub(crate) fn costs_from_json(mut fields: Fields) -> Result<crate::params::vm::H
         evm_native_call: cost("evm_native_call", base.evm_native_call)?,
         evm_native_word: cost("evm_native_word", base.evm_native_word)?,
         evm_name_lookup: cost("evm_name_lookup", base.evm_name_lookup)?,
+        bls_verify: cost("bls_verify", base.bls_verify)?,
+        bls_key: cost("bls_key", base.bls_key)?,
     };
     fields.done()?;
 

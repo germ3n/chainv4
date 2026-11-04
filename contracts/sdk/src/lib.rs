@@ -253,6 +253,24 @@ pub fn check_merkle(root: &[u8], data: &[u8], index: u64, count: u64, path: &[u8
     unsafe { sys::check_merkle(root.as_ptr(), root.len() as u32, data.as_ptr(), data.len() as u32, index, count, path.as_ptr(), path.len() as u32) == 1 }
 }
 
+/// SHA-256 on the node, 32 bytes: hash with Algorithm::Sha256, without the allocation.
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut out = [0; 32];
+    unsafe { sys::hash(Algorithm::Sha256 as u32, data.as_ptr(), data.len() as u32, out.as_mut_ptr()) };
+
+    out
+}
+
+/// FastAggregateVerify as Ethereum checks its sync committees: whether a BLS signature, 96 bytes
+/// compressed on G2, is the aggregate of every key's over one message, by the ciphersuite
+/// BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_. pubkeys holds the keys, 48 bytes each,
+/// compressed on G1, back to back. False for no keys, wrong lengths, a key or signature that is no
+/// point of its group or is the point at infinity, and keys that sum to infinity. On a chain built
+/// without bls12-381, it aborts the call.
+pub fn fast_aggregate_verify(pubkeys: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    unsafe { sys::fast_aggregate_verify(pubkeys.as_ptr(), pubkeys.len() as u32, message.as_ptr(), message.len() as u32, signature.as_ptr(), signature.len() as u32) == 1 }
+}
+
 /// The bridges' federation in force: who vouches for what crosses chains, and how many must.
 pub struct Federation {
     /// 0 for genesis's, one more for each governance decided since.

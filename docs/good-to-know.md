@@ -1468,6 +1468,40 @@ voting finality it now goes back to the checkpoint and follows the node from the
   writes another, at another Bitcoin fee.
 - **Ethereum anchors are written, not counted,** until a light client of Ethereum's finality is in.
 
+## Ethereum's light client
+
+- **The presets' fork schedules are built in,** through Fulu on mainnet, Sepolia and Hoodi
+  (`ethlight::forks`). A fork after the last signs under a version they lack, so the relay refuses
+  every update from it until it is upgraded with a schedule that names it. Blob-parameter-only
+  forks change no version, and nothing here.
+- **A network is a whole definition,** not only a name: its genesis validators root and time,
+  seconds per slot, slots per epoch, epochs per sync committee period, and its forks with their
+  versions and epochs (`ethlight::Network`). Mainnet, Sepolia and Hoodi are presets, by
+  `Network::by_name`; another, such as Gnosis with 5-second slots and 16-slot epochs, is made by
+  hand, or decoded from its SSZ (`Network::encode` and `decode`, which refuses one `problem`
+  refuses). Every network must run the mainnet preset's sync committees of 512 and 8,192 block
+  roots. The relay contract still takes a preset by name.
+- **Electra moved the state's generalized indices:** the finalized root to 169, the current and
+  next committees to 86 and 87, one level deeper, as the state grew past 32 fields. An update's
+  layout and gindices go by its attested header's fork, a bootstrap's by its header's.
+- **Only finality counts:** no optimistic header, no best-update tracking and no forced updates.
+  An update needs two thirds of the committee, at least 342 of 512, and must finalize a header
+  after genesis's.
+- **A finality update has no next committee:** send it as a `LightClientUpdate` with zeros for the
+  committee and its branch, as the specs allow.
+- **A transaction proven must be in a header the relay keeps:** a finalized one, or an ancestor of
+  one within 8,192 slots proven with `prove_header`. One older than that, before any kept header's
+  window, cannot be proven any more.
+- **At most 8,192 headers are kept,** the oldest kept dropped first, ancestors included; the
+  finalized one always stays. Proving many ancestors drops older headers, at a transaction each.
+- **The BLS check is strict:** a key or signature that is no point of its prime-order group, or is
+  at infinity, or keys summing to infinity, fail it, the same on every node. It trusts that each
+  key proved possession, as the beacon chain checked when its validator joined: never feed it keys
+  anyone may choose.
+- **`fast_aggregate_verify`'s fuel is consensus,** `bls_verify` and `bls_key` in `HostCosts`. They
+  are new fields of `HostCosts`, so a chain whose genesis or a decided change named `fees.costs`
+  encodes differently from before: a new chain.
+
 ## The camera
 
 - **The live camera is the wallet's alone.** `chainv4-ui`'s `camera` feature brings it, and nokhwa
