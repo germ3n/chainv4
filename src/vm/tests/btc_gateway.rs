@@ -232,6 +232,102 @@ impl Btc {
     fn state_of_output(&self, n: u64) -> TxCallArgumentType {
         self.call("utxo", &[number(n)]).unwrap()[4].clone()
     }
+
+    /// A bump proposed under a signer's signature over btc_bump_digest, for the number it will take.
+    fn bump_as(&self, secret: u8, function: &str, domain: &str, of: u64, raw: &[u8]) -> Result<Vec<TxCallArgumentType>, String> {
+        let digest = crate::bridge::btc_bump_digest(domain, self.world.vm.chain_id(), &self.gateway, self.next_proposal(), of, raw);
+
+        self.call(function, &[number(of), bytes(raw), bytes(&crate::bridge::sign_digest(&[secret; 32], &digest))])
+    }
+
+    fn replace(&self, of: u64, tx: &Transaction) -> Result<Vec<TxCallArgumentType>, String> {
+        self.bump_as(21, "replace", crate::bridge::BTC_REPLACE_DOMAIN, of, &tx.base())
+    }
+
+    fn child(&self, parent: u64, tx: &Transaction) -> Result<Vec<TxCallArgumentType>, String> {
+        self.bump_as(21, "child", crate::bridge::BTC_CHILD_DOMAIN, parent, &tx.base())
+    }
+
+    /// Every input of a proposal signed by two of the three.
+    fn sign_all(&self, proposal: u64, tx: &Transaction) {
+        for index in 0..tx.inputs.len() {
+            self.sign(proposal, tx, index, 21).unwrap();
+            self.sign(proposal, tx, index, 22).unwrap();
+        }
+    }
+
+    /// A proposal mined, buried and shown.
+    fn show(&mut self, proposal: u64, tx: &Transaction) -> Result<Vec<TxCallArgumentType>, String> {
+        let (block, index, path, first, first_path) = self.mine(&tx.base());
+        self.bury();
+
+        self.call("released", &[number(proposal), bytes(&block), bytes(&tx.base()), number(index), bytes(&path), bytes(&first), bytes(&first_path)])
+    }
+
+    /// What the gateway says of an outpoint it knows: its state, or nothing.
+    fn state_at(&self, txid: &[u8; 32], vout: u32) -> Option<TxCallArgumentType> {
+        let key = format!("{}:{vout}", crate::structs::hex::to_hex(txid).trim_start_matches("0x"));
+
+        self.call("utxo_of", &[text(&key)]).unwrap().get(3).cloned()
+    }
+
+    fn count_of(&self, function: &str) -> i64 {
+        match self.call(function, &[]).unwrap()[..] {
+            [TxCallArgumentType::I64(count), ..] => count,
+            ref other => panic!("{other:?}"),
+        }
+    }
+
+    fn fee_of_withdrawal(&self, withdrawal: u64) -> TxCallArgumentType {
+        self.call("withdrawal", &[number(withdrawal)]).unwrap()[5].clone()
+    }
+
+    /// What children cost the backing that is not repaid yet, and how much of it open releases repay.
+    fn owed(&self) -> [i64; 2] {
+        match self.call("shortfall", &[]).unwrap()[..] {
+            [TxCallArgumentType::I64(owed), TxCallArgumentType::I64(repaying)] => [owed, repaying],
+            ref other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// A release paid for by a child of 400 that Bitcoin mined, both shown: the gateway holds 400 less
+/// than the wBTC it backs, and the child's output, 79,600, is what it holds to spend.
+#[cfg(feature = "bridge")]
+fn a_shortfall() -> (Btc, [u8; 32]) {
+    let (mut btc, release, _) = a_signed_release();
+    let child = child_of(&btc, &release, 1, 80_000, 400, &[]);
+    btc.child(1, &child).unwrap();
+    btc.sign_all(2, &child);
+    btc.show(1, &release).unwrap();
+    btc.show(2, &child).unwrap();
+    assert_eq!(btc.owed(), [400, 0]);
+
+    (btc, sha256d(&child.base()))
+}
+
+/// A release paying Bob 20,000 less 1,000 from a deposit of 100,000, signed in full: what is
+/// bumped.
+#[cfg(feature = "bridge")]
+fn a_signed_release() -> (Btc, Transaction, u64) {
+    let mut btc = Btc::new();
+    let deposit = btc.deposited(100_000);
+    let id = btc.withdrawal(20_000);
+    let release = spending(&[deposit], vec![pays_bob(19_000), btc.change(80_000)]);
+    btc.propose(&release.base(), &[number(id)]).unwrap();
+    btc.sign_all(1, &release);
+
+    (btc, release, id)
+}
+
+/// A child spending a release's change, paying the rest less its fee to the federation.
+#[cfg(feature = "bridge")]
+fn child_of(btc: &Btc, release: &Transaction, vout: u32, change: u64, fee: u64, more: &[[u8; 32]]) -> Transaction {
+    let held: u64 = more.len() as u64 * 50_000;
+    let mut child = spending(more, vec![btc.change(change + held - fee)]);
+    child.inputs.insert(0, TxIn { txid: sha256d(&release.base()), vout, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() });
+
+    child
 }
 
 #[cfg(feature = "bridge")]
@@ -249,7 +345,7 @@ fn text(value: &str) -> TxCallArgumentType {
 fn spending(inputs: &[[u8; 32]], outputs: Vec<TxOut>) -> Transaction {
     Transaction {
         version: 2,
-        inputs: inputs.iter().map(|txid| TxIn { txid: *txid, vout: 0, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }).collect(),
+        inputs: inputs.iter().map(|txid| TxIn { txid: *txid, vout: 0, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() }).collect(),
         outputs,
         lock_time: 0,
     }
@@ -325,15 +421,15 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     };
     let release = |bob_sats: u64, change_sats: u64, from: [u8; 32]| Transaction {
         version: 2,
-        inputs: vec![TxIn { txid: from, vout: 0, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }],
+        inputs: vec![TxIn { txid: from, vout: 0, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() }],
         outputs: vec![TxOut { value: bob_sats, script: bob.clone() }, TxOut { value: change_sats, script: change.clone() }],
         lock_time: 0,
     };
     let deposit_id = sha256d(&deposit);
     let propose = |btc: &Btc, tx: &Transaction| btc.propose(&tx.base(), &[number(1)]);
 
-    assert!(propose(&btc, &release(20_000, 29_000, deposit_id)).unwrap_err().contains("does not pay its withdrawal"), "the pool paying the fee");
-    assert!(propose(&btc, &release(18_500, 30_500, deposit_id)).unwrap_err().contains("does not pay its withdrawal"), "Bob paying the pool");
+    assert!(propose(&btc, &release(20_000, 29_000, deposit_id)).unwrap_err().contains("change that is not all"), "the pool paying the fee");
+    assert!(propose(&btc, &release(18_500, 30_500, deposit_id)).unwrap_err().contains("change that is not all"), "Bob paying the pool");
     assert!(propose(&btc, &release(9_000, 30_000, deposit_id)).unwrap_err().contains("past the cap"));
     assert!(propose(&btc, &release(19_000, 30_000, [1; 32])).unwrap_err().contains("not an output the gateway holds"));
     let good = release(19_000, 30_000, deposit_id);
@@ -376,7 +472,7 @@ fn a_deposit_mints_wbtc_and_a_withdrawal_is_released_as_the_federation_signs() {
     };
     let sweep = Transaction {
         version: 2,
-        inputs: vec![TxIn { txid: sha256d(&good.base()), vout: 1, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }],
+        inputs: vec![TxIn { txid: sha256d(&good.base()), vout: 1, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() }],
         outputs: vec![TxOut { value: 29_500, script: new_change }],
         lock_time: 0,
     };
@@ -527,13 +623,15 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
     twice.inputs.push(twice.inputs[0].clone());
     assert!(propose(&twice.base()).unwrap_err().contains("spent twice"));
 
-    // A BIP68 delay, or a version that takes one differently.
+    // A BIP68 delay, or a version that takes one differently; or a final sequence, which a node not
+    // replacing by fee alone would hold against a bump.
     let mut delayed = good.clone();
     delayed.inputs[0].sequence = 144;
     assert!(propose(&delayed.base()).unwrap_err().contains("sequence"));
-    let mut opted = good.clone();
-    opted.inputs[0].sequence = 0xffff_fffd;
-    assert!(propose(&opted.base()).unwrap_err().contains("sequence"));
+    let mut final_ = good.clone();
+    final_.inputs[0].sequence = 0xffff_ffff;
+    assert!(propose(&final_.base()).unwrap_err().contains("sequence"));
+    assert_eq!(good.inputs[0].sequence, 0xffff_fffd, "BIP125's signal, with no delay");
     assert!(propose(&Transaction { version: 1, ..good.clone() }.base()).unwrap_err().contains("version 2"));
     assert!(propose(&Transaction { version: 3, ..good.clone() }.base()).unwrap_err().contains("version 2"));
     assert!(propose(&Transaction { lock_time: 900_000, ..good.clone() }.base()).unwrap_err().contains("lock time"));
@@ -544,15 +642,19 @@ fn a_release_bitcoin_would_refuse_or_delay_is_refused() {
     let long = [&base[..4], &[0xfd, 1, 0], &base[5..]].concat();
     assert!(propose(&long).unwrap_err().contains("longer than it needs"));
 
-    // Change under Bitcoin's dust is not relayed.
-    for (over, took) in [(545, false), (546, true)] {
+    // Change under Bitcoin's dust for a P2WSH output is not relayed: the withdrawals top it up to that,
+    // with the fee, so every release keeps change a child can spend.
+    for (over, change, bob, took) in [(329, 329, 19_000, false), (329, 330, 18_999, true), (330, 330, 19_000, true), (0, 0, 19_000, false), (0, 330, 18_670, true)] {
         let mut near = Btc::new();
         let small = near.deposited(20_000 + over);
         let id = near.withdrawal(20_000);
-        let tx = spending(&[small], vec![pays_bob(19_000), near.change(over)]);
-        let answer = near.propose(&tx.base(), &[number(id)]);
+        let outputs = match change {
+            0 => vec![pays_bob(bob)],
+            change => vec![pays_bob(bob), near.change(change)],
+        };
+        let answer = near.propose(&spending(&[small], outputs).base(), &[number(id)]);
 
-        assert_eq!(answer.is_ok(), took, "{answer:?}");
+        assert_eq!(answer.is_ok(), took, "{over} {change} {answer:?}");
     }
 
     // Nor is a transaction of 64 bytes or under: one input, and one output of a 4-byte script.
@@ -626,7 +728,7 @@ fn the_gateway_goes_by_the_fee_policy_the_federation_names_once_governance_names
     assert_eq!(btc.call("fee_limits", &[]).unwrap(), [TxCallArgumentType::I64(CAP as i64), TxCallArgumentType::I64(FLOOR as i64)], "what it was set up with");
 
     // The same signers, with a policy of their own: a higher floor and a lower cap.
-    let policy = BtcPolicy { fee_cap: 8_000, fee_floor: 10, grace_ms: 1_000, cancel_after_ms: 60_000, fee_part: 4 };
+    let policy = BtcPolicy { fee_cap: 8_000, fee_floor: 10, grace_ms: 1_000, cancel_after_ms: 60_000, fee_part: 4, bump_after_ms: 60_000, bump_below_pct: 80, repay_pct: 20, repay_most: 500 };
     let next = DecidedFederation { version: 0, federation: Federation { btc: Some(policy), ..federation(&[21, 22, 23], 2) } };
     btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
 
@@ -907,6 +1009,7 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
         fee_cap: CAP,
         fee_floor: FLOOR,
         most_rate: 1_000,
+        repay: Default::default(),
     };
 
     // The fee is 2,000 over what this release weighs: at the limit it is signed, a byte under it not.
@@ -934,7 +1037,7 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     refused(&|facts| facts.withdrawals.push(facts.withdrawals[0].clone()), "twice");
     refused(&|facts| facts.withdrawals[0].state = "paid".to_string(), "is paid");
     refused(&|facts| facts.withdrawals[0].state = "queued".to_string(), "is queued");
-    refused(&|facts| facts.withdrawals[0].sats = 19_000, "as asked");
+    refused(&|facts| facts.withdrawals[0].sats = 19_000, "change is not all");
     refused(&|facts| facts.withdrawals[0].most_fee = 1_999, "agreed to lose");
     refused(&|facts| facts.withdrawals[0].script = vec![0x51], "as asked");
     refused(&|facts| facts.withdrawals[0].anchor = Some("00:9".to_string()), "cancelled release");
@@ -959,10 +1062,13 @@ fn a_signer_goes_over_a_release_against_the_gateway_s_state() {
     let mut dust = release.clone();
     dust.outputs[1].value = 10;
     refused(&with_tx(dust), "not change");
-    // The fee taken from the pool rather than from the withdrawal.
+    // The fee taken from the pool rather than from the withdrawal, or no change kept.
     let mut pool_pays = release.clone();
     (pool_pays.outputs[0].value, pool_pays.outputs[1].value) = (20_000, 88_000);
-    refused(&with_tx(pool_pays), "as asked");
+    refused(&with_tx(pool_pays), "change is not all");
+    let mut no_change = release.clone();
+    no_change.outputs.pop();
+    refused(&with_tx(no_change), "keeps no change");
     let mut tiny = facts.clone();
     tiny.raw = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     tiny.txid = sha256d(&tiny.raw).to_vec();
@@ -1010,8 +1116,11 @@ fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_ne
 
     let taken = release(1_001, 1_001);
     propose(&taken).unwrap();
-    assert!(btc.call_as(ALICE, "set_most_fee", &[number(small), number(2_000)]).unwrap_err().contains("not queued"));
-    assert_eq!(btc.call("withdrawal", &[number(small)]).unwrap()[5], TxCallArgumentType::I64(1_001));
+
+    // In a release, only higher, as a bump may need: what it was proposed under stands.
+    assert!(btc.call_as(ALICE, "set_most_fee", &[number(small), number(1_000)]).unwrap_err().contains("only raises"));
+    btc.call_as(ALICE, "set_most_fee", &[number(small), number(2_000)]).unwrap();
+    assert_eq!(btc.call("withdrawal", &[number(small)]).unwrap()[4..], [TxCallArgumentType::I64(2_000), TxCallArgumentType::I64(1_001)]);
 
     // What the gateway holds falls by just what was burned, whatever the fee was: a full release
     // leaves all of it backed.
@@ -1035,6 +1144,337 @@ fn a_fee_comes_off_the_withdrawals_evenly_within_what_each_agreed_to_lose_and_ne
     btc.world.state.put_value(Column::Validators, b"change:federation".to_vec(), &next);
     let sweep = spending(&[second], vec![btc.change(99_001)]);
     btc.propose_as(31, &sweep.base(), &[]).unwrap();
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_release_with_all_its_signatures_is_replaced_by_one_paying_more_and_the_one_mined_is_shown() {
+    let (mut btc, release, id) = a_signed_release();
+    let mut bumped = release.clone();
+    bumped.outputs[0].value = 18_000;
+
+    // Only a signer's signature over a replacement proposes one: not a stranger's, and not one over
+    // a release's digest, so neither passes for the other.
+    assert!(btc.bump_as(99, "replace", crate::bridge::BTC_REPLACE_DOMAIN, 1, &bumped.base()).unwrap_err().contains("only a signer"));
+    assert!(btc.bump_as(21, "replace", crate::bridge::BTC_CHILD_DOMAIN, 1, &bumped.base()).unwrap_err().contains("only a signer"));
+    assert!(btc.call("replace", &[number(1), bytes(&bumped.base()), bytes(&btc.propose_signature(21, 2, &bumped.base(), &[number(id)]))]).unwrap_err().contains("only a signer"));
+    assert_eq!(btc.replace(1, &bumped).unwrap(), [TxCallArgumentType::I64(2)]);
+
+    // A version of the same release: its withdrawals, its federation, what it replaced, and its fee;
+    // the withdrawal says it may lose the newer share.
+    let found = btc.call("proposal", &[number(2)]).unwrap();
+    assert_eq!(found[2..], [text("1"), TxCallArgumentType::I64(0), text("open"), text("replacement"), TxCallArgumentType::I64(1), TxCallArgumentType::I64(2_000), TxCallArgumentType::I64(2_000), text("0"), TxCallArgumentType::I64(0)]);
+    assert_eq!(btc.call("tree", &[number(2)]).unwrap(), [TxCallArgumentType::I64(1), text("2")]);
+    assert_eq!(btc.fee_of_withdrawal(id), TxCallArgumentType::I64(2_000));
+    assert_eq!(btc.state_of_proposal(1), text("open"), "it may still be mined");
+
+    // One bump at a time: none of a version short of its signatures, nor beside one.
+    let mut again = release.clone();
+    again.outputs[0].value = 17_500;
+    assert!(btc.replace(2, &again).unwrap_err().contains("only what holds all its signatures"));
+    assert!(btc.replace(1, &again).unwrap_err().contains("one at a time"));
+    btc.sign_all(2, &bumped);
+
+    // Mined, it is shown: its withdrawal paid at its share, its change held once, and the release
+    // and every other version closed, as Bitcoin can never mine them now.
+    btc.show(2, &bumped).unwrap();
+    assert_eq!((btc.state_of_proposal(1), btc.state_of_proposal(2)), (text("replaced"), text("released")));
+    assert_eq!((btc.state_of_withdrawal(id), btc.fee_of_withdrawal(id)), (text("paid"), TxCallArgumentType::I64(2_000)));
+    assert_eq!(btc.count_of("utxo_count"), 2);
+    assert_eq!(btc.state_of_output(1), text("unspent"));
+    assert_eq!(btc.call("utxo", &[number(1)]).unwrap()[1], TxCallArgumentType::I64(80_000), "the change as it was: the withdrawal paid the bump");
+    assert!(btc.show(1, &release).unwrap_err().contains("no open release"));
+    assert!(btc.replace(2, &again).unwrap_err().contains("no open release"));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn the_original_shown_after_a_replacement_was_proposed_closes_the_replacement() {
+    let (mut btc, release, id) = a_signed_release();
+    let mut bumped = release.clone();
+    bumped.outputs[0].value = 18_000;
+    btc.replace(1, &bumped).unwrap();
+    btc.sign(2, &bumped, 0, 21).unwrap();
+
+    // Bitcoin mined the first after all: its share stands, and the replacement can never be mined.
+    btc.show(1, &release).unwrap();
+    assert_eq!((btc.state_of_proposal(1), btc.state_of_proposal(2)), (text("released"), text("replaced")));
+    assert_eq!((btc.state_of_withdrawal(id), btc.fee_of_withdrawal(id)), (text("paid"), TxCallArgumentType::I64(1_000)));
+    assert_eq!(btc.count_of("utxo_count"), 2, "its change, once");
+    assert!(btc.sign(2, &bumped, 0, 22).unwrap_err().contains("no open release"));
+    assert!(btc.show(2, &bumped).unwrap_err().contains("no open release"));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_replacement_that_changes_what_it_pays_or_passes_a_limit_is_refused() {
+    let (mut btc, release, id) = a_signed_release();
+    let refused = |btc: &Btc, tx: &Transaction, why: &str| {
+        let answer = btc.replace(1, tx).unwrap_err();
+        assert!(answer.contains(why), "{why}: {answer}");
+    };
+    let with = |change: &dyn Fn(&mut Transaction)| {
+        let mut tx = release.clone();
+        tx.outputs[0].value = 18_000;
+        change(&mut tx);
+        tx
+    };
+
+    // What it spends and pays to, and the change, as they were.
+    let other = btc.deposited(50_000);
+    refused(&btc, &with(&|tx| tx.inputs[0].txid = other), "spends what it replaces");
+    refused(&btc, &with(&|tx| tx.inputs.push(TxIn { txid: other, vout: 0, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() })), "spends what it replaces");
+    refused(&btc, &with(&|tx| tx.outputs[0].script = crate::crypto::bitcoin::tx::p2wpkh(&[0xee; 20])), "the same outputs");
+    refused(&btc, &with(&|tx| tx.outputs[1].script = bob()), "the same outputs");
+    refused(&btc, &with(&|tx| tx.outputs.push(pays_bob(500))), "the same outputs");
+    refused(&btc, &with(&|tx| (tx.outputs[0].value, tx.outputs[1].value) = (19_000, 79_000)), "keeps its change");
+    refused(&btc, &with(&|tx| tx.inputs[0].sequence = 0xffff_ffff), "sequence");
+
+    // More than every version it replaces, by a satoshi a virtual byte; within what the withdrawal
+    // agreed to lose; and under the cap, whatever it agreed to.
+    refused(&btc, &with(&|tx| tx.outputs[0].value = 18_999), "pays at least");
+    refused(&btc, &with(&|tx| tx.outputs[0].value = 17_999), "agreed to lose");
+    btc.call_as(ALICE, "set_most_fee", &[number(id), number(15_000)]).unwrap();
+    refused(&btc, &with(&|tx| tx.outputs[0].value = 20_000 - CAP - 1), "past the cap");
+    btc.replace(1, &with(&|tx| tx.outputs[0].value = 20_000 - CAP)).unwrap();
+    let _ = btc.show(1, &release);
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_child_pays_for_a_release_from_its_change_and_is_charged_to_its_withdrawals() {
+    let (mut btc, release, id) = a_signed_release();
+    let more = btc.deposited(50_000);
+    let child = child_of(&btc, &release, 1, 80_000, 400, &[]);
+
+    // Not past what the withdrawal agreed to lose with its share of the release's own fee, not
+    // spending more than the change when that pays it, not elsewhere, not anywhere but back.
+    assert!(btc.child(1, &child_of(&btc, &release, 1, 80_000, 1_001, &[])).unwrap_err().contains("past what withdrawal"));
+    assert!(btc.child(1, &child_of(&btc, &release, 1, 80_000, 400, &[more])).unwrap_err().contains("only when the change alone"));
+    assert!(btc.child(1, &child_of(&btc, &release, 0, 19_000, 400, &[])).unwrap_err().contains("change of what it pays for"));
+    let mut robbing = child.clone();
+    robbing.outputs[0].script = bob();
+    assert!(btc.child(1, &robbing).unwrap_err().contains("federation in force alone"));
+    assert!(btc.bump_as(99, "child", crate::bridge::BTC_CHILD_DOMAIN, 1, &child.base()).unwrap_err().contains("only a signer"));
+
+    assert_eq!(btc.child(1, &child).unwrap(), [TxCallArgumentType::I64(2)]);
+    assert_eq!(btc.call("proposal", &[number(2)]).unwrap()[5..7], [text("child"), TxCallArgumentType::I64(1)]);
+    assert_eq!(btc.state_at(&sha256d(&release.base()), 1), Some(text("pending")), "known to sign, and spent by it");
+    assert_eq!(btc.count_of("utxo_count"), 2, "and not held until it is shown");
+    assert!(btc.child(1, &child_of(&btc, &release, 1, 80_000, 800, &[])).unwrap_err().contains("one at a time"));
+
+    // Signed as any release, the change by the federation it was paid to; a second child of that
+    // change conflicts with it, so it is a replacement of it instead.
+    btc.sign_all(2, &child);
+    assert!(btc.child(1, &child_of(&btc, &release, 1, 80_000, 950, &[])).unwrap_err().contains("spends that change already"));
+    let dearer = child_of(&btc, &release, 1, 80_000, 600, &[]);
+    assert!(btc.replace(2, &child_of(&btc, &release, 1, 80_000, 401, &[])).unwrap_err().contains("pays at least"));
+    assert_eq!(btc.replace(2, &dearer).unwrap(), [TxCallArgumentType::I64(3)]);
+    assert!(btc.replace(3, &dearer).unwrap_err().contains("only what holds all"));
+    btc.sign_all(3, &dearer);
+
+    // Mined, both shown: the release's change held, spent by the child; the child's held; its fee
+    // charged to the withdrawal, and paid by the federation from its change, which is what the
+    // gateway now holds short of the wBTC it backs. The other version of the child is closed.
+    btc.show(1, &release).unwrap();
+    assert_eq!(btc.state_at(&sha256d(&release.base()), 1), Some(text("pending")));
+    btc.show(3, &dearer).unwrap();
+    assert_eq!((btc.state_of_proposal(2), btc.state_of_proposal(3)), (text("replaced"), text("released")));
+    assert_eq!(btc.state_at(&sha256d(&release.base()), 1), Some(text("spent")));
+    assert_eq!(btc.state_at(&sha256d(&dearer.base()), 0), Some(text("unspent")));
+    assert_eq!(btc.count_of("utxo_count"), 4, "the deposits, the change and the child's, each once");
+    assert_eq!(btc.fee_of_withdrawal(id), TxCallArgumentType::I64(1_000 + 600));
+    assert_eq!(btc.count_of("shortfall"), 600);
+    assert_eq!(btc.wbtc_of(ALICE), u256::from(130_000u64));
+    let held: i64 = (0..4).filter(|n| btc.state_of_output(*n) == text("unspent")).map(|n| match btc.call("utxo", &[number(n)]).unwrap()[1] { TxCallArgumentType::I64(sats) => sats, _ => 0 }).sum();
+    assert_eq!(held as u64, 130_000 - 600, "short by the child's fee alone");
+    assert!(btc.show(2, &child).unwrap_err().contains("no open release"));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_child_shown_before_what_it_paid_for_holds_no_change_twice() {
+    let (mut btc, release, id) = a_signed_release();
+    let child = child_of(&btc, &release, 1, 80_000, 500, &[]);
+    btc.child(1, &child).unwrap();
+    btc.sign_all(2, &child);
+    let mut bumped = release.clone();
+
+    // The child first: the change it spent is spent, though no one has shown the release yet.
+    btc.show(2, &child).unwrap();
+    assert_eq!(btc.state_at(&sha256d(&release.base()), 1), Some(text("spent")));
+    assert_eq!(btc.count_of("utxo_count"), 2, "the deposit and the child's output");
+
+    // Then the release: its change is listed, and stays spent; nothing of it is held twice, and the
+    // withdrawal says both shares.
+    btc.show(1, &release).unwrap();
+    assert_eq!(btc.count_of("utxo_count"), 3);
+    assert_eq!(btc.state_at(&sha256d(&release.base()), 1), Some(text("spent")));
+    assert_eq!(btc.fee_of_withdrawal(id), TxCallArgumentType::I64(1_500));
+    bumped.outputs[0].value = 18_000;
+    assert!(btc.replace(1, &bumped).unwrap_err().contains("no open release"));
+    assert!(btc.show(2, &child).unwrap_err().contains("no open release"));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_bump_its_signers_refuse_is_cancelled_alone_and_a_release_with_one_open_cannot_be() {
+    let (btc, release, id) = a_signed_release();
+    let mut bumped = release.clone();
+    bumped.outputs[0].value = 18_000;
+    btc.replace(1, &bumped).unwrap();
+    btc.sign(2, &bumped, 0, 21).unwrap();
+
+    // The release holds all its signatures, so it stands, and so does all it holds; the bump is short
+    // of them, so the federation votes it down by its own number, and it alone goes.
+    assert!(btc.vote(1, &release, 22).unwrap_err().contains("anyone can still finish it"));
+    assert_eq!(btc.vote(2, &bumped, 22).unwrap(), [TxCallArgumentType::Bool(false)]);
+    assert_eq!(btc.vote(2, &bumped, 23).unwrap(), [TxCallArgumentType::Bool(true)]);
+    assert_eq!((btc.state_of_proposal(1), btc.state_of_proposal(2)), (text("open"), text("cancelled")));
+    assert_eq!((btc.state_of_withdrawal(id), btc.state_of_output(0)), (text("proposed"), text("pending")));
+    assert_eq!(btc.call("anchor", &[number(id)]).unwrap(), [TxCallArgumentType::Nil], "every version spends the same inputs: nothing to anchor");
+    assert_eq!(btc.call("input_signatures", &[number(2), number(0)]).unwrap().len(), 2, "what was signed for it counts for nothing");
+
+    // Another bump may go now.
+    let mut again = release.clone();
+    again.outputs[0].value = 18_500;
+    assert_eq!(btc.replace(1, &again).unwrap(), [TxCallArgumentType::I64(3)]);
+
+    // A child short of its signatures is cancelled alone too, and the change it spent is unshown
+    // again, so another child may spend it.
+    btc.sign_all(3, &again);
+    let child = child_of(&btc, &again, 1, 80_000, 350, &[]);
+    btc.child(3, &child).unwrap();
+    btc.vote(4, &child, 21).unwrap();
+    btc.vote(4, &child, 22).unwrap();
+    assert_eq!(btc.state_of_proposal(4), text("cancelled"));
+    assert_eq!(btc.state_at(&sha256d(&again.base()), 1), Some(text("unshown")));
+    btc.child(3, &child_of(&btc, &again, 1, 80_000, 400, &[])).unwrap();
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_release_bitcoin_can_never_mine_is_cancelled_with_every_bump_of_it() {
+    let mut btc = Btc::new();
+    let first = btc.deposited(50_000);
+    let id = btc.withdrawal(20_000);
+
+    // Cancelled short of its signatures, and finished anyway with ones that came too late for the board.
+    let cancelled = spending(&[first], vec![pays_bob(19_000), btc.change(30_000)]);
+    btc.propose(&cancelled.base(), &[number(id)]).unwrap();
+    btc.vote(1, &cancelled, 21).unwrap();
+    btc.vote(1, &cancelled, 22).unwrap();
+
+    // Proposed again through its anchor, signed in full, and paid for by a child signed in full.
+    let again = spending(&[first], vec![pays_bob(18_900), btc.change(30_000)]);
+    btc.propose(&again.base(), &[number(id)]).unwrap();
+    btc.sign_all(2, &again);
+    let child = child_of(&btc, &again, 1, 30_000, 500, &[]);
+    btc.child(2, &child).unwrap();
+    btc.sign_all(3, &child);
+    assert!(btc.vote(2, &again, 21).unwrap_err().contains("anyone can still finish it"));
+
+    // The first is mined: neither can be now, so the release's number cancels the two.
+    btc.show(1, &cancelled).unwrap();
+    btc.vote(2, &again, 21).unwrap();
+    assert_eq!(btc.vote(2, &again, 22).unwrap(), [TxCallArgumentType::Bool(true)]);
+    assert_eq!((btc.state_of_proposal(2), btc.state_of_proposal(3)), (text("cancelled"), text("cancelled")));
+    assert_eq!(btc.state_at(&sha256d(&again.base()), 1), Some(text("unshown")), "never held, and spent by nothing");
+    assert_eq!(btc.state_of_withdrawal(id), text("paid"), "by the first");
+    assert_eq!(btc.count_of("utxo_count"), 2);
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn later_releases_repay_what_a_child_cost_within_their_limits_and_stop_at_nothing_owed() {
+    let (mut btc, held) = a_shortfall();
+    let (second, third, fourth) = (btc.deposited(50_001), btc.deposited(50_002), btc.deposited(50_003));
+    let [a, b, c, d] = [0; 4].map(|_| btc.withdrawal(20_000));
+
+    // A fee of 1,000: it repays a fifth of that, 200, all from its one withdrawal, whose limit leaves
+    // room for it, and gives it to the federation's change. Without it, or with more, it is refused.
+    let change = btc.change(0).script;
+    let release = |input: [u8; 32], spent: u64, fee: u64, repays: u64| spending(&[input], vec![pays_bob(20_000 - fee - repays), TxOut { value: spent - 20_000 + repays, script: change.clone() }]);
+    assert!(btc.propose(&release(held, 79_600, 1_000, 0).base(), &[number(a)]).unwrap_err().contains("with what they repay"));
+    assert!(btc.propose(&release(held, 79_600, 1_000, 201).base(), &[number(a)]).unwrap_err().contains("with what they repay"));
+    let first = release(held, 79_600, 1_000, 200);
+    btc.propose(&first.base(), &[number(a)]).unwrap();
+    assert_eq!(btc.owed(), [400, 200], "counted as repaying, so no other release repays it again");
+    assert_eq!(btc.call("proposal", &[number(3)]).unwrap()[9..], [text("200"), TxCallArgumentType::I64(200)]);
+    assert_eq!(btc.fee_of_withdrawal(a), TxCallArgumentType::I64(1_200));
+
+    // At its limit with the fee, a withdrawal repays nothing, and is not held up for it.
+    let at_limit = release(second, 50_001, 2_000, 0);
+    btc.propose(&at_limit.base(), &[number(b)]).unwrap();
+    assert_eq!(btc.owed(), [400, 200]);
+
+    // The rest is all another may repay, and then nothing is owed past what open releases repay.
+    let rest = release(third, 50_002, 1_000, 200);
+    btc.propose(&rest.base(), &[number(c)]).unwrap();
+    assert_eq!(btc.owed(), [400, 400]);
+    let none = release(fourth, 50_003, 1_000, 0);
+    btc.propose(&none.base(), &[number(d)]).unwrap();
+
+    // Shown, each brings the shortfall down by what it repaid, to nothing, and no further.
+    for (proposal, tx) in [(3, &first), (4, &at_limit), (5, &rest), (6, &none)] {
+        btc.sign_all(proposal, tx);
+        btc.show(proposal, tx).unwrap();
+    }
+
+    assert_eq!(btc.owed(), [0, 0]);
+    let held: i64 = (0..btc.count_of("utxo_count") as u64).filter(|n| btc.state_of_output(*n) == text("unspent")).map(|n| match btc.call("utxo", &[number(n)]).unwrap()[1] { TxCallArgumentType::I64(sats) => sats, _ => 0 }).sum();
+    assert_eq!(held as u64, 250_006 - 100_000, "backed one for one again");
+    assert_eq!(btc.wbtc_of(ALICE), u256::from(150_006u64));
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn a_replaced_or_cancelled_release_keeps_what_it_repays_counted_once() {
+    let (mut btc, held) = a_shortfall();
+    let other = btc.deposited(50_000);
+    let ids: Vec<u64> = (0..2).map(|_| match btc.call_as(ALICE, "withdraw", &[bytes(&bob()), number(20_000), number(5_000)]).unwrap()[..] {
+        [TxCallArgumentType::I64(id)] => id as u64,
+        ref other => panic!("{other:?}"),
+    }).collect();
+    let change = btc.change(0).script;
+    let release = |input: [u8; 32], spent: u64, fee: u64, repays: u64| spending(&[input], vec![pays_bob(20_000 - fee - repays), TxOut { value: spent - 20_000 + repays, script: change.clone() }]);
+
+    // Replaced: the replacement repays what the release does, from the same change, and the extra fee
+    // comes off the withdrawal alone; one dropping the repayment changes the change, and is refused.
+    let first = release(held, 79_600, 1_000, 200);
+    btc.propose(&first.base(), &[number(ids[0])]).unwrap();
+    btc.sign_all(3, &first);
+    let mut dropping = first.clone();
+    (dropping.outputs[0].value, dropping.outputs[1].value) = (17_800 + 200, 59_600);
+    assert!(btc.replace(3, &dropping).unwrap_err().contains("keeps its change"));
+    let mut bumped = first.clone();
+    bumped.outputs[0].value = 20_000 - 2_000 - 200;
+    btc.replace(3, &bumped).unwrap();
+    assert_eq!(btc.call("proposal", &[number(4)]).unwrap()[9..], [text("200"), TxCallArgumentType::I64(200)]);
+    assert_eq!((btc.owed(), btc.fee_of_withdrawal(ids[0])), ([400, 200], TxCallArgumentType::I64(2_200)), "counted once for both");
+    btc.sign_all(4, &bumped);
+    btc.show(4, &bumped).unwrap();
+    assert_eq!(btc.owed(), [200, 0]);
+
+    // Cancelled: no longer counted, so what it would have repaid is owed again, and its next release
+    // repays it.
+    let second = release(other, 50_000, 1_000, 200);
+    btc.propose(&second.base(), &[number(ids[1])]).unwrap();
+    assert_eq!(btc.owed(), [200, 200]);
+    btc.vote(5, &second, 21).unwrap();
+    btc.vote(5, &second, 22).unwrap();
+    assert_eq!(btc.owed(), [200, 0]);
+    let again = second.clone();
+    btc.propose(&again.base(), &[number(ids[1])]).unwrap();
+    assert_eq!(btc.owed(), [200, 200]);
+
+    // The cancelled one is mined after all: what it gave the federation counts, once, and the one
+    // proposed again can never be mined, so it is cancelled with nothing more counted.
+    btc.show(5, &second).unwrap();
+    assert_eq!(btc.owed(), [0, 200]);
+    btc.vote(6, &again, 21).unwrap();
+    btc.vote(6, &again, 22).unwrap();
+    assert_eq!(btc.owed(), [0, 0]);
 }
 
 /// A transaction of 64 bytes could be an inner node of a block's tree: not the relay's to tell apart
@@ -1182,7 +1622,7 @@ fn bitcoin_core_takes_a_release_of_a_deposit_with_every_kind_of_output_the_gatew
 
     // 1,200 in fees, 200 from each of the six, and all the rest back.
     outputs.push(btc.change(100_000 - 60_000));
-    let mut release = Transaction { version: 2, inputs: vec![TxIn { txid: sha256d(&deposit), vout: vout as u32, script_sig: Vec::new(), sequence: 0xffff_ffff, witness: Vec::new() }], outputs, lock_time: 0 };
+    let mut release = Transaction { version: 2, inputs: vec![TxIn { txid: sha256d(&deposit), vout: vout as u32, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() }], outputs, lock_time: 0 };
     assert_eq!(btc.propose(&release.base(), &args[1..]).unwrap(), [TxCallArgumentType::I64(1)]);
     btc.sign(1, &release, 0, 21).unwrap();
     btc.sign(1, &release, 0, 23).unwrap();
@@ -1206,4 +1646,140 @@ fn bitcoin_core_takes_a_release_of_a_deposit_with_every_kind_of_output_the_gatew
     let vbytes = crate::bridge::btc_release_vbytes(release.base().len(), &[(2, script.len())]);
     assert!(mined["vsize"].as_u64().unwrap() <= vbytes, "{} over the {vbytes} the floor goes by", mined["vsize"]);
     assert!(vbytes - mined["vsize"].as_u64().unwrap() < 10, "{} well under {vbytes}", mined["vsize"]);
+}
+
+/// A proposal with its witnesses assembled from the board, as chainv4 bridge btc finish does: hex,
+/// ready to send.
+#[cfg(feature = "bridge")]
+fn witnessed(btc: &Btc, proposal: u64, tx: &Transaction) -> String {
+    use crate::crypto::bitcoin::tx::der;
+
+    let mut tx = tx.clone();
+
+    for index in 0..tx.inputs.len() {
+        let posted = btc.call("input_signatures", &[number(proposal), number(index as u64)]).unwrap();
+        let [TxCallArgumentType::Bytes(script), TxCallArgumentType::I64(threshold), signed @ ..] = &posted[..] else { panic!("{posted:?}") };
+        let signatures = signed.chunks(2).filter_map(|pair| match pair {
+            [_, TxCallArgumentType::Bytes(signature)] => Some([der(&<[u8; 64]>::try_from(signature.as_slice()).unwrap()), vec![0x01]].concat()),
+            _ => None,
+        });
+        tx.inputs[index].witness = [vec![Vec::new()], signatures.take(*threshold as usize).collect(), vec![script.clone()]].concat();
+    }
+
+    crate::structs::hex::to_hex(&tx.encode()).trim_start_matches("0x").to_string()
+}
+
+/// Bitcoin Core's own say on bumps: a release left unmined at the floor is replaced by one paying
+/// more, which its mempool takes in its place and mines; and a release whose recipient pinned it
+/// with a large child of their own, so the replacement is refused, is paid for by a child spending
+/// its change, which its mempool takes and mines with it. The gateway then shows what was mined.
+#[cfg(feature = "bridge")]
+#[test]
+#[ignore = "runs Bitcoin Core on a private regtest chain"]
+fn bitcoin_core_takes_a_replacement_of_a_stuck_release_and_a_child_for_a_pinned_one() {
+    use crate::structs::hex::from_hex;
+
+    let node = Regtest::start(18983);
+    node.cli(&["createwallet", "test"]).unwrap();
+    node.mine(101);
+    let mut btc = Btc::new();
+    let output = btc.deposit_output(ALICE);
+    let paid = node.cli(&["sendtoaddress", &crate::structs::bech32::encode_segwit("bcrt", &output[2..]), "0.002"]).unwrap();
+    node.mine(1);
+    let (paying, _) = Transaction::read(&from_hex(&format!("0x{}", node.cli(&["getrawtransaction", &paid]).unwrap())).unwrap()).unwrap();
+    let vout = paying.outputs.iter().position(|out| out.script == output).unwrap() as u64;
+    let deposit = paying.base();
+    let (block, index, path, first, first_path) = btc.mine(&deposit);
+    btc.bury();
+    btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&path), bytes(&first), bytes(&first_path), number(vout), address(ALICE), TxCallArgumentType::Nil]).unwrap();
+
+    // Two withdrawals to an address of the node's own wallet, so it can spend what it is paid.
+    let script_of = |address: &str| -> Vec<u8> {
+        let info: serde_json::Value = serde_json::from_str(&node.cli(&["getaddressinfo", address]).unwrap()).unwrap();
+        from_hex(&format!("0x{}", info["scriptPubKey"].as_str().unwrap())).unwrap()
+    };
+    let bob = node.cli(&["getnewaddress", "", "bech32"]).unwrap();
+    let ids: Vec<u64> = (0..2).map(|_| match btc.call_as(ALICE, "withdraw", &[bytes(&script_of(&bob)), number(50_000), number(20_000)]).unwrap()[..] {
+        [TxCallArgumentType::I64(id)] => id as u64,
+        ref other => panic!("{other:?}"),
+    }).collect();
+    let display = |tx: &Transaction| crate::structs::hex::to_hex(&{ let mut id = sha256d(&tx.base()); id.reverse(); id }).trim_start_matches("0x").to_string();
+    let in_mempool = |tx: &Transaction| node.cli(&["getmempoolentry", &display(tx)]).is_ok();
+
+    // The first, at the floor, signed and sent. Nothing is mined.
+    let spends = TxIn { txid: sha256d(&deposit), vout: vout as u32, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() };
+    let release = Transaction { version: 2, inputs: vec![spends], outputs: vec![TxOut { value: 49_500, script: script_of(&bob) }, btc.change(150_000)], lock_time: 0 };
+    btc.propose(&release.base(), &[number(ids[0])]).unwrap();
+    btc.sign_all(1, &release);
+    node.cli(&["sendrawtransaction", &witnessed(&btc, 1, &release)]).unwrap();
+    assert!(in_mempool(&release));
+
+    // Replaced by one paying ten times as much: the same input, outputs and change, the withdrawal paying the more.
+    let mut bumped = release.clone();
+    bumped.outputs[0].value = 46_000;
+    btc.replace(1, &bumped).unwrap();
+    btc.sign_all(2, &bumped);
+    node.cli(&["sendrawtransaction", &witnessed(&btc, 2, &bumped)]).unwrap();
+    assert!(in_mempool(&bumped) && !in_mempool(&release), "it takes the place of the first");
+    node.mine(1);
+    let mined: serde_json::Value = serde_json::from_str(&node.cli(&["getrawtransaction", &display(&bumped), "true"]).unwrap()).unwrap();
+    assert_eq!(mined["confirmations"], 1);
+    btc.show(2, &bumped).unwrap();
+    assert_eq!((btc.state_of_proposal(1), btc.state_of_withdrawal(ids[0])), (text("replaced"), text("paid")));
+
+    // The second, at the floor, from the change: the recipient spends their output in a large child
+    // at a low rate, which Bitcoin will not let a replacement evict for less than all it pays.
+    let spends = TxIn { txid: sha256d(&bumped.base()), vout: 1, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() };
+    let pinned = Transaction { version: 2, inputs: vec![spends], outputs: vec![TxOut { value: 49_500, script: script_of(&bob) }, btc.change(100_000)], lock_time: 0 };
+    btc.propose(&pinned.base(), &[number(ids[1])]).unwrap();
+    btc.sign_all(3, &pinned);
+    node.cli(&["sendrawtransaction", &witnessed(&btc, 3, &pinned)]).unwrap();
+    let outputs = serde_json::json!([{ node.cli(&["getnewaddress", "", "bech32"]).unwrap(): 0.0003 }, { "data": "00".repeat(4_000) }]);
+    let pin = node.cli(&["createrawtransaction", &serde_json::json!([{ "txid": display(&pinned), "vout": 0 }]).to_string(), &outputs.to_string()]).unwrap();
+    let signed: serde_json::Value = serde_json::from_str(&node.cli(&["signrawtransactionwithwallet", &pin]).unwrap()).unwrap();
+    node.cli(&["sendrawtransaction", signed["hex"].as_str().unwrap()]).unwrap();
+
+    let mut replacement = pinned.clone();
+    replacement.outputs[0].value = 46_000;
+    btc.replace(3, &replacement).unwrap();
+    btc.sign_all(4, &replacement);
+    let refused = node.cli(&["sendrawtransaction", &witnessed(&btc, 4, &replacement)]).unwrap_err();
+    assert!(refused.contains("insufficient fee") || refused.contains("rejecting replacement"), "{refused}");
+
+    // A child spending the change pays for it instead, and Bitcoin takes it beside the recipient's.
+    let mut child = spending(&[], vec![btc.change(100_000 - 5_000)]);
+    child.inputs.push(TxIn { txid: sha256d(&pinned.base()), vout: 1, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() });
+    assert_eq!(btc.child(3, &child).unwrap(), [TxCallArgumentType::I64(5)]);
+    btc.sign_all(5, &child);
+    node.cli(&["sendrawtransaction", &witnessed(&btc, 5, &child)]).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(&node.cli(&["getmempoolentry", &display(&pinned)]).unwrap()).unwrap();
+    assert_eq!(entry["descendantcount"], 3, "the recipient's child and ours");
+    node.mine(1);
+
+    for tx in [&pinned, &child] {
+        let mined: serde_json::Value = serde_json::from_str(&node.cli(&["getrawtransaction", &display(tx), "true"]).unwrap()).unwrap();
+        assert_eq!(mined["confirmations"], 1);
+    }
+
+    // Shown: the release and its child, the refused replacement closed, the change held once and spent.
+    btc.show(3, &pinned).unwrap();
+    btc.show(5, &child).unwrap();
+    assert_eq!([btc.state_of_proposal(3), btc.state_of_proposal(4), btc.state_of_proposal(5)], [text("released"), text("replaced"), text("released")]);
+    assert_eq!(btc.state_at(&sha256d(&pinned.base()), 1), Some(text("spent")));
+    assert_eq!(btc.state_at(&sha256d(&child.base()), 0), Some(text("unspent")));
+    assert_eq!(btc.count_of("shortfall"), 5_000);
+
+    // The next release repays a fifth of its fee of that to the federation's change, and Bitcoin takes it.
+    let id = match btc.call_as(ALICE, "withdraw", &[bytes(&script_of(&bob)), number(50_000), number(20_000)]).unwrap()[..] {
+        [TxCallArgumentType::I64(id)] => id as u64,
+        ref other => panic!("{other:?}"),
+    };
+    let spends = TxIn { txid: sha256d(&child.base()), vout: 0, script_sig: Vec::new(), sequence: crate::bridge::BTC_SEQUENCE, witness: Vec::new() };
+    let repaying = Transaction { version: 2, inputs: vec![spends], outputs: vec![TxOut { value: 50_000 - 1_000 - 200, script: script_of(&bob) }, btc.change(95_000 - 50_000 + 200)], lock_time: 0 };
+    assert_eq!(btc.propose(&repaying.base(), &[number(id)]).unwrap(), [TxCallArgumentType::I64(6)]);
+    btc.sign_all(6, &repaying);
+    node.cli(&["sendrawtransaction", &witnessed(&btc, 6, &repaying)]).unwrap();
+    node.mine(1);
+    btc.show(6, &repaying).unwrap();
+    assert_eq!(btc.owed(), [4_800, 0]);
 }

@@ -1131,7 +1131,34 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **A withdrawal pays its own fee.** It arrives as what it burned less its share of the release's
   fee, split evenly, up to the most it agreed to lose, a tenth unless it says. So `--fee` to `btc
   propose` comes off them, not the pool, and change is exactly what was spent past what they burned.
-  A release that would leave change under dust cannot be proposed: the rest waits for a deposit.
+- **Every release keeps change of at least 330,** Bitcoin's dust for a P2WSH output, so a child can pay
+  for it: should the gateway hold no more than they burned, the withdrawals top it up to that with the fee,
+  and `withdrawal(id)` counts it in their share. Dust was 546 before, a P2PKH output's.
+- **Releases signal BIP125:** each input's sequence is `0xfffffffd`, so Bitcoin takes a replacement paying
+  more, and its top bit leaves no BIP68 delay. A gateway from before took `0xffffffff` alone, so its
+  releases can only be paid for by a child: the gateway is redeployed with a new genesis.
+- **A bump is a proposal of its own:** `replace` and `child` take a number as `propose` does, signed over
+  `btc_bump_digest`, and are signed input by input like any release. `proposal(id)` gives four more values
+  after the state, its kind, what it replaced or pays for, its fee and what its withdrawals lose by it, and a
+  proposal another version of which was shown is `replaced`. `tree(id)` lists a release and its bumps.
+- **One bump at a time:** while any bump of a release waits for signatures, another is refused, and a
+  child of a change a child spends already is too: replace that child instead.
+- **A change a child spends before it is shown is `unshown`** in `utxo_of`, and unlisted: `utxo_count`
+  counts it once the release it is of is shown, still pending under the child or spent.
+- **A child's fee is the backing's one cost, for a while:** the withdrawals it is charged to were paid, so
+  the federation pays it from its change, and `shortfall()` says how far what the gateway holds is short of
+  wBTC, then how much of that open releases repay. Later releases repay it, a fifth of their fee at most and
+  500 satoshis from any one withdrawal, within its most fee: so a withdrawal's quote, from `bridge btc
+  withdraw` or the wallet, says a little may come off toward it while anything is owed. The gateway works
+  out what each repays; a release that does not carry just that, or a replacement that changes it, is refused.
+- **`set_most_fee` raises a limit while its release is open,** for a bump its limit held back; it never
+  lowers one in a release, as what the release took stands.
+- **Signers take turns:** a pass waits its place among the federation's signers times a block of the chain,
+  at least a second, before it shows, votes, proposes or bumps, then checks the gateway and the node's
+  mempool again. A large federation's last signer may wait a while each time; the first never does. A pass
+  with no `--evm-key` goes last.
+- **A bump by policy needs fee estimates and ages:** no `/fee-estimates`, as on regtest, or no
+  `--index-events`, and nothing is stuck by policy; `bridge btc bump --rate` still goes by hand.
 - **A proof needs the block's coinbase:** `deposit` and `released` take it and its path, without its
   witness. Esplora gives it as `/block/HASH/txid/0`, then as any transaction. A wallet's coin kept
   before that is shown through Esplora instead.

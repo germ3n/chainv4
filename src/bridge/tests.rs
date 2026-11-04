@@ -180,6 +180,7 @@ mod stuck_releases {
             fee_cap: 50_000,
             fee_floor: 2,
             most_rate: 100,
+            repay: ReleaseRepay::default(),
         };
 
         assert!(matches!(check_btc_release(&facts), Err(ReleaseRefusal::Dead(_))));
@@ -215,7 +216,7 @@ mod stuck_releases {
 
 #[cfg(feature = "bitcoin")]
 mod planning {
-    use {super::super::*, crate::crypto::bitcoin::tx::p2wpkh};
+    use {super::super::*, crate::crypto::bitcoin::tx::{p2wpkh, p2wsh}};
 
     const CAP: u64 = 50_000;
     const FLOOR: u64 = 2;
@@ -230,7 +231,7 @@ mod planning {
     }
 
     fn plan(withdrawals: &[NamedWithdrawal], outputs: &[(String, SpentOutput)], fee: ReleaseFee) -> ReleasePlan {
-        plan_btc_release(withdrawals, outputs, &CHANGE, CAP, FLOOR, fee).unwrap()
+        plan_btc_release(withdrawals, outputs, &CHANGE, CAP, FLOOR, fee, &ReleaseRepay::default()).unwrap()
     }
 
     #[test]
@@ -284,7 +285,7 @@ mod planning {
     fn past_the_cap_at_this_rate_a_release_pays_fewer_and_the_rest_go_in_the_next() {
         // 90 satoshis a virtual byte: fine for a few, not for all of them.
         let withdrawals: Vec<NamedWithdrawal> = (1..=20).map(|id| queued(id, 200_000, 100_000)).collect();
-        let chosen = plan_btc_release(&withdrawals, &[held(1, 10_000_000)], &CHANGE, CAP, FLOOR, ReleaseFee::Rate(90)).unwrap();
+        let chosen = plan_btc_release(&withdrawals, &[held(1, 10_000_000)], &CHANGE, CAP, FLOOR, ReleaseFee::Rate(90), &ReleaseRepay::default()).unwrap();
 
         assert!(chosen.tx.is_some() && chosen.fee <= CAP, "{}", chosen.fee);
         assert!((2..20).contains(&chosen.ids.len()), "{}", chosen.ids.len());
@@ -292,7 +293,7 @@ mod planning {
         assert!(chosen.waiting.is_empty(), "those left are next, and waiting for nothing");
 
         // Past the cap for even one: it stays queued, and says so.
-        let alone = plan_btc_release(&withdrawals[..1], &[held(1, 10_000_000)], &CHANGE, CAP, FLOOR, ReleaseFee::Rate(5_000)).unwrap();
+        let alone = plan_btc_release(&withdrawals[..1], &[held(1, 10_000_000)], &CHANGE, CAP, FLOOR, ReleaseFee::Rate(5_000), &ReleaseRepay::default()).unwrap();
         assert_eq!(alone.tx, None);
         assert!(alone.waiting[0].1.contains("until fees fall"), "{:?}", alone.waiting);
     }
@@ -327,8 +328,269 @@ mod planning {
         let outputs = [held(1, 20_000)];
 
         assert_eq!(plan(&one, &outputs, ReleaseFee::Fixed(1_000)).fee, 1_000);
-        assert!(plan_btc_release(&one, &outputs, &CHANGE, CAP, FLOOR, ReleaseFee::Fixed(1)).unwrap_err().contains("under the floor"));
-        assert!(plan_btc_release(&one, &outputs, &CHANGE, CAP, FLOOR, ReleaseFee::Fixed(CAP + 1)).unwrap_err().contains("past the gateway's cap"));
+        assert!(plan_btc_release(&one, &outputs, &CHANGE, CAP, FLOOR, ReleaseFee::Fixed(1), &ReleaseRepay::default()).unwrap_err().contains("under the floor"));
+        assert!(plan_btc_release(&one, &outputs, &CHANGE, CAP, FLOOR, ReleaseFee::Fixed(CAP + 1), &ReleaseRepay::default()).unwrap_err().contains("past the gateway's cap"));
+    }
+
+    #[test]
+    fn change_under_dust_is_topped_up_by_the_withdrawals_only_when_the_gateway_holds_no_more() {
+        // Just what was burned, and nothing more held: the withdrawals top change up to dust with the fee.
+        let alone = plan(&[queued(1, 20_000, 2_000)], &[held(1, 20_000)], ReleaseFee::Fixed(1_000));
+        let tx = alone.tx.unwrap();
+        assert_eq!((tx.outputs[1].value, alone.fee, alone.cost), (BTC_DUST, 1_000, 1_000 + BTC_DUST));
+        assert_eq!(tx.outputs[0].value, 20_000 - 1_000 - BTC_DUST);
+
+        // With more held, it is taken rather than topping up.
+        let more = plan(&[queued(1, 20_000, 2_000)], &[held(1, 20_000), held(2, 5_000)], ReleaseFee::Fixed(1_000));
+        assert_eq!((more.tx.unwrap().outputs[1].value, more.cost), (5_000, 1_000));
+        assert!(plan(&[queued(1, 20_000, 2_000)], &[held(1, 19_999)], ReleaseFee::Fixed(1_000)).tx.is_none(), "less than burned");
+    }
+
+    /// A release as the gateway would hold it once proposed: its withdrawals proposed, its inputs
+    /// pending.
+    fn proposed(plan: &ReleasePlan, withdrawals: &[NamedWithdrawal], outputs: &[(String, SpentOutput)]) -> ReleaseFacts {
+        let tx = plan.tx.clone().unwrap();
+        let raw = tx.base();
+        let inputs = tx
+            .inputs
+            .iter()
+            .map(|input| {
+                let key = format!("{}:{}", crate::structs::hex::to_hex(&input.txid).trim_start_matches("0x"), input.vout);
+                let (_, held) = outputs.iter().find(|(outpoint, _)| *outpoint == key).unwrap().clone();
+
+                (key, SpentOutput { state: "pending".to_string(), ..held })
+            })
+            .collect();
+        let withdrawals = withdrawals.iter().filter(|withdrawal| plan.ids.contains(&withdrawal.id)).map(|withdrawal| NamedWithdrawal { state: "proposed".to_string(), ..withdrawal.clone() }).collect();
+
+        ReleaseFacts { txid: crate::crypto::bitcoin::sha256d(&raw).to_vec(), raw, version: 0, withdrawals, inputs, change_script: FED.to_vec(), fee_cap: CAP, fee_floor: FLOOR, most_rate: 1_000, repay: ReleaseRepay::default() }
+    }
+
+    /// The federation's bare multisig, and its change output.
+    const FED: [u8; 3] = [0x51, 0x51, 0xae];
+
+    fn fed_change() -> Vec<u8> {
+        p2wsh(&FED)
+    }
+
+    fn signed_release(most_fee: u64) -> (ReleaseFacts, Vec<(String, SpentOutput)>) {
+        let withdrawals = [queued(1, 20_000, most_fee), queued(2, 30_000, most_fee)];
+        let outputs = [held(1, 100_000), held(2, 50_000)];
+        let plan = plan_btc_release(&withdrawals, &outputs, &fed_change(), CAP, FLOOR, ReleaseFee::Rate(5), &ReleaseRepay::default()).unwrap();
+
+        (proposed(&plan, &withdrawals, &outputs), outputs.to_vec())
+    }
+
+    #[test]
+    fn a_replacement_pays_the_same_withdrawals_more_evenly_keeps_its_change_and_passes_every_version() {
+        let (facts, _) = signed_release(5_000);
+        let (fee, vbytes) = btc_fee_and_vbytes(&facts).unwrap();
+        let bump = plan_btc_replacement(&facts, fee, 20).unwrap();
+        let (old, _) = crate::crypto::bitcoin::tx::Transaction::read(&facts.raw).unwrap();
+
+        // The same inputs and scripts, the same size, the change as it was; the fee at the rate, off
+        // the withdrawals evenly.
+        assert_eq!(bump.tx.inputs, old.inputs);
+        assert_eq!(bump.tx.base().len(), facts.raw.len());
+        assert_eq!(bump.tx.outputs.iter().map(|output| &output.script).collect::<Vec<_>>(), old.outputs.iter().map(|output| &output.script).collect::<Vec<_>>());
+        assert_eq!(bump.tx.outputs[2].value, old.outputs[2].value);
+        assert_eq!((bump.fee, bump.rate), (vbytes * 20, 20));
+        assert_eq!(bump.tx.outputs[0].value, 20_000 - btc_fee_share(bump.fee, 2, 0));
+        assert_eq!(bump.tx.outputs[1].value, 30_000 - btc_fee_share(bump.fee, 2, 1));
+        assert!(bump.held_back.is_empty());
+
+        // The signers take it: it passes every open version by Bitcoin's incremental rate.
+        let next = ReleaseFacts { raw: bump.tx.base(), txid: crate::crypto::bitcoin::sha256d(&bump.tx.base()).to_vec(), ..facts.clone() };
+        assert_eq!(check_btc_replacement(&facts, &next, fee), Ok(()));
+        assert!(check_btc_replacement(&facts, &next, bump.fee).unwrap_err().to_string().contains("not past every version"));
+
+        // A rate under what it pays still pays past it, by the increment.
+        assert_eq!(plan_btc_replacement(&facts, fee, 1).unwrap().fee, fee + vbytes * BTC_LEAST_BUMP_RATE);
+    }
+
+    #[test]
+    fn a_replacement_goes_as_high_as_the_tightest_limit_lets_it_and_says_which_held_it_back() {
+        let withdrawals = [queued(1, 20_000, 600), queued(2, 30_000, 5_000)];
+        let outputs = [held(1, 100_000)];
+        let plan = plan_btc_release(&withdrawals, &outputs, &fed_change(), CAP, FLOOR, ReleaseFee::Rate(2), &ReleaseRepay::default()).unwrap();
+        let facts = proposed(&plan, &withdrawals, &outputs);
+        let bump = plan_btc_replacement(&facts, plan.fee, 40).unwrap();
+
+        // Split evenly, so the first's limit holds both: no more than twice it, and it says so.
+        assert_eq!(bump.held_back, [1]);
+        assert!(bump.fee <= 1_200 && bump.fee > plan.fee, "{}", bump.fee);
+        assert!(btc_fee_share(bump.fee, 2, 0) <= 600);
+
+        // With no room at all for even the increment, none goes, naming who holds it.
+        let tight = ReleaseFacts { withdrawals: facts.withdrawals.iter().map(|withdrawal| NamedWithdrawal { most_fee: btc_fee_share(plan.cost, 2, 0), ..withdrawal.clone() }).collect(), ..facts.clone() };
+        assert!(plan_btc_replacement(&tight, plan.fee, 40).unwrap_err().contains("withdrawal 1, 2 agreed to lose too little"));
+
+        // Nor past the cap.
+        let capped = ReleaseFacts { fee_cap: plan.fee + 10, ..facts.clone() };
+        assert!(plan_btc_replacement(&capped, plan.fee, 40).unwrap_err().contains("past the cap"));
+    }
+
+    #[test]
+    fn a_replacement_that_changes_what_it_pays_is_refused_by_the_signers() {
+        let (facts, _) = signed_release(5_000);
+        let (fee, _) = btc_fee_and_vbytes(&facts).unwrap();
+        let bump = plan_btc_replacement(&facts, fee, 20).unwrap();
+        let refused = |change: &dyn Fn(&mut crate::crypto::bitcoin::tx::Transaction), why: &str| {
+            let mut tx = bump.tx.clone();
+            change(&mut tx);
+            let next = ReleaseFacts { raw: tx.base(), txid: crate::crypto::bitcoin::sha256d(&tx.base()).to_vec(), ..facts.clone() };
+            let answer = check_btc_replacement(&facts, &next, fee).unwrap_err().to_string();
+            assert!(answer.contains(why), "{why}: {answer}");
+        };
+
+        refused(&|tx| tx.outputs.swap(0, 1), "as asked");
+        refused(&|tx| (tx.outputs[0].value, tx.outputs[2].value) = (tx.outputs[0].value + 100, tx.outputs[2].value - 100), "change is not all");
+        refused(&|tx| tx.inputs[0].vout = 7, "does not spend what it replaces");
+        refused(&|tx| tx.inputs[0].sequence = 0xffff_ffff, "delay");
+    }
+
+    #[test]
+    fn a_child_spends_the_change_pays_for_both_at_the_rate_and_is_charged_within_the_limits() {
+        let (facts, outputs) = signed_release(5_000);
+        let (fee, vbytes) = btc_fee_and_vbytes(&facts).unwrap();
+        let child = plan_btc_child(&facts, &outputs, &fed_change(), 20).unwrap();
+        let (change, spent) = btc_change_of(&facts).unwrap();
+
+        // It spends the change alone, which pays it, and the two together come to the rate.
+        assert_eq!(child.tx.inputs.len(), 1);
+        assert_eq!(format!("{}:{}", crate::structs::hex::to_hex(&child.tx.inputs[0].txid).trim_start_matches("0x"), child.tx.inputs[0].vout), change);
+        assert_eq!(child.tx.outputs[0].value, spent.sats - child.fee);
+        let child_vbytes = btc_release_vbytes(child.tx.base().len(), &[(spent.threshold, spent.script_len)]);
+        assert_eq!(child.fee, 20 * (vbytes + child_vbytes) - fee);
+        assert_eq!(child.rate, 20);
+
+        // The signers take it, and refuse it past the rate they sign for, with what it pays for.
+        let facts_of = |tx: &crate::crypto::bitcoin::tx::Transaction, most_rate: u64| ReleaseFacts {
+            raw: tx.base(),
+            txid: crate::crypto::bitcoin::sha256d(&tx.base()).to_vec(),
+            version: 0,
+            withdrawals: Vec::new(),
+            inputs: vec![(change.clone(), SpentOutput { state: "pending".to_string(), ..spent.clone() })],
+            change_script: FED.to_vec(),
+            fee_cap: CAP,
+            fee_floor: FLOOR,
+            most_rate,
+            repay: ReleaseRepay::default(),
+        };
+        assert_eq!(check_btc_child(&facts, &facts_of(&child.tx, 20), None), Ok(()));
+        assert!(matches!(check_btc_child(&facts, &facts_of(&child.tx, 19), None), Err(ReleaseRefusal::Overpriced(_))));
+
+        // Its replacement pays past it by the increment, from the same change.
+        let again = plan_btc_child_replacement(&facts, &facts_of(&child.tx, 1_000), child.fee, 30).unwrap();
+        assert_eq!(again.tx.inputs, child.tx.inputs);
+        assert!(again.fee >= child.fee + child_vbytes && again.rate > child.rate, "{again:?}");
+        assert!(check_btc_child(&facts, &facts_of(&again.tx, 1_000), Some(child.fee)).is_ok());
+        assert!(check_btc_child(&facts, &facts_of(&child.tx, 1_000), Some(child.fee)).unwrap_err().to_string().contains("not past every version"));
+
+        // Within what each withdrawal agreed to lose, with its share of the release's own.
+        let (tight, outputs) = signed_release(btc_fee_share(fee, 2, 0) + 200);
+        let held = plan_btc_child(&tight, &outputs, &fed_change(), 200).unwrap();
+        assert_eq!(held.held_back, [1, 2]);
+        assert!(held.fee <= 400 && held.fee >= 230, "{}", held.fee);
+    }
+
+    #[test]
+    fn a_child_spends_more_than_the_change_only_when_the_change_cannot_pay_it() {
+        let withdrawals = [queued(1, 20_000, 10_000)];
+        let outputs = [held(1, 20_000), held(2, 50_000)];
+        // Just what was burned, held alone: the change is dust, too little to pay a child.
+        let plan = plan_btc_release(&withdrawals, &outputs[..1], &fed_change(), CAP, FLOOR, ReleaseFee::Rate(2), &ReleaseRepay::default()).unwrap();
+        let facts = proposed(&plan, &withdrawals, &outputs);
+        let child = plan_btc_child(&facts, &outputs[1..], &fed_change(), 10).unwrap();
+
+        assert_eq!(child.tx.inputs.len(), 2, "the change, and what pays the rest");
+        assert_eq!(child.tx.outputs[0].value, BTC_DUST + 50_000 - child.fee);
+        assert!(plan_btc_child(&facts, &[], &fed_change(), 10).unwrap_err().contains("too little"));
+    }
+
+    #[test]
+    fn what_a_release_repays_is_a_share_of_its_fee_capped_per_withdrawal_within_each_limit() {
+        // A fifth of a fee of 3,000 is 600, under the 1,000 owed: 300 each, but for the one with room for 50.
+        assert_eq!(btc_repays(1_000, 3_000, 20, 500, &[2_000, 50]), (600, vec![300, 50]));
+        // Never more than is owed, nor than one withdrawal repays at most, and none from one at its limit.
+        assert_eq!(btc_repays(100, 3_000, 20, 500, &[2_000, 2_000]), (100, vec![50, 50]));
+        assert_eq!(btc_repays(5_000, 10_000, 20, 500, &[2_000, 2_000]), (2_000, vec![500, 500]));
+        assert_eq!(btc_repays(1_000, 3_000, 20, 500, &[0]), (600, vec![0]));
+        assert_eq!(btc_repays(0, 3_000, 20, 500, &[2_000]), (0, vec![0]), "nothing owed");
+        assert_eq!(btc_repays(1_000, 3_000, 0, 500, &[2_000]), (0, vec![0]), "a policy that never repays");
+    }
+
+    #[test]
+    fn a_release_repays_what_is_owed_to_the_federation_s_change_and_a_signer_refuses_a_wrong_repayment() {
+        let withdrawals = [queued(1, 20_000, 5_000), queued(2, 30_000, 5_000)];
+        let outputs = [held(1, 100_000)];
+        let repay = ReleaseRepay { owed: 10_000, pct: 20, most: 500, ..ReleaseRepay::default() };
+        let plan = plan_btc_release(&withdrawals, &outputs, &fed_change(), CAP, FLOOR, ReleaseFee::Fixed(2_000), &repay).unwrap();
+        let tx = plan.tx.clone().unwrap();
+
+        // A fifth of the fee, 400, 200 each, off their outputs and onto the change.
+        assert_eq!((plan.repay.budget, plan.repay.shares.clone()), (400, vec![200, 200]));
+        assert_eq!(tx.outputs[0].value, 20_000 - 1_000 - 200);
+        assert_eq!(tx.outputs[2].value, 100_000 - 50_000 + 400);
+
+        // The signers take it as the gateway records it, with what is owed now.
+        let facts = ReleaseFacts { repay: ReleaseRepay { owed: 10_000, ..plan.repay.clone() }, ..proposed(&plan, &withdrawals, &outputs) };
+        assert_eq!(check_btc_release(&facts), Ok(()));
+
+        let refused = |change: &dyn Fn(&mut ReleaseFacts), why: &str| {
+            let mut changed = facts.clone();
+            change(&mut changed);
+            let answer = check_btc_release(&changed).unwrap_err().to_string();
+            assert!(answer.contains(why), "{why}: {answer}");
+        };
+        refused(&|facts| facts.repay.owed = 399, "past what children cost");
+        refused(&|facts| facts.repay.budget = 401, "percent of its fee");
+        refused(&|facts| facts.repay.most = 199, "repays at most");
+        refused(&|facts| facts.repay.shares = vec![300, 100], "past its share of the budget");
+        refused(&|facts| facts.repay.shares = vec![200, 100], "with what they repay");
+        refused(&|facts| facts.repay.shares = vec![200, 200, 1], "account of what it repays");
+
+        // Nothing owed, nothing repaid: the release is as it was.
+        let plain = plan_btc_release(&withdrawals, &outputs, &fed_change(), CAP, FLOOR, ReleaseFee::Fixed(2_000), &ReleaseRepay { owed: 0, ..repay.clone() }).unwrap();
+        assert_eq!(plain.tx.unwrap().outputs[2].value, 50_000);
+
+        // A replacement keeps what it repays, the bump off the withdrawals alone, and a child's room counts it.
+        let (fee, _) = btc_fee_and_vbytes(&facts).unwrap();
+        let bump = plan_btc_replacement(&facts, fee, 20).unwrap();
+        assert_eq!(bump.tx.outputs[2].value, tx.outputs[2].value);
+        assert_eq!(bump.tx.outputs[0].value, 20_000 - btc_fee_share(bump.fee, 2, 0) - 200);
+        let next = ReleaseFacts { raw: bump.tx.base(), txid: crate::crypto::bitcoin::sha256d(&bump.tx.base()).to_vec(), ..facts.clone() };
+        assert_eq!(check_btc_replacement(&facts, &next, fee), Ok(()));
+        let dropping = ReleaseFacts { repay: ReleaseRepay { shares: vec![200, 100], ..facts.repay.clone() }, ..next.clone() };
+        assert!(check_btc_replacement(&facts, &dropping, fee).is_err());
+    }
+
+    #[test]
+    fn a_release_is_stuck_once_old_enough_and_well_under_what_the_network_asks() {
+        let hour = 3_600_000;
+
+        assert!(btc_is_stuck(Some(hour), 7, Some(10), hour, 80), "under four fifths of it, an hour on");
+        assert!(!btc_is_stuck(Some(hour), 8, Some(10), hour, 80), "at four fifths it waits");
+        assert!(!btc_is_stuck(Some(hour - 1), 1, Some(10), hour, 80), "too soon");
+        assert!(!btc_is_stuck(None, 1, Some(10), hour, 80), "an age unread says nothing");
+        assert!(!btc_is_stuck(Some(hour), 1, None, hour, 80), "nor does a network that asks nothing");
+        assert!(btc_is_stuck(Some(hour), 99, Some(100), hour, 100), "a hundred percent bumps whatever is under it");
+
+        // Replace-by-fee first; a child once that was refused or tried; and a child is replaced.
+        assert_eq!(btc_bump_kind(false, false, false), BumpKind::Replace);
+        assert_eq!(btc_bump_kind(false, true, false), BumpKind::Child);
+        assert_eq!(btc_bump_kind(false, false, true), BumpKind::Child);
+        assert_eq!(btc_bump_kind(true, false, false), BumpKind::ReplaceChild);
+    }
+
+    #[test]
+    fn signers_take_turns_a_block_apart_in_their_order() {
+        assert_eq!([0, 1, 2].map(|place| btc_turn_delay(place, 5_000)), [0, 5_000, 10_000]);
+        assert_eq!(btc_turn_delay(3, 50), 3 * BTC_LEAST_TURN_MS, "a chain faster than a transaction reaches its mempool");
+        assert_eq!(btc_block_ms((110, 1_050_000), (100, 1_000_000)), 5_000);
+        assert_eq!(btc_block_ms((100, 1_000_000), (100, 1_000_000)), 5_000, "one block says nothing");
+        assert_eq!(btc_block_ms((101, 1_000_000), (100, 1_000_000)), 1, "at least a millisecond");
+        assert_eq!(btc_block_ms((101, u64::MAX), (100, 0)), 600_000, "at most ten minutes");
     }
 
     #[test]

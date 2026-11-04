@@ -39,7 +39,7 @@ pub fn federation_json(federation: &Federation) -> Value {
 
     // A later addition: left out while unset, as files from before it leave it out.
     if let Some(btc) = &federation.btc {
-        value["btc"] = json!({ "fee_cap": btc.fee_cap, "fee_floor": btc.fee_floor, "grace_ms": btc.grace_ms, "cancel_after_ms": btc.cancel_after_ms, "fee_part": btc.fee_part });
+        value["btc"] = json!({ "fee_cap": btc.fee_cap, "fee_floor": btc.fee_floor, "grace_ms": btc.grace_ms, "cancel_after_ms": btc.cancel_after_ms, "fee_part": btc.fee_part, "bump_after_ms": btc.bump_after_ms, "bump_below_pct": btc.bump_below_pct, "repay_pct": btc.repay_pct, "repay_most": btc.repay_most });
     }
 
     value
@@ -69,6 +69,11 @@ pub(crate) fn federation_from_json(mut fields: Fields) -> Result<Federation, Str
                     grace_ms: btc.whole("grace_ms")?,
                     cancel_after_ms: btc.whole("cancel_after_ms")?,
                     fee_part: btc.whole("fee_part")?,
+                    // Added after the rest: a policy written before them bumps by the defaults.
+                    bump_after_ms: btc.later_whole("bump_after_ms")?.unwrap_or(crate::registry::federation::BtcPolicy::BUMP_AFTER_MS),
+                    bump_below_pct: btc.later_whole("bump_below_pct")?.unwrap_or(crate::registry::federation::BtcPolicy::BUMP_BELOW_PCT),
+                    repay_pct: btc.later_whole("repay_pct")?.unwrap_or(crate::registry::federation::BtcPolicy::REPAY_PCT),
+                    repay_most: btc.later_whole("repay_most")?.unwrap_or(crate::registry::federation::BtcPolicy::REPAY_MOST),
                 };
                 btc.done()?;
 

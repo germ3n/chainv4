@@ -279,12 +279,15 @@ Bitcoin's nodes do not relay one.
 byte, and how long an old federation's deposit addresses stay open.
 
 **The federation's Bitcoin policy.** Once the federation names one, its `btc`
-(`fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms` and `fee_part`, the share of a withdrawal
-its fee may take unless it says, 10 for a tenth), the gateway goes by that in place of what it was
+(`fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms`, `fee_part`, the share of a withdrawal
+its fee may take unless it says, 10 for a tenth, `bump_after_ms` and `bump_below_pct`, when a
+stuck release is [bumped](#bumping-a-stuck-release), and `repay_pct` and `repay_most`, how later
+releases [repay](#repaying-what-a-child-cost) what a child cost the backing), the gateway goes by that in place of what it was
 set up with, from the block after a change of federation decides it: `fee_limits`, the least
 withdrawal, a release's cap and floor, and a retired federation's grace all read it as they run.
 A spike in Bitcoin's fees is then a governance vote away, with no new gateway and no sweep. The
-signers' `--cancel-after` gives way to `cancel_after_ms` too, so every signer waits alike rather
+signers' `--cancel-after` and `--bump-after` give way to `cancel_after_ms` and `bump_after_ms` too, so
+every signer waits alike rather
 than the threshold-th most patient one deciding.
 
 **Depositing.** Every address here has its own deposit address on Bitcoin, under the federation in
@@ -321,9 +324,10 @@ anything more to do: its signers' [passes](#the-commands) go through these steps
    transaction's id, and the withdrawals it pays); anyone may post that, `propose(raw, signature,
    ids…)`. The gateway checks its inputs are outputs it holds
    unspent, each once, it pays each withdrawal what it burned less its share of the fee, its one
-   other output is change to the federation in force, 546 satoshis or more, and its fee is between
-   the floor and the cap. It is
-   version 2, with sequence `0xffffffff` and no lock time, so nothing delays it, and at most
+   other output is change to the federation in force, at least 330 satoshis, Bitcoin's dust for a
+   P2WSH output, and its fee is between the floor and the cap. It is version 2, with no lock time
+   and each input's sequence `0xfffffffd`, which signals BIP125, so a version paying more can
+   [replace it](#bumping-a-stuck-release), and whose top bit leaves it no BIP68 delay; and at most
    100,000 virtual bytes, what Bitcoin's nodes relay. Its inputs are then pending.
 2. **Signed:** each signer signs each input as BIP143 has it, SIGHASH_ALL, and posts the 64-byte
    signature, `sign(proposal, input, signature)`; the gateway checks it against that input's
@@ -338,9 +342,12 @@ first taking what will not divide: each output costs about the same to carry, wh
 that is exact enough for the contract to check. No share may pass the most that withdrawal agreed to
 lose, so one that said little waits, or the fee is lower. Its change is all it spends past what those
 withdrawals burned, so what the gateway holds falls by just what was burned, and wBTC stays backed
-one for one whatever the fee. It follows that a release spends just what they burned, or leaves
-change of at least dust; the last satoshis under dust wait for a deposit. A sweep pays no one, so its
-fee stays the federation's. `withdrawal(id)` says the limit, and its share once it is in a release.
+one for one whatever the fee. **Every release keeps change,** as a child paying for it spends that:
+should what it spends past what was burned be under 330 satoshis, as when the gateway holds just
+what they burned, the change is 330 all the same, and the withdrawals lose what tops it up with the
+fee, split as the fee is. The planner takes another held output first, so this costs nothing unless
+the gateway holds no more. A sweep pays no one, so its fee stays the federation's. `withdrawal(id)`
+says the limit, and its share once it is in a release, with any child's that paid for it.
 
 **Only a signer proposes.** A release's fee is burned to Bitcoin's miners, off the withdrawals it pays,
 so anyone able to propose could burn all each had agreed to lose, or tie them up in a release no one
@@ -404,9 +411,9 @@ asks what some signer refuses:
   errs on the side of waiting. `bridge btc propose --fee` is an operator's word, and goes by none of this.
 
 **A release with all its signatures that is not mined** cannot be cancelled, as anyone could still
-broadcast it. Past `--cancel-after`, again by its proposal's age, each pass logs one line of it, its id,
-its transaction, what it pays against what the network asks, and that it needs child-pays-for-parent: a
-transaction spending one of its outputs, at a fee that pays for both. Nothing bumps it automatically.
+broadcast it. It is [bumped](#bumping-a-stuck-release) instead. Past `--cancel-after`, again by its
+proposal's age, each pass also logs one line of it, its id, the version Bitcoin holds, what it pays
+against what the network asks, and how it is bumped.
 
 **A new federation** takes over the deposit addresses: new ones are made under it, and the old
 ones stay open for the grace period. A **sweep** is a release with no withdrawals, paying what
@@ -414,8 +421,147 @@ older federations hold to the one in force, proposed by a signer as any release 
 
 **Reading it:** `wbtc()`, `deposit_script(address)` (the witness script, the output script and
 the federation's version), `utxo(n)`, `utxo_of(outpoint)` and `utxo_count()`, `withdrawal(id)`,
-`anchor(id)` and `withdrawal_count()`, `proposal(id)`, `voted(id, key)` and `proposal_count()`,
-`change_script()` or `change_script(version)`, `fee_limits()`.
+`anchor(id)` and `withdrawal_count()`, `proposal(id)`, `tree(id)`, `voted(id, key)` and
+`proposal_count()`, `change_script()` or `change_script(version)`, `fee_limits()`, `shortfall()`.
+
+### Bumping a stuck release
+
+A release with all its signatures that Bitcoin leaves unmined, as fees rose past what it pays, is
+bumped, one of two ways, each a proposal of its own that the signers sign as they sign a release:
+- **Replace-by-fee, by default:** `replace(of, raw, signature)` proposes a replacement of a version
+  of the release, signed by a signer of the federation in force over `btc_bump_digest` under the
+  domain `chainv4-btc-replace`. It spends just what that version spends, in the same order, so
+  Bitcoin mines one of them at most, and its inputs signal BIP125; it pays the same withdrawals to
+  the same scripts, each less its even share of what they now lose, within what each agreed to
+  lose; its change is what it was, as the withdrawals pay the bump as they paid the fee; and its
+  fee is past every open version of it by a satoshi a virtual byte, Bitcoin's incremental relay
+  fee, and under the cap. A sweep's bump comes off its change, as its fee is the federation's.
+- **A child, as the fallback:** `child(parent, raw, signature)`, under the domain
+  `chainv4-btc-child`, proposes a child spending the change of a version, which every release
+  keeps for this, then outputs the gateway holds unspent only should that change not pay its fee
+  and leave dust; it pays the rest to the federation in force in one output, held like change once
+  shown. Its fee is charged to that version's withdrawals, evenly, each within what it agreed to
+  lose with its share of the release's own, the two fees together under the cap. A child is bumped
+  by replacing it, by `replace`, as a second child of the same change would conflict with it.
+
+Before a child is shown, the gateway knows the change it spends, unlisted, as `unshown`, so the
+signers can sign it; once the release is shown, its change is held, pending under the child or spent
+should the child have been shown first.
+
+**Who pays.** The withdrawals, split evenly, each within its most fee, as for the fee itself: a
+replacement's outputs to them are lower. A child's fee is charged to them too, within their limits,
+and recorded, `withdrawal(id)` saying its share; but they have their outputs already, so the
+federation pays it from its change, and the gateway then holds that much less than the wBTC it
+backs, until later releases [repay it](#repaying-what-a-child-cost). This is the one cost the backing
+bears, even for a while, so a replacement comes first.
+
+**A withdrawal whose limit is too low for its share.** A replacement pays exactly the same withdrawals
+and splits evenly, so it goes as high as the tightest limit lets it, and the pass names whose limit held
+it back. Its owner may raise its most fee with `set-most-fee` while the release is open, only higher, as
+what it was proposed under stands. Dropping it, or making the others pay more than an even share, would
+both be a release of another kind, which a replacement is not; with no room for even the increment, no
+bump goes, and it waits, as a withdrawal past its limit waits today.
+
+**When.**
+- **By policy:** a signer's pass bumps a release once nothing of it waits for signatures, its newest
+  version or child was proposed at least `bump_after_ms` ago by the chain's block time, an hour unless
+  the federation says, and what the version Bitcoin holds pays, with any child of it, is under
+  `bump_below_pct` percent of what Esplora says the network asks to mine it within 3 blocks, 80 unless
+  it says (`btc_is_stuck`). It bumps to that rate. An hour is twice the three blocks its rate was asked
+  for, so one mined in the usual time is never bumped, and well inside the six hours a release short of
+  its signatures waits before it is voted down. 80 percent, as estimates wander by a tenth or so from
+  one minute to the next, and a bump costs its withdrawals its whole fee again at the new rate.
+- **Replace-by-fee first, then a child** (`btc_bump_kind`): a child once Esplora refused the
+  replacement while an older version stands, as when a recipient pinned the release by spending their
+  output in a large child at a low rate, which Bitcoin will not let a replacement evict for less than
+  all it pays, and that at once; or once a replacement goes unmined past the delay again. A replacement
+  refused is not sent again once a child pays for the version Bitcoin holds.
+- **By hand,** sooner: `chainv4 bridge btc bump <release> [--rate N] [--child]`. The others check it as
+  any bump.
+
+**One at a time.** A bump is of what holds all its signatures, and while any bump of a release waits for
+its signatures, another is refused: two signers proposing at once could only compete. One the signers
+refuse is voted down by its own number, as below, and the next may go.
+
+**Exactly one of them can be mined.** Every version of a release spends the same inputs, and a child
+spends a version's change, so Bitcoin mines one version at most, and a child only with its own. `released`
+takes whichever was mined: its inputs are spent, its withdrawals paid at its shares, its change held, and
+every other version and every child of those closed as `replaced`, freeing what a child spent besides.
+A child shown releases its own output and charges its fee. No output is held twice: another version's
+change has another outpoint and can never be shown, as its inputs are spent, and a child's change is its
+own output, held once. `proposal(id)` says each one's kind, `release`, `replacement` or `child`, what it
+replaced or pays for, its fee and what its withdrawals lose by it; `tree(id)` the release and every
+bump of it.
+
+**Cancelling with bumps open.** A bump short of its signatures is cancelled alone by its own number:
+the release, its other versions and what they hold stand, and a child's own inputs are freed once
+none of its versions is open. The release's number cancels its whole tree, and only while no version of
+it holds every signature, or Bitcoin can never mine it as an input was shown spent: then every version
+and child goes with it, its inputs unspent, its withdrawals queued with their anchors. A bump needs no
+anchor of its own: every version spends the same inputs, and a child pays no withdrawal, so neither can
+pay anyone twice. As before, what is cancelled may still be shown if it was mined anyway.
+
+**The threat model.** The federation's threshold could spend what the gateway holds anywhere, as ever;
+what bumps add is what one signer, or one Esplora, can do.
+- **Who proposes a bump:** any signer of the federation in force, as for a release; no one else's
+  signature passes, nor one over a release's, a vote's or the other kind of bump's digest.
+- **What each signer checks before it signs one** (`check_btc_replacement`, `check_btc_child`), from the
+  gateway's state, not from who proposed it:
+  - *the same outputs:* a replacement spends just what it replaces, in the same order, pays the same
+    scripts and withdrawals, and keeps the change; a child spends that version's change first, other
+    held outputs only when needed, and pays the federation in force alone;
+  - *the cap and each limit:* the fee under the cap, a child's with its release's; each withdrawal's
+    share within what it agreed to lose, a child's with the release's, and what it repays with it;
+  - *what it repays:* within each withdrawal's even share of the budget and `repay_most`, the budget within
+    `repay_pct` of the fee, the whole no more than `shortfall()` owes now, and all of it in the change;
+    a replacement repaying just what it replaces. A wrong one gets no signature and a vote, as any
+    release that is wrong. The signers bound it rather than work it out again, as what was owed past
+    other open releases when it was proposed is the gateway's to say;
+  - *the rate:* at the floor, past every open version by the increment, and no more a virtual byte than
+    the signer signs for, a child's with what it pays for (`--max-fee-rate`, or 3 times Esplora's fastest);
+  - *that it is stuck:* no version of the release is mined, and what it bumps pays under what its Esplora
+    says the network asks now. A bump it finds needless gets no signature, and a vote only past the age
+    limit, as another signer's Esplora may say otherwise.
+- **A lone signer** can propose a bump the rest refuse; it holds up the next bump until it is voted down,
+  and costs nothing, as only the threshold's signatures make anything mineable. Its share of the fee
+  is bounded by the cap and each limit, whoever proposes.
+- **An Esplora that lies** can get a needless bump signed, which costs the withdrawals up to their limits
+  and the cap, or refuse a good one, which costs a delay; run your own for a check that does not rest on
+  someone else's.
+- **A recipient** can pin a release with a child of their own; the federation's child, spending its own
+  change, pays for both.
+
+**The signers take turns.** On the devnet, on 2026-11-03, all three signers sent `released` for release 1
+in one block; two failed, each paying a fee. Now what any one signer's call does for all, `released`, a
+vote to cancel, a proposal or a bump, waits for the signer's turn: its place among the federation's
+signers times one block of the chain's, measured from its newest blocks, and at least a second
+(`btc_turn_delay`). Each then checks again, by what the gateway says and what waits in the node's
+mempool, and sends only what is still undone, so the first usually alone pays, and the others step in
+only if it is down. A pass with no signer's key goes after them all. Signing takes no turn, as every
+signer signs.
+
+### Repaying what a child cost
+
+Later releases repay what children cost the backing, a little each, until it is back to one for one,
+with no one stepping in. `shortfall()` says what is left to repay, and how much of that open releases
+repay once shown; the explorer shows the first as what is left to repay.
+- **How much:** a release's budget is the least of what is owed past what open releases repay and
+  `repay_pct` percent of its own fee, a fifth unless the federation says. Each withdrawal repays an even
+  share of it, at most `repay_most`, 500 satoshis unless it says, and only what its most fee leaves past
+  its share of the fee (`btc_repays`): one at its limit repays nothing, and is not held up for it. So it
+  is never more than is owed, and falls on the next withdrawers thinly. A sweep repays nothing.
+- **Where it goes:** to the federation's change, with the rest of what backs wBTC. The gateway works it
+  out from its state when the release is proposed, and refuses one whose change and outputs do not carry
+  just that; `proposal(id)` gives what each withdrawal repays and the budget, and `withdrawal(id)` counts
+  it in what it lost.
+- **Counted once:** a release proposed is counted as repaying, so another proposed meanwhile repays only
+  what is left past it. Shown, the shortfall falls by what it repaid; cancelled, it is no longer counted,
+  so the next release repays it instead. Every version of a release repays what the release does, from
+  the same change, the bump coming off the withdrawals alone, so it is counted once whichever is mined.
+  One cancelled and mined anyway is counted as it is shown, and nothing falls below zero.
+- **Why the defaults:** a child's fee is about what pulls one release up to the network's rate, so at a
+  fifth of each later release's fee, some five releases repay it; 500 satoshis is half of what the least
+  withdrawal agrees to lose by default, so no one gives up most of their limit to it.
 
 ### The commands
 
@@ -434,6 +580,7 @@ chainv4 bridge btc withdraw bc1q… 20000 --btc-gateway 0x…
 chainv4 bridge btc watch --esplora URL --evm-key signer.key --key payer.key  # each signer, left running
 chainv4 bridge btc pass --esplora URL --evm-key signer.key --key payer.key   # one pass, as from cron
 chainv4 bridge btc cancel 1 --btc-gateway 0x… --evm-key signer.key  # each signer's vote
+chainv4 bridge btc bump 1 --rate 40 --evm-key signer.key --esplora URL  # sooner than a pass would
 chainv4 bridge btc sweep --fee 1000 --evm-key signer.key --btc-gateway 0x… --esplora URL
 ```
 
@@ -464,11 +611,15 @@ is said, and the next goes on.
    With Esplora out of reach, nothing is proposed, rather than guess a fee a release cannot then change.
 2. **Signs** every open release that stands, as **sign** below, and [votes](#the-gateway) to cancel what
    it refuses for good or what is short of its signatures past `--cancel-after`.
-3. **Broadcasts** any with all its signatures that Esplora has not heard of, **shows** any
-   `bitcoin_depth` deep, a cancelled one that was mined anyway among them, and warns of any with all its
-   signatures that Bitcoin has not mined past `--cancel-after`. This takes no signer's key: anyone may run
-   a pass with no `--evm-key` to do just this, and `relay-sync` is still what keeps the relay able to prove
-   it.
+3. **Broadcasts** the newest version of each release with all its signatures that Esplora has not heard
+   of, and the newest of a child paying for the version it holds; **shows** any `bitcoin_depth` deep, a
+   cancelled one that was mined anyway among them; and warns of any with all its signatures that Bitcoin
+   has not mined past `--cancel-after`. This takes no signer's key: anyone may run a pass with no
+   `--evm-key` to do just this, and `relay-sync` is still what keeps the relay able to prove it.
+4. **Bumps,** with a signer's key, what is stuck, as [above](#bumping-a-stuck-release): what was broadcast
+   this pass waits for the next.
+
+Proposing, voting, showing and bumping each wait the signer's [turn](#bumping-a-stuck-release).
 
 How long a withdrawal takes is then one pass of the federation, its threshold's signatures, and
 Bitcoin's own time: usually under an hour to be mined, and a little more to show as `paid`. It waits
@@ -524,6 +675,12 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
 - **`--cancel-after`** takes a time, `6h`, `90m` or `30s`, 6 hours unless told: see
   [the gateway](#the-gateway). A pass reading a release's age needs a node with `--index-events`.
 - **cancel** is a signer's vote, signed with `--evm-key`.
+- **bump** proposes a bump of a release, by any proposal of it, with a signer's `--evm-key`: a
+  replacement of its newest version, or with `--child` a child paying for the version Bitcoin holds,
+  or, should a child pay for it already, a replacement of that; at `--rate`, else what Esplora says the
+  network asks within 3 blocks, and never past what this signer signs for. It is refused while any of
+  the release waits for signatures. The others sign it only while their Esplora says it is stuck.
+- **`--bump-after`** takes a time, 1 hour unless told, which `btc.bump_after_ms` overrides.
 
 ## Caveats
 
@@ -538,8 +695,12 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   that never was: keep it synced, and keep `bitcoin_depth` above what an attacker could mine.
 - **A release that never confirms holds its inputs:** once proposed, they are pending until it is
   shown released or cancelled. One stuck with every signature, as fees rose past what it pays, can
-  no longer be cancelled: it is bumped by a child that pays for it, spending one of its outputs. A pass
-  warns of it, and does not do this for you.
+  no longer be cancelled: the signers' passes bump it, by a replacement or a child. One its
+  withdrawals' limits hold back waits for them to be raised, or for fees to fall.
+- **A child's fee comes from the federation's change:** the withdrawals it is charged to were paid
+  already, so the gateway then holds that much less than the wBTC it backs, `shortfall()`, until later
+  releases repay it, a little from each withdrawal. Each child is bounded by the cap and its
+  withdrawals' limits, and replace-by-fee, which costs the backing nothing, goes first.
 - **What was in flight at a reset stays there.** Whatever left Gateway.sol for a gateway before it
   was set up anew is signed by no one and arrives nowhere, and whatever left before `chainv4 bridge
   peer` named the new one the same, and no refund takes it back, as no gateway it was for can void it:

@@ -2007,12 +2007,14 @@ mod send {
     }
 
 /// An Esplora API in miniature, for the Bitcoin bridge's commands: what a test puts in it,
-    /// served at its paths, and what is posted to /tx, kept.
+    /// served at its paths, and what is posted to /tx, kept and known from then on as in its mempool,
+    /// unless it is refusing, as Bitcoin's nodes refuse a replacement they will not take.
     #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
     struct FakeEsplora {
         url: String,
         routes: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
         posted: Arc<std::sync::Mutex<Vec<String>>>,
+        refusing: Arc<AtomicBool>,
     }
 
     #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
@@ -2024,7 +2026,8 @@ mod send {
             let url = format!("http://{}", listener.local_addr().unwrap());
             let routes: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> = Arc::default();
             let posted: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
-            let (served, kept) = (routes.clone(), posted.clone());
+            let refusing: Arc<AtomicBool> = Arc::default();
+            let (served, kept, refuses) = (routes.clone(), posted.clone(), refusing.clone());
 
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
@@ -2052,21 +2055,29 @@ mod send {
                     let mut parts = first.split_whitespace();
                     let (method, path) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default().to_string());
                     let answer = match method {
+                        "POST" if refuses.load(Ordering::Relaxed) => Err("insufficient fee, rejecting replacement".to_string()),
                         "POST" => {
-                            kept.lock().unwrap().push(String::from_utf8(body).unwrap());
-                            Some("posted".to_string())
+                            let hex = String::from_utf8(body).unwrap();
+                            let (tx, _) = crate::crypto::bitcoin::tx::Transaction::read(&crate::structs::hex::from_hex(&format!("0x{hex}")).unwrap()).unwrap();
+                            let txid = FakeBitcoin::display(&crate::crypto::bitcoin::sha256d(&tx.base()));
+                            let mut routes = served.lock().unwrap();
+                            routes.insert(format!("/tx/{txid}/hex"), hex.clone());
+                            routes.entry(format!("/tx/{txid}/status")).or_insert_with(|| serde_json::json!({ "confirmed": false }).to_string());
+                            kept.lock().unwrap().push(hex);
+                            Ok(Some(txid))
                         }
-                        _ => served.lock().unwrap().get(&path).cloned(),
+                        _ => Ok(served.lock().unwrap().get(&path).cloned()),
                     };
                     let (status, body) = match answer {
-                        Some(body) => ("200 OK", body),
-                        None => ("404 Not Found", "not found".to_string()),
+                        Ok(Some(body)) => ("200 OK", body),
+                        Ok(None) => ("404 Not Found", "not found".to_string()),
+                        Err(why) => ("400 Bad Request", why),
                     };
                     let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 }
             });
 
-            FakeEsplora { url, routes, posted }
+            FakeEsplora { url, routes, posted, refusing }
         }
 
         fn serve(&self, path: &str, body: String) {
@@ -2169,6 +2180,7 @@ mod send {
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+                bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS,
             })
         };
         let tip = || -> (String, u64) {
@@ -2259,6 +2271,7 @@ mod send {
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+                bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS,
             })
         };
         run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }, None, None).unwrap();
@@ -2288,6 +2301,7 @@ mod send {
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+                bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS,
             })
             .unwrap()
             .deposit_address(&me, network)
@@ -2415,6 +2429,7 @@ mod send {
         node: String,
         bitcoin: FakeBitcoin,
         esplora: String,
+        relay: Address,
         gateway: Address,
         dir: TempDir,
     }
@@ -2444,7 +2459,7 @@ mod send {
             let dir = TempDir::new(name);
             let esplora = bitcoin.esplora.url.clone();
             let (relay, gateway) = (deployed_at(&me, 3, hash), deployed_at(&me, 6, hash));
-            let mut fixture = StuckReleases { running, node, bitcoin, esplora, gateway, dir };
+            let mut fixture = StuckReleases { running, node, bitcoin, esplora, relay, gateway, dir };
 
             for secret in [21u8, 22, 23] {
                 let payer = Keypair::from_private(PrivateKey::Secp256k1([secret; 32])).public().address();
@@ -2499,6 +2514,7 @@ mod send {
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+                bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS,
             }
         }
 
@@ -2582,6 +2598,199 @@ mod send {
 
             serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{}/accounts/{of}", self.node)).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap()
         }
+
+        /// One signer's pass, bumping what is stuck after this many milliseconds of block time.
+        fn pass_bumping(&self, secret: u8, bump_after: u64) {
+            crate::cli::bridge::bridge(crate::cli::bridge::BridgeArgs { bump_after, ..self.args(crate::cli::bridge::btc::BtcAction::Pass, Some(secret)) }).unwrap();
+        }
+
+        fn bump_by_hand(&self, secret: u8, release: u64, rate: Option<u64>, child: bool) -> crate::cli::CliResult<()> {
+            crate::cli::bridge::bridge(self.args(crate::cli::bridge::btc::BtcAction::Bump { release, rate, child }, Some(secret)))
+        }
+
+        fn kind(&self, id: &str) -> String {
+            self.proposal(id)[5]["value"].as_str().unwrap().to_string()
+        }
+
+        /// Bitcoin mines these proposals, a block each, and buries the last; the relay follows.
+        fn mine(&mut self, ids: &[&str]) {
+            for id in ids {
+                let raw = crate::structs::hex::from_hex(self.proposal(id)[0]["value"].as_str().unwrap()).unwrap();
+                self.bitcoin.block(&[raw], false);
+            }
+
+            self.bitcoin.block(&[], false);
+            self.run(crate::cli::bridge::btc::BtcAction::RelaySync { relay: self.relay, batch: 10 }).unwrap();
+        }
+
+        /// Whether Bitcoin's nodes refuse what is sent them, as a replacement they will not take.
+        fn refusing(&self, refusing: bool) {
+            self.bitcoin.esplora.refusing.store(refusing, Ordering::Relaxed);
+        }
+    }
+
+    /// Three signers' passes at once against one release Bitcoin mined: each would show it, as on the
+    /// devnet, where all three did in one block and two paid for nothing. Now each waits its turn, a
+    /// block after the one before, and finds it shown or on its way, so the first alone pays.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn three_signers_passes_against_one_mined_release_send_released_once() {
+        let mut fixture = StuckReleases::start("btc-race");
+        let id = fixture.withdraw();
+        fixture.pass(21);
+        fixture.pass(22);
+        assert_eq!(fixture.signed("1"), 2);
+        fixture.mine(&["1"]);
+        let before = [21, 22, 23].map(|secret| fixture.nonce(secret));
+
+        std::thread::scope(|scope| {
+            for secret in [23u8, 22, 21] {
+                let fixture = &fixture;
+                scope.spawn(move || fixture.pass(secret));
+            }
+        });
+
+        assert_eq!((fixture.state("1").as_str(), fixture.withdrawal_state(&id).as_str()), ("released", "paid"));
+        let after = [21, 22, 23].map(|secret| fixture.nonce(secret));
+        assert_eq!(after, [before[0] + 1, before[1], before[2]], "the first in turn alone sent it");
+        fixture.running.stop();
+    }
+
+    /// A release with all its signatures that Bitcoin leaves unmined while the network asks far more:
+    /// past the delay the first signer in turn replaces it, the others sign the replacement as stuck,
+    /// and it is broadcast; still unmined past the delay again, a child pays for it; and what Bitcoin
+    /// mines is shown, the rest closed, the child's fee charged to the withdrawal.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_stuck_release_is_replaced_by_fee_then_paid_for_by_a_child_and_what_is_mined_is_shown() {
+        let mut fixture = StuckReleases::start("btc-bump");
+        let id = fixture.withdraw();
+        fixture.pass(21);
+        fixture.pass(22);
+        let first_fee = fixture.read("withdrawal", serde_json::json!([{ "type": "u64", "value": id }]))[5]["value"].as_str().unwrap().parse::<u64>().unwrap();
+
+        // Within the delay nothing is bumped, however far under it pays.
+        fixture.asks(50);
+        fixture.pass(21);
+        assert_eq!(fixture.count("proposal_count"), "1");
+
+        // Past it, the first in turn replaces it; the others sign it, as their Esplora says it is stuck.
+        fixture.pass_bumping(21, 0);
+        assert_eq!((fixture.count("proposal_count").as_str(), fixture.kind("2").as_str()), ("2", "replacement"));
+        fixture.pass_bumping(22, 0);
+        fixture.pass_bumping(23, 0);
+        assert_eq!(fixture.signed("2"), 2);
+        fixture.pass_bumping(21, 0);
+        let posted = fixture.bitcoin.esplora.posted.lock().unwrap().len();
+        assert!(posted >= 2, "the release and its replacement");
+
+        // The replacement goes unmined past the delay again, with the network asking more: a child.
+        fixture.asks(100);
+        fixture.pass_bumping(21, 0);
+        assert_eq!((fixture.count("proposal_count").as_str(), fixture.kind("3").as_str()), ("3", "child"));
+        assert_eq!(fixture.proposal("3")[6]["value"], "2", "paying for the version Bitcoin holds");
+        fixture.pass_bumping(22, 0);
+        fixture.pass_bumping(23, 0);
+        assert_eq!(fixture.signed("3"), 2);
+        fixture.pass_bumping(21, 0);
+        assert!(fixture.bitcoin.esplora.posted.lock().unwrap().len() > posted, "the child broadcast");
+
+        // Mined, the replacement and its child: both shown, the release closed, what each cost charged.
+        fixture.mine(&["2", "3"]);
+        fixture.pass(22);
+        assert_eq!([fixture.state("1"), fixture.state("2"), fixture.state("3")], ["replaced", "released", "released"]);
+        assert_eq!(fixture.withdrawal_state(&id), "paid");
+        let fee_of = |id: &str| fixture.proposal(id)[7]["value"].as_str().unwrap().parse::<u64>().unwrap();
+        let charged = fixture.read("withdrawal", serde_json::json!([{ "type": "u64", "value": id }]))[5]["value"].as_str().unwrap().parse::<u64>().unwrap();
+        assert!(fee_of("2") > first_fee);
+        assert_eq!(charged, fee_of("2") + fee_of("3"));
+        assert_eq!(fixture.count("shortfall"), fee_of("3").to_string());
+
+        // The next release a pass proposes repays some of it, as the gateway works it out, and the
+        // others sign it; shown, the shortfall falls by just that.
+        fixture.asks(5);
+        fixture.withdraw();
+        fixture.pass(21);
+        fixture.pass(22);
+        assert_eq!((fixture.count("proposal_count").as_str(), fixture.signed("4")), ("4", 2));
+        let repaid: u64 = fixture.proposal("4")[9]["value"].as_str().unwrap().split(',').filter_map(|share| share.parse::<u64>().ok()).sum();
+        assert!(repaid > 0 && repaid <= fee_of("4") / 5, "{repaid}");
+        assert_eq!(fixture.read("shortfall", serde_json::json!([]))[1]["value"], repaid.to_string());
+        let child_fee = fee_of("3");
+        fixture.mine(&["4"]);
+        fixture.pass(21);
+        assert_eq!(fixture.state("4"), "released");
+        assert_eq!(fixture.count("shortfall"), (child_fee - repaid).to_string());
+        fixture.running.stop();
+    }
+
+    /// A replacement Bitcoin's nodes refuse, as when a recipient pinned the release with a large child
+    /// of their own: a child pays for the version they hold at once, and the replacement is not sent
+    /// again while it does.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_replacement_bitcoin_refuses_falls_back_to_a_child_at_once() {
+        let mut fixture = StuckReleases::start("btc-pinned");
+        fixture.withdraw();
+        fixture.pass(21);
+        fixture.pass(22);
+        fixture.asks(50);
+        fixture.pass_bumping(21, 0);
+        assert_eq!(fixture.kind("2"), "replacement");
+
+        fixture.refusing(true);
+        fixture.pass_bumping(22, 0);
+        fixture.pass_bumping(21, 0);
+        assert_eq!(fixture.signed("2"), 2);
+        assert_eq!((fixture.count("proposal_count").as_str(), fixture.kind("3").as_str()), ("3", "child"));
+        assert_eq!(fixture.proposal("3")[6]["value"], "1", "paying for the release Bitcoin holds");
+
+        fixture.refusing(false);
+        let posted = fixture.bitcoin.esplora.posted.lock().unwrap().clone();
+        fixture.pass_bumping(22, 0);
+        fixture.pass_bumping(23, 0);
+        fixture.pass_bumping(21, 0);
+        let sent: Vec<String> = fixture.bitcoin.esplora.posted.lock().unwrap()[posted.len()..].to_vec();
+        let txid = |hex: &str| FakeBitcoin::display(&crate::crypto::bitcoin::sha256d(&crate::crypto::bitcoin::tx::Transaction::read(&crate::structs::hex::from_hex(&format!("0x{hex}")).unwrap()).unwrap().0.base()));
+        let of = |id: &str| FakeBitcoin::display(&crate::structs::hex::from_hex(fixture.proposal(id)[1]["value"].as_str().unwrap()).unwrap());
+        assert_eq!(sent.iter().map(|hex| txid(hex)).collect::<Vec<_>>(), [of("3")], "the child alone");
+
+        fixture.mine(&["1", "3"]);
+        fixture.pass(21);
+        assert_eq!([fixture.state("1"), fixture.state("2"), fixture.state("3")], ["released", "replaced", "released"]);
+        fixture.running.stop();
+    }
+
+    /// An operator bumps by hand, sooner than the policy would; the others sign only while their
+    /// Esplora says it is stuck, and leave one that is not unsigned, with no vote until the age limit.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "lvm", feature = "wasm"))]
+    #[test]
+    fn a_bump_by_hand_is_signed_by_the_others_only_while_the_release_is_stuck() {
+        let fixture = StuckReleases::start("btc-bump-by-hand");
+        fixture.withdraw();
+        fixture.pass(21);
+        fixture.pass(22);
+
+        // The network asks what it pays: needless, so no one signs it, and no one votes yet.
+        fixture.bump_by_hand(23, 1, Some(20), false).unwrap();
+        assert_eq!(fixture.kind("2"), "replacement");
+        assert!(fixture.bump_by_hand(23, 1, Some(21), false).unwrap_err().to_string().contains("waits for its signatures"), "one at a time");
+        fixture.pass(21);
+        fixture.pass(22);
+        assert_eq!((fixture.signed("2"), fixture.voted("2", 21)), (0, false));
+
+        // Past the age limit it is voted down alone, and the release stands.
+        fixture.pass_past(21, 0);
+        fixture.pass_past(22, 0);
+        assert_eq!((fixture.state("1").as_str(), fixture.state("2").as_str()), ("open", "cancelled"));
+
+        // The network asks more: by hand, within the hour, it is signed.
+        fixture.asks(40);
+        fixture.bump_by_hand(23, 1, None, false).unwrap();
+        fixture.pass(21);
+        fixture.pass(22);
+        assert_eq!((fixture.kind("3").as_str(), fixture.signed("3")), ("replacement", 2));
+        fixture.running.stop();
     }
 
     /// A release one signer proposed at a fee the others refuse: each votes it down at once, it is
@@ -2878,7 +3087,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
-        let args = |action: BridgeAction, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS };
+        let args = |action: BridgeAction, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| bridge(args(action, evm_key));
         bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, None) }).unwrap();
         run(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
@@ -3097,6 +3306,7 @@ mod send {
             evm_gateways: Vec::new(),
             max_fee_rate,
             cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
+            bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS,
         };
         let run = |action: BtcAction, gateway: Option<Address>| bridge(args(action, None, None, &esplora, gateway, None));
         run(BtcAction::RelayStart { relay, height: 0, network: Some("regtest".into()) }, None).unwrap();
@@ -3261,7 +3471,7 @@ mod send {
         let relayer_address = from_key(&[0x42; 32]).unwrap();
         send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS })
         };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -3278,7 +3488,7 @@ mod send {
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
         assert!(run(BridgeAction::Deploy, None).is_ok());
         let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS })
         };
         with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
@@ -3362,7 +3572,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
-        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways, max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS };
+        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways, max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
         bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, Vec::new()) }).unwrap();
 
         // Its owner's own peer, and a coin sent to it.
@@ -3459,7 +3669,7 @@ mod send {
         // This chain has no directory, so each signer vouches for Gateway.sol itself.
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
         let vouched = vec![(rpc.chain_id().unwrap(), evm_gateway)];
-        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS };
+        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
         let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
             let started = std::time::Instant::now();
 

@@ -20,11 +20,15 @@
 -- witnesses and broadcasts it; and once it is deep enough, anyone shows it, and its inputs are
 -- spent and its change held. A sweep is a release that pays everything an old federation holds
 -- to the one in force. A release that cannot be finished is cancelled by the federation in force:
--- see M.cancel for why that cannot pay anyone twice.
+-- see M.cancel for why that cannot pay anyone twice. One with all its signatures that Bitcoin
+-- leaves unmined is bumped: replaced by one paying more (M.replace), or paid for by a child
+-- spending its change (M.child); each is a proposal of its own, signed as a release is, and
+-- whichever Bitcoin mines is what is shown.
 --
 -- Events: DepositedBtc(txid, vout, sats, recipient), WithdrawRequested(id, script, sats, sender),
--- Proposed(proposal, txid), SignedBtc(proposal, input, signer), Released(proposal, txid),
--- CancelVoted(proposal, signer), Cancelled(proposal, txid).
+-- Proposed(proposal, txid), Replaced(proposal, replaced), Child(proposal, parent),
+-- SignedBtc(proposal, input, signer), Released(proposal, txid), CancelVoted(proposal, signer),
+-- Cancelled(proposal, txid).
 
 local M = {}
 
@@ -36,15 +40,26 @@ local LEAST = 10000
 local LEAST_PAYOUT = 1000
 -- The most a withdrawal may lose to its share of a fee unless it says, as a part of it.
 local DEFAULT_FEE_PART = 10
+-- What a release repays of what children cost the backing unless the policy says: a fifth of its own
+-- fee at most, and at most 500 satoshis from any one withdrawal, so the next withdrawers bear it
+-- thinly, about five releases repaying a child's fee.
+local DEFAULT_REPAY_PCT = 20
+local DEFAULT_REPAY_MOST = 500
 -- What Bitcoin's nodes relay at the least, without witnesses; an inner node of a Merkle tree is
 -- 64 bytes, and a transaction of that size could be taken for one (CVE-2017-12842).
 local LEAST_TX = 65
--- What change is at least: Bitcoin's nodes relay nothing with an output under its dust.
-local LEAST_CHANGE = 546
--- What a release's transaction is, and each of its inputs' sequence: fixed, so none of them can
--- carry a BIP68 delay that keeps it out of a block while it holds what it spends.
+-- What change is at least: Bitcoin's dust for a P2WSH output, under which its nodes relay nothing.
+-- Every release keeps one, which the withdrawals top up to this where it would be less, so a child
+-- can always spend it to pay for the release.
+local LEAST_CHANGE = 330
+-- What a release's transaction is, and each of its inputs' sequence: fixed. 0xfffffffd signals
+-- BIP125, so a replacement paying more takes its place in Bitcoin's mempools, and with its top bit
+-- set it carries no BIP68 delay that keeps it out of a block while it holds what it spends.
 local VERSION = "\2\0\0\0"
-local SEQUENCE = "\255\255\255\255"
+local SEQUENCE = "\253\255\255\255"
+-- What a replacement pays past every version it replaces, a virtual byte: Bitcoin's incremental
+-- relay fee, which its nodes ask of a replacement before they take it.
+local LEAST_BUMP = 1
 -- The most virtual bytes a release may be: past 100,000 Bitcoin's nodes do not relay it.
 local MOST_VBYTES = 100000
 -- The most a release spending one input can be, under the largest federation there is, 20 of 20,
@@ -278,6 +293,14 @@ local function fee_part()
     return policy("fee_part", nil) or DEFAULT_FEE_PART
 end
 
+local function repay_pct()
+    return policy("repay_pct", nil) or DEFAULT_REPAY_PCT
+end
+
+local function repay_most()
+    return policy("repay_most", nil) or DEFAULT_REPAY_MOST
+end
+
 -- The federations this gateway has seen, by version: their threshold and keys, and when the next
 -- took over, after which their deposit addresses stay open for the grace period.
 local function remember()
@@ -377,15 +400,40 @@ local function witness_weight(threshold, script)
     return 2 + threshold * 74 + #compact(#script) + #script
 end
 
+-- Lists an output this gateway holds, by its place.
+local function list(key)
+    local n = count("utxo_count")
+    utxos:set("at:" .. n, key)
+    storage.set("utxo_count", tostring(n + 1))
+end
+
 -- Keeps an output this gateway holds, and lists it.
 local function hold(key, sats, version, recipient)
     utxos:set(key .. ":sats", tostring(sats))
     utxos:set(key .. ":version", tostring(version))
     utxos:set(key .. ":recipient", recipient)
     utxos:set(key .. ":state", "unspent")
-    local n = count("utxo_count")
-    utxos:set("at:" .. n, key)
-    storage.set("utxo_count", tostring(n + 1))
+    list(key)
+end
+
+-- Keeps a release's change, shown mined. A child paying for it already knows it, unlisted, as
+-- what it spends: it is listed now, still pending under that child, or spent if the child was
+-- shown first, and only otherwise unspent. Each output is held once, whoever showed it first.
+local function show_change(key, sats, version)
+    local state = utxos:get(key .. ":state")
+
+    if state == nil then
+        return hold(key, sats, version, "")
+    end
+
+    if utxos:get(key .. ":unlisted") then
+        utxos:set(key .. ":unlisted", nil)
+        list(key)
+    end
+
+    if state == "unshown" then
+        utxos:set(key .. ":state", "unspent")
+    end
 end
 
 -- Run once by the chain: whoever deploys owns the gateway.
@@ -530,8 +578,9 @@ function M.withdraw(script, sats, most_fee)
     return id
 end
 
--- Who asked for a withdrawal changes the most it may lose to fees, while it waits: as fees rise
--- past it, or to a lower limit before a release takes it.
+-- Who asked for a withdrawal changes the most it may lose to fees: while it waits, as fees rise past
+-- it, or to a lower limit before a release takes it; and in a release Bitcoin has not mined, only
+-- higher, so a bump its limit held back can go, as what that release took stays within it.
 function M.set_most_fee(id, most_fee)
     id = whole(id, "the withdrawal")
 
@@ -539,11 +588,18 @@ function M.set_most_fee(id, most_fee)
         error("only who asked for a withdrawal may")
     end
 
-    if withdrawals:get(id .. ":state") ~= "queued" then
-        error("a withdrawal that is not queued")
+    local state = withdrawals:get(id .. ":state")
+    local most = fee_limit(most_fee, tonumber(withdrawals:get(id .. ":sats")))
+
+    if state ~= "queued" and state ~= "proposed" then
+        error("a withdrawal that is not queued or in a release")
     end
 
-    withdrawals:set(id .. ":most_fee", tostring(fee_limit(most_fee, tonumber(withdrawals:get(id .. ":sats")))))
+    if state == "proposed" and most < tonumber(withdrawals:get(id .. ":most_fee")) then
+        error("a withdrawal in a release only raises the most it may lose, for a bump")
+    end
+
+    withdrawals:set(id .. ":most_fee", tostring(most))
     return true
 end
 
@@ -567,16 +623,299 @@ local function propose_digest(id, raw, ids)
     return crypto.sha256d("chainv4-btc-propose" .. le(chain.id(), 8) .. ctx.contract:encode() .. le(id, 8) .. crypto.sha256d(raw) .. le(#ids, 8) .. table.concat(named))
 end
 
+-- What a signer signs to propose a bump: a replacement of a proposal, or a child paying for one, each
+-- under its own domain, so neither passes for the other or for a release.
+local function bump_digest(domain, id, of, raw)
+    return crypto.sha256d(domain .. le(chain.id(), 8) .. ctx.contract:encode() .. le(id, 8) .. le(of, 8) .. crypto.sha256d(raw))
+end
+
+-- Whether a key is a signer of the federation in force.
+local function signer_of(fed, key)
+    for _, signer in ipairs(fed.signers) do
+        if signer == key then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- A release, its replacements and the children paying for them make one tree: the release is its
+-- root, each version of the release or of a child is in a group headed by the first of them, and
+-- each bump says what it replaced, or for a child what it pays for.
+local function root_of(id)
+    return tonumber(proposals:get(id .. ":root") or id)
+end
+
+local function group_of(id)
+    return tonumber(proposals:get(id .. ":group") or id)
+end
+
+local function kind_of(id)
+    if id ~= group_of(id) then
+        return "replacement"
+    elseif id ~= root_of(id) then
+        return "child"
+    end
+
+    return "release"
+end
+
+-- Every proposal of a release's tree, the release first.
+local function tree(root)
+    local found = { root }
+
+    for member in (proposals:get(root .. ":members") or ""):gmatch("%d+") do
+        table.insert(found, tonumber(member))
+    end
+
+    return found
+end
+
+local function state_of(id)
+    return proposals:get(id .. ":state")
+end
+
+local function number_of(id, field)
+    return tonumber(proposals:get(id .. ":" .. field) or "0")
+end
+
+-- The withdrawals a proposal pays, in order.
+local function ids_of(id)
+    local ids = {}
+
+    for withdrawal in (proposals:get(id .. ":ids") or ""):gmatch("%d+") do
+        table.insert(ids, withdrawal)
+    end
+
+    return ids
+end
+
+-- A transaction as every release is: version 2, no lock time, at least what Bitcoin's nodes relay,
+-- each input without a script and with a release's sequence.
+local function shaped(raw)
+    local tx = parse(raw)
+
+    if tx.version ~= VERSION then
+        error("a release is a version 2 transaction")
+    end
+
+    if #raw < LEAST_TX then
+        error("a release under " .. LEAST_TX .. " bytes, which Bitcoin's nodes do not relay")
+    end
+
+    if tx.locktime ~= "\0\0\0\0" then
+        error("a release has no lock time")
+    end
+
+    for _, input in ipairs(tx.inputs) do
+        if #input.script ~= 0 then
+            error("an input with a script: a release spends witness outputs alone")
+        end
+
+        if input.sequence ~= SEQUENCE then
+            error("an input with another sequence than a release's")
+        end
+    end
+
+    return tx
+end
+
+-- What a transaction spending outputs this gateway knows weighs at most once signed, in virtual
+-- bytes, and what it spends.
+local function sized(raw, tx)
+    local weight, spent = 4 * #raw + 2, 0
+
+    for _, input in ipairs(tx.inputs) do
+        local key = outpoint(input)
+        local version = utxos:get(key .. ":version") or error("an input that is not an output the gateway holds unspent")
+        spent = spent + tonumber(utxos:get(key .. ":sats"))
+        weight = weight + witness_weight(fed_at(version), witness_script(version, utxos:get(key .. ":recipient")))
+    end
+
+    local vbytes = math.ceil(weight / 4)
+
+    if vbytes > MOST_VBYTES then
+        error("a release larger than Bitcoin's nodes relay: pay fewer, from fewer")
+    end
+
+    return vbytes, spent
+end
+
+local function paid_out(tx)
+    local paid = 0
+
+    for _, output in ipairs(tx.outputs) do
+        paid = paid + output.sats
+    end
+
+    return paid
+end
+
+-- Checks a proposal's withdrawals are paid as asked: what each burned, less its share of what they
+-- lose between them and what it repays, within what it agreed to lose, and in the state it must be.
+local function pays_as_asked(tx, ids, cost, state, repays)
+    for at, id in ipairs(ids) do
+        local output = tx.outputs[at] or error("a withdrawal the transaction does not pay")
+
+        if withdrawals:get(id .. ":state") ~= state then
+            error("a withdrawal that is not " .. state)
+        end
+
+        local share = fee_share(cost, #ids, at) + repays[at]
+
+        if share > tonumber(withdrawals:get(id .. ":most_fee")) then
+            error("a share of the fee past what withdrawal " .. id .. " agreed to lose")
+        end
+
+        if output.script ~= withdrawals:get(id .. ":script") or output.sats ~= tonumber(withdrawals:get(id .. ":sats")) - share then
+            error("an output that does not pay its withdrawal as asked: what it burned, less its share of the fee and what it repays")
+        end
+    end
+end
+
+-- What children cost the backing that no open release repays yet.
+local function owed()
+    return math.max(0, count("shortfall") - count("repaying"))
+end
+
+-- What each withdrawal of a release repays of that: of a budget, the least of what is owed and
+-- repay_pct of the release's fee, an even share, at most repay_most, and only what its limit leaves
+-- past its share of the fee, so one at its limit repays nothing and waits for nothing. Worked out
+-- from the gateway's state alone, as the planner and the gateway must agree on it.
+local function repays_for(ids, cost, fee)
+    local budget = math.min(owed(), math.floor(fee * repay_pct() / 100))
+    local repays, total = {}, 0
+
+    for at, id in ipairs(ids) do
+        local room = tonumber(withdrawals:get(id .. ":most_fee")) - fee_share(cost, #ids, at)
+        repays[at] = math.max(0, math.min(fee_share(budget, #ids, at), repay_most(), room))
+        total = total + repays[at]
+    end
+
+    return repays, total, budget
+end
+
+-- What each withdrawal of a proposal repays, as it was worked out when it was proposed; nothing for
+-- one that pays none, as a child or a sweep.
+local function repays_of(id, count)
+    local repays = {}
+
+    for repay in (proposals:get(id .. ":repays") or ""):gmatch("%d+") do
+        table.insert(repays, tonumber(repay))
+    end
+
+    for at = 1, count do
+        repays[at] = repays[at] or 0
+    end
+
+    return repays
+end
+
+-- What a withdrawal says it lost: its share of the release that paid it, or of the newest version
+-- that may, and of any child shown paying for it.
+local function record_fee(id, share)
+    withdrawals:set(id .. ":fee", tostring(share + tonumber(withdrawals:get(id .. ":charged") or "0")))
+end
+
+-- Whether a proposal is short of what finishing it takes: an input under its threshold of
+-- signatures here, or one Bitcoin already spent in another release, shown here, so it can never be
+-- mined however many signed.
+local function unfinished(id, tx)
+    for index, input in ipairs(tx.inputs) do
+        local key = outpoint(input)
+
+        if utxos:get(key .. ":state") == "spent" then
+            return true
+        end
+
+        local threshold, keys = fed_at(utxos:get(key .. ":version"))
+        local count = 0
+
+        for at = 0, #keys - 1 do
+            if signatures:get(id .. ":" .. (index - 1) .. ":" .. at) then
+                count = count + 1
+            end
+        end
+
+        if count < threshold then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function finished(id)
+    return not unfinished(id, parse(proposals:get(id .. ":raw")))
+end
+
+-- A bump is of what Bitcoin may yet mine with all its signatures, and one at a time: while one waits
+-- for its signatures, another would only compete with it, so it is refused, and one the signers
+-- refuse is voted down alone, as M.cancel has it.
+local function may_bump(of)
+    if not finished(of) then
+        error("only what holds all its signatures is bumped: what is short of them is cancelled")
+    end
+
+    for _, member in ipairs(tree(root_of(of))) do
+        if state_of(member) == "open" and not finished(member) then
+            error("another bump of this release waits for its signatures: one at a time")
+        end
+    end
+end
+
+-- Checks what a child adds to the fee of what it pays for can be charged to that one's
+-- withdrawals: each one's share of the release's own, with its share of the child's, within what it
+-- agreed to lose, and the two fees under the cap. The withdrawals have their outputs already, so
+-- the federation pays it from its change, as M.released records.
+local function charged_within(parent, fee)
+    local ids, cost = ids_of(parent), number_of(parent, "cost")
+    local repays = repays_of(parent, #ids)
+
+    for at, id in ipairs(ids) do
+        if fee_share(cost, #ids, at) + repays[at] + fee_share(fee, #ids, at) > tonumber(withdrawals:get(id .. ":most_fee")) then
+            error("a share of the child's fee, with its share of the release's, past what withdrawal " .. id .. " agreed to lose")
+        end
+    end
+
+    if fee + number_of(parent, "fee") > fee_cap() then
+        error("a fee of nothing, or past the cap, with that of the release it pays for")
+    end
+end
+
+-- Keeps a proposal, as each kind of it is kept.
+local function keep(id, raw, ids, version, fee, cost)
+    storage.set("proposal_count", tostring(id))
+    proposals:set(id .. ":raw", raw)
+    proposals:set(id .. ":txid", crypto.sha256d(raw))
+    proposals:set(id .. ":ids", ids)
+    proposals:set(id .. ":version", tostring(version))
+    proposals:set(id .. ":state", "open")
+    proposals:set(id .. ":fee", tostring(fee))
+    proposals:set(id .. ":cost", tostring(cost))
+    events.emit("Proposed", id, crypto.sha256d(raw))
+end
+
+-- A bump joins its release's tree.
+local function join(root, group, of, id)
+    proposals:set(id .. ":root", tostring(root))
+    proposals:set(id .. ":group", tostring(group))
+    proposals:set(id .. ":of", tostring(of))
+    local members = proposals:get(root .. ":members")
+    proposals:set(root .. ":members", members and (members .. "," .. id) or tostring(id))
+end
+
 -- Proposes a release, signed by a signer of the federation in force, as btc_propose_digest has it:
 -- what it pays in fees comes off the withdrawals, so a stranger could burn all they agreed to lose,
 -- or hold them in a release no one signs. raw is an unsigned transaction without witnesses, spending
--- deposits and change this gateway holds, whose first outputs pay the given withdrawals in order, each less its
--- share of the fee, and whose one more output, if any, is change to the federation in force: all it
--- spends past what those withdrawals burned, so the fee costs the backing nothing. With no
+-- deposits and change this gateway holds, whose first outputs pay the given withdrawals in order, each
+-- less its share of what they lose, and whose one more output is change to the federation in force:
+-- all it spends past what those withdrawals burned, so the fee costs the backing nothing, or where
+-- that is under Bitcoin's dust, dust, the withdrawals losing what tops it up with the fee. With no
 -- withdrawals it is a sweep: everything it spends an old federation's, all of it to the one in
--- force, the fee the federation's. Whatever it
--- proposes Bitcoin must be able to mine, as its inputs and withdrawals wait on it until it is
--- shown mined or cancelled.
+-- force, the fee the federation's. Whatever it proposes Bitcoin must be able to mine, as its inputs
+-- and withdrawals wait on it until it is shown mined or cancelled.
 function M.propose(raw, signature, ...)
     local fed = remember()
     local ids, named = {}, {}
@@ -592,36 +931,16 @@ function M.propose(raw, signature, ...)
         table.insert(ids, number)
     end
 
-    local signer = crypto.recover(propose_digest(count("proposal_count") + 1, raw, ids), signature)
-    local known = false
-
-    for _, key in ipairs(fed.signers) do
-        known = known or key == signer
-    end
-
-    if not known then
+    if not signer_of(fed, crypto.recover(propose_digest(count("proposal_count") + 1, raw, ids), signature)) then
         error("only a signer of the federation in force proposes a release")
     end
-
-    local tx = parse(raw)
 
     if #ids > MOST_WITHDRAWALS then
         error("at most " .. MOST_WITHDRAWALS .. " withdrawals a release")
     end
 
-    if tx.version ~= VERSION then
-        error("a release is a version 2 transaction")
-    end
-
-    if #raw < LEAST_TX then
-        error("a release under " .. LEAST_TX .. " bytes, which Bitcoin's nodes do not relay")
-    end
-
-    if tx.locktime ~= "\0\0\0\0" then
-        error("a release has no lock time")
-    end
-
-    local spent, weight, spends = 0, 4 * #raw + 2, {}
+    local tx = shaped(raw)
+    local spends = {}
 
     for _, input in ipairs(tx.inputs) do
         local key = outpoint(input)
@@ -632,61 +951,63 @@ function M.propose(raw, signature, ...)
 
         spends[key] = true
 
-        if utxos:get(key .. ":state") ~= "unspent" then
+        if utxos:get(key .. ":state") ~= "unspent" or utxos:get(key .. ":unlisted") then
             error("an input that is not an output the gateway holds unspent")
         end
 
-        if #input.script ~= 0 then
-            error("an input with a script: a release spends witness outputs alone")
-        end
-
-        if input.sequence ~= SEQUENCE then
-            error("an input with another sequence than a release's")
-        end
-
-        local version = utxos:get(key .. ":version")
-
-        if #ids == 0 and tonumber(version) >= fed.version then
+        if #ids == 0 and tonumber(utxos:get(key .. ":version")) >= fed.version then
             error("a sweep spends only what older federations hold")
         end
-
-        spent = spent + tonumber(utxos:get(key .. ":sats"))
-        weight = weight + witness_weight(fed_at(version), witness_script(version, utxos:get(key .. ":recipient")))
     end
 
-    local paid = 0
-
-    for _, output in ipairs(tx.outputs) do
-        paid = paid + output.sats
-    end
-
+    local vbytes, spent = sized(raw, tx)
+    local paid = paid_out(tx)
     local fee = spent - paid
 
     if fee <= 0 or fee > fee_cap() then
         error("a fee of nothing, or past the cap")
     end
 
-    local shares = {}
+    if #tx.outputs ~= #ids + 1 then
+        error("a release pays its withdrawals and one change to the federation in force, and nothing else")
+    end
 
-    for at, id in ipairs(ids) do
-        local output = tx.outputs[at] or error("a withdrawal the transaction does not pay")
+    local change = tx.outputs[#ids + 1]
 
-        if withdrawals:get(id .. ":state") ~= "queued" then
-            error("a withdrawal that is not queued")
+    if change.script ~= p2wsh(multisig(fed.threshold, fed.signers)) then
+        error("change goes to the federation in force alone")
+    end
+
+    if change.sats < LEAST_CHANGE then
+        error("change under Bitcoin's dust")
+    end
+
+    local burned, cost, repays, repaid, budget = 0, 0, {}, 0, 0
+
+    for _, id in ipairs(ids) do
+        burned = burned + tonumber(withdrawals:get(id .. ":sats") or error("a withdrawal that is not queued"))
+    end
+
+    if #ids > 0 then
+        if spent < burned then
+            error("a release that spends less than its withdrawals burned")
         end
 
-        local share = fee_share(fee, #ids, at)
+        -- Its change is what backs the wBTC left: just what it spends past what was burned, but where
+        -- that is under dust, dust, which the withdrawals top up as they pay the fee; and what they
+        -- repay of what children cost the backing, which goes back to it.
+        local base = math.max(spent - burned, LEAST_CHANGE)
+        cost = fee + base - (spent - burned)
+        repays, repaid, budget = repays_for(ids, cost, fee)
 
-        if share > tonumber(withdrawals:get(id .. ":most_fee")) then
-            error("a share of the fee past what withdrawal " .. id .. " agreed to lose")
+        if change.sats ~= base + repaid then
+            error("change that is not all it spends past what its withdrawals burned, or dust where that is less, with what they repay")
         end
+    end
 
-        if output.script ~= withdrawals:get(id .. ":script") or output.sats ~= tonumber(withdrawals:get(id .. ":sats")) - share then
-            error("an output that does not pay its withdrawal as asked: what it burned, less its share of the fee")
-        end
+    pays_as_asked(tx, ids, cost, "queued", repays)
 
-        shares[at] = share
-
+    for _, id in ipairs(ids) do
         -- See M.cancel: every release paying it must conflict with the ones cancelled before,
         -- until Bitcoin showed they can no longer be mined.
         local anchor = withdrawals:get(id .. ":anchor")
@@ -696,40 +1017,21 @@ function M.propose(raw, signature, ...)
         end
     end
 
-    local change = tx.outputs[#ids + 1]
-
-    if #tx.outputs > #ids + 1 or (#ids == 0 and change == nil) then
-        error("outputs past the withdrawals and one change")
-    end
-
-    if change then
-        if change.script ~= p2wsh(multisig(fed.threshold, fed.signers)) then
-            error("change goes to the federation in force alone")
-        end
-
-        if change.sats < LEAST_CHANGE then
-            error("change under Bitcoin's dust")
-        end
-    end
-
-    local vbytes = math.ceil(weight / 4)
-
-    if vbytes > MOST_VBYTES then
-        error("a release larger than Bitcoin's nodes relay: pay fewer, from fewer")
-    end
-
     if fee < vbytes * fee_floor() then
         error("a fee under the floor: this release pays at least " .. (vbytes * fee_floor()))
     end
 
     local id = count("proposal_count") + 1
-    storage.set("proposal_count", tostring(id))
-    local txid = crypto.sha256d(raw)
-    proposals:set(id .. ":raw", raw)
-    proposals:set(id .. ":txid", txid)
-    proposals:set(id .. ":ids", table.concat(ids, ","))
-    proposals:set(id .. ":version", tostring(fed.version))
-    proposals:set(id .. ":state", "open")
+    keep(id, raw, table.concat(ids, ","), fed.version, fee, cost)
+    proposals:set(id .. ":repays", table.concat(repays, ","))
+    proposals:set(id .. ":budget", tostring(budget))
+
+    -- Counted as repaying until a version of it is shown or it is cancelled, so no other release
+    -- repays the same again.
+    if repaid > 0 then
+        proposals:set(id .. ":repaid", tostring(repaid))
+        storage.set("repaying", tostring(count("repaying") + repaid))
+    end
 
     for _, input in ipairs(tx.inputs) do
         utxos:set(outpoint(input) .. ":state", "pending")
@@ -737,10 +1039,221 @@ function M.propose(raw, signature, ...)
 
     for at, withdrawal in ipairs(ids) do
         withdrawals:set(withdrawal .. ":state", "proposed")
-        withdrawals:set(withdrawal .. ":fee", tostring(shares[at]))
+        record_fee(withdrawal, fee_share(cost, #ids, at) + repays[at])
     end
 
-    events.emit("Proposed", id, txid)
+    return id
+end
+
+-- A release no longer repaying, shown or cancelled, is no longer counted as repaying; shown, what it
+-- repaid is repaid, as Bitcoin gave it to the federation's change. Each step down stops at nothing,
+-- should one cancelled have been mined anyway after another took up what it would have repaid.
+local function settle(root, shown)
+    local repaid = proposals:get(root .. ":repaid")
+
+    if repaid ~= nil then
+        proposals:set(root .. ":repaid", nil)
+        proposals:set(root .. ":settled", repaid)
+        storage.set("repaying", tostring(math.max(0, count("repaying") - tonumber(repaid))))
+    end
+
+    if shown then
+        local settled = number_of(root, "settled")
+        proposals:set(root .. ":settled", nil)
+        storage.set("shortfall", tostring(math.max(0, count("shortfall") - settled)))
+    end
+end
+
+-- Replaces a release with all its signatures that Bitcoin has not mined, or a child paying for one,
+-- by a version paying more, signed by a signer of the federation in force over btc_replace_digest.
+-- It spends just what the one it replaces spends, so Bitcoin mines one of them at most, each input
+-- signalling BIP125; it pays the same withdrawals to the same scripts, each less its even share of
+-- what they now lose, within what it agreed to lose; its change is what it was, as the withdrawals
+-- pay the bump as they paid the fee, but for a sweep's, which the federation pays it from, and a
+-- child's, charged to what that pays for; and it pays more than every open version, by Bitcoin's
+-- incremental rate, under the cap. Every version stays open until one is shown.
+function M.replace(of, raw, signature)
+    of = whole(of, "the proposal")
+    local fed = remember()
+
+    if state_of(of) ~= "open" then
+        error("no open release by that number")
+    end
+
+    if not signer_of(fed, crypto.recover(bump_digest("chainv4-btc-replace", count("proposal_count") + 1, of, raw), signature)) then
+        error("only a signer of the federation in force bumps a release")
+    end
+
+    may_bump(of)
+    local root, group = root_of(of), group_of(of)
+    local old, tx = parse(proposals:get(of .. ":raw")), shaped(raw)
+    local same = #tx.inputs == #old.inputs and #tx.outputs == #old.outputs
+
+    for at, input in ipairs(tx.inputs) do
+        same = same and input.outpoint == old.inputs[at].outpoint
+    end
+
+    for at, output in ipairs(tx.outputs) do
+        same = same and output.script == old.outputs[at].script
+    end
+
+    if not same then
+        error("a replacement spends what it replaces and pays the same outputs")
+    end
+
+    local vbytes, spent = sized(raw, tx)
+    local fee = spent - paid_out(tx)
+
+    if fee <= 0 or fee > fee_cap() then
+        error("a fee of nothing, or past the cap")
+    end
+
+    -- What every version Bitcoin may hold in its place pays, so this one pays past all of them.
+    local most = 0
+
+    for _, member in ipairs(tree(root)) do
+        if group_of(member) == group and state_of(member) == "open" then
+            most = math.max(most, number_of(member, "fee"))
+        end
+    end
+
+    if fee < most + vbytes * LEAST_BUMP then
+        error("a replacement pays at least " .. (most + vbytes * LEAST_BUMP) .. ": more than every version it replaces, by a satoshi a virtual byte")
+    end
+
+    local ids, cost = ids_of(of), fee
+    local change = tx.outputs[#tx.outputs]
+
+    if change.sats < LEAST_CHANGE then
+        error("change under Bitcoin's dust")
+    end
+
+    if group == root and #ids > 0 then
+        if change.sats ~= old.outputs[#old.outputs].sats then
+            error("a replacement keeps its change: its withdrawals pay what it adds, as they paid the fee")
+        end
+
+        cost = number_of(of, "cost") + fee - number_of(of, "fee")
+        pays_as_asked(tx, ids, cost, "proposed", repays_of(of, #ids))
+    elseif group == root then
+        cost = 0
+    else
+        charged_within(number_of(group, "of"), fee)
+    end
+
+    local id = count("proposal_count") + 1
+    keep(id, raw, proposals:get(of .. ":ids"), proposals:get(of .. ":version"), fee, cost)
+    join(root, group, of, id)
+
+    -- What it repays is the release's, as its change is: the extra fee comes off the withdrawals alone.
+    if group == root then
+        local repays = repays_of(of, #ids)
+        proposals:set(id .. ":repays", table.concat(repays, ","))
+        proposals:set(id .. ":budget", proposals:get(of .. ":budget") or "0")
+
+        for at, withdrawal in ipairs(ids) do
+            record_fee(withdrawal, fee_share(cost, #ids, at) + repays[at])
+        end
+    end
+
+    events.emit("Replaced", id, of)
+    return id
+end
+
+-- Proposes a child paying for a release with all its signatures that Bitcoin has not mined, or for
+-- a replacement of one, signed by a signer of the federation in force over btc_child_digest: for
+-- when a replacement cannot go, as when a recipient spent their output in a child Bitcoin will not
+-- let one replace, or one went unmined too. It spends that version's change first, which every
+-- release keeps for this, then outputs the gateway holds unspent only should that change not pay
+-- its fee and leave dust; and pays all of it less its fee to the federation in force, in one
+-- output, held like change once shown. Its fee is charged to what it pays for's withdrawals within
+-- what each agreed to lose, with that one's own, the two under the cap. Bitcoin mines it only with
+-- what it pays for. A child is bumped by replacing it, with M.replace.
+function M.child(parent, raw, signature)
+    parent = whole(parent, "the proposal")
+    local fed = remember()
+
+    if state_of(parent) ~= "open" then
+        error("no open release by that number")
+    end
+
+    if group_of(parent) ~= root_of(parent) then
+        error("a child pays for a release or a replacement of one: replace a child to bump it")
+    end
+
+    if not signer_of(fed, crypto.recover(bump_digest("chainv4-btc-child", count("proposal_count") + 1, parent, raw), signature)) then
+        error("only a signer of the federation in force bumps a release")
+    end
+
+    may_bump(parent)
+    local ids, of = ids_of(parent), parse(proposals:get(parent .. ":raw"))
+    local change = hex(proposals:get(parent .. ":txid")) .. ":" .. #ids
+    local state = utxos:get(change .. ":state")
+
+    if state == "pending" or state == "spent" then
+        error("a child spends that change already: replace it to bump it")
+    end
+
+    local tx = shaped(raw)
+
+    if outpoint(tx.inputs[1]) ~= change then
+        error("a child spends the change of what it pays for, first")
+    end
+
+    if #tx.outputs ~= 1 or tx.outputs[1].script ~= p2wsh(multisig(fed.threshold, fed.signers)) or tx.outputs[1].sats < LEAST_CHANGE then
+        error("a child pays the federation in force alone, at least Bitcoin's dust")
+    end
+
+    -- Known to the gateway, unlisted, so its signers can sign what spends it before it is shown.
+    if state == nil then
+        utxos:set(change .. ":sats", tostring(of.outputs[#ids + 1].sats))
+        utxos:set(change .. ":version", proposals:get(parent .. ":version"))
+        utxos:set(change .. ":recipient", "")
+        utxos:set(change .. ":state", "unshown")
+        utxos:set(change .. ":unlisted", "1")
+    end
+
+    local spends = { [change] = true }
+
+    for at = 2, #tx.inputs do
+        local key = outpoint(tx.inputs[at])
+
+        if spends[key] then
+            error("an input spent twice")
+        end
+
+        spends[key] = true
+
+        if utxos:get(key .. ":state") ~= "unspent" or utxos:get(key .. ":unlisted") then
+            error("an input that is not an output the gateway holds unspent")
+        end
+    end
+
+    local vbytes, spent = sized(raw, tx)
+    local fee = spent - tx.outputs[1].sats
+
+    if fee <= 0 then
+        error("a fee of nothing, or past the cap")
+    end
+
+    if #tx.inputs > 1 and tonumber(utxos:get(change .. ":sats")) >= fee + LEAST_CHANGE then
+        error("a child spends more than that change only when the change alone cannot pay its fee and leave dust")
+    end
+
+    if fee < vbytes * fee_floor() then
+        error("a fee under the floor: this child pays at least " .. (vbytes * fee_floor()))
+    end
+
+    charged_within(parent, fee)
+    local id = count("proposal_count") + 1
+    keep(id, raw, "", fed.version, fee, fee)
+    join(root_of(parent), id, parent, id)
+
+    for _, input in ipairs(tx.inputs) do
+        utxos:set(outpoint(input) .. ":state", "pending")
+    end
+
+    events.emit("Child", id, parent)
     return id
 end
 
@@ -771,12 +1284,13 @@ local function preimage(tx, index, script, sats)
         .. le(SIGHASH_ALL, 4)
 end
 
--- A signer's signature over one input of a release: r and s, 64 bytes, low s, over its BIP143
--- preimage. It must be one of the keys of the federation the input's output was paid to.
+-- A signer's signature over one input of a release, a replacement or a child: r and s, 64 bytes,
+-- low s, over its BIP143 preimage. It must be one of the keys of the federation the input's output
+-- was paid to.
 function M.sign(id, index, signature)
     id, index = whole(id, "the proposal"), whole(index, "the input")
 
-    if proposals:get(id .. ":state") ~= "open" then
+    if state_of(id) ~= "open" then
         error("no open release by that number")
     end
 
@@ -805,38 +1319,33 @@ local function cancel_digest(id)
     return crypto.sha256d("chainv4-btc-cancel" .. le(chain.id(), 8) .. ctx.contract:encode() .. le(id, 8) .. proposals:get(id .. ":txid"))
 end
 
--- Whether a release is short of what finishing it takes: an input under its threshold of
--- signatures here, or one Bitcoin already spent in another release, shown here, so it can never be
--- mined however many signed.
-local function unfinished(id, tx)
-    for index, input in ipairs(tx.inputs) do
-        local key = outpoint(input)
-
-        if utxos:get(key .. ":state") == "spent" then
-            return true
-        end
-
-        local threshold, keys = fed_at(utxos:get(key .. ":version"))
-        local count = 0
-
-        for at = 0, #keys - 1 do
-            if signatures:get(id .. ":" .. (index - 1) .. ":" .. at) then
-                count = count + 1
-            end
-        end
-
-        if count < threshold then
-            return true
+-- A child's group no longer open frees what it held: what else it spent is unspent again, and the
+-- change it spent too, or unshown while what it paid for is not shown.
+local function free_child(group)
+    for _, member in ipairs(tree(root_of(group))) do
+        if group_of(member) == group and state_of(member) == "open" then
+            return
         end
     end
 
-    return false
+    for at, input in ipairs(parse(proposals:get(group .. ":raw")).inputs) do
+        local key = outpoint(input)
+
+        if utxos:get(key .. ":state") == "pending" then
+            utxos:set(key .. ":state", (at == 1 and utxos:get(key .. ":unlisted")) and "unshown" or "unspent")
+        end
+    end
 end
 
--- A signer's vote to cancel a release that cannot be finished, as btc_cancel_digest has it, posted
--- by anyone; once the threshold of the federation in force voted, its inputs are unspent again, its
--- withdrawals queued, and what was signed for it counts for nothing here. A release with every
--- input at its threshold is refused: anyone can still finish it.
+-- A signer's vote to cancel what cannot be finished, as btc_cancel_digest has it, posted by anyone;
+-- once the threshold of the federation in force voted, it is cancelled, and what was signed for it
+-- counts for nothing here. What has every input at its threshold is refused: anyone can still
+-- finish it.
+--
+-- A release's number cancels all of its tree, as no version of it holds its signatures: its inputs
+-- are unspent again and its withdrawals queued. A bump's number cancels that bump alone, one its
+-- signers refuse: the release, the other versions and what they hold stand, and a child's own
+-- inputs are freed once none of its group is open.
 --
 -- Bitcoin does not know a release was cancelled, and what a signer signed is public from the moment
 -- it is sent, even in a transaction that lands too late, so a release under its threshold here may
@@ -844,29 +1353,38 @@ end
 -- paying that withdrawal from now on must spend that input as well, and conflicting, only one of
 -- them can ever be mined. The anchor lapses once it is shown spent, as nothing that spends it can
 -- be mined after that. It is the input of the newest federation, as a release stuck on an old
--- federation no one can reach anymore is why a cancel is needed at all.
+-- federation no one can reach anymore is why a cancel is needed at all. A child or a replacement
+-- needs none: every version of a release spends the same inputs, and a child pays no withdrawal.
 function M.cancel(id, signature)
     id = whole(id, "the proposal")
     local fed = remember()
 
-    if proposals:get(id .. ":state") ~= "open" then
+    if state_of(id) ~= "open" then
         error("no open release by that number")
     end
 
-    local tx = parse(proposals:get(id .. ":raw"))
+    local root = root_of(id)
+    local cancelling = { id }
 
-    if not unfinished(id, tx) then
+    if id == root then
+        cancelling = {}
+
+        for _, member in ipairs(tree(root)) do
+            if state_of(member) == "open" then
+                if group_of(member) == root and finished(member) then
+                    error("every input of it holds its threshold of signatures: anyone can still finish it")
+                end
+
+                table.insert(cancelling, member)
+            end
+        end
+    elseif finished(id) then
         error("every input of it holds its threshold of signatures: anyone can still finish it")
     end
 
     local key = crypto.recover(cancel_digest(id), signature)
-    local known = false
 
-    for _, signer in ipairs(fed.signers) do
-        known = known or signer == key
-    end
-
-    if not known then
+    if not signer_of(fed, key) then
         error("not signed by a signer of the federation in force")
     end
 
@@ -884,6 +1402,22 @@ function M.cancel(id, signature)
         return false
     end
 
+    for _, member in ipairs(cancelling) do
+        proposals:set(member .. ":state", "cancelled")
+    end
+
+    for _, member in ipairs(cancelling) do
+        if group_of(member) ~= root then
+            free_child(group_of(member))
+        end
+    end
+
+    if id ~= root then
+        events.emit("Cancelled", id, proposals:get(id .. ":txid"))
+        return true
+    end
+
+    local tx = parse(proposals:get(id .. ":raw"))
     local anchor, newest = nil, -1
 
     for _, input in ipairs(tx.inputs) do
@@ -900,7 +1434,9 @@ function M.cancel(id, signature)
         end
     end
 
-    for withdrawal in proposals:get(id .. ":ids"):gmatch("%d+") do
+    settle(id, false)
+
+    for _, withdrawal in ipairs(ids_of(id)) do
         -- One shown paid by a release cancelled before stays so.
         if withdrawals:get(withdrawal .. ":state") == "proposed" then
             withdrawals:set(withdrawal .. ":state", "queued")
@@ -912,7 +1448,6 @@ function M.cancel(id, signature)
         end
     end
 
-    proposals:set(id .. ":state", "cancelled")
     events.emit("Cancelled", id, proposals:get(id .. ":txid"))
     return true
 end
@@ -934,12 +1469,27 @@ function M.anchor(id)
     return anchor
 end
 
--- A release: its unsigned transaction, its id, its withdrawals, the federation it was proposed
--- under, and its state, open, released or cancelled.
+-- A proposal: its unsigned transaction, its id, its withdrawals, the federation it was proposed
+-- under, and its state, open, released, cancelled, or replaced once another version of it or of
+-- what it pays for was shown; then its kind, release, replacement or child, what it replaced or
+-- pays for, its fee, and what its withdrawals lose between them by it; then what each of its
+-- withdrawals repays of what children cost the backing, separated by commas, and the budget that was
+-- worked out of.
 function M.proposal(id)
     id = whole(id, "the proposal")
 
-    return proposals:get(id .. ":raw"), proposals:get(id .. ":txid"), proposals:get(id .. ":ids"), tonumber(proposals:get(id .. ":version")), proposals:get(id .. ":state")
+    if proposals:get(id .. ":raw") == nil then
+        return nil
+    end
+
+    return proposals:get(id .. ":raw"), proposals:get(id .. ":txid"), proposals:get(id .. ":ids"), tonumber(proposals:get(id .. ":version")), state_of(id), kind_of(id), tonumber(proposals:get(id .. ":of") or ""), number_of(id, "fee"), number_of(id, "cost"), proposals:get(id .. ":repays") or "", number_of(id, "budget")
+end
+
+-- The release a proposal is of, and every bump of it in the order proposed, separated by commas.
+function M.tree(id)
+    local root = root_of(whole(id, "the proposal"))
+
+    return root, proposals:get(root .. ":members") or ""
 end
 
 -- The signatures posted for one input, as signer number and signature, in the keys' order, and
@@ -957,7 +1507,7 @@ function M.input_signatures(id, index)
     for at = 0, #keys - 1 do
         local signature = signatures:get(id .. ":" .. index .. ":" .. at)
 
-        if signature and proposals:get(id .. ":state") ~= "cancelled" then
+        if signature and state_of(id) ~= "cancelled" then
             table.insert(found, at)
             table.insert(found, signature)
         end
@@ -966,14 +1516,18 @@ function M.input_signatures(id, index)
     return witness_script(version, utxos:get(key .. ":recipient")), threshold, table.unpack(found)
 end
 
--- Shows a release, bitcoin_depth deep, with its block's coinbase and that one's path: its inputs
--- are spent, its withdrawals paid, and its change, if any, held for the federation it was proposed
--- under. One cancelled may still be shown, if it was finished anyway: Bitcoin mined it, so what it
--- spent and paid is what the gateway must know.
+-- Shows a proposal, bitcoin_depth deep, with its block's coinbase and that one's path. A version of a
+-- release, the release itself or a replacement: its inputs are spent, its withdrawals paid at its
+-- shares, its change held for the federation it was proposed under, and every other version of it,
+-- and every child of those, closed as replaced, as Bitcoin can never mine them now. A child: what it
+-- spent is spent, its output held, the other versions of it closed, and its fee charged to what it
+-- paid for's withdrawals, which the federation paid from its change. One cancelled may still be
+-- shown, if it was finished anyway: Bitcoin mined it, so what it spent and paid is what the gateway
+-- must know. Every output is held once, as no two of what spends the same inputs can be mined.
 function M.released(id, block, raw, index, path, coinbase, coinbase_path)
     id = whole(id, "the proposal")
     local fed = remember()
-    local state = proposals:get(id .. ":state")
+    local state = state_of(id)
 
     if state ~= "open" and state ~= "cancelled" then
         error("no open release by that number")
@@ -986,6 +1540,7 @@ function M.released(id, block, raw, index, path, coinbase, coinbase_path)
     end
 
     local tx = parse(proposals:get(id .. ":raw"))
+    local root, group = root_of(id), group_of(id)
 
     -- Cancelled and proposed again as it was, it has the same id: shown once is enough.
     for _, input in ipairs(tx.inputs) do
@@ -998,23 +1553,73 @@ function M.released(id, block, raw, index, path, coinbase, coinbase_path)
         utxos:set(outpoint(input) .. ":state", "spent")
     end
 
-    local ids = proposals:get(id .. ":ids")
-    local paid = 0
+    -- What Bitcoin can no longer mine: for a version of the release, every other version and every
+    -- child of those; for a child, every other version of it.
+    local others = {}
 
-    for withdrawal in ids:gmatch("%d+") do
-        withdrawals:set(withdrawal .. ":state", "paid")
-        paid = paid + 1
+    for _, member in ipairs(tree(root)) do
+        local theirs = group_of(member)
+        local closed = (group == root and (theirs == root or number_of(theirs, "of") ~= id)) or (group ~= root and theirs == group)
+
+        if member ~= id and state_of(member) == "open" and closed then
+            table.insert(others, member)
+        end
     end
 
-    local change = tx.outputs[paid + 1]
+    for _, member in ipairs(others) do
+        proposals:set(member .. ":state", "replaced")
+    end
 
-    if change then
-        hold(hex(txid) .. ":" .. paid, change.sats, proposals:get(id .. ":version"), "")
+    for _, member in ipairs(others) do
+        if group == root and group_of(member) ~= root then
+            free_child(group_of(member))
+        end
     end
 
     proposals:set(id .. ":state", "released")
+
+    if group == root then
+        local ids, cost = ids_of(id), number_of(id, "cost")
+        local repays = repays_of(id, #ids)
+
+        for at, withdrawal in ipairs(ids) do
+            withdrawals:set(withdrawal .. ":state", "paid")
+            record_fee(withdrawal, fee_share(cost, #ids, at) + repays[at])
+        end
+
+        -- Every version repays the same, the release's, so it is settled once, by the release.
+        settle(root, true)
+
+        show_change(hex(txid) .. ":" .. #ids, tx.outputs[#ids + 1].sats, proposals:get(id .. ":version"))
+
+        if id ~= root then
+            proposals:set(root .. ":state", "replaced")
+        end
+    else
+        hold(hex(txid) .. ":0", tx.outputs[1].sats, proposals:get(id .. ":version"), "")
+        local paid_for, fee = ids_of(number_of(group, "of")), number_of(id, "fee")
+
+        for at, withdrawal in ipairs(paid_for) do
+            local share = fee_share(fee, #paid_for, at)
+            withdrawals:set(withdrawal .. ":charged", tostring(tonumber(withdrawals:get(withdrawal .. ":charged") or "0") + share))
+            withdrawals:set(withdrawal .. ":fee", tostring(tonumber(withdrawals:get(withdrawal .. ":fee") or "0") + share))
+        end
+
+        -- The withdrawals have their outputs already, so what the child paid came from the
+        -- federation's change: what the gateway holds falls short of wBTC by it.
+        storage.set("shortfall", tostring(count("shortfall") + fee))
+    end
+
     events.emit("Released", id, txid)
     return true
+end
+
+-- What the federation paid from its change for children and later releases have not repaid yet, in
+-- satoshis: what the gateway holds falls short of the wBTC it backs by this, as a child's fee is
+-- charged to withdrawals already paid. Then how much of it open releases repay, once shown: a release
+-- proposed repays only what is left past that.
+function M.shortfall()
+    return count("shortfall"), count("repaying")
 end
 
 -- What the gateway holds, by its place in the list: the outpoint, satoshis, federation version,

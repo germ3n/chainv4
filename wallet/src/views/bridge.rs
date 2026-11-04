@@ -258,6 +258,15 @@ pub fn esplora_proof(tx_hex: &str, merkle: &Value, block_hash: &str, coinbase_he
     })
 }
 
+/// What the withdraw form says comes off what arrives: its share of its release's fee, and while the
+/// gateway repays what children cost the backing, a little of that, all within the tenth it may lose.
+pub fn arrival_note(repaying: bool) -> &'static str {
+    match repaying {
+        true => "the amount less its share of the release's fee and a little toward what the federation paid for a stuck release, at most a tenth of it in all.",
+        false => "the amount less its share of the release's fee, at most a tenth of it.",
+    }
+}
+
 /// What a withdrawal of this much arrives as at the least: all but a tenth, the most the wallet lets
 /// it lose to its share of a release's fee.
 pub fn least_arriving(sats: u64) -> u64 {
@@ -877,8 +886,11 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
         let sats = format::parse_units(&state.withdraw_sats, 8).and_then(|raw| raw.parse::<u64>().ok());
         let least = state.read(ctx, &gateway, "least_withdrawal", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).unwrap_or(10_000);
 
+        // While later releases repay what children cost the backing, a withdrawal's limit takes a little of that too.
+        let repaying = state.read(ctx, &gateway, "shortfall", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).is_some_and(|owed| owed > 0);
+
         if let Some((burned, arrives)) = sats.filter(|sats| *sats >= least).map(|sats| (sats, least_arriving(sats))) {
-            ui.label(format!("You burn {} and get {} up to {}: the amount less its share of the release's fee, at most a tenth of it.", format::amount(&burned.to_string(), 8, "wBTC"), format::amount(&arrives.to_string(), 8, "BTC"), format::amount(&burned.to_string(), 8, "BTC")));
+            ui.label(format!("You burn {} and get {} up to {}: {}", format::amount(&burned.to_string(), 8, "wBTC"), format::amount(&arrives.to_string(), 8, "BTC"), format::amount(&burned.to_string(), 8, "BTC"), arrival_note(repaying)));
         }
 
         if theme::primary(ui, &palette, "Withdraw", script.is_some() && sats.is_some_and(|sats| sats >= least)).clicked()

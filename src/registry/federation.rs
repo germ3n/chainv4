@@ -48,7 +48,7 @@ pub struct Federation {
 impl Hashable for Federation {}
 
 #[document(
-    summary = "The federation's Bitcoin policy, which the Bitcoin gateway and its signers go by from the block a change of federation decides it: the most fee a release may pay, the least it pays a virtual byte, how long a retired federation's deposit addresses stay open, how long a release waits before its signers vote it down, and the share of a withdrawal its fee may take unless the withdrawal says.",
+    summary = "The federation's Bitcoin policy, which the Bitcoin gateway and its signers go by from the block a change of federation decides it: the most fee a release may pay, the least it pays a virtual byte, how long a retired federation's deposit addresses stay open, how long a release waits before its signers vote it down, the share of a withdrawal its fee may take unless the withdrawal says, when a release with all its signatures that Bitcoin has not mined is bumped, and how later releases repay what a child cost the backing.",
     category = "Bridges",
     see_also = "Federation::btc, Change::Federation",
 )]
@@ -64,6 +64,14 @@ pub struct BtcPolicy {
     pub cancel_after_ms: u64,
     #[document(summary = "A withdrawal that names no most fee may lose at most its sats divided by this to its release's fee: 10, a tenth, by default. At least 1.")]
     pub fee_part: u64,
+    #[document(summary = "How long, in milliseconds of block time, a release with all its signatures may go unmined before its signers bump it, and its bump again before they bump that: BUMP_AFTER_MS unless set.")]
+    pub bump_after_ms: u64,
+    #[document(summary = "How far under what the network asks a release must pay to be bumped, as a percent of that rate: BUMP_BELOW_PCT unless set. 1 to 100.")]
+    pub bump_below_pct: u64,
+    #[document(summary = "The most a release repays of what children cost the backing, as a percent of its own fee: REPAY_PCT unless set. 0 to 100; 0 never repays.")]
+    pub repay_pct: u64,
+    #[document(summary = "The most any one withdrawal repays of it, in satoshis: REPAY_MOST unless set. It counts within the withdrawal's most fee.")]
+    pub repay_most: u64,
 }
 
 impl Hashable for BtcPolicy {}
@@ -72,7 +80,31 @@ impl BtcPolicy {
     #[document(parent = "BtcPolicy", summary = "The smallest release there is, in virtual bytes: one input under 20 of 20 signers, paying a withdrawal and change. The cap must pay it at the floor.")]
     pub const ONE_INPUT_VBYTES: u64 = 710;
 
-    #[document(parent = "BtcPolicy", summary = "Why no gateway could go by it: a floor of 0, a cap that pays no release at the floor, no fee share, or no wait before a cancel.")]
+    #[document(
+        parent = "BtcPolicy",
+        summary = "How long a release with all its signatures waits for Bitcoin before it is bumped, unless the policy says: an hour, twice the three blocks its rate was asked for, so one mined in the usual time is never bumped, and well inside the six hours a release short of its signatures waits before it is voted down.",
+    )]
+    pub const BUMP_AFTER_MS: u64 = 3_600_000;
+
+    #[document(
+        parent = "BtcPolicy",
+        summary = "How far under the network's rate a release must pay to be bumped, unless the policy says: under 80 percent of it. Estimates wander by a tenth or so from one minute to the next, and a bump costs its withdrawals the whole fee again at the new rate, so a release only a little under waits for the next block or two rather than pay for that.",
+    )]
+    pub const BUMP_BELOW_PCT: u64 = 80;
+
+    #[document(
+        parent = "BtcPolicy",
+        summary = "How much of its own fee a release repays at most of what children cost the backing, unless the policy says: a fifth. A child's fee is about what pulls one release up to the network's rate, so some five releases repay it, each withdrawer paying little.",
+    )]
+    pub const REPAY_PCT: u64 = 20;
+
+    #[document(
+        parent = "BtcPolicy",
+        summary = "The most one withdrawal repays of it, unless the policy says: 500 satoshis, half of what the least withdrawal agrees to lose by default, so it never takes most of anyone's limit.",
+    )]
+    pub const REPAY_MOST: u64 = 500;
+
+    #[document(parent = "BtcPolicy", summary = "Why no gateway could go by it: a floor of 0, a cap that pays no release at the floor, no fee share, no wait before a cancel or a bump, or a bump threshold or repayment that is no percent.")]
     pub fn problem(&self) -> Option<&'static str> {
         if self.fee_floor == 0 {
             Some("btc.fee_floor is at least 1 satoshi a virtual byte")
@@ -82,6 +114,12 @@ impl BtcPolicy {
             Some("btc.fee_part is at least 1")
         } else if self.cancel_after_ms == 0 {
             Some("btc.cancel_after_ms is at least 1")
+        } else if self.bump_after_ms == 0 {
+            Some("btc.bump_after_ms is at least 1")
+        } else if !(1..=100).contains(&self.bump_below_pct) {
+            Some("btc.bump_below_pct is 1 to 100")
+        } else if self.repay_pct > 100 {
+            Some("btc.repay_pct is 0 to 100")
         } else {
             None
         }
@@ -148,9 +186,10 @@ mod tests {
     #[test]
     fn a_federation_holds_together_or_says_why_not() {
         let good = Federation { signers: vec![key(1), key(2), key(3)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6, btc: None };
-        let policy = BtcPolicy { fee_cap: 50_000, fee_floor: 2, grace_ms: 3_600_000, cancel_after_ms: 3_600_000, fee_part: 10 };
+        let policy = BtcPolicy { fee_cap: 50_000, fee_floor: 2, grace_ms: 3_600_000, cancel_after_ms: 3_600_000, fee_part: 10, bump_after_ms: 3_600_000, bump_below_pct: 80, repay_pct: 20, repay_most: 500 };
 
         assert_eq!(good.problem(), None);
+        assert_eq!(Federation { btc: Some(policy), ..good.clone() }.problem(), None);
 
         for (bad, why) in [
             (Federation { signers: Vec::new(), ..good.clone() }, "1 to 20"),
@@ -163,6 +202,10 @@ mod tests {
             (Federation { btc: Some(BtcPolicy { fee_floor: 0, ..policy }), ..good.clone() }, "fee_floor"),
             (Federation { btc: Some(BtcPolicy { fee_cap: 1_000, ..policy }), ..good.clone() }, "allow none"),
             (Federation { btc: Some(BtcPolicy { fee_part: 0, ..policy }), ..good.clone() }, "fee_part"),
+            (Federation { btc: Some(BtcPolicy { bump_after_ms: 0, ..policy }), ..good.clone() }, "bump_after_ms"),
+            (Federation { btc: Some(BtcPolicy { bump_below_pct: 0, ..policy }), ..good.clone() }, "bump_below_pct"),
+            (Federation { btc: Some(BtcPolicy { bump_below_pct: 101, ..policy }), ..good.clone() }, "bump_below_pct"),
+            (Federation { btc: Some(BtcPolicy { repay_pct: 101, ..policy }), ..good.clone() }, "repay_pct"),
         ] {
             assert!(bad.problem().is_some_and(|problem| problem.contains(why)), "{bad:?}");
         }

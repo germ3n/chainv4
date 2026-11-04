@@ -346,6 +346,10 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("btc.grace_ms", "How long a retired federation's addresses stay open, in ms", "", Control::Millis).under("Bitcoin").when(WHEN_BTC),
             field("btc.cancel_after_ms", "How long a release waits before its signers vote it down, in ms", "", Control::Millis).under("Bitcoin").when(WHEN_BTC).least(1),
             field("btc.fee_part", "A withdrawal's fee is at most its sats divided by", "10 is a tenth.", Control::Whole).under("Bitcoin").when(WHEN_BTC).least(1),
+            field("btc.bump_after_ms", "How long a signed release goes unmined before its signers bump it, in ms", "And its bump again before they bump that.", Control::Millis).under("Bitcoin").when(WHEN_BTC).least(1),
+            field("btc.bump_below_pct", "Bumped when it pays under this percent of what Bitcoin asks", "80 bumps one paying under four fifths of the rate.", Control::Whole).under("Bitcoin").when(WHEN_BTC).least(1).most(100),
+            field("btc.repay_pct", "A release repays what children cost, up to this percent of its fee", "0 never repays.", Control::Whole).under("Bitcoin").when(WHEN_BTC).most(100),
+            field("btc.repay_most", "The most one withdrawal repays of it, in sats", "Within what it agreed to lose.", Control::Whole).under("Bitcoin").when(WHEN_BTC),
         ],
         "directory" => vec![
             field("gateway", "The bridges' gateway", "", Control::MaybeContract),

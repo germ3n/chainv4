@@ -480,9 +480,17 @@ fn a_release_and_a_held_output_read_as_the_gateway_gives_them() {
     let release = release_from(&[bytes("0x0200"), bytes(&format!("0x01{}", "00".repeat(31))), text("3,4"), int(1), text("open")]).unwrap();
 
     assert_eq!(release.raw, vec![2, 0]);
+    assert_eq!(pays(&release), "2 withdrawals", "a gateway from before bumps: a release");
     assert_eq!(release.txid, format!("{}01", "00".repeat(31)));
     assert_eq!((release.withdrawals, release.version, release.state.as_str()), (vec![3, 4], 1, "open"));
     assert_eq!(release_from(&[bytes("0x0200"), bytes("0x00"), text(""), int(0), text("open")]).unwrap().withdrawals, Vec::<u64>::new(), "a sweep pays none");
+
+    // A replacement says what it replaced, and a child what it pays for.
+    let bump = |kind: &str, ids: &str| release_from(&[bytes("0x0200"), bytes("0x00"), text(ids), int(0), text("open"), text(kind), int(4), int(900), int(900)]).unwrap();
+    assert_eq!((bump("replacement", "3").kind.as_str(), bump("replacement", "3").of), ("replacement", Some(4)));
+    assert_eq!(pays(&bump("replacement", "3")), "1 withdrawal, replacing #4");
+    assert_eq!(pays(&bump("child", "")), "a child paying for #4");
+    assert_eq!(pays(&bump("release", "3,4")), "2 withdrawals");
 
     let held = held_from(&[text(&format!("01{}:0", "00".repeat(31))), int(50_000), int(0), text(""), text("unspent")]).unwrap();
 

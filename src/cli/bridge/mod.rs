@@ -80,6 +80,12 @@ pub struct BridgeArgs {
     /// every signer waits alike. Reading a release's age takes a node with --index-events.
     #[arg(long, global = true, default_value = "6h", value_parser = parse_age)]
     pub cancel_after: u64,
+    /// How long, by the chain's block time, a Bitcoin release with all its signatures may go unmined
+    /// before a signer's pass bumps it, should it pay well under what the network asks, and its bump
+    /// again before it bumps that: 1h, 90m, 30s. The federation's own policy, btc.bump_after_ms,
+    /// wins once governance names one.
+    #[arg(long, global = true, default_value = "1h", value_parser = parse_age)]
+    pub bump_after: u64,
 }
 
 /// A length of time as milliseconds, from a number and its unit: s, m, h or d.

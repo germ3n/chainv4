@@ -50,6 +50,11 @@ fn esplora_s_proof_is_given_in_bitcoin_s_own_byte_order_without_the_witness() {
     // What a withdrawal says it arrives as: all but the tenth the wallet lets it lose.
     assert_eq!(least_arriving(10_000), 9_000);
     assert_eq!(least_arriving(123_456), 111_111);
+
+    // While the gateway repays what children cost it, the form says a little of that comes off too,
+    // within the same tenth.
+    assert!(arrival_note(true).contains("stuck release") && arrival_note(true).contains("a tenth"));
+    assert!(!arrival_note(false).contains("stuck release"));
 }
 
 #[test]

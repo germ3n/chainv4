@@ -320,6 +320,34 @@ offline; these would make that hold up as a treasury.
   nobody, so `Mint` is a dev faucet and a chain of value gets coins from rewards and allocations
   alone.
 
+### Thought experiments
+
+**Not planned work.** Nothing here is to be built until it is decided to; these are notes to think
+with.
+
+- [ ] **Post-quantum signatures, a thought experiment for now.** What it would take for the chain
+  to survive a machine that breaks elliptic curves:
+  - **A scheme beside the others.** Key schemes are already one feature and one pinned tag each,
+    so ML-DSA (FIPS 204), SLH-DSA (FIPS 205) or FN-DSA (Falcon) could be another `KeyType` without
+    touching the rest.
+  - **Size is the cost.** An ML-DSA-44 key is 1,312 bytes and a signature 2,420, against
+    ed25519's 32 and 64. Fees are charged per byte, so each transaction would cost tens of times
+    more. That reaches block size, `max_tx_bytes`, multisig pricing (the heaviest quorum), the
+    mempool's memory and the light client's proofs.
+  - **Keys exposed in addresses.** An `ed25519:` address is its key, so a quantum attacker could
+    sign for it from the address alone. Addresses that are a key's hash (secp256k1, bitcoin) hide
+    the key until it first signs. Moving coins would need a rotation path, for example an account
+    that commits to a post-quantum key it switches to later, and a deadline for accounts that never
+    move.
+  - **Votes and finality.** FFG votes and checkpoints are signatures too, and many of them per
+    epoch. They would grow the most, and aggregation would matter.
+  - **Hashes hold up.** Grover's algorithm only halves a hash's strength, so 256-bit hashes such
+    as blake3 and sha256 stay sound. Merkle proofs, state roots and proof of work are unaffected.
+  - **Bridges are not ours to fix.** The Bitcoin and EVM sides sign with secp256k1 and Schnorr
+    until those chains change, so a bridge is only as safe as the weaker side.
+  - **Hybrids first.** A transaction signed both classically and post-quantum, valid only with
+    both, is the usual first step while the new schemes are young.
+
 ### Privacy
 
 - [ ] **Hidden recipients: stealth addresses.** A recipient publishes a stealth meta-key; a sender
@@ -803,6 +831,39 @@ offline; these would make that hold up as a treasury.
   - Left: a refund of one voided here is paid on the EVM chain and its signatures here need Gateway.sol's
     `leftBy`, so the explorer keeps it at "voided, refund to come" and shows those signatures as one
     arriving; neither event says why it was refused.
+- [x] **A child's fee comes off the backing, and later releases repay it.** Done 2026-11-04. The gateway
+  changed, with the fee bumping below, in the same regenesis. Each release proposed while `shortfall()` owes
+  anything repays a budget of the least of what is left past what open releases repay and `btc.repay_pct` of
+  its fee (20 percent), an even share from each withdrawal, at most `btc.repay_most` (500 satoshis), within
+  what its most fee leaves: one at its limit repays nothing and is not held up. It goes to the federation's
+  change, and the shortfall falls by it when a version of the release is shown; a release proposed counts as
+  repaying until shown or cancelled, so none repays the same twice, and a replacement repays what its release
+  does. The planner and the gateway work it out alike (`btc_repays`), and a signer refuses one past its bounds.
+  `bridge btc withdraw` and the wallet's withdraw form say a little may come off toward it; the explorer shows
+  what is left to repay.
+
+- [x] **Fee bumping a stuck Bitcoin release, before real funds, and the signers taking turns.** Done
+  2026-11-03. Needs a new genesis with the Bitcoin gateway redeployed: the contract changed.
+  - Every release signals BIP125 (sequence `0xfffffffd`) and keeps change of at least 330 satoshis,
+    Bitcoin's dust for P2WSH, the withdrawals topping it up when the gateway holds no more than they burned.
+  - `replace(of, raw, signature)` proposes a replacement: the same inputs, scripts, withdrawals and change,
+    each withdrawal less its even share of what it now loses within its limit, past every open version by a
+    satoshi a virtual byte, under the cap. `child(parent, raw, signature)` proposes a child spending the
+    version's change, held outputs only when needed, back to the federation, its fee charged to the
+    withdrawals within their limits and recorded as `shortfall()`. One bump at a time; `released` takes
+    whichever version was mined and closes the rest as `replaced`; a bump short of its signatures is
+    cancelled alone; `tree(id)` and `proposal(id)` say each one's kind.
+  - Signers' passes bump by policy, `btc.bump_after_ms` (an hour) and `btc.bump_below_pct` (80), governable,
+    replace-by-fee first and a child once Esplora refuses the replacement or it goes unmined past the delay
+    again; `bridge btc bump <release> [--rate] [--child]` by hand. The others sign only within their limits and
+    while their Esplora says it is stuck (`check_btc_replacement`, `check_btc_child`, `ReleaseRefusal::Needless`).
+  - The race on the devnet, all three signers sending `released` for one release in one block: what any one
+    signer's call does for all waits its turn, its place times a block, at least a second, then checks the
+    gateway and the node's mempool again (`btc_turn_delay`).
+  - `set_most_fee` raises a limit while its release is open, for a bump. The explorer lists each bump and
+    what children were paid from the federation's change.
+  - Left: a release evicted from mempools is only replaced, and the wallet shows withdrawals, not bumps
+    (below). The shortfall a child leaves is repaid by later releases (above).
 
 - [x] **Four CLI bugs from the testnet run.** Done 2026-11-03. CLI only: no new genesis, no
   consensus change, no contract redeployed.
@@ -952,9 +1013,11 @@ offline; these would make that hold up as a treasury.
   take it name another. New domains, `chainv4-gateway-void` and `chainv4-gateway-refund`, kept alike in Rust,
   Lua and Solidity. Needs a new gateway here and a new Gateway.sol; the Bitcoin gateway has no such path and
   needs none.
-- [ ] **Fee bumping a stuck Bitcoin release, before real funds.** A pass only warns of a release with all its
-  signatures that is not mined: someone must build the child that pays for it by hand. A federation output
-  to spend for it, or a small anchor output, and signers to agree its fee, are all undecided.
+- [ ] **A release dropped from Bitcoin's mempools can only be replaced.** One paying under their minimum fee
+  is evicted, and a child cannot bring it back through Esplora, which takes one transaction at a time; Bitcoin
+  Core's `submitpackage` could take the two together.
+- [ ] **The wallet shows a withdrawal's release, not its bumps.** It reads `withdrawal(id)`, whose fee says
+  the newest version's share and any child's; the explorer lists each bump, with what it replaced or pays for.
 - [ ] **A refund across a replaced gateway.** What left for a gateway since replaced can be neither delivered
   nor voided, so it stays where it left unless its peer is put back. A chain's reset leaves that for good.
 - [x] **Only federation signers propose a Bitcoin release, and they do it by themselves.** Done 2026-11-01. Anyone could

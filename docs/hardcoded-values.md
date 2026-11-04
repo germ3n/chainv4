@@ -97,7 +97,7 @@ Before the governance batch, governance could change consensus, bootnodes, name_
 | `src/cli/bridge/btc.rs:166-170` | ESPLORA_PACE 150 ms, TRIES 6 | Esplora throttling | **C** |
 | `src/cli/bridge/mod.rs:36` `LOG_WINDOW` | 5,000 blocks | The `eth_getLogs` span. Many RPC providers cap it at 500 to 10k. | **C**: `--log-window` |
 | `src/bridge.rs:480-483` and `btc_gateway.lua:32,49` | 50 withdrawals, 100k vB | Duplicated in Rust and Lua | **E**: Bitcoin relay policy. Have Rust read them from the gateway. |
-| `src/bridge.rs:629`, `btc_gateway.lua:43`, `src/swap/htlc.rs:57`, `src/crypto/bitcoin/psbt.rs:587` | Dust 546, 546, 294, 330 | Bitcoin dust rules | **E** |
+| `src/bridge.rs:629`, `btc_gateway.lua:43`, `src/swap/htlc.rs:57`, `src/crypto/bitcoin/psbt.rs:587` | Dust 330, 330, 294, 330 | Bitcoin dust rules | **E** |
 | `src/registry/federation.rs:25` `MOST_SIGNERS` | 20 | Bounded by CHECKMULTISIG and `ONE_INPUT_VBYTES` 710 | **E** |
 | `contracts/examples/btc_relay/src/lib.rs:22-30` | 2016, 14 d, 11, 2 h, 2,000 headers | Bitcoin consensus, and the relay's batch size | **E** |
 

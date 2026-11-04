@@ -36,6 +36,10 @@ fn get(lua: &Lua, (): ()) -> mlua::Result<Option<Table>> {
         policy.set("grace_ms", btc.grace_ms)?;
         policy.set("cancel_after_ms", btc.cancel_after_ms)?;
         policy.set("fee_part", btc.fee_part)?;
+        policy.set("bump_after_ms", btc.bump_after_ms)?;
+        policy.set("bump_below_pct", btc.bump_below_pct)?;
+        policy.set("repay_pct", btc.repay_pct)?;
+        policy.set("repay_most", btc.repay_most)?;
         table.set("btc", policy)?;
     }
 
@@ -59,7 +63,7 @@ fn federation_lib() {}
     parent = "federation",
     name = "get",
     summary = "The federation in force.",
-    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be; and btc, the Bitcoin policy, with fee_cap, fee_floor, grace_ms, cancel_after_ms and fee_part, or nil while the federation names none. nil on a chain with none." },
+    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be; and btc, the Bitcoin policy, with fee_cap, fee_floor, grace_ms, cancel_after_ms, fee_part, bump_after_ms, bump_below_pct, repay_pct and repay_most, or nil while the federation names none. nil on a chain with none." },
 )]
 fn federation_get() {}
 

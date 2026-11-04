@@ -484,7 +484,7 @@ DEXes keeps for the pool, in hundredths of a percent, 0 to 1000. See [DEX](dex.m
 | `limits` | `max_tx_bytes`, `multisig_members` | The most bytes a transaction takes (Ethereum-signed ones by their raw bytes, 128 KiB while unset), and the most members of a new multisig, at most 20. |
 | `finality` | `slash_permille` | How much of a cheater's FFG bond a slash takes, 1000 by default. |
 | `consensus` | `window`, `adjustment`, `max_steps_down`, `max_swing` | Proof of work's retarget window and steps; unset, genesis's window and 64, 32 and 4. |
-| `federation` | `btc` | The Bitcoin policy: `fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms`, `fee_part` (see [Bridges](bridges.md#bitcoin)). |
+| `federation` | `btc` | The Bitcoin policy: `fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms`, `fee_part`, `bump_after_ms` and `bump_below_pct`, when a stuck release is bumped, an hour and 80 percent of what the network asks when left out, and `repay_pct` and `repay_most`, how much of its fee a release repays at most of what children cost the backing and the most one withdrawal repays, 20 percent and 500 satoshis when left out, as a policy written before them is read (see [Bridges](bridges.md#bumping-a-stuck-release)). |
 
 Genesis carries each too, unset meaning what every chain ran before (`contract_limits`,
 `max_tx_bytes`, `multisig_members`, `evm_spec` and `dex` at its top level, the rest inside fees,

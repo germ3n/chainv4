@@ -317,7 +317,9 @@ fn signed_input(values: &[String]) -> Option<(usize, u64)> {
 }
 
 /// A release, as proposal returns it: its transaction, unsigned, its id, the withdrawals it pays,
-/// the federation it was proposed under, and its state.
+/// the federation it was proposed under, and its state; then its kind, a release, a replacement of
+/// one paying more, or a child paying for one, and what it replaced or pays for. A gateway from
+/// before bumps says neither, and holds releases alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Release {
     raw: Vec<u8>,
@@ -325,6 +327,8 @@ struct Release {
     withdrawals: Vec<u64>,
     version: u64,
     state: String,
+    kind: String,
+    of: Option<u64>,
 }
 
 fn release_from(values: &[Argument]) -> Option<Release> {
@@ -337,7 +341,26 @@ fn release_from(values: &[Argument]) -> Option<Release> {
         withdrawals,
         version: number(values.get(3)),
         state: values.get(4).map(Argument::text).unwrap_or_default(),
+        kind: values.get(5).map(Argument::text).filter(|kind| !kind.is_empty() && kind != "null").unwrap_or_else(|| "release".to_string()),
+        of: values.get(6).and_then(|of| of.text().parse().ok()),
     })
+}
+
+/// What a release pays, as its row and page say it: its withdrawals, or a sweep's federation; for a
+/// replacement, also what it replaced; and for a child, what it pays for.
+fn pays(release: &Release) -> String {
+    let of = release.of.map_or_else(String::new, |of| format!("#{of}"));
+    let paid = match release.withdrawals.len() {
+        0 => "a sweep".to_string(),
+        1 => "1 withdrawal".to_string(),
+        many => format!("{many} withdrawals"),
+    };
+
+    match release.kind.as_str() {
+        "child" => format!("a child paying for {of}"),
+        "replacement" => format!("{paid}, replacing {of}"),
+        _ => paid,
+    }
 }
 
 fn btc(sats: &str) -> String {
@@ -938,10 +961,19 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) {
             Some((wbtc, supply))
         });
         let unspent: u64 = held.iter().flatten().filter(|utxo| utxo.state != "spent").map(|utxo| utxo.sats).sum();
-        super::stats(ui, look, &[
+        // What children paid from the federation's change that later releases have not repaid yet,
+        // which the gateway holds short of wBTC by.
+        let short = texts(ctx, state, gateway, "shortfall", json!([])).and_then(|values| values.first()?.parse::<u64>().ok()).filter(|short| *short > 0);
+        let mut stats = vec![
             ("wBTC minted".to_string(), minted.as_ref().map_or_else(|| "—".to_string(), |(_, supply)| format::units(supply, 8)), "in circulation".to_string()),
             ("BTC held".to_string(), format::units(&unspent.to_string(), 8), "unspent or pending".to_string()),
-        ]);
+        ];
+
+        if let Some(short) = short {
+            stats.push(("Left to repay".to_string(), format::units(&short.to_string(), 8), "of children's fees, by later releases".to_string()));
+        }
+
+        super::stats(ui, look, &stats);
 
         if let Some((wbtc, _)) = &minted {
             ui.horizontal(|ui| {
@@ -1193,11 +1225,7 @@ fn releases(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) 
             match release {
                 Some(release) => {
                     ui.monospace(format::short(&release.txid)).on_hover_text(&release.txid);
-                    ui.label(match release.withdrawals.len() {
-                        0 => "a sweep".to_string(),
-                        1 => "1 withdrawal".to_string(),
-                        many => format!("{many} withdrawals"),
-                    });
+                    ui.label(pays(release));
                     ui.label(&release.state);
                 }
                 None => {
@@ -1249,10 +1277,15 @@ pub fn release(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, id: u64) {
             facts.row("transaction", |ui| super::copyable(ui, &release.txid));
             facts.text("state", &release.state);
             facts.text("federation", format!("version {}", release.version));
-            facts.text("pays", match release.withdrawals.is_empty() {
-                true => "a sweep to the federation in force".to_string(),
-                false => release.withdrawals.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", "),
+            facts.text("pays", match (release.kind.as_str(), release.withdrawals.is_empty()) {
+                ("child", _) => "the federation in force, from the change of what it pays for".to_string(),
+                (_, true) => "a sweep to the federation in force".to_string(),
+                (_, false) => release.withdrawals.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", "),
             });
+
+            if release.kind != "release" {
+                facts.text("bumps", pays(&release));
+            }
         });
     });
 
