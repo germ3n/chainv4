@@ -1235,6 +1235,86 @@ pub const WRAPPED_CODES: [&str; 3] = [
     include_str!("../contracts/evm/WrappedMulti.bin"),
 ];
 
+#[cfg(feature = "bitcoin")]
+#[document(
+    summary = "Which Bitcoin a gateway's relay follows, as its network_name says: what its addresses are written for, and the only addresses a withdrawal may pay. Main's are bc1…, the test networks' tb1… and regtest's bcrt1….",
+    category = "Bridges",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BtcNetwork {
+    #[document(summary = "Bitcoin itself.")]
+    Main,
+    #[document(summary = "Testnet3, testnet4 and signet, which write addresses alike.")]
+    Test,
+    #[document(summary = "A regtest network of one's own.")]
+    Regtest,
+}
+
+#[cfg(feature = "bitcoin")]
+impl BtcNetwork {
+    #[document(parent = "BtcNetwork", summary = "The network a relay's network_name names: main, test or regtest.")]
+    pub fn from_name(name: &str) -> Option<BtcNetwork> {
+        match name.trim() {
+            "main" => Some(BtcNetwork::Main),
+            "test" => Some(BtcNetwork::Test),
+            "regtest" => Some(BtcNetwork::Regtest),
+            _ => None,
+        }
+    }
+
+    #[document(parent = "BtcNetwork", summary = "Its name, as from_name reads it.")]
+    pub fn name(self) -> &'static str {
+        match self {
+            BtcNetwork::Main => "main",
+            BtcNetwork::Test => "test",
+            BtcNetwork::Regtest => "regtest",
+        }
+    }
+
+    #[document(parent = "BtcNetwork", summary = "The human-readable part of its segwit addresses: bc, tb or bcrt.")]
+    pub fn hrp(self) -> &'static str {
+        match self {
+            BtcNetwork::Main => "bc",
+            BtcNetwork::Test => "tb",
+            BtcNetwork::Regtest => "bcrt",
+        }
+    }
+
+    #[document(parent = "BtcNetwork", summary = "An output script's address on this network. Regtest's witness programs are bcrt1…, its others as the test networks write them.")]
+    pub fn address(self, script: &[u8]) -> String {
+        use crate::crypto::bitcoin::tx::{Network, address};
+
+        match (self, script) {
+            (BtcNetwork::Main, _) => address(script, Network::Main),
+            (BtcNetwork::Regtest, [0x00, size @ (0x14 | 0x20), program @ ..]) if program.len() == usize::from(*size) => crate::structs::bech32::encode_segwit("bcrt", program),
+            (BtcNetwork::Regtest, [version @ 0x51..=0x60, size @ 2..=40, program @ ..]) if program.len() == usize::from(*size) => crate::structs::bech32::encode_witness("bcrt", version - 0x50, program),
+            _ => address(script, Network::Test),
+        }
+    }
+
+    #[document(
+        parent = "BtcNetwork",
+        summary = "The output script a withdrawal pays, from a native segwit address on this network or a script given as 0x and its hex. An address on another network is refused, as bitcoin sent to it would be paid where no one meant.",
+    )]
+    pub fn output_script(self, text: &str) -> Result<Vec<u8>, String> {
+        let text = text.trim();
+
+        if text.starts_with("0x") {
+            return crate::structs::hex::from_hex(text).filter(|script| (1..=80).contains(&script.len())).ok_or_else(|| "the script is not hex, or not 1 to 80 bytes".to_string());
+        }
+
+        let (hrp, program) = crate::structs::bech32::decode_segwit(text).ok_or_else(|| format!("give a native segwit address, {}1q…, or an output script, 0x…", self.hrp()))?;
+
+        if hrp != self.hrp() {
+            let theirs = [BtcNetwork::Main, BtcNetwork::Test, BtcNetwork::Regtest].into_iter().find(|network| network.hrp() == hrp).map_or_else(|| format!("{hrp}1… is no Bitcoin network's address"), |network| format!("{hrp}1… is an address on Bitcoin's {} network", network.name()));
+
+            return Err(format!("{theirs}, and the gateway pays out on Bitcoin's {} network, whose addresses are {}1…", self.name(), self.hrp()));
+        }
+
+        Ok([&[0x00, program.len() as u8][..], &program].concat())
+    }
+}
+
 #[document(
     summary = "What a transfer moves.",
     category = "Bridges",

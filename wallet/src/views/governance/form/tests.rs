@@ -109,6 +109,7 @@ fn every_shape() -> Vec<Change> {
         Change::Consensus(ConsensusConfig::Rotating { slot_ms: 2_000 }),
         Change::Consensus(ConsensusConfig::Staked { slot_ms: 2_000, schedule: Schedule::Priority }),
         Change::Fees(fees(ScheduleConfig::Weighted(weights()), base_fee())),
+        Change::Fees(FeeConfig { vote_rewards: Some(chainv4::params::fees::VoteRewardSource::Fees), ..fees(ScheduleConfig::Weighted(weights()), base_fee()) }),
         Change::Fees(fees(ScheduleConfig::Contract(ContractScorer { weights: weights(), contract: Address::Contract([9; 32]), fuel: 1_000, kinds: vec!["call".to_string()] }), PricingConfig::Bid(Bid { min_price: u256::new(7) }))),
         Change::Reward(Reward { initial: u256::new(50 * DEV), halving_interval: Some(210_000) }),
         Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 32 << 20 }, max_block_bytes: Some(4 << 20), contract: None, max_tx_bytes: None, multisig_members: None }),
@@ -213,6 +214,40 @@ fn only_what_changed_is_given_and_laid_over_what_stands() {
 
     assert_eq!(built.change, None);
     assert_eq!(built.errors.get("pricing.initial").map(String::as_str), Some("the base fee's initial price must be at least its min"), "the node's check, under its field");
+}
+
+#[test]
+fn where_vote_rewards_come_from_is_picked_or_left_as_genesis_set() {
+    use chainv4::params::fees::VoteRewardSource;
+
+    let env = env();
+    let base = fees(ScheduleConfig::Weighted(weights()), base_fee());
+    let stands = change_json(&Change::Fees(base.clone()))["fees"].clone();
+    let mut draft = Draft::of("fees", Some(&stands), &env);
+
+    // Left as genesis set: nothing changes.
+    assert_eq!(draft.text("vote_rewards"), "");
+    assert_eq!(build("fees", &draft, Some(&stands), &env).given, json!({}));
+
+    // Paid from the reward pool: that alone is given, and said in words.
+    draft.texts.insert("vote_rewards".to_string(), "fees".to_string());
+    let built = build("fees", &draft, Some(&stands), &env);
+    assert_eq!(built.given, json!({ "vote_rewards": "fees" }));
+    assert_eq!(built.change, Some(Change::Fees(FeeConfig { vote_rewards: Some(VoteRewardSource::Fees), ..base.clone() })));
+    assert_eq!(built.changes, [Diff { label: "Where vote rewards come from".to_string(), old: "As genesis".to_string(), new: "Reward pool".to_string() }]);
+
+    // Back from minting to as genesis set, over one that names it.
+    let minting = change_json(&Change::Fees(FeeConfig { vote_rewards: Some(VoteRewardSource::Mint), ..base.clone() }))["fees"].clone();
+    let mut draft = Draft::of("fees", Some(&minting), &env);
+    assert_eq!(draft.text("vote_rewards"), "mint");
+    draft.texts.insert("vote_rewards".to_string(), String::new());
+    let built = build("fees", &draft, Some(&minting), &env);
+    assert_eq!(built.given, json!({ "vote_rewards": null }));
+    assert_eq!(built.change, Some(Change::Fees(base)));
+
+    // Anything else is refused at its field.
+    draft.texts.insert("vote_rewards".to_string(), "airdrop".to_string());
+    assert!(build("fees", &draft, Some(&minting), &env).errors.contains_key("vote_rewards"));
 }
 
 #[test]
@@ -330,7 +365,7 @@ fn what_the_form_refuses_at_a_field_the_node_refuses_too() {
         assert!(change_from_json(&json!({ "fees": over(&base, &edit) })).is_err(), "{edit}");
     }
 
-    let federation = change_json(&every_shape()[22])["federation"].clone();
+    let federation = change_json(&every_shape().into_iter().find(|change| change.name() == "federation").unwrap())["federation"].clone();
 
     for edit in [json!({ "threshold": 0 }), json!({ "chain_depth": 0 }), json!({ "evm_depth": 0 }), json!({ "bitcoin_depth": 0 })] {
         assert!(change_from_json(&json!({ "federation": over(&federation, &edit) })).is_err(), "{edit}");
@@ -348,7 +383,7 @@ fn the_node_s_errors_say_which_field_they_are_about() {
     };
 
     // A federation's threshold past its signers, as its problem says.
-    let federation = change_json(&every_shape()[22])["federation"].clone();
+    let federation = change_json(&every_shape().into_iter().find(|change| change.name() == "federation").unwrap())["federation"].clone();
     let errors = under("federation", &federation, &|draft| {
         draft.texts.insert("threshold".to_string(), "4".to_string());
     });

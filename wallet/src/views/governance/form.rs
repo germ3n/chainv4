@@ -133,6 +133,9 @@ impl Draft {
             Control::Switch { .. } => {
                 self.switches.insert(path, !value.is_null());
             }
+            Control::MaybeChoice { .. } => {
+                self.texts.insert(path, value.as_str().unwrap_or_default().to_string());
+            }
             Control::List(line) => {
                 let lines = value.as_array().into_iter().flatten().map(|item| match line {
                     Line::Price => item.as_str().map_or_else(String::new, |raw| plain_amount(raw, env.decimals)),
@@ -414,6 +417,11 @@ fn read(spec: &Spec, draft: &Draft, env: &Env, errors: &mut BTreeMap<String, Str
         Control::Choice(options) => match options.iter().any(|(value, _)| *value == text) {
             true => Some(json!(text)),
             false => failed("Pick one.".to_string()),
+        },
+        Control::MaybeChoice { options, .. } => match text {
+            "" => Some(Value::Null),
+            text if options.iter().any(|(value, _)| *value == text) => Some(json!(text)),
+            _ => failed("Pick one.".to_string()),
         },
         Control::MaybeWhole { .. } if !on => Some(Value::Null),
         Control::MaybeWhole { .. } => match whole(text) {
@@ -751,6 +759,7 @@ pub fn words(spec: &Spec, value: Option<&Value>, env: &Env) -> String {
         Control::Millis => value.as_u64().map_or_else(|| "none".to_string(), millis),
         Control::Bytes => value.as_u64().map_or_else(|| "none".to_string(), bytes),
         Control::Choice(options) => value.as_str().map_or_else(|| "none".to_string(), |text| options.iter().find(|(known, _)| *known == text).map_or(text, |(_, label)| label).to_string()),
+        Control::MaybeChoice { off, options } => value.as_str().map_or_else(|| off.to_string(), |text| options.iter().find(|(known, _)| *known == text).map_or(text, |(_, label)| label).to_string()),
         Control::MaybeWhole { off, .. } => value.as_u64().map_or_else(|| off.to_string(), |number| format::thousands(&number.to_string())),
         Control::MaybeBytes { off, .. } => value.as_u64().map_or_else(|| off.to_string(), bytes),
         Control::Switch { off, on } => if value.is_null() { off } else { on }.to_string(),
@@ -997,6 +1006,14 @@ fn control(ui: &mut Ui, palette: &theme::Palette, spec: &Spec, draft: &mut Draft
 
             if theme::segmented_rows(ui, palette, &mut picked, &shown) {
                 draft.texts.insert(path.to_string(), options[picked].0.to_string());
+            }
+        }
+        Control::MaybeChoice { off, options } => {
+            let mut picked = options.iter().position(|(value, _)| *value == draft.text(path)).map_or(0, |place| place + 1);
+            let shown: Vec<(usize, &str)> = std::iter::once((0, off)).chain(options.iter().enumerate().map(|(place, (_, label))| (place + 1, *label))).collect();
+
+            if theme::segmented_rows(ui, palette, &mut picked, &shown) {
+                draft.texts.insert(path.to_string(), picked.checked_sub(1).map_or_else(String::new, |place| options[place].0.to_string()));
             }
         }
         Control::MaybeWhole { off, on } | Control::MaybeBytes { off, on } => {

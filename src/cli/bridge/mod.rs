@@ -198,7 +198,43 @@ pub enum BridgeAction {
         /// Seconds between passes.
         #[arg(long, default_value_t = 15)]
         every: u64,
+        /// Seconds each signer after the first waits, by its turn, before delivering what is ready
+        /// to an EVM chain: long enough for the one before it to be mined there, so one signer pays
+        /// for a delivery and the rest step in only should it be down.
+        #[arg(long, default_value_t = 90)]
+        relay_turn: u64,
     },
+}
+
+/// Which turn a signer at this place among `signers` takes in delivering transfer `nonce` to an
+/// EVM chain, from 0: the first turn goes round the signers nonce by nonce, so they share the gas,
+/// and one that is no signer's (place `signers`) goes after them all.
+fn relay_turn(place: u64, signers: u64, nonce: u64) -> u64 {
+    if signers == 0 || place >= signers {
+        return signers;
+    }
+
+    (place + signers - nonce % signers) % signers
+}
+
+/// How many times a request the node turns away as too many is asked again, a second, then two,
+/// then four after the one before: a signer's pass reads the gateway a good many times, past what
+/// a public node's limits let through at once, and one read turned away must not fail its step.
+const SLOWED_TRIES: u32 = 4;
+
+/// Asks, and asks again after a pause while the node answers 429, too many requests.
+fn slowed<T>(mut wait: impl FnMut(std::time::Duration), mut ask: impl FnMut() -> CliResult<T>) -> CliResult<T> {
+    let mut tried = 0;
+
+    loop {
+        match ask() {
+            Err(err) if tried + 1 < SLOWED_TRIES && err.to_string().starts_with("the node refused (429)") => {
+                wait(std::time::Duration::from_secs(1 << tried));
+                tried += 1;
+            }
+            answer => return answer,
+        }
+    }
 }
 
 /// The most passes a transfer refused sits out before it is tried again.
@@ -224,11 +260,19 @@ pub(crate) struct Refusals {
     /// Transfers in Gateway.sol's logs for another gateway than this one, as a chain's reset leaves
     /// them: by chain and nonce. They never come to be for this one.
     others: std::collections::HashSet<(u64, u64)>,
+    /// What is done for good, by gateway here and what was done: signed by this signer, or
+    /// delivered or voided at its destination. Never read again, so a pass reads only what is
+    /// still to do however many transfers came before.
+    done: std::collections::HashSet<(Address, String)>,
 }
 
 impl Refusals {
     fn due(&self, what: &str) -> bool {
         self.held.get(what).is_none_or(|refusal| refusal.next <= self.pass)
+    }
+
+    fn is_done(&self, gateway: &Address, what: &str) -> bool {
+        self.done.contains(&(*gateway, what.to_string()))
     }
 
     fn settle(&mut self, what: String, result: CliResult<()>) {
@@ -259,6 +303,16 @@ pub(crate) struct Bridge {
     args: BridgeArgs,
     refused: std::cell::RefCell<Refusals>,
     btc_done: std::cell::Cell<btc::BtcDone>,
+    /// Under watch, the turns in delivering to an EVM chain. Without them, as relay run by hand is,
+    /// a transfer is delivered at once.
+    turns: Option<Turns>,
+}
+
+/// How long each turn in delivering to an EVM chain lasts, and when this signer first found each
+/// transfer ready, by chain and nonce.
+struct Turns {
+    turn: std::time::Duration,
+    ready: std::cell::RefCell<std::collections::HashMap<(u64, u64), std::time::Instant>>,
 }
 
 fn kind_of(text: &str) -> CliResult<AssetKind> {
@@ -294,7 +348,7 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Refund { nonce, from_evm, why, yes } => bridge.refund(*nonce, *from_evm, why.as_deref(), *yes, &mut std::io::stdin().lock()),
         BridgeAction::RefundTo { nonce, recipient, from_evm } => bridge.refund_to(*nonce, recipient, *from_evm),
         BridgeAction::Btc { action } => bridge.btc(action),
-        BridgeAction::Watch { from_block, every } => loop {
+        BridgeAction::Watch { from_block, every, .. } => loop {
             bridge.pass(*from_block);
             std::thread::sleep(std::time::Duration::from_secs(*every));
         },
@@ -303,7 +357,12 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
 
 impl Bridge {
     pub(crate) fn new(args: BridgeArgs) -> CliResult<Bridge> {
-        Ok(Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default(), btc_done: Default::default() })
+        let turns = match &args.action {
+            BridgeAction::Watch { relay_turn, .. } => Some(Turns { turn: std::time::Duration::from_secs(*relay_turn), ready: Default::default() }),
+            _ => None,
+        };
+
+        Ok(Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default(), btc_done: Default::default(), turns })
     }
 
     /// What this signer or relayer holds refused, each with why.
@@ -338,6 +397,21 @@ impl Bridge {
         refused.next_pass();
     }
 
+    /// Settles what a pass tried: refused, it is listed and tried again later; done for good, it is
+    /// never read again while this runs; neither, as one still short of signatures, it comes up next pass.
+    fn settle_or_done(&self, gateway: &Address, what: String, result: CliResult<bool>) {
+        let mut refused = self.refused.borrow_mut();
+
+        match result {
+            Ok(true) => {
+                refused.settle(what.clone(), Ok(()));
+                refused.done.insert((*gateway, what));
+            }
+            Ok(false) => refused.settle(what, Ok(())),
+            Err(err) => refused.settle(what, Err(err)),
+        }
+    }
+
     fn tx(&self, tx: TxArgs) -> CliResult<()> {
         send(SendArgs {
             node: self.node.clone(),
@@ -364,13 +438,13 @@ impl Bridge {
     }
 
     fn status(&self) -> CliResult<Value> {
-        ok(self.agent.get(format!("{}/status", self.node)).call())
+        slowed(std::thread::sleep, || ok(self.agent.get(format!("{}/status", self.node)).call()))
     }
 
     /// A read-only call's values, each as the API writes it: {type, value}.
     fn read(&self, contract: &Address, function: &str, args: Value) -> CliResult<Vec<Value>> {
-        let body = json!({ "contract": contract.to_string(), "function": function, "args": args });
-        let answer = ok(self.agent.post(format!("{}/call", self.node)).header("content-type", "application/json").send(body.to_string()))?;
+        let body = json!({ "contract": contract.to_string(), "function": function, "args": args }).to_string();
+        let answer = slowed(std::thread::sleep, || ok(self.agent.post(format!("{}/call", self.node)).header("content-type", "application/json").send(&body)))?;
 
         match answer["status"].as_str() {
             Some("returned") => Ok(answer["values"].as_array().cloned().unwrap_or_default()),
@@ -624,9 +698,9 @@ impl Bridge {
             };
             let what = format!("signing transfer {nonce} from here");
 
-            if self.refused.borrow().due(&what) {
+            if self.refused.borrow().due(&what) && !self.refused.borrow().is_done(&gateway, &what) {
                 let result = self.left_here(&gateway, &identity, here, nonce).and_then(|transfer| self.post(&gateway, &transfer, &secret));
-                self.refused.borrow_mut().settle(what, result);
+                self.settle_or_done(&gateway, what, result.map(|()| true));
             }
         }
 
@@ -662,12 +736,12 @@ impl Bridge {
                 };
                 let what = format!("signing transfer {nonce} from chain {chain}");
 
-                if self.refused.borrow().others.contains(&(chain, nonce)) || !self.refused.borrow().due(&what) {
+                if self.refused.borrow().others.contains(&(chain, nonce)) || !self.refused.borrow().due(&what) || self.refused.borrow().is_done(gateway, &what) {
                     continue;
                 }
 
                 let result = self.sign_one_from_evm(&rpc, gateway, identity, &evm_gateway, here, chain, nonce, secret);
-                self.refused.borrow_mut().settle(what, result);
+                self.settle_or_done(gateway, what, result.map(|()| true));
             }
 
             from = to + 1;
@@ -764,6 +838,10 @@ impl Bridge {
         let gateway = self.gateway()?;
         let here = self.here()?;
         let identity = self.identity(&gateway)?;
+        let place = match self.turns {
+            Some(_) => (self.place()?, self.status()?["federation"]["signers"].as_array().map_or(0, Vec::len) as u64),
+            None => (0, 0),
+        };
         let count = self.read(&gateway, "sent_count", json!([]))?.first().and_then(|value| value["value"].as_str()?.parse::<u64>().ok()).unwrap_or(0);
 
         for url in &self.args.eth_rpc {
@@ -788,9 +866,9 @@ impl Bridge {
             for nonce in 1..=count {
                 let what = format!("delivering transfer {nonce} to chain {chain}");
 
-                if self.refused.borrow().due(&what) {
-                    let result = self.deliver_one(&rpc, &gateway, &identity, &evm_gateway, here, chain, nonce, &secret);
-                    self.refused.borrow_mut().settle(what, result);
+                if self.refused.borrow().due(&what) && !self.refused.borrow().is_done(&gateway, &what) {
+                    let result = self.deliver_one(&rpc, &gateway, &identity, &evm_gateway, here, chain, nonce, place, &secret);
+                    self.settle_or_done(&gateway, what, result);
                 }
             }
         }
@@ -800,17 +878,21 @@ impl Bridge {
 
     /// One transfer delivered, if it is for this chain, not yet there, and signed enough.
     #[allow(clippy::too_many_arguments)]
-    fn deliver_one(&self, rpc: &Rpc, gateway: &Address, identity: &[u8], evm_gateway: &[u8; 20], here: u64, chain: u64, nonce: u64, secret: &[u8; 32]) -> CliResult<()> {
+    fn deliver_one(&self, rpc: &Rpc, gateway: &Address, identity: &[u8], evm_gateway: &[u8; 20], here: u64, chain: u64, nonce: u64, (place, signers): (u64, u64), secret: &[u8; 32]) -> CliResult<bool> {
         let transfer = self.left_here(gateway, identity, here, nonce)?;
 
         if transfer.target != chain {
-            return Ok(());
+            return Ok(true);
         }
 
         let delivered = rpc.call(evm_gateway, &calldata("delivered(bytes32)", &[AbiValue::FixedBytes(transfer.delivered_key())])?)?;
 
         if delivered.last() == Some(&1) {
-            return Ok(());
+            if let Some(turns) = &self.turns {
+                turns.ready.borrow_mut().remove(&(chain, nonce));
+            }
+
+            return Ok(true);
         }
 
         let posted = self.read(gateway, "signatures", json!([{ "type": "bytes", "value": to_hex(&transfer.digest()) }]))?;
@@ -818,24 +900,107 @@ impl Bridge {
         let signatures: Vec<[u8; 65]> = posted.iter().skip(1).filter_map(|value| value["value"].as_str().and_then(from_hex)?.try_into().ok()).collect();
 
         if signatures.len() < threshold {
-            return Ok(());
+            return Ok(false);
         }
 
         // Voided, as one refused for good is, its signatures stop counting there.
         if rpc.call(evm_gateway, &calldata("voidedAt(bytes32)", &[AbiValue::FixedBytes(transfer.delivered_key())])?)?.iter().any(|byte| *byte != 0) {
-            return Ok(());
+            return Ok(true);
+        }
+
+        // Its turn: the first goes at once, and each after it a turn after the one before, by when
+        // this signer first found it ready, so the one before had the time to be mined there.
+        if let Some(turns) = &self.turns {
+            let since = *turns.ready.borrow_mut().entry((chain, nonce)).or_insert_with(std::time::Instant::now);
+
+            if since.elapsed() < turns.turn * relay_turn(place, signers, nonce) as u32 {
+                return Ok(false);
+            }
         }
 
         println!("delivering transfer {nonce} to chain {chain}, from {}", to_hex(&from_key(secret)?));
         rpc.send(&Call { to: *evm_gateway, value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" }, false, secret)?;
 
-        Ok(())
+        Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_turned_away_as_too_many_is_asked_again_after_longer_and_longer_pauses() {
+        let too_many = || -> CliResult<u32> { Err("the node refused (429): too many requests from this address: slow down and try again".into()) };
+
+        // Turned away twice, then answered: the answer, after a second and two.
+        let mut waited = Vec::new();
+        let mut asked = 0;
+        let answer = slowed(
+            |pause| waited.push(pause.as_secs()),
+            || {
+                asked += 1;
+
+                if asked < 3 { too_many() } else { Ok(7) }
+            },
+        );
+        assert_eq!(answer.unwrap(), 7);
+        assert_eq!(waited, [1, 2]);
+
+        // Turned away every time: it gives up after SLOWED_TRIES, saying why.
+        let mut waited = Vec::new();
+        let answer = slowed(|pause| waited.push(pause.as_secs()), too_many);
+        assert!(answer.unwrap_err().to_string().contains("429"));
+        assert_eq!(waited, [1, 2, 4]);
+
+        // Anything else is not asked again.
+        let mut asked = 0;
+        let answer: CliResult<u32> = slowed(
+            |_| panic!("no pause"),
+            || {
+                asked += 1;
+
+                Err("the node refused (400): no such function".into())
+            },
+        );
+        assert!(answer.is_err());
+        assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn what_is_done_for_good_is_remembered_by_gateway_and_what_is_refused_is_not() {
+        let mut refused = Refusals::default();
+        let (one, other) = (Address::Contract([1; 32]), Address::Contract([2; 32]));
+        let what = "delivering transfer 4 to chain 11155111".to_string();
+
+        refused.settle(what.clone(), Err("not yet".into()));
+        assert!(!refused.is_done(&one, &what));
+
+        refused.settle(what.clone(), Ok(()));
+        refused.done.insert((one, what.clone()));
+        assert!(refused.is_done(&one, &what));
+        assert!(refused.listed().is_empty());
+
+        // The same nonce at a gateway set up anew, after a reset, is still to do.
+        assert!(!refused.is_done(&other, &what));
+    }
+
+    #[test]
+    fn the_first_turn_to_deliver_goes_round_the_signers_and_one_no_signers_goes_last() {
+        // Three signers: transfer 1 is the second's to deliver first, then the third's, then the first's.
+        assert_eq!([0, 1, 2].map(|place| relay_turn(place, 3, 1)), [2, 0, 1]);
+        assert_eq!([0, 1, 2].map(|place| relay_turn(place, 3, 3)), [0, 1, 2]);
+
+        // Every nonce has exactly one first, and each signer is first as often as the next.
+        for nonce in 1..=30 {
+            let mut turns = [0, 1, 2].map(|place| relay_turn(place, 3, nonce));
+            turns.sort();
+            assert_eq!(turns, [0, 1, 2], "{nonce}");
+        }
+
+        assert_eq!(relay_turn(3, 3, 7), 3);
+        assert_eq!(relay_turn(0, 0, 7), 0);
+    }
 
     #[test]
     fn an_age_limit_reads_as_a_number_and_its_unit() {

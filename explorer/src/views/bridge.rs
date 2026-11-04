@@ -16,7 +16,8 @@ use {
     crate::api::{Ask, EventQuery},
     crate::format,
     crate::model::{Argument, Called, FoundEvent},
-    chainv4::crypto::bitcoin::tx::{Network, Transaction, address as bitcoin_address},
+    chainv4::bridge::BtcNetwork,
+    chainv4::crypto::bitcoin::tx::Transaction,
     chainv4::structs::address::Address,
     chainv4::structs::hex::{from_hex, to_hex},
     chainv4_ui::bridge::{Known, Standing, left},
@@ -38,17 +39,15 @@ const CHECKED: usize = 50;
 
 #[derive(Default)]
 pub struct BridgeState {
-    /// Bitcoin's test networks' addresses, tb1q…, rather than Bitcoin's own: as the relay follows.
-    testnet: bool,
+    /// The Bitcoin the relay follows, whose addresses its scripts are written as: main's bc1q…, the
+    /// test networks' tb1q… and regtest's bcrt1q…. Main until the relay says.
+    network: Option<BtcNetwork>,
     asked: HashMap<Ask, u64>,
 }
 
 impl BridgeState {
-    fn network(&self) -> Network {
-        match self.testnet {
-            true => Network::Test,
-            false => Network::Main,
-        }
+    fn network(&self) -> BtcNetwork {
+        self.network.unwrap_or(BtcNetwork::Main)
     }
 }
 
@@ -486,10 +485,121 @@ fn lookups(ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, crossings: &[C
 
 /// The gateway's transfers, with what its events alone cannot say put in.
 fn transfers(ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, events: &[FoundEvent]) -> (Vec<Crossing>, HashMap<String, (String, Over)>) {
-    let found = crossings(events);
-    let (over, stuck) = lookups(ctx, state, gateway, &found);
+    let mut found = crossings(events);
+    let (mut over, stuck) = lookups(ctx, state, gateway, &found);
+    let posts = posted_here(ctx, state, gateway, &found, &over);
+    adopt(&mut found, &mut over, &posts);
 
     (place(found, &over, &stuck), over)
+}
+
+/// A signature to void or refund a transfer, as the call that posted it names the transfer: by its
+/// digest, the chain it left and its nonce there, and whether it was coming here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Posted {
+    of: String,
+    what: Over,
+    source: u64,
+    nonce: u64,
+    arriving: bool,
+}
+
+/// What an attest_void(source, target, nonce, digest, signature) or attest_refund(source, target,
+/// nonce, digest, sender, signature) to the gateway signs for: None for any other call.
+fn posted(func: &str, args: &[Argument], here: u64) -> Option<Posted> {
+    let what = match func {
+        "attest_void" => Over::Void,
+        "attest_refund" => Over::Refund,
+        _ => return None,
+    };
+    let of = args.get(3).map(bytes_hex).filter(|digest| digest.len() == 66)?;
+
+    Some(Posted { of, what, source: number(args.first()), nonce: number(args.get(2)), arriving: number(args.get(1)) == here })
+}
+
+/// A transaction's call, once the node gave it and its block: the contract, function and arguments.
+/// Asked for meanwhile.
+fn call_of(ctx: &mut Ctx, state: &mut BridgeState, id: &str) -> Option<(String, String, Vec<Argument>)> {
+    let Some(block) = ctx.store.receipts.get(id).map(|receipt| receipt.block.clone()) else {
+        ask(ctx, state, Ask::Tx(id.to_string()));
+
+        return None;
+    };
+
+    if !ctx.store.details.contains_key(&block) {
+        ask(ctx, state, Ask::Block(block));
+
+        return None;
+    }
+
+    let (_, tx) = ctx.store.tx(id)?;
+
+    if tx.kind() != "contract_call" {
+        return None;
+    }
+
+    Some((tx.tx["to"].as_str()?.to_string(), tx.tx["func"].as_str()?.to_string(), serde_json::from_value(tx.tx["data"].clone()).ok()?))
+}
+
+/// Signatures nothing else matched, by the calls that posted them: what refunding a transfer that came
+/// here and was voided takes is signed over who sent it there, which only that chain knows, but the
+/// signer named it, and the transfer, in its call. And one voided before it ever showed here has only
+/// those calls to tell it by.
+fn posted_here(ctx: &mut Ctx, state: &mut BridgeState, gateway: &str, found: &[Crossing], over: &HashMap<String, (String, Over)>) -> Vec<(String, Posted, u64, String)> {
+    let Some(here) = ctx.store.status.as_ref().and_then(|status| status.chain_id) else {
+        return Vec::new();
+    };
+    let unmatched: Vec<(String, String, u64)> = found
+        .iter()
+        .filter(|crossing| crossing.way == Way::Arriving && !over.contains_key(&crossing.digest))
+        .take(CHECKED)
+        .map(|crossing| (crossing.digest.clone(), crossing.signers.first().map_or_else(|| crossing.tx.clone(), |(_, tx)| tx.clone()), crossing.height))
+        .collect();
+    let mut posts = Vec::new();
+
+    for (digest, tx, height) in unmatched {
+        if let Some((to, func, args)) = call_of(ctx, state, &tx)
+            && to == gateway
+            && let Some(post) = posted(&func, &args, here)
+        {
+            posts.push((digest, post, height, tx));
+        }
+    }
+
+    posts
+}
+
+/// Puts signatures the calls that posted them matched with their transfers: each digest signed maps to
+/// the transfer's, and a transfer coming here that shows by nothing else, refused before it arrived,
+/// is added as one that came from its chain, so its void and refund show with it.
+fn adopt(list: &mut Vec<Crossing>, over: &mut HashMap<String, (String, Over)>, posts: &[(String, Posted, u64, String)]) {
+    for (digest, post, height, tx) in posts {
+        over.insert(digest.clone(), (post.of.clone(), post.what));
+
+        if !post.arriving {
+            continue;
+        }
+
+        match list.iter_mut().find(|crossing| crossing.digest == post.of) {
+            Some(crossing) if crossing.way == Way::Arriving => crossing.way = Way::In { source: post.source, nonce: post.nonce },
+            Some(_) => {}
+            None => list.push(Crossing {
+                digest: post.of.clone(),
+                way: Way::In { source: post.source, nonce: post.nonce },
+                signers: Vec::new(),
+                void_signers: Vec::new(),
+                refund_signers: Vec::new(),
+                height: *height,
+                tx: tx.clone(),
+                done_in: None,
+                voided_in: None,
+                refunded: None,
+                stuck: false,
+            }),
+        }
+    }
+
+    list.sort_by(|one, two| (two.height, &two.digest).cmp(&(one.height, &one.digest)));
 }
 
 /// A contract's events, newest first, from the event index, asked for again once old; None,
@@ -996,13 +1106,13 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) {
 }
 
 /// Which network the gateway's Bitcoin scripts are written as addresses for: the one its relay
-/// follows, main as Bitcoin's own and regtest or test as the test networks'.
+/// follows: main as Bitcoin's own, test as the test networks' and regtest as its own, bcrt1….
 fn networks(ctx: &mut Ctx, state: &mut BridgeState, gateway: &str) {
     let relay = texts(ctx, state, gateway, "relay", json!([])).and_then(|values| values.into_iter().next());
     let name = relay.and_then(|relay| texts(ctx, state, &relay, "network_name", json!([]))).and_then(|values| values.into_iter().next());
 
-    if let Some(name) = name {
-        state.testnet = name != "main";
+    if let Some(network) = name.as_deref().and_then(BtcNetwork::from_name) {
+        state.network = Some(network);
     }
 }
 
@@ -1165,7 +1275,7 @@ fn withdrawals(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, gateway: &st
             let fee = said.as_ref().map_or("…".to_string(), |values| withdrawal_fee(values));
             let by = event.data.get(3).map(Argument::text).unwrap_or_default();
 
-            (id, by, bitcoin_address(&script, network), sats, fee, standing, event.tx.clone())
+            (id, by, network.address(&script), sats, fee, standing, event.tx.clone())
         })
         .collect();
 
@@ -1316,7 +1426,7 @@ pub fn release(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, id: u64) {
     super::section(ui, look, "Outputs", |ui| {
         super::table(ui, look, ("release outputs", id), &["#", "to", "amount", "for"], |ui| {
             for (index, output) in tx.outputs.iter().enumerate() {
-                let to = bitcoin_address(&output.script, network);
+                let to = network.address(&output.script);
                 ui.monospace(index.to_string());
                 ui.monospace(format::short(&to)).on_hover_text(&to);
                 ui.monospace(btc(&output.value.to_string()));

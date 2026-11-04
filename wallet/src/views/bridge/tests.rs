@@ -11,13 +11,26 @@ fn approvals_name_what_each_kind_lets_the_gateway_move() {
 }
 
 #[test]
-fn withdrawal_addresses_read_as_their_scripts() {
-    // BIP173's P2WPKH and P2WSH examples.
-    assert_eq!(output_script("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").map(|script| to_hex(&script)), Some("0x0014751e76e8199196d454941c45d1b3a323f1433bd6".to_string()));
-    assert_eq!(output_script("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7").map(|script| script.len()), Some(34));
-    assert_eq!(output_script("0x5120").map(|script| script.len()), Some(2), "any script, as 0x…");
-    assert_eq!(output_script("bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297"), None, "Taproot only as its script");
-    assert_eq!(output_script(""), None);
+fn withdrawal_addresses_read_as_their_scripts_on_the_network_the_relay_follows() {
+    // BIP173's P2WPKH and P2WSH examples, each on its own network.
+    assert_eq!(BtcNetwork::Main.output_script("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").map(|script| to_hex(&script)), Ok("0x0014751e76e8199196d454941c45d1b3a323f1433bd6".to_string()));
+    assert_eq!(BtcNetwork::Test.output_script("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7").map(|script| script.len()), Ok(34));
+    assert_eq!(BtcNetwork::Main.output_script("0x5120").map(|script| script.len()), Ok(2), "any script, as 0x…");
+    assert!(BtcNetwork::Main.output_script("bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297").is_err(), "Taproot only as its script");
+    assert!(BtcNetwork::Main.output_script("").is_err());
+
+    // Another network's address is refused: a testnet address on main, a test network's on regtest.
+    assert!(BtcNetwork::Main.output_script("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7").unwrap_err().contains("Bitcoin's test network"));
+    assert!(BtcNetwork::Regtest.output_script("tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7").unwrap_err().contains("bcrt1…"));
+}
+
+#[test]
+fn a_deposit_address_on_regtest_is_written_bcrt1_not_tb1() {
+    let script = [&[0x00, 0x20][..], &[7; 32]].concat();
+
+    assert!(BtcNetwork::Regtest.address(&script).starts_with("bcrt1q"));
+    assert!(BtcNetwork::Test.address(&script).starts_with("tb1q"));
+    assert!(BtcNetwork::Main.address(&script).starts_with("bc1q"));
 }
 
 #[test]

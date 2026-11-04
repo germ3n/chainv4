@@ -74,6 +74,8 @@ pub enum Control {
     Version,
     /// One of a few.
     Choice(Options),
+    /// One of a few, or null, named off: what genesis set, say.
+    MaybeChoice { off: &'static str, options: Options },
     /// A whole number, or null: on or off, named, with the number beside on.
     MaybeWhole { off: &'static str, on: &'static str },
     /// A number of bytes, or null, likewise.
@@ -138,6 +140,7 @@ const SCHEDULES: Options = &[("draw", "A weighted draw"), ("priority", "Priority
 const GAS_SCHEDULES: Options = &[("weighted", "Weights"), ("contract", "A contract scores")];
 const PRICINGS: Options = &[("base_fee", "A base price"), ("bid", "Bids")];
 const FINALITIES: Options = &[("ffg", "FFG"), ("authority", "Authority"), ("depth", "Depth")];
+const VOTE_REWARD_SOURCES: Options = &[("mint", "Minted"), ("fees", "Reward pool")];
 const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, by signers")];
 const GOVERNANCES: Options = &[("council", "A council"), ("electorate", "Finality's voters")];
 const EVM_SPECS: Options = &[("shanghai", "Shanghai"), ("cancun", "Cancun"), ("prague", "Prague"), ("osaka", "Osaka")];
@@ -216,6 +219,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
         "fees" => vec![
             field("block_gas_limit", "Gas a block may use", "", Control::Whole).least(1),
             field("burn_permille", "Share of each fee burned, in thousandths", "Of a fee's base part: 500 burns half, and the rest goes to the block's maker.", Control::Permille).most(1000),
+            field("vote_rewards", "Where vote rewards come from", "Minted new, or paid from the reward pool fees fill, from the block after the one that decides it. The pool keeps what it holds either way.", Control::MaybeChoice { off: "As genesis", options: VOTE_REWARD_SOURCES }),
             field("schedule.type", "How gas is counted", "", Control::Choice(GAS_SCHEDULES)).under("Gas schedule"),
             field("schedule.per_tx", "Gas per transaction", "", Control::Whole).under("Gas schedule"),
             field("schedule.per_byte", "Gas per byte", "", Control::Whole).under("Gas schedule"),

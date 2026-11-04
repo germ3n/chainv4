@@ -891,7 +891,8 @@ actions.
 - **Propose:** pick a kind, and each setting of it has a field of its own, with what stands beside
   it (`now 50%`), and **Put back** once it differs: numbers, amounts typed in the coin, sizes as
   `32 MiB`, addresses, on or off with its number (a reward's halving, a block's size, the leak), a
-  choice for what picks other fields (the consensus's type, the gas schedule, the pricing), and
+  choice for what picks other fields (the consensus's type, the gas schedule, the pricing), a
+  choice or as genesis set (where vote rewards come from: minted, or the reward pool fees fill), and
   lists with **Add** and **Remove** (bootnodes, name prices by length, collections' functions, the
   federation's signers, the directory's EVM gateways, a switch's signers). What the chain keeps
   through a change of finality shows as staying as it is: the kind, `checkpoint_interval`,
@@ -1178,8 +1179,11 @@ light client:
   The light client watches every address's deposit address, of every account, whichever is picked.
   A payment to it, found by the wallet's own [Bitcoin light client](#bitcoin-followed-by-the-wallet-itself)
   and deep enough, is minted as wBTC by its proof from the block it came in; without the light
-  client, by Esplora's proof of a transaction typed in. wBTC is withdrawn to a `bc1q…` address or
-  an output script nodes relay, from 10,000 satoshis: it says what you get, the amount up to a tenth
+  client, by Esplora's proof of a transaction typed in. Addresses are written for the Bitcoin the
+  gateway's relay follows: `bc1q…` on main, `tb1q…` on the test networks, `bcrt1q…` on regtest.
+  wBTC is withdrawn to an address on that network, `bc1q…` on main, or an output script nodes
+  relay, from 10,000 satoshis; another network's address is refused under its field, saying whose
+  it is: it says what you get, the amount up to a tenth
   less, as a release's fee comes off the withdrawals it pays. There is nothing more to do: the
   federation pays it out in a release of its own, usually within the hour, longer while fees run past
   what it agreed to lose. The account's withdrawals show queued, proposed or paid, and what each lost.

@@ -2337,9 +2337,19 @@ mod send {
 
         assert_eq!(wbtc_of(&me), "50000");
 
-        // 20,000 withdrawn to a bc1q… address, proposed with a 1,000 fee, signed by two signers.
-        let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
-        run(BtcAction::Withdraw { address: to, sats: 20_000, most_fee: None }, None, None).unwrap();
+        // An address on another Bitcoin than the relay's is refused, and nothing is burned: the
+        // relay follows regtest, so bc1q… and tb1q… would pay a program on a network no one meant.
+        for (hrp, network) in [("bc", "main"), ("tb", "test")] {
+            let wrong = crate::structs::bech32::encode_segwit(hrp, &[0xb0; 20]);
+            let why = run(BtcAction::Withdraw { address: wrong, sats: 20_000, most_fee: None, network: None }, None, None).unwrap_err().to_string();
+            assert!(why.contains(&format!("Bitcoin's {network} network")) && why.contains("bcrt1…"), "{why}");
+        }
+        assert!(run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]), sats: 20_000, most_fee: None, network: Some("main".into()) }, None, None).unwrap_err().to_string().contains("is not the Bitcoin here"));
+        assert_eq!(wbtc_of(&me), "50000");
+
+        // 20,000 withdrawn to a bcrt1q… address, proposed with a 1,000 fee, signed by two signers.
+        let to = crate::structs::bech32::encode_segwit("bcrt", &[0xb0; 20]);
+        run(BtcAction::Withdraw { address: to, sats: 20_000, most_fee: None, network: None }, None, None).unwrap();
         assert_eq!(wbtc_of(&me), "30000");
         let signer = |secret: u8| {
             let key = dir.0.join(format!("signer-{secret}.key"));
@@ -2379,7 +2389,7 @@ mod send {
 
         // Another withdrawal, proposed from the change, signed by one, then cancelled by two: a
         // signer that voted does not sign it, and the next one spends the same input.
-        run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]), sats: 10_000, most_fee: Some(500) }, None, None).unwrap();
+        run(BtcAction::Withdraw { address: crate::structs::bech32::encode_segwit("bcrt", &[0xb0; 20]), sats: 10_000, most_fee: Some(500), network: None }, None, None).unwrap();
 
         // A fee past what it agreed to lose takes nothing, until it says otherwise.
         assert!(run(BtcAction::Propose { fee: Some(1_000) }, None, signer(21)).unwrap_err().to_string().contains("less than its share"));
@@ -2546,8 +2556,8 @@ mod send {
         }
 
         fn withdraw(&self) -> String {
-            let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
-            self.run(crate::cli::bridge::btc::BtcAction::Withdraw { address: to, sats: 200_000, most_fee: Some(100_000) }).unwrap();
+            let to = crate::structs::bech32::encode_segwit("bcrt", &[0xb0; 20]);
+            self.run(crate::cli::bridge::btc::BtcAction::Withdraw { address: to, sats: 200_000, most_fee: Some(100_000), network: None }).unwrap();
 
             self.count("withdrawal_count")
         }
@@ -3327,8 +3337,8 @@ mod send {
         }
 
         bitcoin.esplora.serve("/fee-estimates", r#"{"1":5.0,"3":4.2,"6":2.0}"#.to_string());
-        let to = crate::structs::bech32::encode_segwit("bc", &[0xb0; 20]);
-        let withdraw = |sats: u64, most_fee: Option<u64>| run(BtcAction::Withdraw { address: to.clone(), sats, most_fee }, Some(gateway)).unwrap();
+        let to = crate::structs::bech32::encode_segwit("bcrt", &[0xb0; 20]);
+        let withdraw = |sats: u64, most_fee: Option<u64>| run(BtcAction::Withdraw { address: to.clone(), sats, most_fee, network: None }, Some(gateway)).unwrap();
         let state_of = |id: &str| read(&gateway, "withdrawal", serde_json::json!([{ "type": "u64", "value": id }]))[2]["value"].as_str().unwrap().to_string();
         let count = || read(&gateway, "proposal_count", serde_json::json!([]))[0]["value"].as_str().unwrap().to_string();
         let signed = |proposal: &str| (read(&gateway, "input_signatures", serde_json::json!([{ "type": "u64", "value": proposal }, { "type": "u64", "value": "0" }])).as_array().unwrap().len() - 2) / 2;

@@ -154,7 +154,13 @@ chain no signer would sign for, as it would never arrive.
   to the board. One it posted already, it skips, and it passes over quietly what is not for this
   chain's gateway from its peer, as Gateway.sol's old logs are after a reset.
 - **relay** delivers what left here to each EVM chain once the board holds enough signatures,
-  paying the gas with `--evm-key`. Anyone may relay.
+  paying the gas with `--evm-key`. Anyone may relay. Run by hand, it delivers at once.
+- **Under watch, signers take turns delivering,** as only the first delivery of a transfer goes
+  through and every other one is mined failing, at its gas. The first turn goes round the
+  federation nonce by nonce, so the signers share the gas, and a relayer that is no signer goes after
+  them all. Each after the first waits `--relay-turn` seconds more, 90 unless told, from when it found
+  the transfer ready, long enough for the one before it to be mined there; finding it delivered by
+  then, it sends nothing. One signer down only delays a delivery by its turn.
 - **watch** does both every `--every` seconds, relaying whatever became of signing.
 
 **Each transfer stands alone.** A transfer the gateway or Gateway.sol refuses, as one a recipient
@@ -641,11 +647,16 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   same on every network, so a deposit to the address of another, such as a mainnet wallet paying the
   `bc1q…` one beside a testnet relay, is never seen here and mints nothing. **Before this,** it wrote
   mainnet's `bc1q…` unless given `--network test`, whatever the relay followed, as the test chain
-  found. The wallet's Bridge page reads the relay's `network_name()` too: `bc1q…` for `main`, `tb1q…`
-  for anything else, regtest included, where Bitcoin Core wants `bcrt1q…`.
-- **withdraw** takes a `bc1q…` address, P2WPKH or P2WSH, or another output script Bitcoin's nodes
-  relay as `0x…` (a Taproot output as its `5120…` script). `--most-fee` is the most it may lose, a
-  tenth of it unless told; **set-most-fee** changes that while it waits.
+  found. The wallet's and the explorer's Bridge pages read the relay's `network_name()` too, through
+  the same `chainv4::bridge::BtcNetwork`: `bc1q…` for `main`, `tb1q…` for `test`, `bcrt1q…` for
+  `regtest`. **Before this,** they wrote `tb1q…` on regtest, where Bitcoin Core wants `bcrt1q…`.
+- **withdraw** takes a native segwit address on the Bitcoin the relay follows, P2WPKH or P2WSH, or
+  another output script Bitcoin's nodes relay as `0x…` (a Taproot output as its `5120…` script). An
+  address on another network is refused before anything is burned, naming both networks: a `bc1q…`
+  beside a testnet relay would be paid to that program on testnet, where no one meant it. Which
+  network goes as for addresses above, `--network` included. The wallet refuses one alike, under its
+  field. `--most-fee` is the most it may lose, a tenth of it unless told; **set-most-fee** changes
+  that while it waits.
 - **propose** pays the queued withdrawals, oldest first, up to 50, from what the gateway holds
   unspent, in the order it took it, starting with what a withdrawal's anchor requires; one whose
   anchor is in another release waits for it, and so does one that agreed to lose less than its

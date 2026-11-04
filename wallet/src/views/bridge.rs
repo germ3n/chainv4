@@ -23,8 +23,8 @@ use {
     crate::theme,
     crate::views::evm::Link,
     chainv4::abi::{AbiType, AbiValue, encode_values},
-    chainv4::bridge::{AssetKind, btc_deposit_script, send_input},
-    chainv4::crypto::bitcoin::tx::{Network, Transaction, address, p2wsh},
+    chainv4::bridge::{AssetKind, BtcNetwork, btc_deposit_script, send_input},
+    chainv4::crypto::bitcoin::tx::{Transaction, p2wsh},
     chainv4::crypto::hasher::Hasher,
     chainv4::registry::directory::Directory,
     chainv4::registry::federation::DecidedFederation,
@@ -209,20 +209,6 @@ pub fn evm_approval(kind: AssetKind, spender: [u8; 20], id: u256, amount: u256) 
         AssetKind::Token => Some(calldata("approve(address,uint256)", &[AbiType::Address, AbiType::Uint(256)], &[AbiValue::Address(spender), AbiValue::Uint(amount)])),
         AssetKind::Nft => Some(calldata("approve(address,uint256)", &[AbiType::Address, AbiType::Uint(256)], &[AbiValue::Address(spender), AbiValue::Uint(id)])),
         AssetKind::Multi => Some(calldata("setApprovalForAll(address,bool)", &[AbiType::Address, AbiType::Bool], &[AbiValue::Address(spender), AbiValue::Bool(true)])),
-    }
-}
-
-/// A Bitcoin address, bc1q… or tb1q…, or an output script, 0x…, as the script it pays.
-pub fn output_script(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim();
-
-    match text.strip_prefix("0x") {
-        Some(_) => from_hex(text).filter(|script| (1..=80).contains(&script.len())),
-        None => {
-            let (_, program) = chainv4::structs::bech32::decode_segwit(text)?;
-
-            Some([&[0x00, program.len() as u8][..], &program].concat())
-        }
     }
 }
 
@@ -762,9 +748,10 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
     let chain_id = here(ctx)?;
     let relay = state.read(ctx, &gateway, "relay", json!([])).and_then(|answer| answer.ok()?.first().map(text)).and_then(|text| text.parse::<Address>().ok());
     let network_name = relay.and_then(|relay| state.read(ctx, &relay, "network_name", json!([]))).and_then(|answer| answer.ok()?.first().map(text));
-    let network = if network_name.as_deref() == Some("main") { Network::Main } else { Network::Test };
+    // Regtest's addresses are bcrt1…, not the test networks' tb1…; until the relay says, a test network's.
+    let network = network_name.as_deref().and_then(BtcNetwork::from_name).unwrap_or(BtcNetwork::Test);
     let output = deposit_output(&me, chain_id, &gateway, federation);
-    let deposit_address = address(&output, network);
+    let deposit_address = network.address(&output);
     let mut prepared = None;
     let mint = |proof: &Proof, vout: u32| {
         let args = vec![
@@ -877,12 +864,21 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
         }
 
         super::row(ui, &palette, "To", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut state.withdraw_to).hint_text("bc1q…, or an output script 0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+            ui.add(egui::TextEdit::singleline(&mut state.withdraw_to).hint_text(format!("{}1q…, or an output script 0x…", network.hrp())).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
         });
         super::row(ui, &palette, "Amount", |ui| {
             ui.add(egui::TextEdit::singleline(&mut state.withdraw_sats).hint_text("BTC").desired_width(160.0));
         });
-        let script = output_script(&state.withdraw_to);
+        // Only an address on the Bitcoin the relay follows: one for another would pay there, to no one meant.
+        let script = network.output_script(&state.withdraw_to);
+
+        if let Err(why) = &script
+            && !state.withdraw_to.trim().is_empty()
+        {
+            ui.label(RichText::new(why).small().color(palette.warn));
+        }
+
+        let script = script.ok();
         let sats = format::parse_units(&state.withdraw_sats, 8).and_then(|raw| raw.parse::<u64>().ok());
         let least = state.read(ctx, &gateway, "least_withdrawal", json!([])).and_then(|answer| answer.ok()?.first().and_then(whole)).unwrap_or(10_000);
 
@@ -930,7 +926,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
                     }
                 }
 
-                ui.label(theme::mono(format::short(&address(&values.first().map(raw).unwrap_or_default(), network))).color(palette.soft));
+                ui.label(theme::mono(format::short(&network.address(&values.first().map(raw).unwrap_or_default()))).color(palette.soft));
                 ui.colored_label(if paid == "paid" { palette.good } else { palette.warn }, paid);
             });
         }

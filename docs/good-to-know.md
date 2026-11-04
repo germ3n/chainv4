@@ -1114,6 +1114,17 @@ voting finality it now goes back to the checkpoint and follows the node from the
   gateway. The sign and relay passes say why, and `send` refuses such a chain up front.
 - **A signer relaying pays gas with `--evm-key`:** under `watch` too, so fund it on each EVM chain,
   or every delivery stays listed.
+- **A Bitcoin withdrawal takes only an address on the Bitcoin the relay follows:** `tb1q…` beside a
+  testnet relay, `bcrt1q…` on regtest. The CLI and the wallet refuse another network's before
+  anything burns, as its output script would be paid there, where no one meant it.
+- **Under `watch`, a delivery to an EVM chain can take up to two turns,** 90 s each by default,
+  while the first signer in line is down or slow: signers take turns so only one pays.
+  `--relay-turn` sets the turn. A `bridge relay` run by hand goes at once.
+- **A signer under `watch` reads only what is still to do:** a transfer it signed, or one delivered
+  or voided, is never read again while it runs, so a pass stays small however many came before.
+  Restarted, it reads them all once more. A read the node turns away with a 429 is asked again
+  after 1, 2 and 4 seconds, so a public node's `/call` limit (5 a second, `RATE_CALLS`) slows a
+  pass rather than failing its steps.
 - **`chainv4 bridge refund` takes two runs by each signer's operator:** one signs the void, and once that
   is voided and final, one signs the refund, each run reading both chains and doing the next step. Never
   the other way round: the signatures are all a source gateway has to go by, so it is the signers' reading
@@ -1270,8 +1281,12 @@ voting finality it now goes back to the checkpoint and follows the node from the
   digest the gateway keeps.
 - **An `Attested` event names only the digest signed:** a signature to void or refund a transfer
   looks like one more transfer arriving. The explorer works the void and refund digests out for
-  what left, and asks `void_digest` for what was voided coming here; a refund of that is signed
-  over who Gateway.sol says sent it, `leftBy`, so those signatures still show as one arriving.
+  what left, and asks `void_digest` for what was voided coming here. A refund of that is signed
+  over who Gateway.sol says sent it, `leftBy`, which only that chain knows, so for a signature
+  nothing else places the explorer reads the `attest_void` or `attest_refund` call that posted it,
+  which names the transfer, its chain and its nonce: up to 50 of them, a transaction and its
+  block each. A transfer refused before it ever showed here is listed from those calls, as one
+  coming from its chain.
 - **Stuck goes by the directory, as the signers do:** a transfer whose recorded digest is not the
   one worked out toward the Gateway.sol the directory names there now left for a peer since
   replaced. The wallet leaves such a one out of its list rather than say so.

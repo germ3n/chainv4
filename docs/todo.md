@@ -854,9 +854,9 @@ with.
   - Stuck is one that left for a Gateway.sol the directory no longer names there: its peer is gone, as in
     the item on a refund across a replaced gateway, which this only shows.
   - The transaction and account pages say the gateway's events in words, each linking to its transfer.
-  - Left: a refund of one voided here is paid on the EVM chain and its signatures here need Gateway.sol's
-    `leftBy`, so the explorer keeps it at "voided, refund to come" and shows those signatures as one
-    arriving; neither event says why it was refused.
+  - Left: a refund of one voided here is paid on the EVM chain, so the explorer keeps it at "voided, refund
+    to come"; neither event says why it was refused. Its refund signatures are placed by the calls that
+    posted them since 2026-11-04, below.
 - [x] **A child's fee comes off the backing, and later releases repay it.** Done 2026-11-04. The gateway
   changed, with the fee bumping below, in the same regenesis. Each release proposed while `shortfall()` owes
   anything repays a budget of the least of what is left past what open releases repay and `btc.repay_pct` of
@@ -908,11 +908,25 @@ with.
     they take.
   - A multisig bundle's review lists a deploy by engine, size, SHA-256 and the address it lands
     at, not its source; `multisig sign --full` and `approve --full` show the code.
-- [ ] **What the CLI fixes left for the apps.**
-  - The wallet's Bridge page writes `tb1q…` for a relay on regtest, where Bitcoin Core wants
-    `bcrt1q…`, and for a relay it cannot read; `Network` has no regtest.
-  - `bridge btc withdraw` takes any `bc1…`/`tb1…` address whatever network the relay follows: the
-    program is the same either way, but one for the wrong network is likely a mistake worth saying.
+- [x] **Signers deliver to an EVM chain in turns and keep within a public node's limits.** Done 2026-11-04,
+  found running the bridge to Sepolia. CLI only: no new genesis.
+  - All three signers delivered transfer 1 within a block, and two of the three were mined failing, at
+    their gas. Under `watch` they now take turns: the first in line for a nonce goes round the federation
+    nonce by nonce, and each after it waits `--relay-turn` more, 90 seconds unless told, from when it
+    found the transfer ready. `bridge relay` by hand goes at once.
+  - A pass read the gateway for every transfer ever sent, every pass, past the public node's `/call`
+    limit (429). A signer now remembers what it signed and what was delivered or voided, by gateway, and
+    a read turned away with a 429 is asked again after 1, 2 and 4 seconds.
+- [x] **What the CLI fixes left for the apps.** Done 2026-11-04. Apps and CLI only: no new genesis.
+  - `chainv4::bridge::BtcNetwork` (main, test, regtest) writes and reads addresses for the Bitcoin the
+    relay follows, for the CLI, the wallet and the explorer alike. The wallet's and the explorer's
+    Bridge pages write `bcrt1q…` on regtest, where they wrote `tb1q…`.
+  - `bridge btc withdraw`, and the wallet's withdraw form, refuse an address on another network than
+    the relay's before anything burns, naming both; `withdraw --network` as `address` takes it.
+  - The explorer places the signatures to refund a transfer voided coming here, signed over
+    Gateway.sol's `leftBy`, by the `attest_refund` call that posted each, which names the transfer, and
+    lists one refused before it ever showed here from its `attest_void` calls.
+  - The wallet's Propose form sets fees' `vote_rewards`: as genesis set, minted, or the reward pool.
 
 - [x] **Governance votes Yes, No or Abstain, rejects what can no longer pass, changes itself, and
   governs what the audit picked.** Done 2026-11-03, from section 1 of `docs/hardcoded-values.md`.

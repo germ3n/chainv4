@@ -14,7 +14,7 @@ use {
     crate::registry::federation::BtcPolicy,
     crate::cli::CliResult,
     crate::crypto::bitcoin::sha256d,
-    crate::crypto::bitcoin::tx::{Network, Transaction, TxIn, TxOut, address, der, p2wsh},
+    crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut, der, p2wsh},
     crate::structs::address::Address,
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::tx::TxCallArgumentType,
@@ -76,13 +76,18 @@ pub enum BtcAction {
     /// Shows a deposit, by its transaction and output, minting its wBTC to the address it pays.
     Deposit { txid: String, vout: u32, recipient: Address },
     /// Burns wBTC to be paid out to a Bitcoin address, bc1q…, or an output script, 0x…. What arrives
-    /// is the amount less its share of its release's fee.
+    /// is the amount less its share of its release's fee. An address must be on the Bitcoin the
+    /// gateway's relay follows: tb1q… on a test network, bcrt1q… on regtest.
     Withdraw {
         address: String,
         sats: u64,
         /// The most it may lose to that share, in satoshis: a tenth of it unless told.
         #[arg(long)]
         most_fee: Option<u64>,
+        /// main, test or regtest, as deposit-address takes it: used only when neither the relay nor
+        /// Esplora says which Bitcoin the gateway pays out on.
+        #[arg(long)]
+        network: Option<String>,
     },
     /// Changes the most a queued withdrawal of yours may lose to fees, as fees rise past it.
     SetMostFee { withdrawal: u64, most_fee: u64 },
@@ -212,12 +217,9 @@ fn shown(internal: &[u8]) -> String {
 
 /// Which Bitcoin a relay follows, by the names its start takes: main, test (testnet4, testnet3 and
 /// signet, which share their addresses and the relay's loose rules) or regtest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Followed {
-    Main,
-    Test,
-    Regtest,
-}
+/// Which Bitcoin the gateway's relay follows: the library's, which the wallet writes and reads
+/// addresses by too.
+pub(crate) use crate::bridge::BtcNetwork as Followed;
 
 /// Bitcoin's genesis blocks as explorers write their hashes, and whose they are.
 const GENESIS_BLOCKS: [(&str, Followed); 5] = [
@@ -229,37 +231,14 @@ const GENESIS_BLOCKS: [(&str, Followed); 5] = [
 ];
 
 impl Followed {
-    pub(crate) fn from_name(name: &str) -> CliResult<Followed> {
-        match name.trim() {
-            "main" => Ok(Followed::Main),
-            "test" => Ok(Followed::Test),
-            "regtest" => Ok(Followed::Regtest),
-            other => Err(format!("{other} is not a network: main, test or regtest").into()),
-        }
+    /// A network named on the command line: main, test or regtest.
+    pub(crate) fn named(name: &str) -> CliResult<Followed> {
+        Followed::from_name(name).ok_or_else(|| format!("{} is not a network: main, test or regtest", name.trim()).into())
     }
 
     /// The network whose genesis block has this hash, as Esplora's /block-height/0 answers it.
     pub(crate) fn from_genesis(hash: &str) -> Option<Followed> {
         GENESIS_BLOCKS.iter().find(|(known, _)| known.eq_ignore_ascii_case(hash.trim())).map(|(_, network)| *network)
-    }
-
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Followed::Main => "main",
-            Followed::Test => "test",
-            Followed::Regtest => "regtest",
-        }
-    }
-
-    /// An output script's address on this network. Regtest's witness programs are bcrt1…, its
-    /// others as the test networks write them.
-    pub(crate) fn address(self, script: &[u8]) -> String {
-        match (self, script) {
-            (Followed::Main, _) => address(script, Network::Main),
-            (Followed::Regtest, [0x00, size @ (0x14 | 0x20), program @ ..]) if program.len() == usize::from(*size) => crate::structs::bech32::encode_segwit("bcrt", program),
-            (Followed::Regtest, [version @ 0x51..=0x60, size @ 2..=40, program @ ..]) if program.len() == usize::from(*size) => crate::structs::bech32::encode_witness("bcrt", version - 0x50, program),
-            _ => address(script, Network::Test),
-        }
     }
 }
 
@@ -267,8 +246,8 @@ impl Followed {
 /// Esplora's genesis block, else what was told, else main. One told that the relay or Esplora
 /// contradicts is refused, rather than write an address no deposit here would be proven from.
 pub(crate) fn pick_network(relay: Option<&str>, esplora: Option<&str>, told: Option<&str>) -> CliResult<(Followed, String)> {
-    let told = told.map(Followed::from_name).transpose()?;
-    let (found, why) = match (relay.map(Followed::from_name).transpose()?, esplora.and_then(Followed::from_genesis)) {
+    let told = told.map(Followed::named).transpose()?;
+    let (found, why) = match (relay.map(Followed::named).transpose()?, esplora.and_then(Followed::from_genesis)) {
         (Some(network), _) => (Some(network), "the relay follows it"),
         (None, Some(network)) => (Some(network), "the relay is not started, and Esplora serves it"),
         (None, None) => (None, ""),
@@ -443,7 +422,7 @@ impl Bridge {
         match action {
             BtcAction::RelayStart { relay, height, network } => {
                 let served = Followed::from_genesis(&self.esplora("/block-height/0")?);
-                let network = match (network.as_deref().map(Followed::from_name).transpose()?, served) {
+                let network = match (network.as_deref().map(Followed::named).transpose()?, served) {
                     (Some(told), Some(served)) if told != served => return Err(format!("--network {} is not what Esplora serves: {}", told.name(), served.name()).into()),
                     (Some(network), _) | (None, Some(network)) => network,
                     (None, None) => return Err("Esplora serves a Bitcoin whose genesis block is none of main's, test's or regtest's: give --network".into()),
@@ -514,15 +493,12 @@ impl Bridge {
                 self.call(self.btc_gateway()?, "deposit", u256::ZERO, args)
             }
             BtcAction::SetMostFee { withdrawal, most_fee } => self.call(self.btc_gateway()?, "set_most_fee", u256::ZERO, vec![number(*withdrawal), number(*most_fee)]),
-            BtcAction::Withdraw { address: text, sats, most_fee } => {
-                let script = match text.strip_prefix("0x") {
-                    Some(_) => from_hex(text).ok_or("the script is not hex")?,
-                    None => {
-                        let (_, program) = crate::structs::bech32::decode_segwit(text).ok_or("give a native segwit address, bc1q…, or an output script, 0x…")?;
-                        [&[0x00, program.len() as u8][..], &program].concat()
-                    }
-                };
+            BtcAction::Withdraw { address: text, sats, most_fee, network } => {
                 let gateway = self.btc_gateway()?;
+                // Only an address on the Bitcoin the gateway pays out on: one for another network
+                // would pay bitcoin there to whoever holds that program's key, or no one.
+                let (followed, why) = self.followed(&gateway, network.as_deref())?;
+                let script = followed.output_script(text).map_err(|err| format!("{err} ({why})"))?;
                 let part = self.status().ok().and_then(|status| status["federation"]["btc"]["fee_part"].as_u64()).unwrap_or(10).max(1);
                 let most = most_fee.unwrap_or(sats / part);
                 let (owed, repaying, repay) = self.repay_policy(&gateway)?;
@@ -610,7 +586,7 @@ impl Bridge {
 
     /// This signer's place among the federation in force's signers, from 0, which its turn goes by:
     /// a pass by none of them, with no --evm-key, goes after them all.
-    fn place(&self) -> CliResult<u64> {
+    pub(super) fn place(&self) -> CliResult<u64> {
         let status = self.status()?;
         let signers = status["federation"]["signers"].as_array().cloned().unwrap_or_default();
         let key = match self.args.evm_key {

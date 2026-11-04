@@ -603,3 +603,34 @@ mod planning {
         assert_eq!(btc_most_fee_rate(None, None, 500), 500);
     }
 }
+
+#[cfg(feature = "bitcoin")]
+#[test]
+fn a_withdrawal_pays_only_an_address_on_the_bitcoin_the_relay_follows() {
+    let program = [0xb0; 20];
+    let script = [&[0x00, 20][..], &program].concat();
+
+    for (network, hrp) in [(BtcNetwork::Main, "bc"), (BtcNetwork::Test, "tb"), (BtcNetwork::Regtest, "bcrt")] {
+        assert_eq!(BtcNetwork::from_name(network.name()), Some(network));
+        assert_eq!(network.hrp(), hrp);
+
+        // Its own address reads back as the script, written as it writes them.
+        let own = network.address(&script);
+        assert!(own.starts_with(&format!("{hrp}1q")), "{own}");
+        assert_eq!(network.output_script(&own), Ok(script.clone()));
+        assert_eq!(network.output_script(&format!("  {}  ", own.to_uppercase())), Ok(script.clone()));
+
+        // Every other network's is refused, saying whose it is and whose it takes.
+        for other in [BtcNetwork::Main, BtcNetwork::Test, BtcNetwork::Regtest].into_iter().filter(|other| *other != network) {
+            let why = network.output_script(&other.address(&script)).unwrap_err();
+            assert!(why.contains(&format!("Bitcoin's {} network", other.name())) && why.contains(&format!("{hrp}1…")), "{why}");
+        }
+    }
+
+    // A script given as hex is taken as it is, on any network; a prefix no Bitcoin has is refused.
+    assert_eq!(BtcNetwork::Regtest.output_script(&crate::structs::hex::to_hex(&script)), Ok(script));
+    assert!(BtcNetwork::Test.output_script("0xzz").is_err());
+    let litecoin = crate::structs::bech32::encode_segwit("ltc", &program);
+    assert!(BtcNetwork::Main.output_script(&litecoin).unwrap_err().contains("no Bitcoin network's"));
+    assert_eq!(BtcNetwork::from_name("signet"), None);
+}

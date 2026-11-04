@@ -506,3 +506,47 @@ fn a_withdrawal_says_what_it_may_lose_and_then_what_it_lost() {
     assert_eq!(withdrawal_fee(&said("2000", "500")), btc("500"));
     assert_eq!(withdrawal_fee(&["0x00".to_string()]), "—");
 }
+
+#[test]
+fn a_void_or_refund_is_read_from_the_call_that_posted_it() {
+    let digest = format!("0x{}", "dd".repeat(32));
+    let refund = [int(11155111), int(777), int(9), bytes(&digest), bytes("0x0a"), bytes("0x01")];
+    let void = [int(777), int(11155111), int(4), bytes(&digest), bytes("0x01")];
+
+    assert_eq!(posted("attest_refund", &refund, 777), Some(Posted { of: digest.clone(), what: Over::Refund, source: 11155111, nonce: 9, arriving: true }));
+    assert_eq!(posted("attest_void", &void, 777), Some(Posted { of: digest.clone(), what: Over::Void, source: 777, nonce: 4, arriving: false }));
+    assert_eq!(posted("attest", &refund, 777), None, "a transfer's own signature is no void or refund");
+    assert_eq!(posted("attest_void", &void[..3], 777), None, "no digest, nothing to put it with");
+}
+
+#[test]
+fn a_transfer_refused_on_its_way_here_shows_with_its_void_and_refund_signatures() {
+    let (transfer, void, refund) = (format!("0x{}", "aa".repeat(32)), format!("0x{}", "bb".repeat(32)), format!("0x{}", "cc".repeat(32)));
+    let (one, two) = (format!("0x02{}", "11".repeat(32)), format!("0x03{}", "22".repeat(32)));
+    // It never arrived, so only the signatures to void and refund it are here, by digests of their own.
+    let events = [
+        event("Attested", vec![bytes(&refund), bytes(&two)], 23),
+        event("Attested", vec![bytes(&refund), bytes(&one)], 22),
+        event("Voided", vec![int(11155111), int(9), bytes(&transfer)], 21),
+        event("Attested", vec![bytes(&void), bytes(&two)], 21),
+        event("Attested", vec![bytes(&void), bytes(&one)], 20),
+    ];
+    let mut found = crossings(&events);
+    let mut over = HashMap::new();
+    let post = |what: Over, height: u64| (match what { Over::Void => void.clone(), Over::Refund => refund.clone() }, Posted { of: transfer.clone(), what, source: 11155111, nonce: 9, arriving: true }, height, format!("0x{height:064x}"));
+    adopt(&mut found, &mut over, &[post(Over::Void, 20), post(Over::Refund, 22)]);
+    let found = place(found, &over, &HashSet::new());
+
+    assert_eq!(found.len(), 1, "one transfer, its signatures with it: {found:?}");
+    assert_eq!(found[0].way, Way::In { source: 11155111, nonce: 9 });
+    assert_eq!((found[0].void_signers.len(), found[0].refund_signers.len()), (2, 2));
+    assert!(found[0].voided_in.is_some());
+
+    // Before it was voided, its void signatures alone still make it one coming from its chain.
+    let mut found = crossings(&events[3..]);
+    let mut over = HashMap::new();
+    adopt(&mut found, &mut over, &[post(Over::Void, 20)]);
+    let found = place(found, &over, &HashSet::new());
+    assert_eq!(found.len(), 1);
+    assert_eq!((&found[0].way, found[0].void_signers.len()), (&Way::In { source: 11155111, nonce: 9 }, 2));
+}
