@@ -457,7 +457,12 @@ impl Net {
             target_peers: config.target_peers,
             tuning,
             tried: HashMap::new(),
-            bans: Bans::new(config.bans),
+            bans: {
+                // The bans kept from before, for what each has left.
+                let mut bans = Bans::new(config.bans);
+                bans.restore(&config.banned, Instant::now(), crate::node::now_ms());
+                bans
+            },
             onion_file: config.tor.onion_file.clone(),
             outgoing: Vec::new(),
             seen: Seen::default(),
@@ -716,6 +721,24 @@ impl Net {
                 ..
             })) => match message {
                 request_response::Message::Request { request, channel, .. } => {
+                    // A request counts against its peer's share until the node answered it, and
+                    // its rate: one past either goes unanswered, its peer waiting out its timeout.
+                    match self.backlog.admit_request(peer, self.ips.get(&peer).copied(), Instant::now()) {
+                        Admission::Admitted => {}
+                        Admission::Dropped => {
+                            log::debug!("[net] left {peer}'s {request:?} unanswered: it asks faster than its rate, or its share of the backlog is full");
+
+                            return true;
+                        }
+                        Admission::Disconnect => {
+                            log::warn!("[net] disconnecting {peer}: it kept asking for more than its rate of sync requests");
+                            let _ = self.swarm.disconnect_peer_id(peer);
+                            self.judge(peer, None, Verdict::Reject(Fault::Flood), events);
+
+                            return true;
+                        }
+                    }
+
                     let id = self.next_id;
                     self.next_id += 1;
                     self.channels.insert(id, channel);
@@ -853,7 +876,7 @@ impl Net {
     /// Whether the backlog has room for one more transaction or vote from a peer, disconnecting a
     /// peer that keeps going over its share.
     fn admit(&mut self, from: PeerId, events: &mpsc::Sender<NetEvent>) -> bool {
-        match self.backlog.admit(Origin::Peer(from), Instant::now()) {
+        match self.backlog.admit_from(Origin::Peer(from), self.ips.get(&from).copied(), Instant::now()) {
             Admission::Admitted => true,
             Admission::Dropped => {
                 log::debug!("[net] dropped gossip from {from}: the backlog is full");
@@ -861,7 +884,7 @@ impl Net {
                 false
             }
             Admission::Disconnect => {
-                log::warn!("[net] disconnecting {from}: it kept sending more gossip than its share of the backlog");
+                log::warn!("[net] disconnecting {from}: it kept sending more gossip than its share of the backlog, or its IP's");
                 let _ = self.swarm.disconnect_peer_id(from);
                 self.judge(from, None, Verdict::Reject(Fault::Flood), events);
 
@@ -890,11 +913,13 @@ impl Net {
         }
     }
 
-    /// Cuts a banned peer off: its connections, its place in Kademlia, and the node's memory of it.
+    /// Cuts a banned peer off: its connections, its place in Kademlia, and the node's memory of it,
+    /// which keeps the ban until it ends.
     fn drop_banned(&mut self, peer: PeerId, events: &mpsc::Sender<NetEvent>) {
+        let ban = self.bans.record(peer, self.ips.get(&peer).copied(), crate::node::now_ms());
         let _ = self.swarm.disconnect_peer_id(peer);
         self.swarm.behaviour_mut().kad.remove_peer(&peer);
-        let _ = events.send(NetEvent::Banned(peer));
+        let _ = events.send(NetEvent::Banned(ban));
     }
 
     fn on_command(&mut self, command: NetCommand, events: &mpsc::Sender<NetEvent>) {
@@ -929,6 +954,10 @@ impl Net {
                 }
             }
             NetCommand::Bootnodes(bootnodes) => self.bootnodes(bootnodes),
+            NetCommand::Unban(which) => {
+                let lifted = self.bans.lift(which);
+                log::info!("[net] lifted {lifted} ban(s): {which:?}");
+            }
         }
     }
 
@@ -1039,6 +1068,7 @@ mod tests {
             key: None,
             remembered: Vec::new(),
             bans: crate::net::BanLimits::default(),
+            banned: Vec::new(),
             tor: Default::default(),
             tuning: crate::net::NetTuning::DEFAULT,
         }
@@ -1540,7 +1570,7 @@ mod tests {
 
         assert_eq!(
             wait_for(&ours, |event| match event {
-                NetEvent::Banned(banned) => Some(banned),
+                NetEvent::Banned(banned) => Some(banned.peer),
                 _ => None,
             }),
             peer

@@ -2217,6 +2217,25 @@ impl Chain {
 
     #[document(
         parent = "Chain",
+        summary = "Whether a block whose parent this chain lacks is worth holding until the parent comes: what can be checked without it holds. It is no block the chain has or knows to be bad, nor a bad block's child; it sits above finality and at most depth heights past the tip; and its transaction, proof and pool roots are its own.",
+        params = { depth = "How many heights past the tip it may be." },
+    )]
+    pub fn fits_ahead(&self, block: &Block, depth: u64) -> bool {
+        let id = block.id();
+        let height = block.header.height;
+
+        !self.bad.contains(&id)
+            && !self.bad.contains(&block.header.parent)
+            && matches!(self.block(&id), Ok(None))
+            && self.finalized_height().is_none_or(|finalized| height > finalized)
+            && height <= self.tip().height.saturating_add(depth)
+            && block.header.tx_root == Block::tx_root(self.hash, &block.txs)
+            && block.header.proof_root == Block::proof_root(self.hash, &block.proofs)
+            && block.header.pool_root == Block::pool_root(self.hash, block.pool.as_ref())
+    }
+
+    #[document(
+        parent = "Chain",
         summary = "Checks a block against its parent and stores it. On the tip, it runs and becomes the new tip; on a side branch it waits, unless its branch now outweighs the main chain, which then reorganizes to follow it.",
         params = {
             block = "The block, from this node or a peer.",

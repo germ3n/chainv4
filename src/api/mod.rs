@@ -828,6 +828,7 @@ fn router(api: Api) -> Router {
         .route("/rich", get(rich))
 
         .route("/node", get(node))
+        .route("/node/unban", post(unban))
         .route("/mempool", get(mempool))
         .route("/offer", post(offer))
         .route("/call", post(call));
@@ -953,6 +954,8 @@ enum ApiError {
     Conflict(String),
     /// The node cannot take transactions right now.
     Unavailable(String),
+    /// Only the node's operator may: from this machine, or with --report-token.
+    Forbidden(String),
     Db(DbError),
 }
 
@@ -970,6 +973,7 @@ impl IntoResponse for ApiError {
             ApiError::TooMany(message) => (StatusCode::TOO_MANY_REQUESTS, message),
             ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
             ApiError::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message),
+            ApiError::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             ApiError::Db(err) => {
                 log::error!("[http] {err}");
 
@@ -2129,6 +2133,34 @@ async fn node(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAdd
     answer["token_refused"] = refused.into();
 
     Ok(Json(answer))
+}
+
+/// Lifts bans, the operator's alone: {"all": true}, {"peer": "12D3…"} or {"ip": "203.0.113.7"}. The
+/// node lets them go from its database and the network lifts them now.
+async fn unban(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Answer {
+    if api.shared_with(peer, &headers).0 != sharing::Sharing::EVERYTHING {
+        return Err(ApiError::Forbidden("only the node's operator lifts bans: from this machine, or with --report-token".to_string()));
+    }
+
+    let which = unban_of(&json_body(&body)?)?;
+    let Some(node) = &api.node else {
+        return Err(ApiError::Unavailable("this API has no node behind it".to_string()));
+    };
+    let lifted = node.unban(which).await.map_err(|err| ApiError::Unavailable(err.to_string()))?;
+
+    Ok(Json(json!({ "lifted": lifted })))
+}
+
+/// Which bans a POST /node/unban names: all, one peer's or one IP's.
+fn unban_of(body: &Value) -> Result<crate::net::Unban, ApiError> {
+    use crate::net::Unban;
+
+    match (body.get("all").and_then(Value::as_bool), body.get("peer").and_then(Value::as_str), body.get("ip").and_then(Value::as_str)) {
+        (Some(true), None, None) => Ok(Unban::All),
+        (None, Some(peer), None) => peer.trim().parse().map(Unban::Peer).map_err(|_| ApiError::BadRequest(format!("{peer} is not a peer id"))),
+        (None, None, Some(ip)) => ip.trim().parse().map(Unban::Ip).map_err(|_| ApiError::BadRequest(format!("{ip} is not an IP address"))),
+        _ => Err(ApiError::BadRequest(r#"give one of {"all": true}, {"peer": "12D3…"} or {"ip": "203.0.113.7"}"#.to_string())),
+    }
 }
 
 /// The transactions waiting in the node's mempool, by sender and nonce.

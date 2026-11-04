@@ -11,7 +11,7 @@ use {
     super::snapshot::SnapshotSync,
     super::{Node, NodeError},
     crate::chain::{FinalityError, ImportError},
-    crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, SyncRequest, SyncResponse},
+    crate::net::{MAX_SYNC_BLOCKS, MAX_SYNC_JUSTIFICATIONS, NetCommand, SyncRequest, SyncResponse, Verdict},
     crate::structs::block::Block,
     crate::structs::u256::u256,
     libp2p::PeerId,
@@ -189,6 +189,11 @@ impl Node {
                 Err(err) => {
                     log::warn!("[node] {peer} sent block {} that does not fit: {err}", block.header.height);
                     self.sync.peers.remove(&peer);
+
+                    // One that breaks the rules counts against it, as the same block gossiped would.
+                    if let Verdict::Reject(fault) = super::block_verdict(&Err(err)) {
+                        self.judge(peer, None, Verdict::Reject(fault));
+                    }
 
                     return Ok(());
                 }

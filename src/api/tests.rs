@@ -106,6 +106,10 @@ fn fake_node_holding(limits: BacklogLimits, waiting: Option<Vec<SignedTx>>) -> N
                     };
                     let _ = reply.send(verdict);
                 }
+                // Lifts as many as asked for: all two it holds, or one.
+                NetEvent::Unban { which, reply } => {
+                    let _ = reply.send(if which == crate::net::Unban::All { 2 } else { 1 });
+                }
                 NetEvent::Report { txs, reply } => {
                     let mut report = fake_report(txs);
 
@@ -1229,7 +1233,7 @@ fn the_node_tells_how_it_is_doing_and_what_waits() {
     assert_eq!(node["peers"][0]["heard"], json!({ "blocks": 3, "txs": 4, "votes": 0 }));
     assert_eq!(node["peers"][0]["chain"], json!({ "height": 5, "work": "5", "justified": 0 }));
     assert_eq!((node["peers"][0]["dropped"].clone(), node["counters"]["gossip_dropped"].clone()), (json!(7), json!(7)));
-    assert_eq!(node["backlog"], json!({ "waiting": 12, "total": 10_000, "per_peer": 1_000, "strikes": 10, "strike_window_ms": 60_000 }));
+    assert_eq!(node["backlog"], json!({ "waiting": 12, "total": 10_000, "per_peer": 1_000, "per_ip": 4_000, "requests": 10, "request_burst": 50, "strikes": 10, "strike_window_ms": 60_000 }));
     assert_eq!((node["limits"]["ban.score"].clone(), node["limits"]["sync.headers"].clone(), node["limits"]["net.max-peers-in"].clone()), (json!(100), json!(1_024), Value::Null), "every knob, at its default here");
     assert_eq!(node["limits"].as_object().unwrap().len(), crate::node::tuning::KNOBS.len());
     assert_eq!(node["syncing"], Value::Null);
@@ -1804,6 +1808,34 @@ fn node_as(address: SocketAddr, headers: &str) -> Value {
     assert_eq!(status, 200);
 
     serde_json::from_slice(&body).unwrap()
+}
+
+#[test]
+fn only_the_operator_lifts_bans() {
+    let address = sharing_node(super::sharing::Sharing::default());
+    let post = |body: &str, headers: &str| {
+        let headers = format!("{headers}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        // raw ends the headers with a blank line of its own, after the body: past its length, unread.
+        let (status, _, answer) = raw(address, "POST", "/node/unban", &headers);
+        (status, serde_json::from_slice::<Value>(&answer).unwrap_or(Value::Null))
+    };
+
+    // From afar, without the token: refused, whatever it names.
+    let (status, answer) = post(r#"{"all": true}"#, FROM_AFAR);
+    assert_eq!(status, 403);
+    assert!(answer["error"].as_str().unwrap().contains("operator"));
+
+    // With the token, or from this machine: lifted.
+    assert_eq!(post(r#"{"all": true}"#, &format!("{FROM_AFAR}Authorization: Bearer {REPORT_TOKEN}\r\n")), (200, json!({ "lifted": 2 })));
+    let peer = libp2p::PeerId::random();
+    assert_eq!(post(&format!(r#"{{"peer": "{peer}"}}"#), ""), (200, json!({ "lifted": 1 })));
+    assert_eq!(post(r#"{"ip": "203.0.113.7"}"#, ""), (200, json!({ "lifted": 1 })));
+
+    // What it names must read, and be one thing.
+    assert_eq!(post(r#"{"peer": "nobody"}"#, "").0, 400);
+    assert_eq!(post(r#"{"ip": "300.1.1.1"}"#, "").0, 400);
+    assert_eq!(post(r#"{"all": true, "ip": "203.0.113.7"}"#, "").0, 400);
+    assert_eq!(post(r#"{}"#, "").0, 400);
 }
 
 #[test]

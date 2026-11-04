@@ -28,7 +28,7 @@ mod swarm;
 pub mod tor;
 
 pub use backlog::{Admission, Backlog, BacklogLimits, MAX_STRIKES, Origin, STRIKE_WINDOW};
-pub use bans::{BAN_SCORE, BanLimits, Bans, DEFAULT_BAN, Fault, SCORE_WINDOW, Verdict};
+pub use bans::{BAN_SCORE, Ban, BanLimits, Bans, DEFAULT_BAN, Fault, SCORE_WINDOW, Unban, Verdict};
 pub use key::{NET_KEY_FILE, net_key};
 
 pub use swarm::{BOOTSTRAP_EVERY, DIALS_AT_ONCE, NetError, REDIAL_EVERY, RETRY_PEER_AFTER, TX_BATCH, TX_BATCH_WAIT, spawn};
@@ -84,8 +84,8 @@ pub enum NetEvent {
     Vote { from: PeerId, vote: SignedVote, gossip: Option<Gossip> },
     #[document(summary = "Where a peer says it can be reached, as identify tells it: what the node remembers it by, for its next start.")]
     Addresses { peer: PeerId, addresses: Vec<Multiaddr> },
-    #[document(summary = "A peer was banned: for its faults, or as it connected from a banned IP. The node forgets it.")]
-    Banned(PeerId),
+    #[document(summary = "A peer was banned for its faults, as Ban says: the node forgets it, and keeps the ban until it ends.")]
+    Banned(Ban),
     #[document(summary = "A peer connected, from or at this address.")]
     PeerUp { peer: PeerId, address: Multiaddr },
     #[document(summary = "A peer's last connection closed.")]
@@ -107,6 +107,11 @@ pub enum NetEvent {
     },
     #[document(summary = "The network listens here now. The address ends in /p2p/ and this node's peer id.")]
     Listening(Multiaddr),
+    #[document(summary = "The operator asked the node to lift bans. The node forgets them, has the network lift them, and answers on reply how many it lifted.")]
+    Unban {
+        which: Unban,
+        reply: oneshot::Sender<usize>,
+    },
     #[document(summary = "A client of this node asked how it is doing, with up to txs of the transactions waiting. The node answers on reply.")]
     Report {
         txs: usize,
@@ -141,6 +146,8 @@ pub enum NetCommand {
     Respond { id: u64, response: SyncResponse },
     #[document(summary = "What the node made of a peer's gossip: passed on to the other peers, dropped, or dropped and counted against the peer, which may ban it.")]
     Judge { peer: PeerId, gossip: Option<Gossip>, verdict: Verdict },
+    #[document(summary = "Lift these bans now.")]
+    Unban(Unban),
 }
 
 #[document(
@@ -288,7 +295,7 @@ pub struct NetConfig {
     pub network: String,
     #[document(summary = "The name every protocol and topic starts with: chainv4 unless --protocol gives another, so chains built from this code can keep apart even on the same genesis. A peer whose name or network differs is disconnected once identify says so.")]
     pub protocol: String,
-    #[document(summary = "How much gossip may wait for the node, in all and from any one peer.")]
+    #[document(summary = "How much gossip and how many sync requests may wait for the node, in all, from any one peer and from any one IP, and how fast a peer may ask.")]
     pub backlog: BacklogLimits,
     #[document(summary = "The node's network key, which its peer id is of, from net_key: the same each start. None takes a new one, as tests do.")]
     pub key: Option<libp2p::identity::Keypair>,
@@ -296,6 +303,8 @@ pub struct NetConfig {
     pub remembered: Vec<Multiaddr>,
     #[document(summary = "How long a ban lasts, and whether it covers the IP.")]
     pub bans: BanLimits,
+    #[document(summary = "The bans the node kept from before, from its database: those not ended yet hold for what they have left.")]
+    pub banned: Vec<Ban>,
     #[document(summary = "Peer-to-peer over Tor: the proxy onions are dialed through, Tor alone, and the node's onion.")]
     pub tor: tor::TorConfig,
     #[document(summary = "How many peers may dial in, and how gossip is batched and peers dialed: NetTuning::DEFAULT unless --max-peers-in or --tune say otherwise.")]

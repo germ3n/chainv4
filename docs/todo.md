@@ -777,21 +777,24 @@ with.
   batch does not connect, the chains split earlier, so it steps a batch further back.
 - [ ] **Sync uses one peer at a time.** Batches are fetched one after another from a single peer;
   downloading from several peers at once would be faster for long catch-ups.
-- [ ] **Blocks gossiped ahead of the tip are dropped.** They only tell the node a peer is ahead;
-  sync fetches them again. Keeping a few would save the round trip.
+- [x] **Blocks gossiped ahead of the tip are held.** Done 2026-11-04. Up to 32 (`ahead.*`), 4 a peer,
+  16 MiB, 2 minutes, each checked as far as it can be without its parent and counted in its peer's
+  backlog share; they go in as soon as the parent lands. See [Sync](node.md#sync).
 - [x] **Gossip is checked before it is passed on.** gossipsub's `validate_messages`, each message
   reported back as the node judged it: accepted, ignored, or rejected as its sender's fault. See
   [Node](node.md#networking).
 - [x] **Faults are scored and peers banned.** Invalid blocks, bad signatures, undecodable gossip
   and floods add up per peer; past `BAN_SCORE` within `SCORE_WINDOW` the peer is banned for
   `--ban-for`, by id, and with `--ban-ips` by IP. See [Node](node.md#bans).
-- [ ] **Sync requests and bad sync batches pay no price.** A peer whose sync batch does not fit is
-  only forgotten; floods of sync requests are not scored. Bans live in memory, so a restart lifts
-  them.
-- [ ] **Backlog shares are per peer id.** One host with many ids gets many shares; limits per IP
-  address would close that.
-- [ ] **Blocks and sync requests are not counted in the backlog.** Gossiped blocks and requests
-  from syncing peers still queue without bound.
+- [x] **Sync requests and bad sync batches pay a price, and bans outlive a restart.** Done 2026-11-04.
+  A block breaking the rules in a sync batch counts against its peer as gossip would; sync requests
+  count in the backlog until answered, at `--sync-rate` past `--sync-burst`, struck past it. Bans are
+  kept in the database's `bans` column until they end; `--unban-all` and the operator's
+  `POST /node/unban` lift them. See [Bans](node.md#bans).
+- [x] **Backlog shares are per IP too.** Done 2026-11-04. The peers of one public IP share
+  `--max-gossip-per-ip`, four peers' shares; loopback (Tor) and private addresses keep one each.
+- [x] **Blocks and sync requests are counted in the backlog.** Gossiped blocks were already; sync
+  requests are since 2026-11-04, until answered.
 - [x] **The strike rules are fixed.** `--max-strikes` and `--strike-window` set them now, 10 within
   a minute unless given.
 - [x] **The node keeps its identity.** Its libp2p key is `net.key`, beside the database or where

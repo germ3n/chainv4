@@ -34,6 +34,7 @@ use {
 };
 
 mod gate;
+mod ahead;
 mod peers;
 #[cfg(feature = "pool")]
 mod push;
@@ -47,7 +48,8 @@ mod updates;
 mod verifier;
 
 pub use crate::mining::pool::MiningPort;
-pub use peers::{MAX_REMEMBERED, remembered};
+pub use ahead::AheadLimits;
+pub use peers::{MAX_REMEMBERED, kept_bans, lift_bans, remembered};
 pub use snapshot::PIVOT_DEPTH;
 pub use tuning::{Span, Tuning};
 pub use report::{Counters, Heard, NodeReport, PeerReport};
@@ -201,6 +203,11 @@ pub struct Node {
     sync_batch_bytes: u64,
     /// What it serves syncing peers at most, and the rest an operator tuned.
     tuning: NodeTuning,
+    /// Blocks gossiped ahead of the tip, held until their parent lands.
+    ahead: ahead::Ahead,
+    /// While it imports what was held for a block that landed, so those imports do not start
+    /// another round of their own.
+    connecting: bool,
     /// The releases it fetches, which may announce an upgrade of its chain.
     #[cfg(feature = "updates")]
     releases: Option<Arc<Releases>>,
@@ -423,6 +430,22 @@ impl NodeHandle {
 
     #[document(
         parent = "NodeHandle",
+        summary = "Lifts bans: in the database, so they stay lifted past a restart, and on the network now.",
+        params = { which = "All of them, one peer's or one IP's." },
+        returns = "How many peer ids and IPs the database let go, or Stopped when the node is not running.",
+    )]
+    pub async fn unban(&self, which: crate::net::Unban) -> Result<usize, SubmitError> {
+        let (reply, lifted) = oneshot::channel();
+
+        self.inbox
+            .send(NetEvent::Unban { which, reply })
+            .map_err(|_| SubmitError::Stopped)?;
+
+        lifted.await.map_err(|_| SubmitError::Stopped)
+    }
+
+    #[document(
+        parent = "NodeHandle",
         summary = "Asks the node how it is doing: its peers, what it heard and did, and its mempool.",
         params = { txs = "How many of the transactions waiting to include, first by sender and nonce." },
         returns = "The report, or Stopped when the node is not running.",
@@ -632,6 +655,8 @@ impl Node {
             max_build_ms: None,
             sync_batch_bytes: SYNC_BATCH_BYTES,
             tuning: NodeTuning::DEFAULT,
+            ahead: ahead::Ahead::new(AheadLimits::default()),
+            connecting: false,
             #[cfg(feature = "updates")]
             releases: None,
             decided_upgrade: None,
@@ -747,6 +772,17 @@ impl Node {
             remembered: tuning.remembered.max(1),
             snapshot_depth: tuning.snapshot_depth.max(1),
         };
+        self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Sets how many blocks gossiped ahead of the tip it holds for their parent: AheadLimits::default unless set, and none with blocks at 0.",
+        see_also = "AheadLimits",
+    )]
+    pub fn ahead(mut self, limits: AheadLimits) -> Node {
+        self.ahead = ahead::Ahead::new(limits);
+
         self
     }
 
@@ -954,6 +990,7 @@ impl Node {
 
         self.report_if_due(now);
         self.ask_status_if_due(now);
+        self.let_go_ahead();
         self.announce_bootnodes()?;
 
         Ok(())
@@ -1091,6 +1128,7 @@ impl Node {
         // Handled now, whatever comes of it, so it no longer counts against its peer.
         match &event {
             NetEvent::Block { from, .. } | NetEvent::Vote { from, .. } => self.backlog.release(Origin::Peer(*from)),
+            NetEvent::Request { peer, .. } => self.backlog.release(Origin::Peer(*peer)),
             NetEvent::PeerDown(peer) => self.backlog.forget(peer),
             _ => {}
         }
@@ -1120,8 +1158,10 @@ impl Node {
                     Err(ImportError::Db(err)) => return Err(NodeError::Db(err)),
                     Err(ImportError::Known) => {}
                     Err(ImportError::UnknownParent(_)) => {
-                        // Its status says how far it got and how much work that holds.
+                        // Its status says how far it got and how much work that holds; meanwhile
+                        // the block is held, in case its parent lands first.
                         log::debug!("[node] block {height} from {from} does not connect yet");
+                        self.hold_ahead(block, from);
                         self.send(NetCommand::Request {
                             peer: from,
                             request: SyncRequest::Status,
@@ -1134,9 +1174,16 @@ impl Node {
                 }
             }
             NetEvent::Addresses { peer, addresses } => peers::remember(self.chain.db().as_ref(), &peer, &addresses, now_ms(), self.tuning.remembered).map_err(NodeError::Db)?,
-            NetEvent::Banned(peer) => {
+            NetEvent::Banned(ban) => {
                 self.counters.peers_banned += 1;
-                peers::forget(self.chain.db().as_ref(), &peer).map_err(NodeError::Db)?;
+                peers::forget(self.chain.db().as_ref(), &ban.peer).map_err(NodeError::Db)?;
+                peers::keep_ban(self.chain.db().as_ref(), &ban).map_err(NodeError::Db)?;
+            }
+            NetEvent::Unban { which, reply } => {
+                let lifted = peers::lift_bans(self.chain.db().as_ref(), which).map_err(NodeError::Db)?;
+                self.send(NetCommand::Unban(which));
+                log::info!("[node] lifted {lifted} kept ban(s): {which:?}");
+                let _ = reply.send(lifted);
             }
             NetEvent::Sealed { block, seal } => self.sealed(block, seal, now)?,
             NetEvent::Vote { from, vote, gossip } => {
@@ -1398,9 +1445,87 @@ impl Node {
 
         // The main chain moved, so votes held back may count now.
         match self.chain.retry_votes() {
-            Ok(update) => self.finality_changed(update, "after an import"),
-            Err(FinalityError::Db(err)) => Err(NodeError::Db(err)),
-            Err(_) => Ok(()),
+            Ok(update) => self.finality_changed(update, "after an import")?,
+            Err(FinalityError::Db(err)) => return Err(NodeError::Db(err)),
+            Err(_) => {}
+        }
+
+        self.connect_ahead(block.id())
+    }
+
+    /// Holds a block gossiped ahead of the tip for its parent, if it fits: checked as far as it can
+    /// be without the parent, and counted in its peer's share of the backlog while it waits.
+    fn hold_ahead(&mut self, block: Block, from: PeerId) {
+        let limits = self.ahead.limits();
+
+        if limits.blocks == 0 || !self.chain.fits_ahead(&block, limits.depth) {
+            return;
+        }
+
+        if self.backlog.admit(Origin::Peer(from), Instant::now()) != Admission::Admitted {
+            return;
+        }
+
+        match self.ahead.hold(block, from, Instant::now()) {
+            ahead::Holding::Held => {}
+            ahead::Holding::Already | ahead::Holding::Full => self.backlog.release(Origin::Peer(from)),
+        }
+    }
+
+    /// Imports the blocks held for one that just landed, and theirs after them, each counted out
+    /// of its peer's share; one that breaks the rules counts against its peer as gossip does.
+    fn connect_ahead(&mut self, parent: Hash) -> Result<(), NodeError> {
+        if self.connecting || self.ahead.len() == 0 {
+            return Ok(());
+        }
+
+        self.connecting = true;
+        let mut parents = vec![parent];
+        let mut result = Ok(());
+
+        while let Some(parent) = parents.pop() {
+            for (block, from) in self.ahead.children(&parent) {
+                self.backlog.release(Origin::Peer(from));
+                let imported = self.chain.import(&block, now_ms());
+
+                if let Verdict::Reject(fault) = block_verdict(&imported) {
+                    self.judge(from, None, Verdict::Reject(fault));
+                }
+
+                match imported {
+                    Ok(imported) => {
+                        if let Err(err) = self.imported(&block, imported, &format!("from {from}, held until its parent landed")) {
+                            result = Err(err);
+                            break;
+                        }
+                        parents.push(block.id());
+                    }
+                    Err(ImportError::Db(err)) => {
+                        result = Err(NodeError::Db(err));
+                        break;
+                    }
+                    Err(err) => log::debug!("[node] block {} held from {from} did not go in: {err}", block.header.height),
+                }
+            }
+
+            if result.is_err() {
+                break;
+            }
+        }
+
+        self.connecting = false;
+
+        result
+    }
+
+    /// Lets go of the blocks held too long, or that finality left behind.
+    fn let_go_ahead(&mut self) {
+        if self.ahead.len() == 0 {
+            return;
+        }
+
+        for from in self.ahead.let_go(Instant::now(), self.chain.finalized_height().unwrap_or(0)) {
+            self.backlog.release(Origin::Peer(from));
         }
     }
 

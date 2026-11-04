@@ -75,6 +75,14 @@ pub const KNOBS: &[Knob] = &[
     flagged(ms("ban.window", "10m", SECOND, 7 * DAY), "--ban-window"),
     flagged(count("backlog.strikes", "10", 1, 10_000), "--max-strikes"),
     flagged(ms("backlog.strike-window", "60s", SECOND, DAY), "--strike-window"),
+    flagged(count("backlog.per-ip", "4000", 1, 10_000_000), "--max-gossip-per-ip"),
+    flagged(count("requests.rate", "10", 1, 100_000), "--sync-rate"),
+    flagged(count("requests.burst", "50", 1, 100_000), "--sync-burst"),
+    // Blocks gossiped ahead of the tip, held until their parent lands.
+    count("ahead.blocks", "32", 0, 1_024),
+    count("ahead.per-peer", "4", 1, 256),
+    ms("ahead.for", "2m", SECOND, HOUR),
+    count("ahead.depth", "64", 1, 10_000),
     flagged(ms("tor.timeout", "90s", 5 * SECOND, 10 * MINUTE), "--tor-timeout"),
     // What the node serves syncing peers at most: never more than peers ask for.
     count("sync.blocks", "128", 1, crate::net::MAX_SYNC_BLOCKS as u64),
@@ -337,14 +345,23 @@ impl Tuning {
         crate::net::BanLimits { ban_for, ips, score: u32::try_from(self.get("ban.score")).unwrap_or(u32::MAX), window: self.time("ban.window") }
     }
 
-    #[document(parent = "Tuning", summary = "The gossip backlog's strike rules, beside its sizes, which have flags of their own already.")]
+    #[document(parent = "Tuning", summary = "The gossip backlog's cap per IP, sync requests' rate and its strike rules, beside its sizes, which have flags of their own already.")]
     pub fn backlog(&self, total: usize, per_peer: usize) -> crate::net::BacklogLimits {
         crate::net::BacklogLimits {
             total,
             per_peer,
+            // Never below one peer's share: a lone peer at an IP keeps all of it.
+            per_ip: self.count("backlog.per-ip").max(per_peer),
+            requests: u32::try_from(self.get("requests.rate")).unwrap_or(u32::MAX),
+            request_burst: u32::try_from(self.get("requests.burst")).unwrap_or(u32::MAX),
             strikes: u32::try_from(self.get("backlog.strikes")).unwrap_or(u32::MAX),
             strike_window: self.time("backlog.strike-window"),
         }
+    }
+
+    #[document(parent = "Tuning", summary = "How many blocks gossiped ahead of the tip the node holds for their parent: in all, from one peer, for how long, and how far past its tip.")]
+    pub fn ahead(&self) -> super::AheadLimits {
+        super::AheadLimits { blocks: self.count("ahead.blocks"), per_peer: self.count("ahead.per-peer"), keep: self.time("ahead.for"), depth: self.get("ahead.depth") }
     }
 
     #[document(parent = "Tuning", summary = "How long a dial through Tor may take.")]

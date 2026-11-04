@@ -502,7 +502,7 @@ impl Chain {
 
     /// The height no block may be added at or below, and no reorg may reach: the finalized
     /// checkpoint's.
-    pub(super) fn finalized_height(&self) -> Option<u64> {
+    pub(crate) fn finalized_height(&self) -> Option<u64> {
         let finality = self.finality.as_ref()?;
 
         Some(finality.height_of(&finality.finalized()))

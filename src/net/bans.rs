@@ -7,7 +7,9 @@
 //!
 //! A ban disconnects the peer and refuses its connections until it ends: by its peer id, and with
 //! --ban-ips by its IP too, which also catches a new peer id from the same machine but can catch
-//! nodes behind the same NAT. Bans live in memory: a restart lifts them.
+//! nodes behind the same NAT. The node keeps each ban in its database, with when it ends on the
+//! wall clock, and restores the live ones as it starts, so a restart lifts none: --unban-all does,
+//! and so does the operator's POST /node/unban.
 
 use {
     libp2p::PeerId,
@@ -51,6 +53,32 @@ impl Default for BanLimits {
     fn default() -> BanLimits {
         BanLimits { ban_for: DEFAULT_BAN, ips: false, score: BAN_SCORE, window: SCORE_WINDOW }
     }
+}
+
+#[document(
+    summary = "A ban as the node keeps it between starts: the peer, the IP it covers too when bans cover IPs, and when it ends, in milliseconds since 1970.",
+    category = "Node",
+    see_also = "Bans::restore, Bans::record",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ban {
+    #[document(summary = "The peer banned.")]
+    pub peer: PeerId,
+    #[document(summary = "Its IP, banned with it under --ban-ips.")]
+    pub ip: Option<IpAddr>,
+    #[document(summary = "When it ends, in milliseconds since 1970.")]
+    pub until_ms: u64,
+}
+
+#[document(summary = "Which bans to lift.", category = "Node", see_also = "Bans::lift")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unban {
+    #[document(summary = "Every ban, by peer id and by IP.")]
+    All,
+    #[document(summary = "One peer's, by its id.")]
+    Peer(PeerId),
+    #[document(summary = "One IP's.")]
+    Ip(IpAddr),
 }
 
 #[document(summary = "Something a peer sent that breaks the rules, which counts against it.", category = "Node", see_also = "Bans, Verdict")]
@@ -161,6 +189,53 @@ impl Bans {
         }
     }
 
+    #[document(
+        parent = "Bans",
+        summary = "A ban just made, as the node keeps it: the IP only when bans cover IPs, ending BanLimits::ban_for from now on the wall clock.",
+        params = { now_ms = "The time on the wall clock, in milliseconds since 1970." },
+    )]
+    pub fn record(&self, peer: PeerId, ip: Option<IpAddr>, now_ms: u64) -> Ban {
+        Ban { peer, ip: ip.filter(|_| self.limits.ips), until_ms: now_ms.saturating_add(self.limits.ban_for.as_millis() as u64) }
+    }
+
+    #[document(
+        parent = "Bans",
+        summary = "Takes back the bans the node kept from before, those not ended yet, for as long as each has left: a ban that ends later than one in force for the same peer or IP wins.",
+        params = { now = "The time now, as the bans count it.", now_ms = "The same time on the wall clock, in milliseconds since 1970." },
+    )]
+    pub fn restore(&mut self, kept: &[Ban], now: Instant, now_ms: u64) {
+        for ban in kept.iter().filter(|ban| ban.until_ms > now_ms) {
+            let until = now + Duration::from_millis(ban.until_ms - now_ms);
+            let later = |held: &mut Instant| *held = (*held).max(until);
+
+            self.peers.entry(ban.peer).and_modify(later).or_insert(until);
+
+            if let Some(ip) = ban.ip {
+                self.ips.entry(ip).and_modify(later).or_insert(until);
+            }
+        }
+    }
+
+    #[document(parent = "Bans", summary = "Lifts bans now, and the faults counted against a peer lifted: how many peer ids and IPs it lifted.")]
+    pub fn lift(&mut self, which: Unban) -> usize {
+        match which {
+            Unban::All => {
+                let lifted = self.peers.len() + self.ips.len();
+                self.peers.clear();
+                self.ips.clear();
+                self.scores.clear();
+
+                lifted
+            }
+            Unban::Peer(peer) => {
+                self.scores.remove(&peer);
+
+                usize::from(self.peers.remove(&peer).is_some())
+            }
+            Unban::Ip(ip) => usize::from(self.ips.remove(&ip).is_some()),
+        }
+    }
+
     #[document(parent = "Bans", summary = "Whether a peer, or the IP it connects from, is banned now.")]
     pub fn banned(&self, peer: &PeerId, ip: Option<IpAddr>, now: Instant) -> bool {
         let live = |until: Option<&Instant>| until.is_some_and(|until| *until > now);
@@ -261,5 +336,49 @@ mod tests {
         for n in 0..8 {
             assert!(!bans.fault(other, None, Fault::Block, now + Duration::from_secs(61 * n)));
         }
+    }
+
+    #[test]
+    fn a_ban_kept_from_before_holds_for_what_it_had_left_and_one_ended_does_not() {
+        let limits = BanLimits { ips: true, ban_for: Duration::from_secs(3_600), ..BanLimits::default() };
+        let (peer, ended, other) = (PeerId::random(), PeerId::random(), PeerId::random());
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let now_ms = 1_800_000_000_000;
+
+        // Recorded as it is made: the IP only when bans cover IPs.
+        let made = Bans::new(limits).record(peer, Some(ip), now_ms);
+        assert_eq!(made, Ban { peer, ip: Some(ip), until_ms: now_ms + 3_600_000 });
+        assert_eq!(Bans::new(BanLimits::default()).record(peer, Some(ip), now_ms).ip, None);
+
+        // A restart half an hour on: the ban holds for the half hour it has left, its IP too.
+        let mut bans = Bans::new(limits);
+        let now = Instant::now();
+        let later_ms = now_ms + 1_800_000;
+        bans.restore(&[made, Ban { peer: ended, ip: None, until_ms: now_ms }], now, later_ms);
+
+        assert!(bans.banned(&peer, None, now));
+        assert!(bans.banned(&other, Some(ip), now), "its IP, under --ban-ips");
+        assert!(!bans.banned(&ended, None, now), "one that ended stays ended");
+        assert!(bans.banned(&peer, None, now + Duration::from_secs(1_799)));
+        assert!(!bans.banned(&peer, None, now + Duration::from_secs(1_801)));
+    }
+
+    #[test]
+    fn bans_are_lifted_one_by_one_or_all_at_once() {
+        let mut bans = Bans::new(BanLimits { ips: true, ..BanLimits::default() });
+        let (one, two) = (PeerId::random(), PeerId::random());
+        let ip: IpAddr = "198.51.100.4".parse().unwrap();
+        let now = Instant::now();
+        bans.ban(one, Some(ip), now);
+        bans.ban(two, None, now);
+
+        assert_eq!(bans.lift(Unban::Peer(one)), 1);
+        assert!(!bans.banned(&one, None, now));
+        assert!(bans.banned(&one, Some(ip), now), "its IP stands until lifted too");
+        assert_eq!(bans.lift(Unban::Ip(ip)), 1);
+        assert!(!bans.banned(&one, Some(ip), now));
+        assert_eq!(bans.lift(Unban::Peer(one)), 0, "nothing left to lift");
+        assert_eq!(bans.lift(Unban::All), 1);
+        assert_eq!(bans.counts(now).0, 0);
     }
 }

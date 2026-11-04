@@ -136,6 +136,18 @@ struct NodeArgs {
     /// The window --max-strikes are counted in, 1s to 1d.
     #[arg(long, default_value = tuning::default_text("backlog.strike-window"), value_parser = tuning::flag("backlog.strike-window"))]
     strike_window: u64,
+    /// The most that the peers of one public IP may have waiting together, so one host with many
+    /// peer ids gets no more than a few shares. Loopback, as every peer over Tor is, and private
+    /// addresses keep each peer to its own share alone. Never below --max-gossip-per-peer.
+    #[arg(long, default_value = tuning::default_text("backlog.per-ip"), value_parser = tuning::flag("backlog.per-ip"))]
+    max_gossip_per_ip: u64,
+    /// Sync requests a second a peer may make, past --sync-burst: more go unanswered, and a peer
+    /// that keeps at it is struck and disconnected as a flood is.
+    #[arg(long, default_value = tuning::default_text("requests.rate"), value_parser = tuning::flag("requests.rate"))]
+    sync_rate: u64,
+    /// Sync requests a peer may make at once before --sync-rate holds it back.
+    #[arg(long, default_value = tuning::default_text("requests.burst"), value_parser = tuning::flag("requests.burst"))]
+    sync_burst: u64,
     /// The node's network key file, which its peer id is of, so the id is the same each start:
     /// made at the first start, readable by its owner alone. net.key beside --db unless given.
     #[arg(long)]
@@ -157,6 +169,10 @@ struct NodeArgs {
     /// It can catch honest nodes behind the same NAT or VPN.
     #[arg(long)]
     ban_ips: bool,
+    /// Lift every ban this node kept from before, by peer id and by IP, as it starts. Bans are kept
+    /// in the database until they end, so a restart alone lifts none.
+    #[arg(long)]
+    unban_all: bool,
     /// Tor's SOCKS5 proxy, socks5h://host:port: /onion3 peers and bootnodes are dialed through it,
     /// everything else directly. Listen on TCP too (--listen /ip4/0.0.0.0/tcp/4001) for tor to
     /// publish as the node's onion.
@@ -587,6 +603,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Everything tuned past the plain flags, which each part of the node takes its piece of.
     let mut tuned = chainv4::node::Tuning::new().with(&args.tune);
     tuned.set("ban.score", args.ban_score).set("ban.window", args.ban_window).set("backlog.strikes", args.max_strikes).set("backlog.strike-window", args.strike_window).set("tor.timeout", args.tor_timeout);
+    tuned.set("backlog.per-ip", args.max_gossip_per_ip).set("requests.rate", args.sync_rate).set("requests.burst", args.sync_burst);
     tuned.set("lua.states", args.lua_states).set("lua.builders", args.lua_builders).set("wasm.cache-mb", args.wasm_cache_mb).set("wasm.cache-modules", args.wasm_cache_modules);
 
     if let Some(most) = args.max_peers_in {
@@ -660,6 +677,18 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--tor-only listens on TCP alone, for tor to publish: give --listen /ip4/127.0.0.1/tcp/4001".into());
     }
 
+    // The bans kept from before hold for what they have left, unless lifted as the node starts.
+    if args.unban_all {
+        let lifted = chainv4::node::lift_bans(db.as_ref(), net::Unban::All)?;
+        log::info!("lifted {lifted} kept ban(s), as --unban-all says");
+    }
+
+    let banned = chainv4::node::kept_bans(db.as_ref(), chainv4::node::now_ms())?;
+
+    if !banned.is_empty() {
+        log::info!("{} ban(s) kept from before hold until they end: --unban-all lifts them", banned.len());
+    }
+
     let net = net::spawn(NetConfig {
         listen: args.listen,
         peers: args.peer,
@@ -673,6 +702,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         key: Some(net::net_key(&net_key)?),
         remembered: chainv4::node::remembered(db.as_ref())?,
         bans: tuned.bans(std::time::Duration::from_millis(args.ban_for), args.ban_ips),
+        banned,
         tor: net::tor::TorConfig {
             proxy: args.tor_proxy.clone(),
             only: args.tor_only,
@@ -806,7 +836,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             underpriced_blocks: underpriced as u32,
         })
         .sync_batch_bytes(args.sync_batch_bytes)
-        .tuning(tuned.node());
+        .tuning(tuned.node())
+        .ahead(tuned.ahead());
 
     #[cfg(feature = "updates")]
     {

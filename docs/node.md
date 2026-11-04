@@ -481,10 +481,21 @@ vote 10. At `--ban-score`, 100 unless given (`BAN_SCORE`: two invalid blocks, or
 signatures), the peer is banned:
 - **Cut off:** disconnected, forgotten in Kademlia and in the remembered peers, and never dialed.
 - **Refused:** a connection from it, whoever dialed, is closed as soon as it stands.
-- **For `--ban-for`,** an hour unless given (`30m`, `2d`); bans live in memory, so a restart lifts
-  them.
+- **For `--ban-for`,** an hour unless given (`30m`, `2d`).
 - **By peer id,** and with `--ban-ips` by its IP too, which also refuses a new id from the same
   machine, but also any honest node behind the same NAT or VPN.
+- **Kept until it ends:** each ban goes into the database's `bans` column, with its IP under
+  `--ban-ips` and when it ends on the wall clock, and the node restores the live ones as it starts,
+  for what each has left. A restart lifts none.
+- **Lifted by the operator:** `--unban-all` lifts every kept ban as the node starts, and
+  `POST /node/unban` with `{"all": true}`, `{"peer": "12D3…"}` or `{"ip": "203.0.113.7"}` lifts
+  them on a running node, in the database and on the network at once. It answers only the
+  operator: a request from this machine, or one bearing `--report-token`, as `GET /node`'s
+  everything does.
+
+What breaks the rules counts the same whichever way it came: a block that breaks the chain's
+rules in a sync batch counts as the same block gossiped would, beside the peer being forgotten as
+a source.
 
 `GET /node`'s counters show `gossip_rejected` and `peers_banned`.
 
@@ -542,14 +553,25 @@ is forgotten.
 
 ## The gossip backlog
 
-Gossiped blocks, transactions and votes, and transactions clients submit, wait between the network
-and the node loop: in the verifier's queue, then the loop's. The backlog (`src/net/backlog.rs`)
-counts them, so a flood is turned away at the door instead of queueing without end.
-- **Counted in:** the network thread counts a block, transaction or vote in as it arrives, before it
-  is even decoded. A `NodeHandle` counts a submission in.
+Gossiped blocks, transactions and votes, peers' sync requests, and transactions clients submit,
+wait between the network and the node loop: in the verifier's queue, then the loop's. The backlog
+(`src/net/backlog.rs`) counts them, so a flood is turned away at the door instead of queueing
+without end.
+- **Counted in:** the network thread counts a block, transaction, vote or sync request in as it
+  arrives, before it is even decoded, against its peer's share and its IP's. A `NodeHandle` counts
+  a submission in.
 - **Counted out:** the gate counts a transaction out once it handled it, taken or refused, and the
-  loop counts a block or vote out once it has judged it. A block counting in bounds a peer that
-  streams blocks whose parent the node lacks: each would otherwise be decoded and queued for free.
+  loop counts a block or vote out once it has judged it, and a sync request once it has answered.
+  A block counting in bounds a peer that streams blocks whose parent the node lacks: each would
+  otherwise be decoded and queued for free. One held for its parent (see [Sync](#sync)) counts
+  again while it waits.
+- **Per IP:** the peers of one public IP share a cap, `--max-gossip-per-ip`, four peers' shares by
+  default, so ids being free gets one host no more than that. Loopback, which every peer over Tor
+  comes from, and private, link-local and shared (`100.64/10`) addresses have no such cap: each
+  peer there keeps its own share alone, so a node behind a home NAT or in a container network is
+  not squeezed with its neighbours.
+- **Sync requests at a rate:** each peer may ask `--sync-rate` requests a second past a burst of
+  `--sync-burst`. One past it goes unanswered, and the peer waits out its 30-second timeout.
 
 **The limits:**
 
@@ -559,14 +581,16 @@ counts them, so a flood is turned away at the door instead of queueing without e
 | `--max-block-txs N` | none | The transactions in each block this node produces; without it, blocks fill to the chain's bytes and gas limits. |
 | `--max-build-ms N` | none | How long this node runs transactions for each block it produces; what ran by then is sealed, the rest wait. |
 | `--max-gossip-per-peer N` | 1,000 | What any one peer's may be. |
+| `--max-gossip-per-ip N` | 4,000 | What the peers of one public IP may have together; never below `--max-gossip-per-peer`. |
+| `--sync-rate N`, `--sync-burst N` | 10, 50 | Sync requests a second each peer may make, past a burst of so many at once. |
 | `--mempool-size N`, `--mempool-per-sender N` | 50,000, 64 | What waits once admitted: see [the mempool](#the-mempool). |
 
 **Over a limit:**
 - **Gossip is dropped.** It is best effort: honest peers gossip it again, and the transaction is
   still out there.
-- **A peer over its own share is struck.** `--max-strikes` (10) strikes within `--strike-window`
-  (a minute) and the network disconnects it. A full backlog strikes nobody, since no one peer
-  filled it.
+- **A peer over its own share, its IP's, or its rate of sync requests is struck.** `--max-strikes`
+  (10) strikes within `--strike-window` (a minute) and the network disconnects it, counting a flood
+  against it toward a ban. A full backlog strikes nobody, since no one peer filled it.
 - **Submissions are refused:** `POST /txs` answers 503, "the node is busy; try again shortly".
 
 `GET /node` shows what waits (`backlog`), what was dropped in all and from each peer, and how many
@@ -574,13 +598,11 @@ peers were disconnected for it. The explorer's Network page shows them too.
 
 **Hardening still to do.** The backlog bounds memory and the loop's work, and bans keep out a
 peer that floods or sends what breaks the rules, but a determined peer still has ways around it:
-- **Shares are per peer id.** Ids are free, so one host with many ids gets many shares.
-  `--max-peers-in` caps the connections dialing in altogether; a limit per IP address would close
-  the rest.
+- **Many hosts are many shares.** The cap per IP bounds one host, and `--max-peers-in` the
+  connections dialing in altogether, but peers over Tor, all from loopback, or from many addresses,
+  each keep a share of their own.
 - **gossipsub's own peer scoring is off.** The node's verdicts feed the bans above; gossipsub's
   mesh scoring, which could build on the same verdicts, is not configured.
-- **Blocks and sync requests are not counted.** Only transactions and votes are; gossiped blocks
-  and requests from syncing peers still queue without bound.
 - **The API's per-client limits are opt in past concurrency.** `--http-per-ip` bounds what one
   client has in flight and `--http-rate` what it asks a second, but submissions still share the
   backlog's total, so many clients can keep others out, if not the node.
@@ -597,6 +619,14 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
    - its latest justified epoch.
 
    A peer on another chain is never asked for anything again.
+
+   A block gossiped ahead of the tip, whose parent the node lacks, is held meanwhile rather than
+   dropped, if it holds as far as it can be checked without its parent: its transaction, proof and
+   pool roots, no block known or known to be bad, above finality, and at most `ahead.depth` (64)
+   heights past the tip. Up to `ahead.blocks` (32) are held, `ahead.per-peer` (4) from any one peer
+   and 16 MiB in all, for `ahead.for` (2 minutes), each counted in its peer's share of the backlog
+   while it waits. When the parent lands, by gossip or sync, those held for it go in at once, and
+   theirs after them, with no round trip to fetch them again. `--tune ahead.blocks=0` holds none.
 2. **Blocks.** While some peer holds more work, the node asks the heaviest for the next blocks.
    With nobody heavier, it asks a peer ahead of it on justification for its blocks, until it has
    them all: a node that mined a heavier branch on its own while cut off from the validators

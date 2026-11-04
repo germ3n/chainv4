@@ -1114,6 +1114,16 @@ voting finality it now goes back to the checkpoint and follows the node from the
   gateway. The sign and relay passes say why, and `send` refuses such a chain up front.
 - **A signer relaying pays gas with `--evm-key`:** under `watch` too, so fund it on each EVM chain,
   or every delivery stays listed.
+- **A ban outlives a restart:** the node keeps each in its database until it ends. `--unban-all` at
+  start, or the operator's `POST /node/unban`, lifts them; deleting the database is no longer the
+  only way.
+- **Peers of one public IP share a backlog cap, four peers' shares by default:** a host running many
+  nodes behind one public address may want `--max-gossip-per-ip` higher. Tor and private addresses
+  are not capped together.
+- **A peer that asks for sync faster than `--sync-rate` past `--sync-burst`** gets no answer, and
+  kept up, is disconnected as a flood. An honest node asks one batch at a time.
+- **A block gossiped before its parent is held, up to 32, for 2 minutes,** and goes in as soon as
+  the parent does; `GET /node`'s backlog counts the held ones as waiting.
 - **A Bitcoin withdrawal takes only an address on the Bitcoin the relay follows:** `tb1q…` beside a
   testnet relay, `bcrt1q…` on regtest. The CLI and the wallet refuse another network's before
   anything burns, as its output script would be paid there, where no one meant it.

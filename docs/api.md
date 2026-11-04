@@ -650,10 +650,22 @@ How the node behind the API is doing. 503 when no node runs behind it.
 | `mempool` | `count` waiting and the `capacity`. |
 | `syncing` | `null`, or the `peer` it fetches blocks from and the height `from`. |
 | `counters` | What it heard and did since it started: blocks heard, imported, stored on side branches, rejected and produced; reorgs; transactions heard, submitted and refused; votes heard and cast; sync requests served, sent and failed; connections; gossip and submissions the backlog dropped (`gossip_dropped`), peers disconnected for flooding (`flooders_disconnected`), and what it published that reached none of its connected peers (`gossip_unpublished`). |
-| `backlog` | What waits for the node loop now (`waiting`), and the backlog's limits, `total` and `per_peer`, and its strike rules, `strikes` within `strike_window_ms` (see [Node](node.md#the-gossip-backlog)). |
+| `backlog` | What waits for the node loop now (`waiting`), sync requests and blocks held for their parent included, and the backlog's limits, `total`, `per_peer` and `per_ip`, sync requests' rate, `requests` a second past `request_burst`, and its strike rules, `strikes` within `strike_window_ms` (see [Node](node.md#the-gossip-backlog)). |
 | `limits` | What its operator tuned: every key of [Node's limits and tuning](node.md#limits-and-tuning), such as `ban.score`, `sync.headers` or `http.rate`, with its value, times in milliseconds and sizes in bytes, `null` for one unset such as `net.max-peers-in` without the flag. `{}` under `--report minimal` or `--hide limits`. |
 | `peers` | Each connected peer's `id`, `address` and `since`, what it gossiped (`heard`: `blocks`, `txs`, `votes`), how much of it the backlog `dropped`, and its `chain` from its last status (`height`, `work`, `justified`), or `null`. |
 | `mining` | `null` for a node that does not mine. Otherwise the hashes a second of everything mining for it (`rate`); its own `devices`, each a `name` and `rate`, its GPUs or CPU threads; where it takes workers (`listening`), or `null`; its `workers`, each with its `name`, `address`, `since`, `rate`, `devices`, the seals it `found` and the nonces `refused`, and under a pool its `payout` address, the `shares` taken and its `share_difficulty` (see [Mining with workers](consensus.md#mining-with-workers)); and `pool`, `null` or the pool's `fee`, `window`, whether it is `open`, and how many `miners` and `blocks` it counts. Rates are measured over the last few seconds. |
+
+### `POST /node/unban`
+
+Lifts bans on the node behind the API: in its database, so they stay lifted past a restart, and on
+the network at once. The body names which, one of `{"all": true}`, `{"peer": "12D3…"}` or
+`{"ip": "203.0.113.7"}`; lifting an IP leaves its peer banned by id. It answers `{"lifted": n}`,
+the peer ids and IPs the database let go.
+
+Only the operator may: a request from this machine with nothing forwarding it, or one bearing
+`--report-token` as `Authorization: Bearer …`. Anyone else gets 403. 400 for a body naming none,
+more than one, or what does not read; 503 when no node runs behind it. See
+[Node](node.md#bans).
 
 ### `GET /claims/{pool}/{address}`
 

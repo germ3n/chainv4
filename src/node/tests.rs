@@ -1874,7 +1874,7 @@ fn peers_are_remembered_for_the_next_start_and_a_banned_one_is_forgotten() {
         fees: None,
         ..Genesis::dev_authority(DevAuthority::dev_keypair().public())
     };
-    let (link, fake) = NetLink::pair();
+    let (link, mut fake) = NetLink::pair();
     let mut node = Node::new(db.clone(), &genesis, None, link).unwrap();
     let (kept, banned) = (PeerId::random(), PeerId::random());
     let at = |peer: &PeerId| -> Multiaddr { format!("/ip4/203.0.113.9/udp/4001/quic-v1/p2p/{peer}").parse().unwrap() };
@@ -1884,10 +1884,24 @@ fn peers_are_remembered_for_the_next_start_and_a_banned_one_is_forgotten() {
     node.step(1).unwrap();
     assert_eq!(remembered(db.as_ref()).unwrap().len(), 2);
 
-    fake.events.send(NetEvent::Banned(banned)).unwrap();
+    let ban = crate::net::Ban { peer: banned, ip: Some("203.0.113.9".parse().unwrap()), until_ms: now_ms() + 3_600_000 };
+    fake.events.send(NetEvent::Banned(ban)).unwrap();
     node.step(2).unwrap();
     assert_eq!(remembered(db.as_ref()).unwrap(), [at(&kept)], "what the next start dials");
     assert_eq!(node.report(1, 0).counters.peers_banned, 1);
+    assert_eq!(crate::node::kept_bans(db.as_ref(), now_ms()).unwrap(), [ban], "kept until it ends, past a restart");
+
+    // The operator lifts it: let go in the database, and the network told to lift it now.
+    let (reply, lifted) = tokio::sync::oneshot::channel();
+    fake.events.send(NetEvent::Unban { which: crate::net::Unban::Peer(banned), reply }).unwrap();
+    node.step(3).unwrap();
+    assert_eq!(lifted.blocking_recv().unwrap(), 1);
+    assert!(crate::node::kept_bans(db.as_ref(), now_ms()).unwrap().is_empty());
+    let mut told = false;
+    while let Ok(command) = fake.commands.try_recv() {
+        told |= matches!(command, NetCommand::Unban(crate::net::Unban::Peer(peer)) if peer == banned);
+    }
+    assert!(told, "the network lifts it too");
 }
 
 #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
@@ -2112,4 +2126,126 @@ fn a_late_node_catches_up_from_answers_cut_short_by_bytes() {
 
     assert_eq!(late.chain().tip().height, 7, "four answers of at most two blocks each");
     assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
+}
+
+/// Three blocks mined one on another, on a node of their own.
+fn three_blocks() -> (Block, Block, Block) {
+    let (mut source, net) = pow_node();
+    let mut blocks = Vec::new();
+
+    for miner in 1..=3 {
+        let block = mine_on(&source, source.chain().tip(), miner);
+        net.events.send(NetEvent::Block { from: PeerId::random(), block: block.clone(), gossip: None }).unwrap();
+        source.step(LATER).unwrap();
+        assert_eq!(source.chain().tip().id(), block.id());
+        blocks.push(block);
+    }
+
+    let mut blocks = blocks.into_iter();
+
+    (blocks.next().unwrap(), blocks.next().unwrap(), blocks.next().unwrap())
+}
+
+#[test]
+fn a_block_gossiped_ahead_of_the_tip_is_held_and_goes_in_once_its_parent_lands() {
+    let (first, second, third) = three_blocks();
+    let (mut node, mut net) = pow_node();
+    let peer = PeerId::random();
+
+    // The second and third come first: neither connects, so both are held, each counted in
+    // the peer's share of the backlog while it waits.
+    // Each counted in as the network would, before the node judges it and counts it out.
+    for block in [third.clone(), second.clone()] {
+        node.backlog.admit(Origin::Peer(peer), Instant::now());
+        net.events.send(NetEvent::Block { from: peer, block, gossip: None }).unwrap();
+    }
+    node.step(LATER).unwrap();
+    assert_eq!(node.chain().tip().height, 0);
+    assert_eq!(node.backlog.waiting(), 2, "held, and counted");
+
+    // Its parent lands, and the two after it go in at once, with no sync.
+    sent(&mut net);
+    let other = PeerId::random();
+    node.backlog.admit(Origin::Peer(other), Instant::now());
+    net.events.send(NetEvent::Block { from: other, block: first, gossip: None }).unwrap();
+    node.step(LATER).unwrap();
+    assert_eq!(node.chain().tip().id(), third.id());
+    assert_eq!(node.backlog.waiting(), 0, "counted out as they went in");
+    assert!(!sent(&mut net).iter().any(|command| matches!(command, NetCommand::Request { request: SyncRequest::Blocks { .. }, .. })), "nothing fetched again");
+}
+
+#[test]
+fn a_block_ahead_that_cannot_hold_is_not_held_and_one_never_connecting_is_let_go() {
+    let (_, second, third) = three_blocks();
+    let (mut node, net) = pow_node();
+    let peer = PeerId::random();
+    assert!(node.chain().fits_ahead(&second, 64), "as it is, it holds");
+
+    // Roots that are not its own: not worth holding.
+    let mut forged = second.clone();
+    forged.header.tx_root = crate::structs::hash::Hash::from_bytes(HashType::default_chain(), &[9; 32]).unwrap();
+    assert!(!node.chain().fits_ahead(&forged, 64));
+
+    // Too far past the tip.
+    let mut far = third.clone();
+    far.header.height = 1_000;
+    assert!(!node.chain().fits_ahead(&far, 64));
+
+    // Neither is held.
+    net.events.send(NetEvent::Block { from: peer, block: forged, gossip: None }).unwrap();
+    net.events.send(NetEvent::Block { from: peer, block: far, gossip: None }).unwrap();
+    node.step(LATER).unwrap();
+    assert_eq!(node.backlog.waiting(), 0);
+
+    // One that fits, whose parent never comes, is let go once kept for long enough.
+    let (link, fake) = NetLink::pair();
+    let mut node = Node::new(Arc::new(MemoryDb::default()), &easy_pow(), None, link)
+        .unwrap()
+        .ahead(AheadLimits { keep: std::time::Duration::from_millis(1), ..AheadLimits::default() });
+    node.backlog.admit(Origin::Peer(peer), Instant::now());
+    fake.events.send(NetEvent::Block { from: peer, block: second, gossip: None }).unwrap();
+    node.step(LATER).unwrap();
+    assert_eq!(node.backlog.waiting(), 1);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    node.step(LATER).unwrap();
+    assert_eq!(node.backlog.waiting(), 0, "let go, and counted out");
+}
+
+#[test]
+fn a_sync_batch_holding_an_invalid_block_counts_against_its_peer() {
+    let (source, _source_net) = pow_node();
+    let mut bad = mine_on(&source, source.chain().tip(), 1);
+    // A height that does not follow its parent's: it breaks the rules.
+    bad.header.height = 2;
+    let (mut node, mut net) = pow_node();
+    let peer = PeerId::random();
+    net.events.send(NetEvent::PeerUp { peer, address: Multiaddr::empty() }).unwrap();
+    net.events
+        .send(NetEvent::Response {
+            peer,
+            response: SyncResponse::Status { genesis: node.chain().genesis(), tip: bad.id(), height: 1, work: u256::new(1_000_000), justified: 0 },
+        })
+        .unwrap();
+    node.step(LATER).unwrap();
+    assert!(sent(&mut net).iter().any(|command| matches!(command, NetCommand::Request { request: SyncRequest::Blocks { .. }, .. })), "it asks the heavier peer");
+
+    net.events.send(NetEvent::Response { peer, response: SyncResponse::Blocks(vec![bad]) }).unwrap();
+    node.step(LATER).unwrap();
+    assert!(
+        sent(&mut net).iter().any(|command| matches!(command, NetCommand::Judge { peer: judged, gossip: None, verdict: Verdict::Reject(Fault::Block) } if *judged == peer)),
+        "as the same block gossiped would"
+    );
+}
+
+#[test]
+fn a_sync_request_counts_in_its_peer_s_share_until_it_is_answered() {
+    let (mut node, mut net) = pow_node();
+    let peer = PeerId::random();
+    assert_eq!(node.backlog.admit_request(peer, None, Instant::now()), crate::net::Admission::Admitted);
+    assert_eq!(node.backlog.waiting(), 1);
+
+    net.events.send(NetEvent::Request { peer, id: 1, request: SyncRequest::Status }).unwrap();
+    node.step(LATER).unwrap();
+    assert_eq!(node.backlog.waiting(), 0);
+    assert!(sent(&mut net).iter().any(|command| matches!(command, NetCommand::Respond { id: 1, .. })));
 }

@@ -113,6 +113,9 @@ pub enum Column {
     #[document(summary = "The member index, for a node that keeps one: each multisig under the address of every member's key, as the multisig registry names them now, for GET /accounts/{address}/multisigs. Not chain state: built from the registry, kept in step with it as blocks run, and taken back with its block.")]
     #[wincode(tag = 25)]
     Members,
+    #[document(summary = "Peers this node banned, by peer id: the IP banned with each under --ban-ips, and when each ends, kept until then so a restart lifts none. Not chain state.")]
+    #[wincode(tag = 26)]
+    Bans,
 }
 
 impl Hashable for Column {
@@ -120,7 +123,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 26] = [
+    pub const ALL: [Column; 27] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -147,6 +150,7 @@ impl Column {
         Column::Pools,
         Column::Decisions,
         Column::Members,
+        Column::Bans,
     ];
 
     #[document(
@@ -181,6 +185,7 @@ impl Column {
             Column::Pools => "pools",
             Column::Decisions => "decisions",
             Column::Members => "members",
+            Column::Bans => "bans",
         }
     }
 }
