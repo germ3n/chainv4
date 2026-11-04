@@ -760,6 +760,8 @@ impl Explorer {
         let page = match &self.view {
             View::Mempool | View::Tx(_) => vec![Ask::Mempool],
             View::Finality => vec![Ask::Validators, Ask::Signers, Ask::Evidence, Ask::Anchors],
+            // The newest anchors, for the overview's tiles.
+            View::Overview => vec![Ask::Anchors],
             View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames { address: address.clone(), cursor: None }, Ask::AccountMultisigs { address: address.clone(), cursor: None }].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
             View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),

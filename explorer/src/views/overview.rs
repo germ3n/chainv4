@@ -91,6 +91,24 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
         ));
     }
 
+    // The newest checkpoint anchored in each chain the node takes anchors from, as the node says:
+    // not proven, so a reading install leaves it to the Finality page.
+    if !reading && let (Some(anchors), Some(finality)) = (&ctx.store.anchors, &status.finality) {
+        for (chain, name, unit) in [("bitcoin", "Bitcoin anchor", "Bitcoin block"), ("ethereum", "Ethereum anchor", "Ethereum slot")] {
+            let newest = anchors["entries"].as_array().into_iter().flatten().rev().find(|entry| entry["chain"].as_str().unwrap_or("bitcoin") == chain);
+
+            if let Some(entry) = newest {
+                let epoch = entry["epoch"].as_u64().unwrap_or(0);
+                let at = entry["btc_height"].as_u64().or_else(|| entry["eth_slot"].as_u64()).unwrap_or(0);
+                tiles.push((
+                    name.to_string(),
+                    format::thousands(&(epoch * finality.checkpoint_interval).to_string()),
+                    format!("epoch {epoch} · {unit} {}", format::thousands(&at.to_string())),
+                ));
+            }
+        }
+    }
+
     if status.difficulty != "0" {
         tiles.push((
             "Difficulty".to_string(),
