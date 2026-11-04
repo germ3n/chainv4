@@ -848,7 +848,7 @@ fn router(api: Api) -> Router {
     let router = router.route("/stream", get(stream));
     #[cfg(feature = "updates")]
     let router = router.route("/release", get(release));
-    #[cfg(feature = "bitcoin")]
+    #[cfg(feature = "anchoring-btc")]
     let router = router.route("/anchors", get(anchors));
     let router = router.route("/claims/{pool}/{address}", get(claims)).route("/mining", get(mining::about)).route(mining::SOCKET_PATH, get(mining::socket));
     #[cfg(feature = "pool")]
@@ -1620,7 +1620,7 @@ async fn rich(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Stri
 /// The anchor list: anchoring's settings in force, how many anchors the chain recorded, the list's
 /// root, the highest enforced checkpoint, the relay's tip, and a page of entries, the newest last,
 /// from ?from on, the newest page unless told.
-#[cfg(feature = "bitcoin")]
+#[cfg(feature = "anchoring-btc")]
 async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let state = State::new(api.db.clone());
     let settings = Changes::new(&state).anchoring()?.or_else(|| api.genesis.anchoring.clone()).unwrap_or_default();

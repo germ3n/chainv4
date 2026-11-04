@@ -1837,14 +1837,14 @@ impl Chain {
 
     #[document(parent = "Chain", summary = "The highest checkpoint an enforced anchor holds on the main chain, by height: no block at or under it replaces the chain's.")]
     pub fn anchored_height(&self) -> Result<Option<u64>, DbError> {
-        #[cfg(feature = "bitcoin")]
+        #[cfg(feature = "anchoring-btc")]
         return crate::anchor::Anchors::new(&self.state()).enforced_height();
 
-        #[cfg(not(feature = "bitcoin"))]
+        #[cfg(not(feature = "anchoring-btc"))]
         Ok(None)
     }
 
-    #[cfg(feature = "bitcoin")]
+    #[cfg(feature = "anchoring-btc")]
     #[document(
         parent = "Chain",
         summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's headers start and the relay's tip. None while the chain holds no anchors, or anchoring has no relay or start.",
@@ -1874,7 +1874,7 @@ impl Chain {
         Ok(Some(crate::params::anchoring::AnchorsAnswer { start, btc_tip, entries: anchors.entries(0, newest + 1)?, proofs }))
     }
 
-    #[cfg(feature = "bitcoin")]
+    #[cfg(feature = "anchoring-btc")]
     #[document(parent = "Chain", summary = "Bitcoin headers from anchoring's relay's main chain, from a height on, 80 bytes each: stopping at its tip, or at one it keeps too little of to write whole.")]
     pub fn btc_headers(&self, from: u64, count: u32) -> Result<Vec<Vec<u8>>, DbError> {
         let Some(relay) = self.anchoring()?.relay else {

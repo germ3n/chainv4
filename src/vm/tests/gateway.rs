@@ -671,3 +671,71 @@ fn a_refund_begun_under_one_federation_takes_the_threshold_of_the_next() {
     bridge.attest_refund(&left, &alice.to_abi(), 4).unwrap();
     assert_eq!(bridge.world.balance(alice), before + u256::from(1_000u64));
 }
+
+// Pentest (docs/queue.md): the gateway driven by hostile parties. An ignored test is a finding,
+// asserting what should hold, and fails until it is fixed.
+
+/// A token whose transfer_from moves one less than it is asked to: a fee taken on every transfer,
+/// as some tokens do.
+fn fee_token(bridge: &mut Bridge) -> Address {
+    let source = include_str!("../../../contracts/lua/token.lua");
+    let taxed = source.replacen("    put(key, allowed - amount)\n    move(from, to, amount)", "    put(key, allowed - amount)\n    move(from, to, amount - u256(1))", 1);
+    assert_ne!(taxed, source, "token.lua still moves in transfer_from as this expects");
+
+    bridge.world.lua_code(&taxed)
+}
+
+#[test]
+#[ignore = "finding: send records what was asked for, not what arrived, so a token that takes a fee leaves its wrapped supply backed by less"]
+fn a_native_token_that_moves_less_than_asked_is_refused_or_recorded_as_it_arrived() {
+    let mut bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let token = fee_token(&mut bridge);
+    bridge.world.call(token, "transfer", &[address(alice), wide(1_000)]).result.unwrap();
+    bridge.world.call_as(alice, token, "approve", &[address(bridge.gateway), wide(300)]).result.unwrap();
+    let sent = bridge.world.call_as(alice, bridge.gateway, "send", &[number(THERE), bytes(&[0xb0; 20]), number(1), address(token), number(0), wide(300)]).result;
+    let held = bridge.read(token, "balance_of", &[address(bridge.gateway)]);
+
+    // Gateway.sol checks its balance before and after, and refuses less than the amount.
+    assert!(sent.is_err() || [wide(bridge.left(1).amount.as_u64())] == held[..], "the transfer says {} left, the gateway holds {held:?}", bridge.left(1).amount);
+}
+
+#[test]
+#[ignore = "finding: what arrived is keyed by the source chain and nonce alone, so after set_peer the new peer's transfers at nonces the old one used are never delivered, nor can they be voided"]
+fn a_new_peer_s_transfers_arrive_though_the_old_peer_used_their_nonces() {
+    let bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    let usdt = [0x9e; 20];
+    let old = bridge.arriving(1, AssetKind::Token, THERE, &usdt, 500, alice);
+    bridge.attest(&old, 1).unwrap();
+    bridge.attest(&old, 2).unwrap();
+
+    // The owner points the chain at a new Gateway.sol, which counts its nonces from 1 again, as
+    // Gateway.sol keys what it delivered by the gateway it came from too.
+    let next = [0xe2; 20];
+    bridge.world.call(bridge.gateway, "set_peer", &[number(THERE), bytes(&next)]).result.unwrap();
+    let new = Transfer { from: next.to_vec(), amount: u256::from(70u64), ..old };
+    bridge.attest(&new, 1).unwrap();
+    bridge.attest(&new, 2).unwrap();
+    let [TxCallArgumentType::Address(wrapped)] = bridge.read(bridge.gateway, "wrapped_of", &[number(THERE), number(1), bytes(&usdt)])[..] else { panic!("made") };
+
+    assert_eq!(bridge.read(wrapped, "balance_of", &[address(alice)]), [wide(570)], "the new peer's transfer is delivered, or at least can be voided and refunded there");
+}
+
+#[test]
+#[ignore = "finding: attest and attest_refund work a transfer's ends out from the peers now, so one in flight when the owner changes the peer can no longer be signed or refunded"]
+fn a_transfer_in_flight_when_the_peer_changes_can_still_be_signed_and_refunded() {
+    let bridge = Bridge::new();
+    let alice = Address::Ed25519([0xa; 32]);
+    bridge.world.fund(alice, 5_000);
+    bridge.world.call_at(alice, bridge.gateway, "send", &[number(THERE), bytes(&[0xb0; 20]), number(0), TxCallArgumentType::Nil, number(0), wide(1_000)], 1_000, 0).result.unwrap();
+    let left = bridge.left(1);
+    let before = bridge.world.balance(alice);
+
+    bridge.world.call(bridge.gateway, "set_peer", &[number(THERE), bytes(&[0xe2; 20])]).result.unwrap();
+
+    // Signed as it left, to the peer of then, which is what its digest says.
+    assert!(bridge.attest(&left, 1).is_ok(), "signatures over it as it left can still be posted for a relayer");
+    bridge.refund(1, alice).expect("refundable, as it never arrived anywhere");
+    assert_eq!(bridge.world.balance(alice), before + u256::from(1_000u64));
+}

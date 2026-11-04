@@ -804,7 +804,7 @@ fn batch(
 
 /// Runs a Tx::Anchor: anchoring's own check, on a build that reads Bitcoin.
 fn anchor(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Address, proof: &crate::structs::tx::AnchorProof) -> Result<Effect, Failure> {
-    #[cfg(feature = "bitcoin")]
+    #[cfg(feature = "anchoring-btc")]
     {
         let interval = rules.staking.as_ref().map(|staking| staking.checkpoint_interval).or(rules.signers.map(|signers| signers.checkpoint_interval));
         let prove = crate::anchor::ProveRules { settings: &rules.anchoring, genesis: context.genesis, checkpoint_interval: interval, pooled: rules.pooled_fees };
@@ -815,7 +815,7 @@ fn anchor(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Ad
             Err(err) => Err(Failure::Anchor(err.to_string())),
         }
     }
-    #[cfg(not(feature = "bitcoin"))]
+    #[cfg(not(feature = "anchoring-btc"))]
     {
         let _ = (layer, rules, context, sender, proof);
 

@@ -15,7 +15,9 @@ Anchoring fixes it without trusting anyone, by borrowing Bitcoin's proof of work
 A fork made later from old keys cannot have put its checkpoints into Bitcoin's past. Doing that
 would mean outworking Bitcoin.
 
-Governance turns each part on and off, and a chain starts with all of them off.
+Governance turns each part on and off, and a chain starts with all of them off. Builds choose too: the cargo features
+`anchoring-btc` and `anchoring-eth`, both on by default (see [Development](development.md)). A node
+built without `anchoring-btc` takes no anchors, so it cannot follow a chain that has them on.
 
 ## What goes into Bitcoin
 

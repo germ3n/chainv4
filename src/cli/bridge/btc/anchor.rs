@@ -102,6 +102,7 @@ impl Bridge {
         let txid = self.write_anchor(secret, &payload, Followed::named(network)?, rate)?;
         println!("wrote epoch {epoch}'s checkpoint {block} into Bitcoin: {txid}");
 
+        #[cfg(feature = "anchoring-eth")]
         if settings["ethereum"].as_bool() == Some(true)
             && !self.args.eth_rpc.is_empty()
             && self.args.evm_key.is_some()
@@ -205,6 +206,7 @@ impl Bridge {
         }
     }
 
+    #[cfg(feature = "anchoring-eth")]
     /// Writes an anchor's 80 bytes to the EVM chain of the one --eth-rpc, as a transaction to the
     /// --evm-key's own address: there for anyone to read, counted by nothing yet.
     fn write_ethereum_anchor(&self, payload: &Payload) -> CliResult<()> {

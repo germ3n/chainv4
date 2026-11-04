@@ -26,6 +26,7 @@ use {
 /// network's for, and what a bump pays when it is not.
 const SOON_BLOCKS: u32 = 3;
 
+#[cfg(feature = "anchoring-btc")]
 mod anchor;
 
 #[derive(clap::Subcommand)]
@@ -34,6 +35,7 @@ pub enum BtcAction {
     /// into an OP_RETURN from the key's coins every anchoring.every epochs, and shows it to the
     /// chain once the relay holds it deep enough, which pays the reward. With anchoring.ethereum
     /// on, --eth-rpc and --evm-key, writes it to that chain too.
+    #[cfg(feature = "anchoring-btc")]
     Anchor {
         /// The secp256k1 key whose native segwit coins pay for anchors: --evm-key's unless given.
         #[arg(long)]
@@ -531,6 +533,7 @@ impl Bridge {
             BtcAction::Sweep { fee } => self.sweep(*fee),
             BtcAction::Sign => self.sign_releases(&self.fee_rates(), false),
             BtcAction::Pass => self.btc_pass(),
+            #[cfg(feature = "anchoring-btc")]
             BtcAction::Anchor { btc_key, every, fee_rate } => {
                 let secret = match btc_key {
                     Some(path) => match crate::cli::signer(Some(path))?.private() {

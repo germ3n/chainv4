@@ -297,6 +297,9 @@ offline; these would make that hold up as a treasury.
   - **Running nodes check their peers' anchors now and then,** and say so loudly if a peer's history
     beats their own. They cannot roll back past their finalized checkpoint, but an operator can
     resync.
+  - **Ethereum anchoring on its own.** `anchoring-eth` builds alone (the owner's call): the anchor
+    list, the guard and anchored sync's framework move into a base either feature turns on, so a
+    build may anchor into Ethereum without Bitcoin, Bitcoin without Ethereum, or both.
   - **Deploy it:** the relay keeps each header's version and nonce now, so the devnet's relay is
     deployed again. That, the anchorer service on .94 and turning it on by a vote go with the key
     rotation's genesis.
@@ -1285,13 +1288,70 @@ with.
   reading; the native precompile's gas, static calls and value; in Lua, building strings stopping at the memory limit,
   hashing paid by its bytes, every call starting fresh, the libraries unchangeable, and nesting without end failing
   cleanly. Not driven through a running federation yet: the gateways, `btc_gateway.lua` and the swap's claim and refund.
-- [ ] **Pentest the gateways and the swap contracts with a running federation.** Queued 2026-11-04. The first run
-  read them only. On a chain of its own, with a federation of test signers, a Bitcoin relay fed regtest headers
-  and an EVM chain in process, drive every path of `gateway.lua`, `btc_gateway.lua`, `Gateway.sol`, `swap.lua` and
-  `Swap.sol` with hostile parties: a signer short of the threshold, a replayed or reordered signature, a transfer
-  delivered, voided and refunded in every order, a deposit shown twice or on a branch that lost, a release proposed,
-  replaced and bumped against itself, withdrawals that agree to lose less than their share, claims and refunds raced
-  and twice, a recipient contract that refuses or re-enters, and an owner changing peers or the coin mid-flight.
+- [x] **Pentest the gateways and the swap contracts with hostile parties.** Done 2026-11-04 in
+  local tests, on a federation of test signers, a relay fed regtest headers, and EVM contracts in
+  process. Its tests are the last ones in `src/vm/tests/gateway.rs`, plus
+  `src/chain/tests/pentest_gateway.rs` (Gateway.sol on this chain's EVM too),
+  `pentest_btc_gateway.rs` and `pentest_swap.rs`. Each finding is an
+  ignored test that fails until it is fixed. None is consensus: one is a client release, the rest
+  a contract redeploy. No finding makes nodes disagree, stalls one, or does work it is not paid for.
+  What it found, worst first:
+  - [ ] **Swap terms with a deadline near `u64::MAX` wrap the gap check** (`src/swap/mod.rs`,
+    `Terms::check`). A starter's code passes in a release build, the other side locks on an EVM leg
+    with a deadline that never comes, and the starter takes back their own lock and claims the
+    other. Debug builds panic instead. Fix: `checked_add`, a first deadline in the future, and every
+    leg's deadline capped. A client release (`terms_refuse_a_second_deadline_so_late_…`).
+  - [ ] **A claim whose payout is refused still shows the secret,** in `swap.lua` and `Swap.sol`. The
+    counterparty, controlling the token (an upgradeable, pausable or blacklisting one, or a refusing
+    ERC-1155 hook), makes the claim fail. They read the secret from the failed transaction, claim
+    the other leg, and refund their own after the deadline. Fix: record the claim and the secret
+    even when paying fails, and let anyone retry the payout by pull. A redeploy, which moves
+    Swap.sol's CREATE2 address.
+  - [ ] **Swap hashes can be squatted,** in both contracts. Swaps are keyed by hash alone, so whoever
+    saw the hash locks one unit under it first, and the real lock is refused for good. Fix: key by
+    the hash and the locker, or by all the terms. A redeploy and a client change.
+  - [ ] **Dust ahead of the gateway's outputs stalls every Bitcoin release.** Deposits of 330 sats
+    each mint, with no minimum. The planner takes outputs in the order they came, so a release drags
+    in hundreds of them, past the fee cap: 300 of them made a 100,000-sat withdrawal 37,561 vB. Fix:
+    pick inputs largest first and skip those not worth spending (planner only), and perhaps a
+    minimum deposit (redeploy).
+  - [ ] **`gateway.lua` records what was asked for, not what arrived:** a token that takes a fee
+    leaves the wrapped supply backed by less (300 recorded, 299 held), and a token or collection
+    that moves nothing at all mints an unbacked wrapped one on the peer chain. Gateway.sol checks its
+    balance and the NFT's owner. `swap.lua`'s `lock_token` has the same flaw, and makes its holders insolvent. Fix:
+    compare balances before and after, as the Solidity contracts do. A redeploy.
+  - [ ] **`gateway.lua` keys what arrived by source chain and nonce alone:** after `set_peer` names a
+    new Gateway.sol, which counts from 1 again, its transfers at nonces the old one used are never
+    delivered, nor can they be voided. Gateway.sol keys by the gateway too. A redeploy.
+  - [ ] **`gateway.lua` works a transfer's ends out from the peers now:** one in flight when the
+    owner changes a peer can no longer be signed or refunded. Fix: sign and refund by the ends it
+    recorded as it left. A redeploy.
+  - [ ] **A federation the Bitcoin gateway never saw in force strands what was paid to it:** it learns
+    a federation only when called while that one is in force, and the apps write deposit addresses
+    from the node's status. Fix: a host call for a past federation, `federation.at(version)`, over a
+    history the node keeps. That is consensus. Or the node writes each decided federation into the
+    gateway.
+  - [ ] **A sweep's fee goes uncounted:** it comes out of what backs wBTC but is not added to
+    `shortfall`, as a child's is: 99,000 held against 100,000 wBTC after one sweep. A redeploy.
+  - [ ] **A coinbase paying a deposit address mints before Bitcoin lets it be spent** (100 blocks), so
+    a release spending it is stuck for hours and cannot be cancelled once signed. Fix: refuse
+    coinbases, or wait 100 confirmations for one. A redeploy.
+  - [ ] **Lowering a withdrawal's most-fee undoes a release planned against it,** delaying the up to
+    49 others with it, for two transactions a round. Fix: a lowered limit takes effect some blocks
+    later. A redeploy.
+  - [ ] **Coin sent with `swap.lua`'s claim or refund is kept for good.** Fix: refuse it. A redeploy.
+  - [ ] **A Bitcoin HTLC claim never expires,** as Bitcoin's script cannot say "before", so Bitcoin as
+    the second leg must be refunded the moment its deadline passes. `docs/swaps.md` says otherwise.
+    Fix: the docs, and the apps refunding at once or warning. A passing test pins the property.
+
+  Found sound: a deposit on a branch that lost or shown twice, inner Merkle nodes posing as
+  transactions, signatures for another input, release, digest, gateway or federation, high-s twins
+  and duplicates, votes and showing raced, an output or withdrawal in two releases, the backing
+  matching wBTC through releases, children, repayments and cancels, the swaps' deadline boundary,
+  preimages, bad locks, hostile tokens on Swap.sol, re-entry into every claim, refund and payout, NFTs
+  backing two locks, the HTLC's scripts and parsers under mutation, and Gateway.sol's ordering and
+  signature counting, a re-entrant coin recipient on Gateway.sol paid once, and changing the coin
+  after a send.
 - [x] **The wallet's Activity names unlisted tokens** by what they say of themselves, labelled, like `1.5 "USDC" (unverified)`. Still only a claim: never on signing screens, and never in balances.
 - [x] **Small things seen on the emulator:** an error from a failed import stayed on Accounts after a later success, and an offline signer's accounts said "not proven yet" for good.
 - [x] **A small call could make every node allocate far more than it paid for.** `evm.decode` and its kin

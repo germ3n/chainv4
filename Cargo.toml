@@ -11,7 +11,7 @@ members = ["macro", "wiki", "gpu"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -28,6 +28,15 @@ bitcoin = ["secp256k1", "dep:sha2", "dep:ripemd", "dep:hmac"]
 # Atomic swaps between any two of chainv4, Bitcoin and EVM chains: the terms both sides agree, as
 # ur:chainv4-swap codes, Bitcoin's HTLC script and its spends, and Swap.sol's calls. chainv4's side
 # is a contract, contracts/lua/swap.lua; an EVM chain's, contracts/evm/Swap.sol.
+# Anchoring the chain's finalized checkpoints into Bitcoin (docs/anchoring.md): Tx::Anchor's checks
+# and reward, the guard against branches leaving an anchored checkpoint, --anchored, GET /anchors
+# and bridge btc anchor. Without it, the types stay, so encodings do not change, but the node takes
+# no anchors, serves none and enforces none.
+anchoring-btc = ["bitcoin"]
+# Anchoring into Ethereum: the anchorer writing each anchor to an EVM chain too, which the chain
+# does not count until a light client of Ethereum's finality is in. It builds on anchoring-btc for
+# now, as the anchor list, the guard and the anchorer live there.
+anchoring-eth = ["anchoring-btc", "secp256k1"]
 swap = ["bitcoin", "dep:ur"]
 # The DEX's arithmetic for the apps: the trade formula and routes through pools, quoting
 # contracts/lua/dex.lua and the EVM's contracts/evm/Dex.sol alike, and the node naming them.

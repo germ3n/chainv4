@@ -847,7 +847,7 @@ fn the_heavier_branch_wins_and_state_follows_it() {
 
 /// A checkpoint anchored while anchoring was enforced holds against any branch, however heavy:
 /// none that leaves it is followed, and no block at or under it is taken.
-#[cfg(feature = "bitcoin")]
+#[cfg(feature = "anchoring-btc")]
 #[test]
 fn no_branch_leaves_a_checkpoint_anchored_while_enforced() {
     let db = Arc::new(MemoryDb::default());
@@ -2121,6 +2121,12 @@ mod evm;
 mod names;
 mod multisig;
 mod pentest_lua;
+#[cfg(all(feature = "bridge", feature = "evm", feature = "secp256k1"))]
+mod pentest_gateway;
+#[cfg(all(feature = "bridge", feature = "bitcoin"))]
+mod pentest_btc_gateway;
+#[cfg(all(feature = "swap", feature = "evm", feature = "secp256k1"))]
+mod pentest_swap;
 #[cfg(feature = "wasm")]
 mod pentest_wasm;
 #[cfg(all(feature = "evm", feature = "secp256k1"))]

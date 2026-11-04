@@ -238,7 +238,7 @@ fn pays_nothing() -> Vec<u8> {
 /// What the chain reads of the relay natively, for anchoring, is what the relay keeps: its tip,
 /// depths, a header written whole again from its record, which its peers' syncing nodes check by
 /// work, and a proof of an anchor checked against it.
-#[cfg(feature = "node")]
+#[cfg(all(feature = "node", feature = "anchoring-btc"))]
 #[test]
 fn anchoring_reads_the_relay_s_own_records_and_proves_an_anchor_by_them() {
     use crate::anchor::{Anchors, Payload, ProveRules, Relay as Records, chain_tag, prove};
