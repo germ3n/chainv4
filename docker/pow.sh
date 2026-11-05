@@ -12,8 +12,12 @@
 #      [--yes]                          machine's chain move aside, after you say yes
 #   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS;
 #                  [-i KEY] [-p PORT]  -i the SSH private key to log in with, -p its port
-#   docker/pow.sh up                  on the VPS, in that copy: build and start the stack, with
-#                                     Docker or Podman
+#   docker/pow.sh up [--no-build]     on the VPS, in that copy: build and start the stack, with
+#                                     Docker or Podman; --no-build starts the images it already
+#                                     has, as images copied them there, compiling nothing
+#   docker/pow.sh images from to...   here: copy the stack's images built on one VPS to others,
+#                  [-i KEY] [-p PORT]  through this machine, so a deploy compiles once; then up
+#                                     --no-build on each. Each is user@host
 #   docker/pow.sh reset [--yes]       on the VPS: stop the node and move its chain and genesis
 #                                     aside, in its volume, for a new genesis; up starts it afresh
 #   docker/pow.sh join host           here: a node of the same chain that mines and dials the VPS,
@@ -448,6 +452,58 @@ push() {
     say "next, on the VPS: $ssh $target, then cd $dir && docker/pow.sh up"
 }
 
+# Copies the stack's images from the VPS that built them to others, streamed through this machine
+# by SSH, so nothing is stored on the way and no VPS holds a key to another, and no registry or
+# token is needed: the node's and nginx's, what takes the build. Each target checks it
+# got the same image ids as the source, then runs up --no-build to start them. The servers are all
+# one architecture: an image built on x86_64 runs on x86_64 alone.
+images() {
+    source=
+    targets=
+    key=${SSH_KEY:-}
+    port=${SSH_PORT:-}
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i) [ $# -ge 2 ] || fail "-i takes the SSH private key's file"; key=$2; shift 2 ;;
+            -p) [ $# -ge 2 ] || fail "-p takes the SSH port"; port=$2; shift 2 ;;
+            -*) fail "images takes user@host for the source and each target, -i KEY and -p PORT, not $1" ;;
+            *) if [ -z "$source" ]; then source=$1; else targets="$targets $1"; fi; shift ;;
+        esac
+    done
+
+    [ -n "$source" ] && [ -n "$targets" ] || fail "copy from where to where? docker/pow.sh images user@built user@other... [-i KEY] [-p PORT]"
+    set -- -o ConnectTimeout=15
+    if [ -n "$key" ]; then
+        [ -r "$key" ] || fail "cannot read the SSH key $key"
+        set -- "$@" -i "$key" -o IdentitiesOnly=yes
+    fi
+    if [ -n "$port" ]; then set -- "$@" -p "$port"; fi
+
+    # The engine on a VPS, as compose.sh would pick it there from the copy's .env, and the ids of
+    # the images named.
+    dir=${REMOTE_DIR:-chainv4}
+    pick="e=\$(sed -n 's/^CONTAINER_ENGINE=\\([a-z]*\\).*/\\1/p' '$dir/docker/.env' 2>/dev/null | tail -n 1); [ -n \"\$e\" ] || { command -v docker > /dev/null && e=docker || e=podman; }"
+    ids() { printf '%s; for i in %s; do $e image inspect --format "{{.Id}}" $i 2>/dev/null || echo none; done' "$pick" "$1"; }
+
+    # Tor's image is not copied: it holds no build, and up --no-build makes it where TOR=1.
+    names="chainv4:latest chainv4-nginx:latest"
+    wanted=$(ssh "$@" "$source" "$(ids "$names")") || fail "cannot reach $source"
+    case "$wanted" in *none*) fail "$source has not built the node's and nginx's images: run up there first" ;; esac
+
+    # Podman saves several images into one archive only with -m; Docker always can.
+    save="$pick; case \$e in podman) \$e save -m $names ;; *) \$e save $names ;; esac | gzip -1"
+
+    for target in $targets; do
+        say "copying $names from $source to $target"
+        start=$(date +%s)
+        ssh "$@" "$source" "$save" | ssh "$@" "$target" "$pick; gunzip | \$e load > /dev/null" || fail "copying to $target failed"
+        got=$(ssh "$@" "$target" "$(ids "$names")") || fail "cannot reach $target"
+        [ "$got" = "$wanted" ] || fail "$target holds other images than $source after the copy"
+        say "$target has the same images, in $(( $(date +%s) - start )) s: next there, docker/pow.sh up --no-build"
+    done
+}
+
 # Makes a file the node's alone, as its container sees it: uid 10001, read by nobody else. Rootless
 # Podman maps that uid to one of the user's subordinate ids, which podman unshare reaches; Docker,
 # and rootful Podman, need root. Without either, the file is left readable to everyone here.
@@ -471,6 +527,24 @@ node_owns() {
 
 up() {
     compose="$root/docker/compose.sh"
+    build=--build
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --no-build) build=--no-build; shift ;;
+            *) fail "up takes --no-build, not $1" ;;
+        esac
+    done
+
+    # Without a build, the images must be here already, as images copies them.
+    if [ "$build" = --no-build ]; then
+        engine=${CONTAINER_ENGINE:-$(sed -n 's/^CONTAINER_ENGINE=\([a-z]*\).*/\1/p' "$root/docker/.env" 2>/dev/null | tail -n 1)}
+        engine=${engine:-$(command -v docker > /dev/null && echo docker || echo podman)}
+
+        for image in chainv4:latest chainv4-nginx:latest; do
+            "$engine" image inspect "$image" > /dev/null 2>&1 || fail "no $image here to start without a build: copy it with docker/pow.sh images, or run up without --no-build"
+        done
+    fi
     [ -s "$root/docker/config/genesis.json" ] || fail "no docker/config/genesis.json: run docker/pow.sh init on your machine, then push"
     [ -s "$root/docker/.env" ] || fail "no docker/.env: run docker/pow.sh init on your machine, then push"
 
@@ -481,14 +555,18 @@ up() {
 
     # The first build compiles RocksDB, Luau and both web apps: a machine with little memory runs
     # out without swap.
-    memory=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
-    swap=$(awk '/^SwapTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "$build" = --build ]; then
+        memory=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
+        swap=$(awk '/^SwapTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null || echo 0)
 
-    if [ "$memory" -gt 0 ] && [ $((memory + swap)) -lt 4000 ]; then
-        say "this machine has ${memory} MiB of memory and ${swap} MiB of swap: the build wants about 4 GiB. Add swap if it fails"
+        if [ "$memory" -gt 0 ] && [ $((memory + swap)) -lt 4000 ]; then
+            say "this machine has ${memory} MiB of memory and ${swap} MiB of swap: the build wants about 4 GiB. Add swap if it fails"
+        fi
+
+        say "building and starting; the first build takes a while"
+    else
+        say "starting the images already here, without a build"
     fi
-
-    say "building and starting; the first build takes a while"
     # Let's Encrypt's certbot and tor run as profiles of their own, when .env asks for them.
     # Recreated always: podman-compose keeps a running container on its old image after a build, so
     # an update would build and change nothing. The chain, certificates and onion key are in
@@ -496,7 +574,9 @@ up() {
     set --
     if grep -q '^TLS_MODE=letsencrypt' "$root/docker/.env"; then set -- "$@" --profile letsencrypt; fi
     if grep -q '^TOR=1' "$root/docker/.env"; then set -- "$@" --profile tor; fi
-    "$compose" "$@" up -d --build --force-recreate
+    # Tor's image is made here even without a build: it is Debian's tor and nothing compiled.
+    if [ "$build" = --no-build ] && grep -q '^TOR=1' "$root/docker/.env"; then "$compose" "$@" build tor; fi
+    "$compose" "$@" up -d "$build" --force-recreate
 
     say "waiting for the node"
     tries=0
@@ -750,7 +830,8 @@ case "$command" in
     init) init "$@" ;;
     regenesis) regenesis "$@" ;;
     push) push "$@" ;;
-    up) up ;;
+    up) up "$@" ;;
+    images) images "$@" ;;
     reset) reset "$@" ;;
     join) join "$@" ;;
     token) token ;;
@@ -760,5 +841,5 @@ case "$command" in
     status) status "$@" ;;
     logs) logs ;;
     onion) onion ;;
-    *) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+    *) sed -n '/^set -eu$/q;2,$p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

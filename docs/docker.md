@@ -412,6 +412,29 @@ The image is built in three stages:
 Cargo's caches are BuildKit cache mounts, so rebuilds are quick. It builds for the platform it runs
 on, arm64 or amd64.
 
+### Building once for several servers
+
+`docker/pow.sh up` builds on the machine it runs on, so with three servers a deploy compiles the
+same images three times. To build once instead, run `up` on one server, check it, then copy its
+images to the others and start them there without a build:
+
+```sh
+docker/pow.sh images root@203.0.113.7 root@203.0.113.8 root@203.0.113.9 -i ~/.ssh/vps   # here
+# on 203.0.113.8 and 203.0.113.9:
+docker/pow.sh up --no-build
+```
+
+- **What is copied:** the node's image and nginx's, which hold the build. Tor's holds none, so
+  `up --no-build` makes it on the server where `TOR=1`. The two are
+  saved on the source, gzipped, streamed through this machine by SSH and loaded on each target:
+  about 170 MB and 70 MB. Nothing is stored on the way, no server holds a key to another, and
+  there's no registry or token.
+- **Checked:** each target must end up with the same image ids as the source, or `images` stops.
+- **`up --no-build`** starts what is there, compiling nothing, and refuses if the node's or
+  nginx's image is missing. The servers must share an architecture: an image built on x86_64 runs
+  only on x86_64.
+- **Building where it runs** stays the default, for a server on its own.
+
 ## What to keep in mind
 
 - **A preset chain's name** comes from `CHAIN_NAME` in `docker/.env`, written into its genesis on

@@ -122,6 +122,16 @@ node has `TLS_MODE=letsencrypt`, `--archive`, `POOL_OPEN=1`, `MINING_SOLO=1`, `M
 `docker/compose.sh restart node` alone leaves nginx on the node's old address, answering 502:
 restart nginx with it.
 
+**Build once.** Run `up` on one machine first, check it, then copy its images to the rest and start
+them without compiling (see [Docker](docker.md#building-once-for-several-servers)):
+
+```sh
+docker/pow.sh images root@66.78.40.57 root@66.78.40.94 root@65.87.7.168 -i ~/.ssh/KEY
+for h in 66.78.40.94 65.87.7.168; do
+  $SSH root@$h 'cd chainv4 && (setsid nohup docker/pow.sh up --no-build > /root/pow-up.log 2>&1 < /dev/null &)'
+done
+```
+
 **A worker machine** keeps no chain: the node's binary copied out of the public node's container
 (`podman cp chainv4_node_1:/usr/local/bin/chainv4 …`) to `/opt/chainv4`, under
 `/etc/systemd/system/chainv4-worker.service`, `Restart=always`:

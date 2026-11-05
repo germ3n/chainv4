@@ -601,6 +601,18 @@ with.
   Run it in CI on Linux x86-64, macOS arm64 and an Android or arm64 Linux target, and turn
   whatever disagrees into a deterministic rule. Related: the pentest's finding that Lua's `^`
   calls the platform's `pow()`.
+- [ ] **Test the Lua fixes across OSes and CPU architectures (the owner's ask, 2026-11-05).** That
+  means the memory fix (a1134bc, Luau 93df670, mlua 3832a79): the limit counted from zero by the
+  sizes Luau asks for, and collection paced by the heap goal, not the clock. It also means the
+  fuel fixes (Luau 325972b): the pattern matcher's steps, what the string, table and utf8 libraries
+  and concatenation go over, and `^` by repeated squaring. Run them on Linux x86-64, Linux arm64,
+  macOS arm64, macOS x86-64, Windows x86-64, and Android and iOS arm64, idle and under CPU load.
+  Use the existing tests (`memory_heavy_calls_come_out_the_same_in_any_state_under_load`,
+  `building_big_strings_stops_at_the_memory_limit`, and the fuel and `pow` tests), plus a fixture
+  of calls that prints each call's fuel, its failure, the bytes counted and the receipts root. Then
+  compare the printouts byte for byte across machines: they must be identical. The CI jobs from the
+  item above can run it once they exist; until then, run it by hand on the servers, this Mac and
+  a phone.
 
 - [x] **The EVM.** revm runs Solidity and Vyper contracts beside Lua and WebAssembly (`evm`
   feature, `evm` in genesis's `engines`): `Code::Evm` deploys, `Tx::EvmCall` calls or pays,
@@ -1540,7 +1552,9 @@ with.
   through certbot, or a self-signed one.
 - [ ] **No published image.** CI does not build or push the Docker image; it is built where it
   runs.
-- [ ] **A deploy compiles on every server.** `docker/pow.sh up` builds the image on each VPS, so a
+- [ ] **A deploy compiles on every server.** Step 1 done 2026-11-05: `docker/pow.sh images` copies
+  one server's images to the others and `up --no-build` starts them (see [Docker](docker.md#building-once-for-several-servers));
+  the registry and CI building stay open. `docker/pow.sh up` builds the image on each VPS, so a
   redeploy of the devnet's three takes about 75 minutes, most of it the same build three times.
   Asked about 2026-11-04; queued after the pentest. In order of effort:
   1. **Build once, copy the image (first).** Build on the first server, as `staged.sh` already
