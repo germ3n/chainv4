@@ -317,12 +317,28 @@ offline; these would make that hold up as a treasury.
     finalized it, and anchored sync checks it through `--beacon`, Ethereum deciding where Bitcoin
     can't. The fork table and the network are governed (`anchoring.eth_start.network`).
     `bridge eth relay-sync` feeds the relay, as the `chainv4-eth-relay` service.
-  - **The anchorer's Ethereum anchors need a block's own header and ancestry.** The beacon API's
-    light-client routes give headers only for checkpoint roots, and no state proofs. So the anchorer
-    times its transaction for an epoch's first slot and writes again if it misses, which wastes gas.
-    The chain already takes ancestry proofs. Options: Lodestar's `/eth/v0/beacon/proof` routes; the
-    anchorer hashing the block body itself, with a parent-root header chain as the proof; or keep
-    the timing. Owner's call.
+  - **Ethereum anchoring is parked (the owner's call, 2026-11-05).** The code stays and builds, but
+    no deploy turns it on, and the `chainv4-eth-relay` service is not set up. Picking it up again
+    needs two things:
+    1. **Gloas.** Sepolia forked to Gloas (ePBS, version `0x90000076`) at epoch 353,024, about
+       2026-10-06. ethlight knows forks only up to Fulu, so it cannot follow Sepolia past that
+       epoch: it reads the wrong fork version and header layout. Gloas's `LightClientHeader` is the
+       beacon header, `execution_block_hash` and an 11-node `execution_branch` (gindex 2,856, through
+       `signed_execution_payload_bid.message.parent_block_hash`), 496 bytes with no offsets. The
+       finality branch is 9 nodes (gindex 735), and the sync committee branches 11 (2,945 and 2,946).
+       Older headers are brought forward by `upgrade_lc_header_to_gloas`. Mainnet and Hoodi are
+       still on Fulu, and mainnet has no Gloas date.
+    2. **Transactions proven through the execution chain.** A Gloas beacon block holds only the
+       payload bid, so no SSZ path reaches a block's transactions any more. The route that works in
+       every fork: start from the finalized header's execution block hash, walk the RLP block
+       headers back to the anchor's block by keccak and `parentHash`, then prove the transaction in
+       that block's transaction trie (Merkle-Patricia). That is roughly 550 bytes a block between the
+       anchor and finality, about 35 KB at most if the anchorer keeps up. It needs keccak and a trie
+       check in ethlight, a keccak host call for `eth_relay` (whose `includes` and `prove_header`
+       move to the same route), and the anchorer building the trie from the block's raw
+       transactions. EIP-2935's history contract, proven by `eth_getProof` against the finalized
+       state root, would make it about 10 KB whatever the distance; that could come later. Once this
+       lands, the anchorer sends at once, with no epoch-first-slot timing and no writing again.
   - **Bitcoin and Ethereum anchors take turns:** each carries the list root, so one recorded wastes
     the other's pending one. The anchorer counts each chain's `every` from its own newest anchor,
     writes to neither while the other has one pending, and lets Bitcoin go first when both are due.
@@ -549,11 +565,9 @@ with.
 
 ### Script layer
 
-- [ ] **Push the Luau and mlua forks, then drop the local `[patch]`.** The Lua memory fix lives in
-  `germ3n/luau-src-rs` 93df670 and `germ3n/mlua` 3832a79, committed locally only. chainv4's
-  `Cargo.toml` points at `../luau-src-rs` and `../mlua` until they are pushed, so no server or CI
-  can build it until then. After the push, remove the `[patch]` section and run
-  `cargo update -p luau0-src -p mlua`.
+- [x] **Push the Luau and mlua forks, then drop the local `[patch]`.** Done 2026-11-05: both forks
+  are pushed (`germ3n/luau-src-rs` 93df670, `germ3n/mlua` 3832a79), the `[patch]` is gone, and
+  `Cargo.lock` builds from them on GitHub.
 - [x] **A Lua block came out two ways on one machine (seen 2026-11-05).** Fixed 2026-11-05. Luau's
   collector timed its cycles by the clock (`getheaptrigger` read `lua_clock()`), so under load it
   freed garbage at other points, and a call near the memory limit failed at another allocation, for

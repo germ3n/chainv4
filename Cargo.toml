@@ -196,12 +196,3 @@ tungstenite = { version = "0.29.0", default-features = false, features = ["hands
 
 [build-dependencies]
 wiki = { path = "wiki" }
-
-# LOCAL UNTIL THE OWNER PUSHES THE FORKS: Lua's memory limit and garbage collector made the same
-# on every run (see docs/contracts.md, "Memory"), committed in ~/luau-src-rs and ~/mlua but not
-# pushed. Servers and CI build from GitHub and cannot build this until both forks are pushed;
-# then drop this section and run `cargo update -p luau0-src -p mlua`.
-[patch."https://github.com/germ3n/luau-src-rs"]
-luau0-src = { path = "../luau-src-rs" }
-[patch."https://github.com/germ3n/mlua"]
-mlua = { path = "../mlua" }

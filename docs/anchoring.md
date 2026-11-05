@@ -18,6 +18,11 @@ A fork made later from old keys cannot have put its checkpoints into Bitcoin's p
 would mean outworking Bitcoin. Nor into Ethereum's finalized past, short of Ethereum's own sync
 committees signing a fork of Ethereum.
 
+> **Ethereum anchoring is parked.** It builds, but nothing deploys or turns it on. Sepolia has forked
+> to Gloas, which ethlight cannot follow yet, and Gloas moved transactions out of beacon blocks, so
+> proofs have to go through the execution chain's headers instead. The plan is in
+> [the todo](todo.md), under "Anchoring: next". Bitcoin anchoring is unaffected.
+
 Governance turns each part on and off, and a chain starts with all of them off. Builds choose too
 (see [Development](development.md)):
 - **`anchoring`** is what every anchor shares: the list and its root, `Tx::Anchor`'s dispatch and
