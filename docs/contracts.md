@@ -791,7 +791,7 @@ check are passed in: the contract makes them host calls, the node runs them nati
 
 | Function | Who | Does |
 | --- | --- | --- |
-| `start(bootstrap, network_name, trusted_root)` | The deployer, once | Starts from a `LightClientBootstrap`, SSZ as `/eth/v1/beacon/light_client/bootstrap/{root}` serves it, on `mainnet`, `sepolia` or `hoodi`. Its header must be the trusted block root, and hold its execution header and its committee. |
+| `start(bootstrap, network_name, trusted_root)` | The deployer, once | Starts from a `LightClientBootstrap`, SSZ as `/eth/v1/beacon/light_client/bootstrap/{root}` serves it. Its network is the one the chain's anchoring names (below) when `network_name` is empty or names it, else `mainnet`, `sepolia` or `hoodi`. Its header must be the trusted block root, and hold its execution header and its committee. It keeps the network's definition and the root. |
 | `submit(update)` | Anyone | Takes a `LightClientUpdate`, SSZ, signed by at least two thirds of the current committee, or across a period boundary of the next one it learned; its finalized header must be newer, or it must bring the next committee while that is unknown. Its finality, next committee and execution branches are checked, and the signature under the fork of the slot before its signature slot. A finality update counts written as an update with zeros for the next committee and its branch. Returns the finalized slot. |
 | `prove_header(held_root, header, branch)` | Anyone | Keeps an ancestor of a header it holds, within the 8,192 slots before it, by the held state's `block_roots`. Returns its slot. |
 | `finalized()` | | The finalized slot, its beacon root, and its execution block's number and hash. |
@@ -800,8 +800,19 @@ check are passed in: the contract makes them host calls, the node runs them nati
 | `calldata(transaction)` | | What a transaction says: its recipient, nil for a creation, its calldata, and its chain id. Legacy, 0x01, 0x02, 0x03 and 0x04 transactions. |
 | `network_name()`, `period()` | | Its network; the current committee's period and whether the next is known. |
 
+**The network follows governance.** The host call `eth_network` (Wasm, the SDK's
+`chainv4_sdk::eth_network()`, Lua's `chain.eth_network()`) gives the beacon network anchoring's
+settings name in force, `anchoring.eth_start.network`, as `ethlight`'s `Network` SSZ: a preset's
+built-in definition, or one governance carried whole. It costs what reading the federation does,
+200 fuel. `start`, `submit` and `prove_header` follow it whenever its name is the one the relay
+started on, and otherwise the definition the relay started with. So a vote adds a fork to a
+schedule, or defines a network no build has, such as Gnosis, Chiado or a private beacon chain,
+without redeploying the relay; a fork past the schedule in force stops updates until a vote names
+it, as its signatures are under a version the schedule lacks.
+
 **What it stores** is bounded and laid out for the node to read natively, as it reads the Bitcoin
-relay's (the layout is in the contract's doc comment): its own `store` and `finalized`, the
+relay's (the layout is in the contract's doc comment): its own `store`, `finalized`, `network`,
+`network_def` (the definition it started with) and `start` (the trusted root), the
 current and next committees in `committees` by period, and at most 8,192 headers in `headers` by
 slot, with `roots` from root to slot and `order` saying which to drop next.
 
@@ -809,13 +820,13 @@ slot, with `roots` from root to slot and `order` saying which to drop next.
 
 | `submit` | Fuel |
 | --- | --- |
-| 512 signers, bringing the next committee, which it stores | 2,970,260 |
-| 512 signers, bringing the next committee it already knows | 3,042,590 |
-| 342 signers, the fewest it takes, with no committee | 2,046,509 |
+| 512 signers, bringing the next committee, which it stores | 2,992,025 |
+| 512 signers, bringing the next committee it already knows | 3,055,147 |
+| 342 signers, the fewest it takes, with no committee | 2,058,556 |
 
 The BLS check is most of it: `bls_verify` and `bls_key` for each signer, 2,663,000 for 512. The
 rest, about 300,000, is the module's load, hashing the committee's root through the host's SHA-256,
-and reading the committees. Both fit a transaction's 10,000,000 by default. The contract and
+reading the committees and the network's definition, and asking the host for the governed one. Both fit a transaction's 10,000,000 by default. The contract and
 `ethlight` are built at `opt-level = "s"` (`contracts/Cargo.toml`): at the workspace's `"z"` their
 hashing and copying loops cost about twice the fuel, more than a larger module's load fee.
 

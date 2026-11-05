@@ -114,9 +114,14 @@ pub enum SwapAction {
         terms: String,
         #[arg(long, default_value = "http://127.0.0.1:8080")]
         node: String,
-        /// An EVM chain's JSON-RPC URL, for its leg: give one for each EVM chain in the swap.
+        /// An EVM chain's JSON-RPC URL, for its leg: give one for each EVM chain in the swap, and
+        /// more of one to fall back to.
         #[arg(long)]
         eth_rpc: Vec<String>,
+        #[command(flatten)]
+        eth_auth: crate::cli::outside::EthAuthArgs,
+        #[command(flatten)]
+        proxy: crate::cli::outside::ProxyArgs,
         #[command(flatten)]
         tls: TlsArgs,
     },
@@ -136,9 +141,10 @@ pub enum SwapAction {
     BitcoinRefund {
         #[command(flatten)]
         spend: BitcoinSpend,
-        /// Wait for the deadline, then broadcast the refund through --esplora until Bitcoin takes
-        /// it, trying again every 30 seconds while its median time is short of the deadline.
-        #[arg(long, requires = "esplora")]
+        /// Wait for the deadline, then broadcast the refund through --esplora or --bitcoind until
+        /// Bitcoin takes it, trying again every 30 seconds while its median time is short of the
+        /// deadline.
+        #[arg(long)]
         wait: bool,
     },
     /// Finishes a multisig's claim or refund of the HTLC from its PSBT, once its members signed
@@ -166,12 +172,16 @@ pub enum SwapAction {
     /// Deploys Swap.sol on an EVM chain: through the deterministic deployment proxy where the
     /// chain has it, at the address offers default to, or else wherever a create puts it.
     EvmDeploy {
-        /// The chain's JSON-RPC URL.
-        #[arg(long)]
-        eth_rpc: String,
+        /// The chain's JSON-RPC URL; give it again for others of the chain to fall back to.
+        #[arg(long, required = true)]
+        eth_rpc: Vec<String>,
         /// A secp256k1 key file holding the chain's coin, to pay for it.
         #[arg(long)]
         key: PathBuf,
+        #[command(flatten)]
+        eth_auth: crate::cli::outside::EthAuthArgs,
+        #[command(flatten)]
+        proxy: crate::cli::outside::ProxyArgs,
         #[command(flatten)]
         tls: TlsArgs,
     },
@@ -219,9 +229,14 @@ pub struct LegAction {
     /// The node's HTTP API, for a chainv4 leg.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub node: String,
-    /// An EVM chain's JSON-RPC URL, for an EVM leg, and to check the other leg locking second.
+    /// An EVM chain's JSON-RPC URL, for an EVM leg, and to check the other leg locking second;
+    /// more of one chain fall back to each other.
     #[arg(long)]
     pub eth_rpc: Vec<String>,
+    #[command(flatten)]
+    pub eth_auth: crate::cli::outside::EthAuthArgs,
+    #[command(flatten)]
+    pub proxy: crate::cli::outside::ProxyArgs,
     #[command(flatten)]
     pub tls: TlsArgs,
     /// The key file to sign with: a secp256k1 one for an EVM leg.
@@ -277,10 +292,12 @@ pub struct BitcoinSpend {
     /// Bitcoin a high one, which it must be mined at once to be safe.
     #[arg(long)]
     pub fee_rate: Option<u64>,
-    /// An Esplora API, such as https://mempool.space/api, to broadcast the signed transaction
-    /// through rather than print it. It tells that server the swap's addresses.
-    #[arg(long)]
-    pub esplora: Option<String>,
+    /// Where to broadcast the signed transaction rather than print it: --esplora, such as
+    /// https://mempool.space/api, or --bitcoind. It tells that server the swap's addresses.
+    #[command(flatten)]
+    pub bitcoin: crate::cli::outside::BitcoinArgs,
+    #[command(flatten)]
+    pub proxy: crate::cli::outside::ProxyArgs,
 }
 
 pub fn swap(args: SwapArgs) -> CliResult<()> {
@@ -462,9 +479,9 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
             }
         }
-        SwapAction::Status { terms, node, eth_rpc, tls } => {
+        SwapAction::Status { terms, node, eth_rpc, eth_auth, proxy, tls } => {
             let terms = Terms::from_text(&terms)?;
-            let action = LegAction { terms: String::new(), leg: None, node, eth_rpc, tls, key: None, anyway: false, multisig: None, out: None };
+            let action = LegAction { terms: String::new(), leg: None, node, eth_rpc, eth_auth, proxy, tls, key: None, anyway: false, multisig: None, out: None };
 
             for (side, leg) in terms.legs() {
                 let name = match side {
@@ -516,18 +533,22 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
         SwapAction::BitcoinClaim { spend, secret } => {
             let secret = bytes32(&secret, "--secret")?;
             let signed = bitcoin(&spend, Spend::Claim { secret })?;
-            match &spend.esplora {
-                Some(esplora) if spend.multisig.is_none() => println!("broadcast {}", esplora_broadcast(&agent(&TlsArgs::default())?, esplora, &signed)?),
+            match spend.bitcoin.source(&spend.proxy)? {
+                Some(bitcoin) if spend.multisig.is_none() => println!("broadcast {}", bitcoin_broadcast(&bitcoin, &signed)?),
                 _ => println!("{signed}"),
             }
         }
         SwapAction::BitcoinRefund { spend, wait } => {
             let signed = bitcoin(&spend, Spend::Refund)?;
-            match &spend.esplora {
-                Some(esplora) if spend.multisig.is_none() => {
+            if wait && !spend.bitcoin.given() {
+                return Err("--wait broadcasts the refund: give --esplora or --bitcoind".into());
+            }
+
+            match spend.bitcoin.source(&spend.proxy)? {
+                Some(bitcoin) if spend.multisig.is_none() => {
                     let terms = agreed(&spend.terms)?;
                     let locktime = terms.htlc().map_or(0, |htlc| u64::from(htlc.locktime));
-                    println!("broadcast {}", refund_when_due(&agent(&TlsArgs::default())?, esplora, &signed, locktime, wait)?);
+                    println!("broadcast {}", refund_when_due(&bitcoin, &signed, locktime, wait)?);
                 }
                 _ => println!("{signed}"),
             }
@@ -549,9 +570,10 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
             let secret = revealed(&tx, &terms.hash).ok_or("that transaction shows no secret of this swap's")?;
             println!("secret {}", to_hex(&secret));
         }
-        SwapAction::EvmDeploy { eth_rpc, key, tls } => {
+        SwapAction::EvmDeploy { eth_rpc, key, eth_auth, proxy, tls } => {
+            let _ = tls;
             let secret = evm_secret(&signer(Some(&key))?)?;
-            let address = Rpc::new(agent(&tls)?, &eth_rpc).deploy(&evm::init_code(), &secret)?;
+            let address = Rpc::over(proxy.http()?, eth_auth.endpoints(&eth_rpc)?).deploy(&evm::init_code(), &secret)?;
             println!("Swap.sol at {}", show_address(&address));
         }
     }
@@ -773,7 +795,7 @@ fn look(terms: &Terms, side: Side, action: &LegAction) -> CliResult<Lock> {
 }
 
 fn evm_rpc(action: &LegAction, leg: &EvmLeg) -> CliResult<Rpc> {
-    Rpc::for_chain(&agent(&action.tls)?, &action.eth_rpc, leg.chain_id)
+    Rpc::for_chain_at(&action.proxy.http()?, &action.eth_auth.endpoints(&action.eth_rpc)?, leg.chain_id)
 }
 
 fn evm_secret(keypair: &Keypair) -> CliResult<[u8; 32]> {
@@ -935,21 +957,14 @@ fn warn_bitcoin_second(terms: &Terms) {
     }
 }
 
-/// Broadcasts a signed Bitcoin transaction through an Esplora API: its txid.
-fn esplora_broadcast(agent: &ureq::Agent, esplora: &str, hex: &str) -> CliResult<String> {
-    let url = format!("{}/tx", esplora.trim().trim_end_matches('/'));
-    let mut answer = agent.post(&url).send(hex.to_string()).map_err(|err| format!("cannot reach Esplora: {err}"))?;
-    let body = answer.body_mut().read_to_string().unwrap_or_default();
-
-    match answer.status().is_success() {
-        true => Ok(body.trim().to_string()),
-        false => Err(format!("Esplora refused it: {}", body.trim()).into()),
-    }
+/// Broadcasts a signed Bitcoin transaction through Esplora or bitcoind: its txid.
+fn bitcoin_broadcast(bitcoin: &dyn crate::remote::bitcoin::BitcoinApi, hex: &str) -> CliResult<String> {
+    Ok(bitcoin.broadcast(hex).map_err(|why| format!("Bitcoin refused it: {why}"))?)
 }
 
-/// Broadcasts a refund through Esplora: at once, or with wait, from its lock time on, again every
-/// 30 seconds while Bitcoin refuses it as not final, its median time running behind the clock.
-fn refund_when_due(agent: &ureq::Agent, esplora: &str, hex: &str, locktime: u64, wait: bool) -> CliResult<String> {
+/// Broadcasts a refund: at once, or with wait, from its lock time on, again every 30 seconds while
+/// Bitcoin refuses it as not final, its median time running behind the clock.
+fn refund_when_due(bitcoin: &dyn crate::remote::bitcoin::BitcoinApi, hex: &str, locktime: u64, wait: bool) -> CliResult<String> {
     loop {
         let now = crate::node::now_ms() / 1_000;
 
@@ -959,7 +974,7 @@ fn refund_when_due(agent: &ureq::Agent, esplora: &str, hex: &str, locktime: u64,
             continue;
         }
 
-        match esplora_broadcast(agent, esplora, hex) {
+        match bitcoin_broadcast(bitcoin, hex) {
             Err(why) if wait && not_final(&why.to_string()) => {
                 eprintln!("not final yet, as Bitcoin's median time is short of the deadline: trying again in 30 s");
                 std::thread::sleep(std::time::Duration::from_secs(30));

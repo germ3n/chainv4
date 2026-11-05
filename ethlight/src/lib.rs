@@ -34,7 +34,7 @@ pub mod testing;
 mod tests;
 
 pub use {
-    client::{Applied, Store, prove_ancestor},
+    client::{Applied, Store, prove_ancestor, verify_finality},
     forks::{Fork, ForkAt, HOODI, MAINNET, NETWORKS, Network, SEPOLIA},
     types::{BeaconBlockHeader, ExecutionPayloadHeader, Finalized, LightClientBootstrap, LightClientHeader, LightClientUpdate, SyncAggregate, SyncCommittee},
 };

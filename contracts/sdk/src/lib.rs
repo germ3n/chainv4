@@ -295,6 +295,19 @@ pub fn federation() -> Option<Federation> {
     Some(Federation { version, threshold, signers })
 }
 
+/// The Ethereum beacon network anchoring's settings name in force, as eth_start's network: one of
+/// mainnet, sepolia and hoodi as this chain's node builds them in, or one governance defined,
+/// SSZ-encoded as ethlight's Network writes it. None while the settings name none. What an
+/// Ethereum light client contract follows, so a vote can change a network's fork schedule without
+/// redeploying it. Charged as federation is.
+pub fn eth_network() -> Option<Vec<u8>> {
+    if unsafe { sys::eth_network() } < 0 {
+        return None;
+    }
+
+    Some(result())
+}
+
 /// The chain's id: what its EVM answers CHAINID with and the bridges name it by, six bytes of its
 /// genesis id, and nothing a contract's owner sets.
 pub fn chain_id() -> u64 {

@@ -634,3 +634,38 @@ fn networks_encode_as_ssz_and_decode_only_when_whole() {
     bytes[72] = 0xff;
     assert!(Network::decode(&bytes).is_err());
 }
+
+#[test]
+fn finality_updates_read_as_updates_bringing_no_committee() {
+    let committee = Committee::new(1);
+
+    for period in [DENEB_LAST, ELECTRA_FIRST, FULU] {
+        let update = testing::update(&C, &MAINNET, &committee, 400, slot(period, 200), slot(period, 201), &finalized_at(slot(period, 128)), None);
+        let bytes = update.encode_finality(&MAINNET);
+        assert_eq!(LightClientUpdate::decode_finality(&bytes, &MAINNET).unwrap(), update, "period {period}");
+        assert_eq!(bytes.len() + SyncCommittee::SSZ_LEN + 32 * update.next_sync_committee_branch.len(), update.encode(&MAINNET).len(), "an update less its next committee");
+        assert!(LightClientUpdate::decode_finality(&bytes[..60], &MAINNET).is_err());
+    }
+
+    let mut update = testing::update(&C, &MAINNET, &committee, 400, slot(FULU, 200), slot(FULU, 201), &finalized_at(slot(FULU, 128)), None);
+    update.finality_branch = vec![[0; 32]; 7];
+    assert_eq!(LightClientUpdate::decode_finality(&update.encode_finality(&MAINNET), &MAINNET), Err(Error::NotFinality));
+}
+
+#[test]
+fn an_update_is_verified_on_its_own_with_the_committee_of_its_period() {
+    let (current, next) = (Committee::new(1), Committee::new(2));
+    let finalized = finalized_at(slot(FULU, 128));
+    let update = testing::update(&C, &MAINNET, &current, 400, slot(FULU, 200), slot(FULU, 201), &finalized, None);
+
+    verify_finality(&C, &MAINNET, &current.committee, &update, slot(FULU, 300)).unwrap();
+    assert_eq!(verify_finality(&C, &MAINNET, &next.committee, &update, slot(FULU, 300)), Err(Error::BadSignature), "another period's committee");
+    assert_eq!(verify_finality(&C, &MAINNET, &current.committee, &update, slot(FULU, 200)), Err(Error::FromTheFuture));
+
+    let few = testing::update(&C, &MAINNET, &current, 300, slot(FULU, 200), slot(FULU, 201), &finalized, None);
+    assert_eq!(verify_finality(&C, &MAINNET, &current.committee, &few, slot(FULU, 300)), Err(Error::LowParticipation));
+
+    let mut moved = update.clone();
+    moved.finalized_header = finalized_at(slot(FULU, 160));
+    assert_eq!(verify_finality(&C, &MAINNET, &current.committee, &moved, slot(FULU, 300)), Err(Error::BadFinalityBranch), "a header its state does not finalize");
+}

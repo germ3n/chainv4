@@ -241,3 +241,162 @@ fn submitting_an_update_costs_the_fuel_measured_here() {
     assert!([learning, following, known].iter().all(|fuel| *fuel < 4_000_000), "{learning} {following} {known}");
     assert!(following < learning, "no committee to hash or store");
 }
+
+/// What the chain's anchoring settings name, to stand for genesis's in the VM.
+fn governing(relay: &mut Relay, network: crate::params::anchoring::EthNetwork, root: [u8; 32]) {
+    let settings = crate::params::anchoring::AnchorSettings {
+        ethereum: true,
+        eth_relay: Some(relay.relay),
+        eth_start: Some(crate::params::anchoring::EthStart { root, network }),
+        ..crate::params::anchoring::AnchorSettings::OFF
+    };
+    relay.world.vm = Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm], HashType::default_chain()).unwrap().with_anchoring(Some(settings)));
+}
+
+#[test]
+fn the_relay_follows_the_network_the_chain_s_anchoring_names() {
+    use crate::params::anchoring::EthNetwork;
+
+    let (mut relay, current, next) = started();
+    let trusted = testing::bootstrap(&C, &MAINNET, slot(PERIOD, 64), &current.committee).1;
+    let finalized = finalized_at(slot(PERIOD, 128), &[]);
+    let signed_as_built = testing::update(&C, &MAINNET, &current, 512, slot(PERIOD, 200), slot(PERIOD, 201), &finalized, Some(&next.committee));
+
+    // Governance gives Fulu another version: updates signed under the built-in one stop holding,
+    // and those under the voted one hold, without a redeploy.
+    let mut voted = MAINNET.clone();
+    let mut forks = voted.forks.to_vec();
+    forks.last_mut().unwrap().version = [0x16, 0, 0, 0];
+    voted.forks = forks.into();
+    governing(&mut relay, EthNetwork::Custom(voted.encode()), trusted);
+    assert!(relay.submit(&signed_as_built, slot(PERIOD, 300)).unwrap_err().contains("signature does not hold"));
+    let mut signed_as_voted = signed_as_built.clone();
+    testing::resign(&C, &current, 512, &mut signed_as_voted, [0x16, 0, 0, 0], &MAINNET.genesis_validators_root);
+    assert_eq!(relay.submit(&signed_as_voted, slot(PERIOD, 300)).unwrap(), [number(slot(PERIOD, 128))]);
+
+    // A network of another name is not the relay's: it goes back to the one it started with.
+    let mut other = voted.clone();
+    other.name = "gnosis-like".into();
+    governing(&mut relay, EthNetwork::Custom(other.encode()), trusted);
+    let later = testing::update(&C, &MAINNET, &current, 512, slot(PERIOD, 400), slot(PERIOD, 401), &finalized_at(slot(PERIOD, 352), &[]), None);
+    assert_eq!(relay.submit(&later, slot(PERIOD, 500)).unwrap(), [number(slot(PERIOD, 352))]);
+
+    // Lua reads the same definition.
+    let lua = relay.world.deploy(Code::Lua("local M = {}\nfunction M.network() return chain.eth_network() end\nreturn M".to_string()));
+    let read = |relay: &Relay| match &relay.world.call(lua, "network", &[]).result.unwrap()[..] {
+        [TxCallArgumentType::Bytes(bytes)] => bytes.clone(),
+        [TxCallArgumentType::String(text)] => text.clone().into_bytes(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(read(&relay), other.encode());
+    governing(&mut relay, EthNetwork::Preset("sepolia".into()), trusted);
+    assert_eq!(read(&relay), ethlight::SEPOLIA.encode(), "a preset as its built-in definition");
+}
+
+#[test]
+fn a_relay_started_without_a_name_takes_the_governed_network() {
+    use crate::params::anchoring::EthNetwork;
+
+    let mut relay = Relay::new();
+    let committee = Committee::new(1);
+    let (bootstrap, trusted) = testing::bootstrap(&C, &MAINNET, slot(PERIOD, 64), &committee.committee);
+    let start = |relay: &Relay| relay.call("start", &[bytes(&bootstrap.encode(&MAINNET)), TxCallArgumentType::String(String::new()), bytes(&trusted)], slot(PERIOD, 64));
+
+    assert!(start(&relay).unwrap_err().contains("names no Ethereum network"));
+    governing(&mut relay, EthNetwork::Preset("mainnet".into()), trusted);
+    start(&relay).unwrap();
+    assert_eq!(relay.call("network_name", &[], 0).unwrap(), [TxCallArgumentType::String("mainnet".into())]);
+    assert_eq!(relay.namespace(b"", b"start"), Some(trusted.to_vec()));
+}
+
+/// An anchor written into Ethereum, proven end to end: a synthetic beacon chain's committee
+/// finalizes a checkpoint the relay takes, the anchor's block an ancestor of it, and the chain
+/// checks the proof natively against the relay's records.
+#[cfg(feature = "anchoring-eth")]
+#[test]
+fn an_ethereum_anchor_is_proven_against_the_relay_and_refused_when_anything_is_off() {
+    use crate::anchor::{Anchors, Payload, ProveError, ProveRules, chain_tag, prove};
+    use crate::params::anchoring::{AnchorSettings, AnchorSource, EthNetwork, EthStart};
+    use crate::structs::tx::{AnchorProof, EthAnchorProof};
+
+    let (relay, current, next) = started();
+    let trusted = testing::bootstrap(&C, &MAINNET, slot(PERIOD, 64), &current.committee).1;
+    let genesis = crate::crypto::hasher::Hasher::digest(HashType::default_chain(), b"a chain");
+    let checkpoint = crate::crypto::hasher::Hasher::digest(HashType::default_chain(), b"its checkpoint at epoch 2");
+    let payload = |chain: [u8; 4]| Payload { chain, epoch: 2, block: checkpoint.to_bytes().try_into().unwrap(), root: [0; 32] }.encode();
+    let key = [0xa1; 20];
+    let anchor = testing::eip1559(1, 7, &key, &payload(chain_tag(&genesis)));
+    let foreign = testing::eip1559(1, 8, &key, &payload(*b"else"));
+    let short = testing::eip1559(1, 9, &key, &payload(chain_tag(&genesis))[..79]);
+    let transactions = vec![testing::eip1559(1, 1, &[2; 20], b"swap"), anchor.clone(), foreign.clone(), short.clone()];
+
+    // The anchor's block, and a checkpoint finalized after it whose state holds its root.
+    let older = finalized_at(slot(PERIOD, 100), &transactions);
+    let at = slot(PERIOD, 4096);
+    let mut state = State::new(MAINNET.fork_at_slot(at).fork, at);
+    let mut roots = BlockRoots::new(at);
+    roots.set(older.beacon.slot, older.beacon.hash_tree_root(&C));
+    state.fields[testing::BLOCK_ROOTS as usize] = roots.root(&C);
+    let checkpoint_header = testing::header(&C, &MAINNET, at, state.root(&C), testing::execution(&C, at, &[] as &[&[u8]]));
+    let update = testing::update(&C, &MAINNET, &current, 400, at + 40, at + 41, &checkpoint_header, Some(&next.committee));
+    relay.submit(&update, at + 100).unwrap();
+
+    relay.world.state.put_value(Column::Heights, 16u64.to_be_bytes().to_vec(), &checkpoint);
+    let settings = AnchorSettings {
+        ethereum: true,
+        enforce: true,
+        eth_relay: Some(relay.relay),
+        eth_start: Some(EthStart { root: trusted, network: EthNetwork::Preset("mainnet".into()) }),
+        ..AnchorSettings::OFF
+    };
+    let rules = ProveRules { settings: &settings, genesis, checkpoint_interval: Some(8), pooled: false, time: time_at(at + 100) };
+    let branch = |index: u64| tx::transaction_branch(&C, &transactions, index);
+    let fork = MAINNET.fork_at_slot(older.beacon.slot).fork;
+    let proof = EthAnchorProof {
+        header: older.encode(fork),
+        root: checkpoint_header.beacon.hash_tree_root(&C),
+        tx: anchor.clone(),
+        index: 1,
+        branch: branch(1),
+        ancestry: Some(roots.branch(&C, &state, older.beacon.slot)),
+        update: update.encode(&MAINNET),
+    };
+    let refused = |proof: EthAnchorProof| match prove(&relay.world.state, &rules, &Address::Ed25519([1; 32]), &AnchorProof::Ethereum(proof)) {
+        Err(ProveError::Refused(why)) => why,
+        other => panic!("{other:?}"),
+    };
+
+    // Another chain's anchor, calldata that is not the 80 bytes, a branch to another place.
+    assert_eq!(refused(EthAnchorProof { tx: foreign.clone(), index: 2, branch: branch(2), ..proof.clone() }), "the anchor is another chain's");
+    assert!(refused(EthAnchorProof { tx: short.clone(), index: 3, branch: branch(3), ..proof.clone() }).contains("not an anchor's 80 bytes"));
+    assert!(refused(EthAnchorProof { branch: branch(0), ..proof.clone() }).contains("not at its place"));
+    assert!(refused(EthAnchorProof { branch: branch(1)[..20].to_vec(), ..proof.clone() }).contains("21 nodes"));
+
+    // A block that is no finalized header, shown without the ancestry that makes it one.
+    assert!(refused(EthAnchorProof { ancestry: None, ..proof.clone() }).contains("not the finalized one"));
+    assert!(refused(EthAnchorProof { ancestry: Some(roots.branch(&C, &state, older.beacon.slot + 1)), ..proof.clone() }).contains("not in the header's state"));
+
+    // A header the relay does not hold, finalized by an update it never took.
+    let unheld_header = testing::header(&C, &MAINNET, at + 32, state.root(&C), testing::execution(&C, at + 32, &[] as &[&[u8]]));
+    let unheld = testing::update(&C, &MAINNET, &current, 400, at + 70, at + 71, &unheld_header, None);
+    assert!(refused(EthAnchorProof { root: unheld_header.beacon.hash_tree_root(&C), update: unheld.encode(&MAINNET), ..proof.clone() }).contains("holds no such finalized header"));
+
+    // An update that is not the one finalizing the root, or that the committee did not sign.
+    assert!(refused(EthAnchorProof { update: unheld.encode(&MAINNET), ..proof.clone() }).contains("does not finalize the header"));
+    let mut forged = update.clone();
+    testing::resign(&C, &Committee::new(9), 512, &mut forged, MAINNET.fork_at_slot(at + 40).version, &MAINNET.genesis_validators_root);
+    assert!(refused(EthAnchorProof { update: forged.encode(&MAINNET), ..proof.clone() }).contains("signature does not hold"));
+
+    // Ethereum off, or a relay that did not start where the settings say.
+    let off = AnchorSettings { ethereum: false, ..settings.clone() };
+    assert!(matches!(prove(&relay.world.state, &ProveRules { settings: &off, ..rules }, &Address::Ed25519([1; 32]), &AnchorProof::Ethereum(proof.clone())), Err(ProveError::Refused(why)) if why.contains("off")));
+    let elsewhere = AnchorSettings { eth_start: Some(EthStart { root: [7; 32], network: EthNetwork::Preset("mainnet".into()) }), ..settings.clone() };
+    assert!(matches!(prove(&relay.world.state, &ProveRules { settings: &elsewhere, ..rules }, &Address::Ed25519([1; 32]), &AnchorProof::Ethereum(proof.clone())), Err(ProveError::Refused(why)) if why.contains("did not start")));
+
+    // What holds is recorded, by the anchor's own block and slot.
+    prove(&relay.world.state, &rules, &Address::Ed25519([1; 32]), &AnchorProof::Ethereum(proof.clone())).unwrap();
+    let anchors = Anchors::new(&relay.world.state);
+    assert_eq!(anchors.entry(0).unwrap().unwrap().source, AnchorSource::Ethereum { root: older.beacon.hash_tree_root(&C), slot: older.beacon.slot });
+    assert_eq!(anchors.enforced_height().unwrap(), Some(16));
+    assert!(refused(proof).contains("anchored already"));
+}

@@ -163,6 +163,7 @@ const WHEN_DEPTH: &[(&str, &str)] = &[("type", "depth")];
 const WHEN_LEAK: &[(&str, &str)] = &[("type", "ffg"), ("leak", "on")];
 const WHEN_BTC_START: &[(&str, &str)] = &[("btc_start", "on")];
 const BTC_NETWORKS: Options = &[("main", "Bitcoin"), ("test", "Testnet4 or signet"), ("regtest", "Regtest")];
+const WHEN_ETH_START: &[(&str, &str)] = &[("eth_start", "on")];
 const INTO_FFG: &[(&str, &str)] = &[("finality.type", "ffg")];
 const INTO_AUTHORITY: &[(&str, &str)] = &[("finality.type", "authority")];
 const INTO_LEAK: &[(&str, &str)] = &[("finality.type", "ffg"), ("finality.leak", "on")];
@@ -206,13 +207,17 @@ pub fn schema(kind: &str) -> Vec<Spec> {
         "dex" => vec![field("fee_bps", "Fee a trade keeps, in hundredths of a percent", "30 is 0.3%. Both DEXes charge it from the block after the decision.", Control::Small).most(1000)],
         "anchoring" => vec![
             field("bitcoin", "Bitcoin anchors", "Whether the chain takes proofs of its checkpoints written into Bitcoin.", Control::Flag { off: "Off", on: "On" }),
-            field("ethereum", "Ethereum anchors", "Anchorers write to Ethereum too. The chain does not count them yet.", Control::Flag { off: "Off", on: "On" }),
+            field("ethereum", "Ethereum anchors", "Whether the chain takes proofs of its checkpoints written into Ethereum, checked against the Ethereum relay.", Control::Flag { off: "Off", on: "On" }),
             field("enforce", "Enforced", "Anchors recorded from now on bind nodes: no block replaces them, and new nodes sync by them. Those recorded while on stay so.", Control::Flag { off: "Off", on: "On" }),
             field("relay", "Bitcoin relay", "The relay contract proofs are checked against.", Control::MaybeContract),
             field("btc_start", "Where the relay started", "Nodes checking anchors on their own check Bitcoin's headers from here.", Control::Switch { off: "Not set", on: "This header" }),
             field("btc_start.header", "Header", "80 bytes, as 0x hex.", Control::Text).when(WHEN_BTC_START),
             field("btc_start.height", "Its height", "On Bitcoin itself, divisible by 2016.", Control::Whole).when(WHEN_BTC_START),
             field("btc_start.network", "Network", "", Control::Choice(BTC_NETWORKS)).when(WHEN_BTC_START),
+            field("eth_relay", "Ethereum relay", "The eth_relay contract Ethereum proofs are checked against.", Control::MaybeContract),
+            field("eth_start", "Where the Ethereum relay started", "Nodes checking Ethereum anchors on their own follow sync committees from here.", Control::Switch { off: "Not set", on: "This root" }),
+            field("eth_start.root", "Beacon block root", "The trusted root the relay started at: 0x and 64 hex digits.", Control::Text).when(WHEN_ETH_START),
+            field("eth_start.network", "Beacon network", "mainnet, sepolia or hoodi, or a network's whole definition as 0x SSZ: a fork table of its own, or a chain no build has.", Control::Text).when(WHEN_ETH_START),
             field("depth", "Bitcoin blocks deep", "Before an anchor in one counts: 1 is the tip.", Control::Whole).least(1).most(144),
             field("every", "Epochs between rewards", "Anchors in between are recorded, unpaid.", Control::Whole).least(1),
             field("reward", "Reward", "For the first proof of a rewarded anchor.", Control::Amount),
@@ -281,6 +286,8 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("costs.evm_native_call", "Evm native call", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
             field("costs.evm_native_word", "Evm native word", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
             field("costs.evm_name_lookup", "Evm name lookup", "", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.bls_verify", "BLS verify", "An Ethereum aggregate signature's check, before its keys.", Control::Whole).under("Host costs").when(WHEN_COSTS),
+            field("costs.bls_key", "BLS key", "Each key in it.", Control::Whole).under("Host costs").when(WHEN_COSTS),
         ],
         "reward" => vec![
             field("initial", "What a block mints", "From the block after the one that decides it.", Control::Amount),
@@ -393,7 +400,7 @@ pub fn defaults(kind: &str) -> Value {
         "names" => json!({ "prices": [], "grace_ms": 7_776_000_000u64, "max_years": 100 }),
         "evm_spec" => json!({ "spec": "prague", "from": null }),
         "dex" => json!({ "fee_bps": 30 }),
-        "anchoring" => json!({ "bitcoin": false, "ethereum": false, "enforce": false, "relay": null, "btc_start": null, "depth": 6, "every": 90, "reward": "0" }),
+        "anchoring" => json!({ "bitcoin": false, "ethereum": false, "enforce": false, "relay": null, "btc_start": null, "eth_relay": null, "eth_start": null, "depth": 6, "every": 90, "reward": "0" }),
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),

@@ -92,13 +92,14 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     });
 }
 
-/// What the chain anchored in Bitcoin: whether it takes and enforces anchors, and the newest, each
-/// with the Bitcoin block that holds it.
+/// What the chain anchored in Bitcoin and Ethereum: which it takes, whether it enforces anchors,
+/// how far each relay reaches, and the newest anchors, each with the block of its chain that holds
+/// it.
 fn anchors(ui: &mut Ui, ctx: &mut Ctx) {
     let look = ctx.look;
     let store = ctx.store;
     let Some(anchors) = &store.anchors else {
-        super::section(ui, look, "Anchored in Bitcoin", |ui| super::waiting(ui, ctx, &Ask::Anchors));
+        super::section(ui, look, "Anchored", |ui| super::waiting(ui, ctx, &Ask::Anchors));
 
         return;
     };
@@ -107,16 +108,26 @@ fn anchors(ui: &mut Ui, ctx: &mut Ctx) {
     let entries = anchors["entries"].as_array().cloned().unwrap_or_default();
     let count = anchors["count"].as_u64().unwrap_or(0);
 
-    super::section(ui, look, &format!("Anchored in Bitcoin · {}", format::thousands(&count.to_string())), |ui| {
-        if !on("bitcoin") && count == 0 {
-            super::note(ui, look, "This chain takes no Bitcoin anchors: governance turns them on.");
+    super::section(ui, look, &format!("Anchored · {}", format::thousands(&count.to_string())), |ui| {
+        if !on("bitcoin") && !on("ethereum") && count == 0 {
+            super::note(ui, look, "This chain takes no anchors, in Bitcoin or Ethereum: governance turns them on.");
 
             return;
         }
 
         super::facts(ui, look, "anchoring", |facts| {
             facts.row("taking anchors", |ui| {
-                widgets::pill(ui, if on("bitcoin") { "Bitcoin" } else { "off" }, look.palette.soft);
+                ui.horizontal(|ui| {
+                    if on("bitcoin") {
+                        widgets::pill(ui, "Bitcoin", look.palette.soft);
+                    }
+                    if on("ethereum") {
+                        widgets::pill(ui, "Ethereum", look.palette.soft);
+                    }
+                    if !on("bitcoin") && !on("ethereum") {
+                        widgets::pill(ui, "off", look.palette.soft);
+                    }
+                });
             });
             facts.row("enforced", |ui| {
                 ui.label(if on("enforce") { "yes: no block replaces an anchored checkpoint" } else { "no" });
@@ -130,8 +141,13 @@ fn anchors(ui: &mut Ui, ctx: &mut Ctx) {
                 });
             }
             if let Some(tip) = anchors["relay_tip"]["height"].as_u64() {
-                facts.row("relay's tip", |ui| {
+                facts.row("Bitcoin relay's tip", |ui| {
                     ui.label(format!("Bitcoin block {}", format::thousands(&tip.to_string())));
+                });
+            }
+            if let Some(slot) = anchors["eth_finalized"]["slot"].as_u64() {
+                facts.row("Ethereum relay's finalized", |ui| {
+                    ui.label(format!("slot {}", format::thousands(&slot.to_string())));
                 });
             }
         });

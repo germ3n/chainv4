@@ -291,7 +291,7 @@ offline; these would make that hold up as a treasury.
   the relay, earning a governance-set reward every `every` epochs. Anchors recorded while `enforce`
   is on bind nodes: no block replaces one. `--snapshot --anchored` starts a new node at the newest
   checkpoint of the history Bitcoin saw first, checked against the Bitcoin headers peers' relays
-  hold, by their work. `bridge btc anchor` is the anchorer. Each part switches on its own under
+  hold, by their work. `bridge anchor` (or its alias `bridge btc anchor`) is the anchorer. Each part switches on its own under
   `Change::Anchoring`, all off when unset. No Bitcoin height went into headers: the relay's tip is
   chain state already. See [Anchoring](anchoring.md).
 - [ ] **Validity proofs: other chains check our blocks, not just our timestamps (owner, 2026-11-05).**
@@ -312,17 +312,30 @@ offline; these would make that hold up as a treasury.
   whether the engines can be proven at all at a sane cost, Luau's C++ VM above all. A large project,
   queued after the todo, with the second pentest.
 - [ ] **Anchoring: next.**
-  - **Ethereum anchors that count.** The anchorer writes them already, but the chain cannot check
-    them without a light client of Ethereum's finality: BLS12-381 checks of the sync committee and
-    Merkle-Patricia proofs as host functions. Once that is in, an Ethereum anchor counts in
-    anchored sync as a Bitcoin one does, by the slot it was finalized in.
+  - [x] **Ethereum anchors that count** (2026-11-05). `ethlight` and `eth_relay` follow the beacon
+    chain. `Tx::Anchor` proves an Ethereum anchor against the relay with the finality update that
+    finalized it, and anchored sync checks it through `--beacon`, Ethereum deciding where Bitcoin
+    can't. The fork table and the network are governed (`anchoring.eth_start.network`).
+    `bridge eth relay-sync` feeds the relay, as the `chainv4-eth-relay` service.
+  - **The anchorer's Ethereum anchors need a block's own header and ancestry.** The beacon API's
+    light-client routes give headers only for checkpoint roots, and no state proofs. So the anchorer
+    times its transaction for an epoch's first slot and writes again if it misses, which wastes gas.
+    The chain already takes ancestry proofs. Options: Lodestar's `/eth/v0/beacon/proof` routes; the
+    anchorer hashing the block body itself, with a parent-root header chain as the proof; or keep
+    the timing. Owner's call.
+  - **Bitcoin and Ethereum anchors take turns:** each carries the list root, so one recorded wastes
+    the other's pending one. The anchorer counts each chain's `every` from its own newest anchor,
+    writes to neither while the other has one pending, and lets Bitcoin go first when both are due.
+    Provisional; the owner to confirm.
+  - **`multisig bitcoin` commands still use their own single-URL Esplora code,** not the shared
+    endpoints with fallbacks, bitcoind, logins and `--proxy`.
   - **The anchorer keeps its pending anchor on disk,** so a restart does not write another.
   - **Anchored sync without `--snapshot`:** running every block from genesis, refusing any branch
     without the picked checkpoint.
   - **Running nodes check their peers' anchors now and then,** and say so loudly if a peer's history
     beats their own. They cannot roll back past their finalized checkpoint, but an operator can
     resync.
-  - **Ethereum anchoring on its own.** `anchoring-eth` builds alone (the owner's call): the anchor
+  - [x] **Ethereum anchoring on its own.** `anchoring-eth` builds alone (the owner's call): the anchor
     list, the guard and anchored sync's framework move into a base either feature turns on, so a
     build may anchor into Ethereum without Bitcoin, Bitcoin without Ethereum, or both.
   - **Deploy it:** the relay keeps each header's version and nonce now, so the devnet's relay is

@@ -57,6 +57,7 @@ pub(super) const NAMES: &[&str] = &[
     "check_merkle",
     "fast_aggregate_verify",
     "federation",
+    "eth_network",
     "chain_id",
     "abort",
 ];
@@ -545,6 +546,16 @@ fn chain_federation() {}
 #[document(
     wasm,
     parent = "chain",
+    name = "eth_network",
+    summary = "The Ethereum beacon network anchoring's settings in force name, into the result buffer: its definition as SSZ, as ethlight's Network writes it, a preset's built-in one or the one governance carried. What an Ethereum light client contract follows, so a vote changes its fork schedule without a redeploy. Costs 200 fuel, as federation does.",
+    returns = { ty = "i32", desc = "The length in the result buffer, or -1 while the settings name no Ethereum network." },
+    see_also = "chain.result_read, rust/Host::eth_network",
+)]
+fn chain_eth_network() {}
+
+#[document(
+    wasm,
+    parent = "chain",
     name = "chain_id",
     summary = "The chain's id: what its EVM answers CHAINID with and the bridges name it by, six bytes of its genesis id, and nothing a contract's owner sets. Costs 20 fuel.",
     returns = { ty = "i64", desc = "A whole number under 2^48, at least 1." },
@@ -717,6 +728,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "check_merkle", check_merkle).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "fast_aggregate_verify", fast_aggregate_verify).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "federation", federation).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "eth_network", eth_network).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "chain_id", chain_id).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "abort", abort).expect(defined);
 
@@ -1077,6 +1089,24 @@ fn federation(mut caller: Caller<'_, Run>) -> Result<i32> {
             bytes.extend(decided.federation.threshold.to_le_bytes());
             bytes.extend((decided.federation.signers.len() as u32).to_le_bytes());
             bytes.extend(decided.federation.signers.iter().flatten());
+            let len = bytes.len() as i32;
+            caller.data_mut().result = bytes;
+
+            Ok(len)
+        }
+        Ok(None) => Ok(-1),
+        Err(err) => Err(stop(&mut caller, err)),
+    }
+}
+
+/// The Ethereum network anchoring names into the result buffer, as SSZ: its length, or -1 for none.
+fn eth_network(mut caller: Caller<'_, Run>) -> Result<i32> {
+    let host = host(&mut caller)?;
+    let fuel = { let costs = costs(&caller); costs.federation };
+    charge(&mut caller, fuel)?;
+
+    match host.eth_network() {
+        Ok(Some(bytes)) => {
             let len = bytes.len() as i32;
             caller.data_mut().result = bytes;
 

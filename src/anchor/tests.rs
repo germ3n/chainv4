@@ -1,7 +1,7 @@
 //! What every build that takes anchors shares: the list's root over entries of either chain,
-//! Ethereum anchors refused until they are counted, and histories compared by the chains holding
+//! Ethereum anchors refused while off or unheard of, and histories compared by the chains holding
 //! them, Bitcoin first and Ethereum filling the gaps. Bitcoin's own proofs and headers are tested in
-//! bitcoin/tests.rs.
+//! bitcoin/tests.rs, Ethereum's in ethereum/tests.rs.
 
 use {
     super::{
@@ -38,11 +38,15 @@ fn entry(epoch: u64, seed: &[u8], source: AnchorSource) -> AnchorEntry {
 
 /// A history whose entries at the places given are proven where they say.
 fn history(entries: &[AnchorEntry], proven: &[u64]) -> History {
-    History { entries: entries.to_vec(), proven: proven.iter().map(|index| (*index, entries[*index as usize].source)).collect() }
+    History {
+        entries: entries.to_vec(),
+        proven: proven.iter().map(|index| (*index, entries[*index as usize].source)).collect(),
+        readable: vec![crate::params::anchoring::AnchorChain::Bitcoin, crate::params::anchoring::AnchorChain::Ethereum],
+    }
 }
 
 fn an_ethereum_proof() -> EthAnchorProof {
-    EthAnchorProof { header: vec![0; 244], root: [1; 32], tx: vec![2; 120], index: 3, branch: vec![[4; 32]; 21], ancestry: None }
+    EthAnchorProof { header: vec![0; 244], root: [1; 32], tx: vec![2; 120], index: 3, branch: vec![[4; 32]; 21], ancestry: None, update: vec![5; 300] }
 }
 
 #[test]
@@ -73,20 +77,24 @@ fn proofs_and_entries_encode_with_their_chain_s_tag() {
 }
 
 #[test]
-fn an_ethereum_anchor_is_not_counted_yet() {
+fn an_ethereum_anchor_needs_ethereum_on_and_a_relay_and_proves_nothing_unheard() {
     let state = State::new(Arc::new(MemoryDb::default()));
-    let settings = AnchorSettings { ethereum: true, enforce: true, ..AnchorSettings::OFF };
-    let rules = ProveRules { settings: &settings, genesis: id(b"genesis"), checkpoint_interval: Some(8), pooled: false };
+    let settings = AnchorSettings { ethereum: false, enforce: true, ..AnchorSettings::OFF };
+    let rules = ProveRules { settings: &settings, genesis: id(b"genesis"), checkpoint_interval: Some(8), pooled: false, time: 0 };
 
     match prove(&state, &rules, &Address::Ed25519([3; 32]), &AnchorProof::Ethereum(an_ethereum_proof())) {
-        Err(ProveError::Refused(why)) => assert_eq!(why, "Ethereum anchors are not counted yet"),
+        #[cfg(feature = "anchoring-eth")]
+        Err(ProveError::Refused(why)) => assert_eq!(why, "anchoring to Ethereum is off on this chain"),
+        #[cfg(not(feature = "anchoring-eth"))]
+        Err(ProveError::Refused(why)) => assert!(why.contains("takes no Ethereum anchors"), "{why}"),
         other => panic!("{other:?}"),
     }
 
     assert_eq!(Anchors::new(&state).count().unwrap(), 0, "nothing recorded");
 
+    // Heard of from no beacon API, an Ethereum anchor proves nothing.
     let answer = AnchorsAnswer { start: None, btc_tip: 0, eth_start: None, entries: vec![entry(1, b"one", ethereum(100))], proofs: vec![(0, AnchorProof::Ethereum(an_ethereum_proof()))] };
-    assert!(check_anchors(&answer, &Sources::default(), &id(b"genesis"), 6).unwrap_err().contains("not counted yet"));
+    assert!(check_anchors(&answer, &Sources::default(), &id(b"genesis"), 6).unwrap_err().contains("Ethereum"));
 
     // A proof in another chain than its entry says.
     let answer = AnchorsAnswer { entries: vec![entry(1, b"one", bitcoin(100))], ..answer };
@@ -182,7 +190,7 @@ fn mixed_histories_go_by_bitcoin_first_and_by_ethereum_in_a_build_without_it() {
 fn a_build_reading_no_bitcoin_takes_no_bitcoin_anchor() {
     let state = State::new(Arc::new(MemoryDb::default()));
     let settings = AnchorSettings { bitcoin: true, ..AnchorSettings::OFF };
-    let rules = ProveRules { settings: &settings, genesis: id(b"genesis"), checkpoint_interval: Some(8), pooled: false };
+    let rules = ProveRules { settings: &settings, genesis: id(b"genesis"), checkpoint_interval: Some(8), pooled: false, time: 0 };
     let proof = AnchorProof::Bitcoin(BtcAnchorProof { block: [0; 32], raw: Vec::new(), index: 0, path: Vec::new(), coinbase: Vec::new(), coinbase_path: Vec::new() });
 
     assert!(matches!(prove(&state, &rules, &Address::Ed25519([3; 32]), &proof), Err(ProveError::Refused(why)) if why.contains("takes no Bitcoin anchors")));

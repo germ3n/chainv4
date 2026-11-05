@@ -286,7 +286,7 @@ fn anchoring_reads_the_relay_s_own_records_and_proves_an_anchor_by_them() {
         depth: 3,
         ..AnchorSettings::OFF
     };
-    let rules = ProveRules { settings: &settings, genesis, checkpoint_interval: Some(8), pooled: false };
+    let rules = ProveRules { settings: &settings, genesis, checkpoint_interval: Some(8), pooled: false, time: 0 };
     let proof = AnchorProof::Bitcoin(BtcAnchorProof {
         block,
         raw: anchor,

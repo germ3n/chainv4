@@ -611,8 +611,9 @@ repay once shown; the explorer shows the first as what is left to repay.
 ### The commands
 
 `chainv4 bridge btc` drives both from an Esplora API (`--esplora`, such as
-`https://mempool.space/api`), the gateway the one the [directory](governance.md#directory) names
-as `btc_gateway`, or `--btc-gateway` before it does:
+`https://mempool.space/api`) or a plain bitcoind (`--bitcoind`, see [Endpoints](#endpoints)), the
+gateway the one the [directory](governance.md#directory) names as `btc_gateway`, or `--btc-gateway`
+before it does:
 
 ```sh
 chainv4 send deploy --wasm btc_relay.wasm                      # the relay
@@ -627,7 +628,7 @@ chainv4 bridge btc pass --esplora URL --evm-key signer.key --key payer.key   # o
 chainv4 bridge btc cancel 1 --btc-gateway 0x… --evm-key signer.key  # each signer's vote
 chainv4 bridge btc bump 1 --rate 40 --evm-key signer.key --esplora URL  # sooner than a pass would
 chainv4 bridge btc sweep --fee 1000 --evm-key signer.key --btc-gateway 0x… --esplora URL
-chainv4 bridge btc anchor --esplora URL --btc-key anchorer.key --key payer.key  # the chain's checkpoints into Bitcoin: anchoring.md
+chainv4 bridge anchor --esplora URL --btc-key anchorer.key --key payer.key  # the chain's checkpoints into Bitcoin, and Ethereum: anchoring.md
 ```
 
 By hand, each step of a pass, and with a fee told:
@@ -737,6 +738,60 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   network asks within 3 blocks, and never past what this signer signs for. It is refused while any of
   the release waits for signatures. The others sign it only while their Esplora says it is stuck.
 - **`--bump-after`** takes a time, 1 hour unless told, which `btc.bump_after_ms` overrides.
+
+## Endpoints
+
+Every outside service the bridge, the anchorer, the swap CLI and the relay feeders use is a list of
+URLs that stand in for each other (`remote::Endpoints`): `--esplora`, `--bitcoind`, `--eth-rpc` and
+`--beacon` each repeat.
+- **The first is asked.** An error, a timeout, a 429, a 5xx or a refused login moves on to the next.
+- **The one that answered stays in use,** and the first is tried again five minutes later.
+- **An answer that is a failure is no URL failing:** a transaction refused, a call reverted, a block
+  not found. The next is not asked.
+- **No URL is trusted more for being first.** What they serve is checked: Bitcoin's by the relay's
+  headers and Merkle paths, Ethereum's by the relays' light clients, a transaction by being one.
+- **Several `--eth-rpc` of one chain** are grouped by the chain id each answers, and stand in for
+  each other; the commands about one EVM chain take every URL given as that chain's.
+
+```sh
+chainv4 bridge btc watch --evm-key signer.key --key payer.key \
+  --esplora https://mempool.space/api --esplora https://blockstream.info/api \
+  --bitcoind http://127.0.0.1:8332 --bitcoind-auth cookie:/var/lib/bitcoind/.cookie \
+  --proxy socks5h://127.0.0.1:9050
+```
+
+**A plain bitcoind** (`--bitcoind URL`) does all Esplora does, behind the same trait
+(`remote::bitcoin::BitcoinApi`), asked after every `--esplora` fails, or alone:
+
+| What | Esplora | bitcoind |
+| --- | --- | --- |
+| A header by height | `/block-height/{h}`, `/block/{hash}/header` | `getblockhash`, `getblockheader` with `verbose=false` |
+| A transaction | `/tx/{id}/hex` | `getrawtransaction` |
+| Where it is | `/tx/{id}/status` | `getrawtransaction` with `verbose=true` |
+| Its Merkle path | `/tx/{id}/merkle-proof` | `gettxoutproof`, its merkleblock read into the path |
+| A block's coinbase | `/block/{hash}/txid/0` | `getblock` |
+| An address's coins | `/address/{a}/utxo` | `scantxoutset`, so it needs no wallet |
+| Broadcasting | `POST /tx` | `sendrawtransaction` |
+| Fee rates | `/fee-estimates` | `estimatesmartfee` for 1, 2, 3, 6, 12 and 144 blocks |
+
+bitcoind keeps no index of transactions already in a block, so finding one by its id alone, as
+showing a deposit or an anchor does, takes `-txindex`. `scantxoutset` reads the whole UTXO set,
+about a minute on mainnet.
+
+**Logins, one per URL by order:** `--bitcoind-auth`, `--eth-rpc-auth` and `--beacon-auth` repeat,
+the first for the first URL, and URLs past them go without. Each is one of:
+- `cookie:PATH`: bitcoind's `.cookie`, read at each request, so a restarted bitcoind's new one works;
+  bitcoind's alone;
+- `file:PATH`: a file holding `user:password`, refused while its group or others may read it
+  (`chmod 600`);
+- `env:NAME`: an environment variable holding the same.
+
+`user:password` goes as basic auth; a value without a colon, as a bearer token header. A password is
+never a flag's own value: one given that way is refused. Logs and errors show only a URL's scheme,
+host and port (`remote::host_of`): never its userinfo, path or query, where keys sit, nor a login.
+
+**`--proxy socks5://host:port`,** or `socks5h://` to resolve names at the proxy as Tor wants, carries
+every one of these connections, through ureq's SOCKS support. The node's own API is not proxied.
 
 ## Caveats
 

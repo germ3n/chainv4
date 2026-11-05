@@ -552,10 +552,75 @@ pub fn anchoring_json(settings: &crate::params::anchoring::AnchorSettings) -> Va
             "height": start.height,
             "network": start.network.name(),
         })),
+        "eth_relay": settings.eth_relay.map(|relay| relay.to_string()),
+        "eth_start": settings.eth_start.as_ref().map(|start| json!({
+            "root": crate::structs::hex::to_hex(&start.root),
+            "network": eth_network_json(&start.network),
+        })),
         "depth": settings.depth,
         "every": settings.every,
         "reward": settings.reward.to_string(),
     })
+}
+
+/// A beacon network as JSON: a preset's name, or a definition's SSZ as hex.
+pub fn eth_network_json(network: &crate::params::anchoring::EthNetwork) -> Value {
+    match network {
+        crate::params::anchoring::EthNetwork::Preset(name) => json!(name),
+        crate::params::anchoring::EthNetwork::Custom(ssz) => json!(crate::structs::hex::to_hex(ssz)),
+    }
+}
+
+/// A beacon network from its JSON: a preset's name (main or mainnet, sepolia, hoodi), a definition's
+/// SSZ as 0x hex, or a definition written out: { "name", "genesis_validators_root",
+/// "genesis_time", "seconds_per_slot", "slots_per_epoch", "epochs_per_sync_committee_period",
+/// "forks": [{ "fork": "deneb", "version": "0x…4 bytes", "epoch": N }, …] }, carried as its SSZ.
+pub(crate) fn eth_network_from_json(value: &Value) -> Result<crate::params::anchoring::EthNetwork, String> {
+    use crate::params::anchoring::EthNetwork;
+
+    let network = match value {
+        Value::String(text) if text.starts_with("0x") => EthNetwork::Custom(crate::structs::hex::from_hex(text).ok_or("anchoring.eth_start.network's definition is not hex")?),
+        Value::String(text) => EthNetwork::preset(text).ok_or_else(|| format!("anchoring.eth_start.network is main, sepolia, hoodi or a network's definition, not {text}"))?,
+        Value::Object(_) => {
+            let mut fields = Fields::of(value, "anchoring.eth_start.network")?;
+            let name = fields.text("name")?;
+            let root = fields.text("genesis_validators_root")?;
+            let genesis_validators_root = crate::structs::hex::from_hex(&root).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()).ok_or("anchoring.eth_start.network.genesis_validators_root is 32 bytes of hex")?;
+            let (genesis_time, seconds_per_slot, slots_per_epoch, epochs_per_sync_committee_period) = (fields.whole("genesis_time")?, fields.whole("seconds_per_slot")?, fields.whole("slots_per_epoch")?, fields.whole("epochs_per_sync_committee_period")?);
+            let forks = fields
+                .list("forks")?
+                .into_iter()
+                .map(|mut fork| {
+                    let named = fork.text("fork")?;
+                    let which = ethlight::Fork::ALL.into_iter().find(|known| known.name() == named).ok_or_else(|| format!("anchoring.eth_start.network: no fork is called {named}"))?;
+                    let version = crate::structs::hex::from_hex(&fork.text("version")?).and_then(|bytes| <[u8; 4]>::try_from(bytes).ok()).ok_or("a fork's version is 4 bytes of hex")?;
+                    let epoch = fork.whole("epoch")?;
+                    fork.done()?;
+
+                    Ok(ethlight::ForkAt { fork: which, version, epoch })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            fields.done()?;
+            let network = ethlight::Network {
+                name: name.into(),
+                genesis_validators_root,
+                genesis_time,
+                seconds_per_slot,
+                slots_per_epoch,
+                epochs_per_sync_committee_period,
+                forks: forks.into(),
+            };
+
+            if let Some(problem) = network.problem() {
+                return Err(format!("anchoring.eth_start.network: {problem}"));
+            }
+
+            EthNetwork::Custom(network.encode())
+        }
+        _ => return Err("anchoring.eth_start.network is a preset's name or a network's definition".to_string()),
+    };
+
+    network.problem().map_or(Ok(network), |problem| Err(problem.to_string()))
 }
 
 /// Anchoring's settings from their JSON. What is left out is off, unset or the default, so
@@ -587,6 +652,21 @@ pub(crate) fn anchoring_from_json(mut fields: Fields) -> Result<crate::params::a
         }
         None => None,
     };
+    let eth_relay = match fields.later_text("eth_relay")? {
+        Some(text) => Some(text.parse::<Address>().map_err(|err| format!("anchoring.eth_relay: {err}"))?),
+        None => None,
+    };
+    let eth_start = match fields.later_object("eth_start")? {
+        Some(mut start) => {
+            let root = start.text("root")?;
+            let root = crate::structs::hex::from_hex(&root).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()).ok_or("anchoring.eth_start.root is 32 bytes of hex")?;
+            let network = eth_network_from_json(start.get("network")?)?;
+            start.done()?;
+
+            Some(crate::params::anchoring::EthStart { root, network })
+        }
+        None => None,
+    };
     let depth = fields.later_whole("depth")?.unwrap_or(crate::params::anchoring::DEFAULT_ANCHOR_DEPTH);
     let every = fields.later_whole("every")?.unwrap_or(crate::params::anchoring::DEFAULT_ANCHOR_EVERY);
     let reward = match fields.map.contains_key("reward") {
@@ -594,7 +674,7 @@ pub(crate) fn anchoring_from_json(mut fields: Fields) -> Result<crate::params::a
         false => u256::ZERO,
     };
     fields.done()?;
-    let settings = AnchorSettings { bitcoin, ethereum, enforce, relay, btc_start, depth, every, reward };
+    let settings = AnchorSettings { bitcoin, ethereum, enforce, relay, btc_start, eth_relay, eth_start, depth, every, reward };
 
     settings.problem().map_or(Ok(settings), |problem| Err(problem.to_string()))
 }

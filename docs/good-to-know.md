@@ -1449,8 +1449,8 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Anchoring
 
-- **Off until governance turns it on,** each part on its own: taking Bitcoin anchors, writing to
-  Ethereum, and enforcing them. See [Anchoring](anchoring.md).
+- **Off until governance turns it on,** each part on its own: taking Bitcoin anchors, taking
+  Ethereum anchors, and enforcing them. See [Anchoring](anchoring.md).
 - **An enforced anchor binds even a checkpoint that is not final:** no block at or under it is
   imported, and no branch splitting off below it is followed, whatever it weighs or justified.
   Turning `enforce` off later frees nothing recorded while it was on.
@@ -1464,11 +1464,32 @@ voting finality it now goes back to the checkpoint and follows the node from the
   again.
 - **`--anchored` hears from `anchors.peers` peers, 2 unless tuned,** before it picks a history:
   with fewer it waits. A node that hears only an attacker's peers follows what they show.
-- **The anchorer keeps its pending anchor in memory:** one restarted before showing its anchor
-  writes another, at another Bitcoin fee.
-- **Ethereum anchors are written, not counted,** until their checks against the Ethereum relay are
-  in. The types are there already: an entry names its chain, Bitcoin or Ethereum, and a
-  `Tx::Anchor` carrying an Ethereum proof fails with "Ethereum anchors are not counted yet".
+- **The anchorer keeps its pending anchors in memory,** each chain's apart: one restarted before
+  showing its anchor writes another, at another fee.
+- **The two chains take turns:** an anchor carries the list's root, so one recorded in either chain
+  wastes an anchor written in the other meanwhile. The anchorer writes into neither while the other
+  has one pending, Bitcoin first when both are due, each chain's cadence (`every`) counted from its
+  own newest anchor.
+- **An Ethereum anchor is calldata to self:** the 80 bytes as a 0-value transaction's whole
+  calldata, from the anchorer's key to itself. The chain checks the calldata, not who sent it.
+- **An Ethereum anchor's block must be a finalized header the relay holds, or its ancestor:** its
+  proof carries the finality update that finalized the header it rests on, and the chain checks it
+  matches what the relay holds and that the committee the relay holds for its period signed it. Once
+  the relay moves two periods on, it no longer holds that committee, and the proof needs a newer
+  update.
+- **The anchorer lands Ethereum anchors in an epoch's first slot:** it sends the transaction 8
+  seconds before one, so its block is the epoch's checkpoint, which a finality update then finalizes
+  itself. One landing elsewhere is written again, as proving it would take an ancestry branch
+  through a state's `block_roots`, which no beacon API's light client routes serve, and the anchor
+  block's light client header, which they serve only for checkpoints. The chain takes ancestry
+  proofs; the anchorer has no source for them yet.
+- **The anchorer must see the finality update naming its block,** about 13 minutes after it landed,
+  before the next finalization replaces it: its passes, every 60 seconds unless told, do. One missed
+  is written again.
+- **Without `--beacon`, Ethereum anchors decide nothing** in anchored sync: a list is checked up to
+  its newest Bitcoin anchor, and only Bitcoin compares histories. With it, the node follows the sync
+  committees from `eth_start` itself, a request per 128 periods, and checks each kept update's
+  signature.
 - **One list holds anchors from both chains,** in the order they were recorded. Its root covers each
   entry's chain and where that chain holds it, so it changed with them: a chain from before it
   needs a new genesis.
@@ -1490,7 +1511,8 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 - **The presets' fork schedules are built in,** through Fulu on mainnet, Sepolia and Hoodi
   (`ethlight::forks`). A fork after the last signs under a version they lack, so the relay refuses
-  every update from it until it is upgraded with a schedule that names it. Blob-parameter-only
+  every update from it until governance names a schedule that has it, in `anchoring.eth_start`:
+  the relay follows that one, through the `eth_network` host call, without a redeploy. Blob-parameter-only
   forks change no version, and nothing here.
 - **A network is a whole definition,** not only a name: its genesis validators root and time,
   seconds per slot, slots per epoch, epochs per sync committee period, and its forks with their
@@ -1498,7 +1520,7 @@ voting finality it now goes back to the checkpoint and follows the node from the
   `Network::by_name`; another, such as Gnosis with 5-second slots and 16-slot epochs, is made by
   hand, or decoded from its SSZ (`Network::encode` and `decode`, which refuses one `problem`
   refuses). Every network must run the mainnet preset's sync committees of 512 and 8,192 block
-  roots. The relay contract still takes a preset by name.
+  roots. Governance carries one in `anchoring.eth_start.network`, which the relay follows.
 - **Electra moved the state's generalized indices:** the finalized root to 169, the current and
   next committees to 86 and 87, one level deeper, as the state grew past 32 fields. An update's
   layout and gindices go by its attested header's fork, a bootstrap's by its header's.
@@ -1519,6 +1541,26 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **`fast_aggregate_verify`'s fuel is consensus,** `bls_verify` and `bls_key` in `HostCosts`. They
   are new fields of `HostCosts`, so a chain whose genesis or a decided change named `fees.costs`
   encodes differently from before: a new chain.
+
+## Endpoints
+
+- **Every outside URL repeats:** `--esplora`, `--bitcoind`, `--eth-rpc` and `--beacon`. The first
+  is asked; an error, a timeout, a 429, a 5xx or a refused login moves on to the next; the one that
+  answered stays in use, and the first is tried again five minutes later. An answer that is a
+  failure, a refused transaction say, is no URL failing, and the next is not asked.
+- **Several `--eth-rpc` of one chain stand in for each other:** each is asked its chain id once, and
+  those of a chain are grouped.
+- **Logins are never a flag's own text:** `--…-auth` takes `cookie:PATH` (bitcoind's alone),
+  `file:PATH`, refused while its group or others may read it, or `env:NAME`. `user:password` is
+  basic auth, anything without a colon a bearer token. A cookie is read at each request, so a
+  restarted bitcoind's new one works at once.
+- **Only scheme, host and port are shown** of a URL, in logs and errors: no userinfo, path or query,
+  where API keys sit.
+- **bitcoind needs no wallet,** as coins come from `scantxoutset`, which scans the whole UTXO set and
+  takes a minute on mainnet; but finding a transaction already in a block by its id
+  (`getrawtransaction`, `gettxoutproof` without its block) takes `-txindex`.
+- **`--proxy` is SOCKS5,** `socks5://` or `socks5h://`, which resolves names at the proxy, as Tor
+  wants; it carries every outside connection but none to the node's own API.
 
 ## The camera
 

@@ -702,6 +702,7 @@ pub fn start(
             .map_err(|engine| std::io::Error::other(format!("this node cannot run {} contracts", engine.name())))?
             .with_names(genesis.names.clone())
             .with_federation(genesis.federation.clone())
+                .with_anchoring(genesis.anchoring.clone())
             .with_chain_id(crate::crypto::ethereum::chain_id(&genesis.block().id())),
     );
     let listener = std::net::TcpListener::bind(address)?;
@@ -1612,7 +1613,8 @@ async fn rich(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Stri
 }
 
 /// The anchor list: anchoring's settings in force, how many anchors the chain recorded, the list's
-/// root, the highest enforced checkpoint, the relay's tip, and a page of entries, the newest last,
+/// root, the highest enforced checkpoint, the Bitcoin relay's tip, the Ethereum relay's finalized
+/// header (eth_finalized: its slot, root, and execution block's number and hash), and a page of entries, the newest last,
 /// from ?from on, the newest page unless told. Each entry names its chain, bitcoin or ethereum, and
 /// where that chain holds it: btc_block and btc_height, or eth_root and eth_slot.
 #[cfg(feature = "anchoring")]
@@ -1658,6 +1660,15 @@ async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, S
     };
     #[cfg(not(feature = "anchoring-btc"))]
     let relay_tip: Option<Value> = None;
+    #[cfg(feature = "anchoring-eth")]
+    let eth_finalized = match settings.eth_relay {
+        Some(relay) => crate::anchor::EthRelay::new(&state, relay).finalized()?.map(|header| {
+            json!({ "slot": header.beacon.slot, "root": crate::structs::hex::to_hex(&header.root), "block_number": header.block_number, "block_hash": crate::structs::hex::to_hex(&header.block_hash) })
+        }),
+        None => None,
+    };
+    #[cfg(not(feature = "anchoring-eth"))]
+    let eth_finalized: Option<Value> = None;
 
     Ok(Json(json!({
         "settings": crate::params::json::anchoring_json(&settings),
@@ -1667,6 +1678,7 @@ async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, S
         "enforced_height": anchors.enforced_height()?,
         "rewarded": anchors.rewarded()?,
         "relay_tip": relay_tip,
+        "eth_finalized": eth_finalized,
         "from": from,
         "entries": entries,
     })))

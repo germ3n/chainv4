@@ -1269,6 +1269,7 @@ impl Chain {
                 .map_err(ChainError::MissingEngine)?
                 .with_names(genesis.names.clone())
                 .with_federation(genesis.federation.clone())
+                .with_anchoring(genesis.anchoring.clone())
                 .with_chain_id(crate::crypto::ethereum::chain_id(&id)),
         );
         let stored: Option<Hash> = read_value(&*db, Column::Heights, &0u64.to_be_bytes())?;
@@ -1847,13 +1848,13 @@ impl Chain {
     #[cfg(feature = "anchoring")]
     #[document(
         parent = "Chain",
-        summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's Bitcoin headers start and the relay's tip. None while the chain holds no anchors, or anchoring has no relay or start this build reads.",
+        summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's Bitcoin headers start and the relay's tip, and where its Ethereum relay started. None while the chain holds no anchors, or anchoring has no relay or start this build reads.",
     )]
     pub fn anchors_answer(&self, asked: &[u64]) -> Result<Option<crate::params::anchoring::AnchorsAnswer>, DbError> {
         let settings = self.anchoring()?;
         let state = self.state();
         #[cfg(feature = "anchoring-btc")]
-        let (start, btc_tip) = match (settings.relay, settings.btc_start) {
+        let (start, btc_tip) = match (settings.relay, settings.btc_start.clone()) {
             (Some(relay), Some(start)) => {
                 let tip = crate::anchor::Relay::new(&state, relay).tip()?.map_or(start.height, |(_, height)| height);
 
@@ -1862,12 +1863,15 @@ impl Chain {
             _ => (None, 0),
         };
         #[cfg(not(feature = "anchoring-btc"))]
-        let (start, btc_tip) = {
-            let _ = settings;
+        let (start, btc_tip) = (None::<crate::params::anchoring::BtcStart>, 0);
+        #[cfg(feature = "anchoring-eth")]
+        let eth_start = settings.eth_start.clone().filter(|_| settings.eth_relay.is_some());
+        #[cfg(not(feature = "anchoring-eth"))]
+        let eth_start = {
+            let _ = &settings;
 
-            (None, 0)
+            None
         };
-        let eth_start = None;
 
         if start.is_none() && eth_start.is_none() {
             return Ok(None);

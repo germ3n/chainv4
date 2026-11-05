@@ -81,23 +81,8 @@ impl Store {
 
     /// validate_light_client_update, for a finalized update that two thirds of the committee signed.
     pub fn validate_update<C: Crypto + ?Sized>(&self, crypto: &C, update: &LightClientUpdate, current_slot: u64) -> Result<(), Error> {
-        let aggregate = &update.sync_aggregate;
-
-        // Two thirds of the committee, and so at least the specs' one participant.
-        if aggregate.participants() * 3 < SYNC_COMMITTEE_SIZE * 2 {
-            return Err(Error::LowParticipation);
-        }
-
+        check_shape(update, current_slot)?;
         let (attested_slot, finalized_slot) = (update.attested_header.beacon.slot, update.finalized_header.beacon.slot);
-
-        if !(update.signature_slot > attested_slot && attested_slot >= finalized_slot) {
-            return Err(Error::BadSlots);
-        }
-
-        if update.signature_slot > current_slot {
-            return Err(Error::FromTheFuture);
-        }
-
         let store_period = self.period();
         let signature_period = self.network.period_at_slot(update.signature_slot);
         let known = signature_period == store_period || (self.next.is_some() && signature_period == store_period + 1);
@@ -121,25 +106,8 @@ impl Store {
             return Err(Error::SkipsPeriod);
         }
 
-        update.attested_header.check(crypto, &self.network)?;
-
-        if finalized_slot == 0 {
-            return Err(Error::NotFinality);
-        }
-
-        update.finalized_header.check(crypto, &self.network)?;
+        check_finality(crypto, &self.network, update)?;
         let fork = self.network.fork_at_slot(attested_slot).fork;
-        let finality_held = ssz::is_valid_normalized_merkle_branch(
-            crypto,
-            &update.finalized_header.beacon.hash_tree_root(crypto),
-            &update.finality_branch,
-            fork.finalized_root_gindex(),
-            &update.attested_header.beacon.state_root,
-        );
-
-        if !finality_held {
-            return Err(Error::BadFinalityBranch);
-        }
 
         if let Some(next) = &update.next_sync_committee {
             if attested_period == store_period && self.next.as_ref().is_some_and(|known| !known.same_as(next)) {
@@ -157,17 +125,8 @@ impl Store {
             true => &self.current,
             false => self.next.as_ref().expect("a known period"),
         };
-        let signers: Vec<_> = committee.pubkeys.iter().enumerate().filter(|(index, _)| aggregate.signed(*index)).map(|(_, key)| *key).collect();
 
-        // Signed under the fork of the slot before the signature's, as the specs have it.
-        let fork_version = self.network.fork_at_slot(update.signature_slot.max(1) - 1).version;
-        let domain = self.network.domain(crypto, DOMAIN_SYNC_COMMITTEE, fork_version);
-        let signing_root = compute_signing_root(crypto, &update.attested_header.beacon.hash_tree_root(crypto), &domain);
-
-        match crypto.fast_aggregate_verify(&signers, &signing_root, &aggregate.signature) {
-            true => Ok(()),
-            false => Err(Error::BadSignature),
-        }
+        check_signature(crypto, &self.network, committee, update)
     }
 
     /// apply_light_client_update, for an update validate_update took.
@@ -211,4 +170,74 @@ pub fn prove_ancestor<C: Crypto + ?Sized>(crypto: &C, network: &Network, held: &
     let found = ssz::is_valid_normalized_merkle_branch(crypto, &ancestor.beacon.hash_tree_root(crypto), branch, gindex, &held.beacon.state_root);
 
     found.then(|| Finalized::from_header(crypto, ancestor)).ok_or(Error::BadAncestorBranch)
+}
+
+/// What an update must be whatever a store holds: two thirds of the committee signed, its slots in
+/// order, and signed no later than the current slot.
+fn check_shape(update: &LightClientUpdate, current_slot: u64) -> Result<(), Error> {
+    // Two thirds of the committee, and so at least the specs' one participant.
+    if update.sync_aggregate.participants() * 3 < SYNC_COMMITTEE_SIZE * 2 {
+        return Err(Error::LowParticipation);
+    }
+
+    let (attested_slot, finalized_slot) = (update.attested_header.beacon.slot, update.finalized_header.beacon.slot);
+
+    if !(update.signature_slot > attested_slot && attested_slot >= finalized_slot) {
+        return Err(Error::BadSlots);
+    }
+
+    if update.signature_slot > current_slot {
+        return Err(Error::FromTheFuture);
+    }
+
+    Ok(())
+}
+
+/// Its headers valid, and a finalized header after genesis's in the attested header's state.
+fn check_finality<C: Crypto + ?Sized>(crypto: &C, network: &Network, update: &LightClientUpdate) -> Result<(), Error> {
+    update.attested_header.check(crypto, network)?;
+
+    if update.finalized_header.beacon.slot == 0 {
+        return Err(Error::NotFinality);
+    }
+
+    update.finalized_header.check(crypto, network)?;
+    let fork = network.fork_at_slot(update.attested_header.beacon.slot).fork;
+    let finality_held = ssz::is_valid_normalized_merkle_branch(
+        crypto,
+        &update.finalized_header.beacon.hash_tree_root(crypto),
+        &update.finality_branch,
+        fork.finalized_root_gindex(),
+        &update.attested_header.beacon.state_root,
+    );
+
+    finality_held.then_some(()).ok_or(Error::BadFinalityBranch)
+}
+
+/// The sync aggregate's signature, by the committee given, over the attested header under the
+/// network's domain for the slot before the signature's, as the specs have it.
+fn check_signature<C: Crypto + ?Sized>(crypto: &C, network: &Network, committee: &SyncCommittee, update: &LightClientUpdate) -> Result<(), Error> {
+    let aggregate = &update.sync_aggregate;
+    let signers: Vec<_> = committee.pubkeys.iter().enumerate().filter(|(index, _)| aggregate.signed(*index)).map(|(_, key)| *key).collect();
+    let fork_version = network.fork_at_slot(update.signature_slot.max(1) - 1).version;
+    let domain = network.domain(crypto, DOMAIN_SYNC_COMMITTEE, fork_version);
+    let signing_root = compute_signing_root(crypto, &update.attested_header.beacon.hash_tree_root(crypto), &domain);
+
+    match crypto.fast_aggregate_verify(&signers, &signing_root, &aggregate.signature) {
+        true => Ok(()),
+        false => Err(Error::BadSignature),
+    }
+}
+
+/// Whether an update finalizes its header, on its own: two thirds of a committee signed it, its
+/// slots in order and not after the current slot, its headers valid, and its finalized header in
+/// the attested header's state. The committee is the caller's to pick: the one it knows for the
+/// period of the update's signature slot. What validate_update checks of an update, without a
+/// store's periods or the next committee: what a node checks an update kept beside an anchor by,
+/// with the committees it learned by following updates from a trusted root.
+pub fn verify_finality<C: Crypto + ?Sized>(crypto: &C, network: &Network, committee: &SyncCommittee, update: &LightClientUpdate, current_slot: u64) -> Result<(), Error> {
+    check_shape(update, current_slot)?;
+    check_finality(crypto, network, update)?;
+
+    check_signature(crypto, network, committee, update)
 }

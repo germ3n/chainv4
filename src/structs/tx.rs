@@ -325,7 +325,7 @@ pub enum Tx {
         steps: Vec<Tx>,
     },
     #[document(
-        summary = "Shows that another chain holds an anchor of one of this chain's checkpoints: in Bitcoin, the transaction whose OP_RETURN carries it and the proof that a block the relay holds, deep enough, includes it; in Ethereum, a transaction carrying it in a finalized block, which the chain does not count yet. The chain records the checkpoint in its anchor list and pays the sender the reward when one is due; whoever wrote the anchor, anyone may show it. See docs/anchoring.md.",
+        summary = "Shows that another chain holds an anchor of one of this chain's checkpoints: in Bitcoin, the transaction whose OP_RETURN carries it and the proof that a block the relay holds, deep enough, includes it; in Ethereum, a transaction carrying it in a block the Ethereum relay holds as finalized, with the signed finality update that finalized it. The chain records the checkpoint in its anchor list and pays the sender the reward when one is due; whoever wrote the anchor, anyone may show it. See docs/anchoring.md.",
         params = { proof = "The anchor's transaction and the proof that the other chain holds it." },
         see_also = "AnchorProof, Payload, AnchorSettings, Anchors",
     )]
@@ -344,7 +344,7 @@ pub enum AnchorProof {
     #[document(summary = "An anchor in Bitcoin, proven against the Bitcoin relay.")]
     #[wincode(tag = 0)]
     Bitcoin(BtcAnchorProof),
-    #[document(summary = "An anchor in Ethereum, proven against the Ethereum relay's finalized headers. Not counted yet: Tx::Anchor fails with it.")]
+    #[document(summary = "An anchor in Ethereum, proven against the Ethereum relay's finalized headers and the sync committee that signed their finality.")]
     #[wincode(tag = 1)]
     Ethereum(EthAnchorProof),
 }
@@ -362,12 +362,16 @@ impl AnchorProof {
         }
     }
 
-    #[document(parent = "AnchorProof", summary = "Whether its parts fit the limits a transaction checks before it runs: MAX_ANCHOR_TX bytes for each transaction and MAX_ANCHOR_HEADER for an Ethereum header, at most MAX_ANCHOR_PATH nodes a path.")]
+    #[document(parent = "AnchorProof", summary = "Whether its parts fit the limits a transaction checks before it runs: MAX_ANCHOR_TX bytes for each transaction, MAX_ANCHOR_HEADER for an Ethereum header and MAX_ANCHOR_UPDATE for its finality update, at most MAX_ANCHOR_PATH nodes a path.")]
     pub fn within_limits(&self) -> bool {
         match self {
             AnchorProof::Bitcoin(proof) => proof.raw.len() <= MAX_ANCHOR_TX && proof.coinbase.len() <= MAX_ANCHOR_TX && proof.path.len() <= MAX_ANCHOR_PATH && proof.coinbase_path.len() <= MAX_ANCHOR_PATH,
             AnchorProof::Ethereum(proof) => {
-                proof.header.len() <= MAX_ANCHOR_HEADER && proof.tx.len() <= MAX_ANCHOR_TX && proof.branch.len() <= MAX_ANCHOR_PATH && proof.ancestry.as_ref().is_none_or(|branch| branch.len() <= MAX_ANCHOR_PATH)
+                proof.header.len() <= MAX_ANCHOR_HEADER
+                    && proof.tx.len() <= MAX_ANCHOR_TX
+                    && proof.update.len() <= MAX_ANCHOR_UPDATE
+                    && proof.branch.len() <= MAX_ANCHOR_PATH
+                    && proof.ancestry.as_ref().is_none_or(|branch| branch.len() <= MAX_ANCHOR_PATH)
             }
         }
     }
@@ -397,7 +401,7 @@ pub struct BtcAnchorProof {
 impl crate::crypto::hashable::Hashable for BtcAnchorProof {}
 
 #[document(
-    summary = "An Ethereum transaction carrying an anchor, and the proof that a finalized block holds it: what AnchorProof::Ethereum carries. The header is the block's light client header; the transaction is proven against its execution payload's transactions root, and the header against a finalized header the Ethereum relay holds: the header itself, or, with an ancestry branch, a later one whose state's block_roots hold it.",
+    summary = "An Ethereum transaction carrying an anchor, and the proof that a finalized block holds it: what AnchorProof::Ethereum carries. The header is the block's light client header; the transaction is proven against its execution payload's transactions root, and the header against a finalized header the Ethereum relay holds: the header itself, or, with an ancestry branch, a later one whose state's block_roots hold it. The finality update that finalized that held header comes with it, so a node syncing on its own checks the sync committee's signature itself.",
     category = "Transactions",
     see_also = "AnchorProof, Tx::Anchor",
 )]
@@ -415,6 +419,8 @@ pub struct EthAnchorProof {
     pub branch: Vec<[u8; 32]>,
     #[document(summary = "The branch from the header's root to the state root of the held header at root, through its block_roots, when the header is an ancestor of it rather than held itself.")]
     pub ancestry: Option<Vec<[u8; 32]>>,
+    #[document(summary = "The light client update, SSZ-encoded as the relay takes one, whose finalized header is the one at root, signed by two thirds of its period's sync committee: a finality update reads as one bringing no next committee.")]
+    pub update: Vec<u8>,
 }
 
 impl crate::crypto::hashable::Hashable for EthAnchorProof {}
@@ -439,6 +445,13 @@ pub const MAX_ANCHOR_PATH: usize = 32;
     see_also = "Tx::Anchor, EthAnchorProof",
 )]
 pub const MAX_ANCHOR_HEADER: usize = 4_096;
+
+#[document(
+    summary = "The most bytes an Ethereum anchor's finality update may take: 65,536, room for one bringing a next sync committee, about 27 KiB.",
+    category = "Transactions",
+    see_also = "Tx::Anchor, EthAnchorProof",
+)]
+pub const MAX_ANCHOR_UPDATE: usize = 65_536;
 
 #[document(
     summary = "The longest Merkle path a claim may carry, 64 hashes: enough for a pool root over every claim there could be.",

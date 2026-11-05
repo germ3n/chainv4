@@ -52,7 +52,7 @@ enum Command {
     /// The bridges: deploys and joins the gateways here and on EVM chains, sends the coin, tokens
     /// and NFTs across, and runs a federation signer's signing and relaying.
     #[cfg(all(feature = "client", feature = "bridge", feature = "swap"))]
-    Bridge(cli::BridgeArgs),
+    Bridge(Box<cli::BridgeArgs>),
     /// How many transactions a second the chain takes: blocks built and imported in-process
     /// (bench chain), or transfers submitted to running nodes at a rising rate (bench load).
     #[cfg(feature = "client")]
@@ -526,6 +526,21 @@ struct NodeArgs {
     /// saw first (docs/anchoring.md). Hears from anchors.peers peers first, 2 unless tuned.
     #[arg(long, requires = "snapshot", conflicts_with = "checkpoint")]
     anchored: bool,
+    /// With --anchored, an Ethereum beacon API serving the light client routes, such as
+    /// https://lodestar-sepolia.chainsafe.io, to follow Ethereum's sync committees from the
+    /// chain's eth_start through, so Ethereum anchors are checked by their signatures here; give
+    /// it again for others to fall back to. Nothing it serves is trusted. Without it, Ethereum
+    /// anchors decide nothing.
+    #[arg(long, requires = "anchored")]
+    beacon: Vec<String>,
+    /// The login of each --beacon, by order: file:PATH or env:NAME, holding user:password or a
+    /// token.
+    #[arg(long, requires = "beacon")]
+    beacon_auth: Vec<String>,
+    /// A SOCKS5 proxy for the node's outside connections, --beacon's: socks5://host:port, or
+    /// socks5h://host:port to resolve names there too, as Tor wants.
+    #[arg(long, requires = "beacon")]
+    proxy: Option<String>,
     /// Tune what the node takes on and how fast, as KEY=VALUE, repeated or comma-separated, such
     /// as sync.headers=512,gossip.wait=20ms: the keys are sync., gossip., dial., peers., node.,
     /// mining., http., range., rpc., filter., finality. and chain., in docs/node.md with their
@@ -566,7 +581,7 @@ fn main() -> std::process::ExitCode {
         #[cfg(all(feature = "client", feature = "nft"))]
         Some(Command::Nft(args)) => cli::nft(args),
         #[cfg(all(feature = "client", feature = "bridge", feature = "swap"))]
-        Some(Command::Bridge(args)) => cli::bridge(args),
+        Some(Command::Bridge(args)) => cli::bridge(*args),
         #[cfg(feature = "client")]
         Some(Command::Bench(args)) => cli::bench(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
@@ -876,6 +891,19 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
                 true => log::info!("[node] syncing from a snapshot, at the checkpoint the anchors pick"),
                 false => log::info!("[node] the database holds more than genesis already: syncing as usual, not from a snapshot"),
             }
+        }
+
+        #[cfg(all(feature = "anchoring-eth", feature = "client"))]
+        if !args.beacon.is_empty() {
+            let http: std::sync::Arc<dyn chainv4::remote::Http> = std::sync::Arc::new(chainv4::remote::UreqHttp::new(args.proxy.as_deref())?);
+            let endpoints = chainv4::remote::Endpoints::from_flags(&args.beacon, &args.beacon_auth, "beacon", false)?;
+            log::info!("[node] Ethereum anchors are checked by sync committees followed through {}", endpoints.hosts().join(", "));
+            node.anchor_beacon(std::sync::Arc::new(chainv4::remote::beacon::Beacon::new(http, endpoints)));
+        }
+
+        #[cfg(not(all(feature = "anchoring-eth", feature = "client")))]
+        if !args.beacon.is_empty() {
+            return Err("--beacon needs a build with the anchoring-eth and client features".into());
         }
 
         #[cfg(not(feature = "anchoring"))]

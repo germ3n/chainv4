@@ -163,6 +163,7 @@ pub fn tx(transaction: &Tx) -> Value {
             "index": proof.index,
             "branch": proof.branch.iter().map(|node| crate::structs::hex::to_hex(node)).collect::<Vec<_>>(),
             "ancestry": proof.ancestry.as_ref().map(|branch| branch.iter().map(|node| crate::structs::hex::to_hex(node)).collect::<Vec<_>>()),
+            "update": crate::structs::hex::to_hex(&proof.update),
         }),
         Tx::Batch { steps } => json!({ "type": "batch", "steps": steps.iter().map(tx).collect::<Vec<_>>() }),
     }

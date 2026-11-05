@@ -478,6 +478,72 @@ impl LightClientUpdate {
     }
 }
 
+impl LightClientUpdate {
+    fn finality_fixed_len(fork: Fork) -> usize {
+        4 + 4 + 32 * floorlog2(fork.finalized_root_gindex()) as usize + SyncAggregate::SSZ_LEN + 8
+    }
+
+    /// A finality update, as a beacon node serves it at /eth/v1/beacon/light_client/finality_update:
+    /// an update's fields without the next committee, read as an update that brings none, which is
+    /// how the relay takes one. In its attested header's fork's layout.
+    pub fn decode_finality(bytes: &[u8], network: &Network) -> Result<LightClientUpdate, Error> {
+        let what = "a light client finality update does not read";
+        let fork = network.fork_at_slot(ssz::slot_at_offset(bytes, what)?).fork;
+
+        if fork < Fork::Capella {
+            return Err(Error::BeforeCapella);
+        }
+
+        let mut reader = Reader::new(bytes, what);
+        let attested_offset = reader.offset()?;
+        let finalized_offset = reader.offset()?;
+        let finality_branch = reader.roots(floorlog2(fork.finalized_root_gindex()) as usize)?;
+        let bits = reader.array()?;
+        let signature = reader.array()?;
+        let signature_slot = reader.u64()?;
+
+        if attested_offset != Self::finality_fixed_len(fork) || finalized_offset < attested_offset || finalized_offset > bytes.len() {
+            return Err(Error::Malformed(what));
+        }
+
+        if ssz::all_zero(&finality_branch) {
+            return Err(Error::NotFinality);
+        }
+
+        Ok(LightClientUpdate {
+            attested_header: LightClientHeader::decode(&bytes[attested_offset..finalized_offset], fork)?,
+            next_sync_committee: None,
+            next_sync_committee_branch: alloc::vec![[0u8; 32]; floorlog2(fork.next_sync_committee_gindex()) as usize],
+            finalized_header: LightClientHeader::decode(&bytes[finalized_offset..], fork)?,
+            finality_branch,
+            sync_aggregate: SyncAggregate { bits, signature },
+            signature_slot,
+        })
+    }
+
+    /// Its finality update, as a beacon node serves one: its next committee left out.
+    pub fn encode_finality(&self, network: &Network) -> Vec<u8> {
+        let fork = network.fork_at_slot(self.attested_header.beacon.slot).fork;
+        let attested = self.attested_header.encode(fork);
+        let fixed = Self::finality_fixed_len(fork);
+        let mut out = Vec::with_capacity(fixed + 2 * attested.len());
+        out.extend_from_slice(&(fixed as u32).to_le_bytes());
+        out.extend_from_slice(&((fixed + attested.len()) as u32).to_le_bytes());
+
+        for node in &self.finality_branch {
+            out.extend_from_slice(node);
+        }
+
+        out.extend_from_slice(&self.sync_aggregate.bits);
+        out.extend_from_slice(&self.sync_aggregate.signature);
+        out.extend_from_slice(&self.signature_slot.to_le_bytes());
+        out.extend_from_slice(&attested);
+        out.extend_from_slice(&self.finalized_header.encode(fork));
+
+        out
+    }
+}
+
 /// What a light client starts from: a header, its state's current sync committee, and the branch
 /// between them.
 #[derive(Clone, Debug, PartialEq, Eq)]

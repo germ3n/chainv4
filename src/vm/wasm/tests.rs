@@ -57,6 +57,7 @@ const IMPORTS: &str = r#"
   (import "chain" "check_merkle" (func $check_merkle (param i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
   (import "chain" "fast_aggregate_verify" (func $fast_aggregate_verify (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "federation" (func $federation (result i32)))
+  (import "chain" "eth_network" (func $eth_network (result i32)))
   (import "chain" "chain_id" (func $chain_id (result i64)))
   (import "chain" "abort" (func $abort (param i32 i32)))
 "#;

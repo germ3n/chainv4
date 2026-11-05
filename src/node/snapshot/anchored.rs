@@ -17,6 +17,30 @@ use {
 
 #[cfg(feature = "anchoring-btc")]
 use {crate::anchor::bitcoin::HeaderChain, crate::net::MAX_SYNC_BTC_HEADERS, crate::params::anchoring::BtcStart};
+#[cfg(feature = "anchoring-eth")]
+use {
+    r#macro::document,
+    crate::anchor::ethereum::{EthBeacon, EthCommittees},
+    crate::params::anchoring::EthStart,
+    std::sync::{Arc, mpsc},
+};
+
+/// Ethereum's sync committees, followed from each eth_start peers name through the node's beacon
+/// APIs, on a thread of their own, as following a year of periods takes a while.
+#[cfg(feature = "anchoring-eth")]
+#[derive(Default)]
+pub(in crate::node) struct EthFollowing {
+    /// The node's --beacon, if given: without it Ethereum anchors prove nothing.
+    pub(in crate::node) beacon: Option<Arc<dyn EthBeacon>>,
+    /// Committees followed, one for each start.
+    committees: Vec<EthCommittees>,
+    /// Starts peers named, and whether following each was begun.
+    starts: Vec<(EthStart, bool)>,
+    /// What is being followed now.
+    waiting: Option<mpsc::Receiver<Result<EthCommittees, String>>>,
+    /// Said once that, without --beacon, Ethereum anchors decide nothing.
+    said: bool,
+}
 
 /// What one peer showed.
 #[derive(Default)]
@@ -41,6 +65,9 @@ pub(in crate::node) struct Anchored {
     /// Bitcoin's headers, one chain for each start a peer named.
     #[cfg(feature = "anchoring-btc")]
     chains: Vec<(BtcStart, HeaderChain)>,
+    /// Ethereum's committees, as far as they were followed.
+    #[cfg(feature = "anchoring-eth")]
+    pub(in crate::node) eth: EthFollowing,
     /// Two histories anchored in the same Bitcoin block: nothing to pick, said once.
     tied: bool,
     /// No peer shows anchors yet: said once.
@@ -53,6 +80,8 @@ impl Anchored {
         Sources {
             #[cfg(feature = "anchoring-btc")]
             bitcoin: self.chains.iter().map(|(_, chain)| chain).max_by_key(|chain| chain.tip().2),
+            #[cfg(feature = "anchoring-eth")]
+            ethereum: &self.eth.committees,
             ..Sources::default()
         }
     }
@@ -101,6 +130,11 @@ impl Node {
             return Ok(());
         }
 
+        #[cfg(feature = "anchoring-eth")]
+        if !anchored.eth.following(crate::node::now_ms() / 1_000) {
+            return Ok(());
+        }
+
         self.pick_by_anchors(&peers)
     }
 
@@ -132,6 +166,13 @@ impl Node {
                 shown.next = answer.start.as_ref().map_or(0, |start| start.height + 1);
                 shown.done = cfg!(not(feature = "anchoring-btc")) || answer.start.is_none();
             }
+        }
+
+        #[cfg(feature = "anchoring-eth")]
+        if let Some(start) = &answer.eth_start
+            && !anchored.eth.starts.iter().any(|(known, _)| known == start)
+        {
+            anchored.eth.starts.push((start.clone(), false));
         }
 
         #[cfg(feature = "anchoring-btc")]
@@ -206,12 +247,31 @@ impl Node {
         let mut histories: Vec<(PeerId, History)> = Vec::new();
         let mut distrusted = Vec::new();
 
+        let mut wanted = Vec::new();
+
         for peer in peers {
             let Some(answer) = anchored.shown.get(peer).and_then(|shown| shown.answer.as_ref()) else {
                 continue;
             };
 
-            match check_anchors(answer, &sources, &genesis, depth) {
+            // Anchors in a chain the node cannot check decide nothing: the list is checked up to
+            // its newest in one it can, whose proof is asked for when the peer sent none.
+            let answer = match crate::anchor::sync::newest_readable(answer, &sources) {
+                None => {
+                    log::warn!("[node] {peer} shows anchors only in chains this node cannot check: Ethereum's take --beacon");
+
+                    continue;
+                }
+                Some(place) if place + 1 == answer.entries.len() as u64 => std::borrow::Cow::Borrowed(answer),
+                Some(place) if !answer.proofs.iter().any(|(index, _)| *index == place) => {
+                    wanted.push((*peer, place));
+
+                    continue;
+                }
+                Some(place) => std::borrow::Cow::Owned(crate::anchor::sync::cut_at(answer, place)),
+            };
+
+            match check_anchors(&answer, &sources, &genesis, depth) {
                 Ok(history) => histories.push((*peer, history)),
                 Err(err) => {
                     log::warn!("[node] {peer}'s anchors do not check against Bitcoin's headers: {err}; asking others");
@@ -221,6 +281,17 @@ impl Node {
         }
 
         snapshot.distrusted.extend(distrusted);
+
+        if !wanted.is_empty() {
+            for (peer, place) in wanted {
+                if let Some(shown) = anchored.shown.get_mut(&peer) {
+                    shown.wanted.insert(place);
+                }
+            }
+
+            return self.anchored_next();
+        }
+
         let mut winner: Option<(PeerId, History)> = None;
 
         for (peer, history) in histories {
@@ -269,5 +340,62 @@ impl Node {
         snapshot.anchored = None;
 
         self.snapshot_next()
+    }
+}
+
+#[cfg(feature = "anchoring-eth")]
+impl EthFollowing {
+    /// Carries following on: takes what a thread followed, and starts the next start on one. Whether
+    /// it is all done, so picking may go on.
+    fn following(&mut self, now: u64) -> bool {
+        if let Some(waiting) = &self.waiting {
+            match waiting.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => return false,
+                Ok(Ok(committees)) => {
+                    log::info!("[node] followed Ethereum's sync committees to period {}", committees.last_period());
+                    self.committees.push(committees);
+                }
+                Ok(Err(why)) => log::warn!("[node] following Ethereum's sync committees through --beacon: {why}; its anchors decide nothing"),
+                Err(mpsc::TryRecvError::Disconnected) => log::warn!("[node] following Ethereum's sync committees stopped; its anchors decide nothing"),
+            }
+
+            self.waiting = None;
+        }
+
+        let Some((start, begun)) = self.starts.iter_mut().find(|(_, begun)| !*begun) else {
+            return true;
+        };
+
+        let Some(beacon) = self.beacon.clone() else {
+            if !self.said {
+                log::warn!("[node] peers' chains anchor in Ethereum, and no --beacon is given: Ethereum anchors decide nothing");
+                self.said = true;
+            }
+
+            return true;
+        };
+
+        *begun = true;
+        let (start, (send, receive)) = (start.clone(), mpsc::channel());
+        log::info!("[node] following Ethereum's sync committees from {} through --beacon", crate::structs::hex::to_hex(&start.root));
+        std::thread::spawn(move || {
+            let _ = send.send(EthCommittees::fetch(beacon.as_ref(), &start, now));
+        });
+        self.waiting = Some(receive);
+
+        false
+    }
+}
+
+impl Node {
+    #[cfg(feature = "anchoring-eth")]
+    #[document(
+        parent = "Node",
+        summary = "Gives anchored sync a beacon API to follow Ethereum's sync committees through, from each eth_start peers name, so it can check Ethereum anchors' signatures itself: what --beacon gives. Without one, Ethereum anchors decide nothing. Call it after sync_from_anchors; it does nothing otherwise.",
+    )]
+    pub fn anchor_beacon(&mut self, beacon: Arc<dyn EthBeacon>) {
+        if let Some(anchored) = self.sync.snapshot.as_mut().and_then(|snapshot| snapshot.anchored.as_mut()) {
+            anchored.eth.beacon = Some(beacon);
+        }
     }
 }

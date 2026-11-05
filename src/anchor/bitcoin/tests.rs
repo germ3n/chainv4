@@ -200,13 +200,13 @@ fn proving() -> (State, AnchorSettings, BtcAnchorProof, MockRelay, Vec<[u8; 80]>
     }
 
     proof.block = sha256d(&headers[0]);
-    let settings = AnchorSettings { bitcoin: true, ethereum: false, enforce: true, relay: Some(relay.address), btc_start: Some(start), depth: 6, every: 10, reward: crate::structs::u256::u256::new(5) };
+    let settings = AnchorSettings { bitcoin: true, ethereum: false, enforce: true, relay: Some(relay.address), eth_relay: None, eth_start: None, btc_start: Some(start), depth: 6, every: 10, reward: crate::structs::u256::u256::new(5) };
 
     (state, settings, proof, relay, headers)
 }
 
 fn rules(settings: &AnchorSettings) -> ProveRules<'_> {
-    ProveRules { settings, genesis: genesis(), checkpoint_interval: Some(8), pooled: false }
+    ProveRules { settings, genesis: genesis(), checkpoint_interval: Some(8), pooled: false, time: 0 }
 }
 
 #[test]
@@ -405,7 +405,7 @@ fn a_list_that_does_not_check_against_bitcoin_is_refused() {
 fn two_histories_anchored_in_one_bitcoin_block_tie() {
     let source = AnchorSource::Bitcoin { block: [1; 32], height: 5 };
     let entry = |seed: &[u8]| AnchorEntry { epoch: 1, block: id(seed), source, enforced: true };
-    let history = |seed: &[u8]| History { entries: vec![entry(seed)], proven: [(0, source)].into() };
+    let history = |seed: &[u8]| History { entries: vec![entry(seed)], proven: [(0, source)].into(), readable: vec![crate::params::anchoring::AnchorChain::Bitcoin] };
 
     assert_eq!(compare_histories(&history(b"one"), &history(b"other")), AnchorVerdict::Tie(0));
 }

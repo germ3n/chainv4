@@ -110,9 +110,17 @@ fn every_shape() -> Vec<Change> {
             enforce: true,
             relay: Some(Address::Contract([4; 32])),
             btc_start: Some(chainv4::params::anchoring::BtcStart { header: vec![7; 80], height: 4032, network: chainv4::params::anchoring::BtcNetworkRules::Main }),
+            eth_relay: Some(Address::Contract([5; 32])),
+            eth_start: Some(chainv4::params::anchoring::EthStart { root: [6; 32], network: chainv4::params::anchoring::EthNetwork::Preset("sepolia".into()) }),
             depth: 3,
             every: 45,
             reward: u256::new(2 * DEV),
+        }),
+        Change::Anchoring(chainv4::params::anchoring::AnchorSettings {
+            ethereum: true,
+            eth_relay: Some(Address::Contract([5; 32])),
+            eth_start: Some(chainv4::params::anchoring::EthStart { root: [6; 32], network: chainv4::params::anchoring::EthNetwork::Custom(ethlight_network()) }),
+            ..chainv4::params::anchoring::AnchorSettings::OFF
         }),
         Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 2_000 }),
         Change::Consensus(ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::Blake3_256, target_block_ms: 2_000, initial_difficulty: 100_000, min_difficulty: 1_000, tuning: None, window: None })),
@@ -686,4 +694,12 @@ fn the_form_draws_at_a_phone_s_width_for_every_kind() {
 
         assert!(widest <= 340.5, "{kind} runs off a phone: {widest}");
     }
+}
+
+/// A network governance defines whole, Hoodi's under another name, as SSZ.
+fn ethlight_network() -> Vec<u8> {
+    let mut network = chainv4::ethlight::HOODI.clone();
+    network.name = "private".into();
+
+    network.encode()
 }

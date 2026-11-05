@@ -30,6 +30,10 @@ pub mod node;
 pub mod registry;
 #[cfg(feature = "release")]
 pub mod release;
+#[cfg(feature = "client")]
+pub mod remote;
+/// The Ethereum light client anchoring's settings name networks by: what the apps decode them with.
+pub use ethlight;
 pub mod structs;
 #[cfg(feature = "swap")]
 pub mod swap;

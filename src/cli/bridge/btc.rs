@@ -13,6 +13,7 @@ use {
     },
     crate::registry::federation::BtcPolicy,
     crate::cli::CliResult,
+    crate::remote::bitcoin::BitcoinApi,
     crate::crypto::bitcoin::sha256d,
     crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut, der, p2wsh},
     crate::structs::address::Address,
@@ -27,27 +28,13 @@ use {
 const SOON_BLOCKS: u32 = 3;
 
 #[cfg(feature = "anchoring-btc")]
-mod anchor;
+pub(super) mod anchor;
 
 #[derive(clap::Subcommand)]
 pub enum BtcAction {
-    /// Anchors the chain into Bitcoin (docs/anchoring.md): writes its newest finalized checkpoint
-    /// into an OP_RETURN from the key's coins every anchoring.every epochs, and shows it to the
-    /// chain once the relay holds it deep enough, which pays the reward. With anchoring.ethereum
-    /// on, --eth-rpc and --evm-key, writes it to that chain too.
+    /// The anchorer, as bridge anchor: kept here as it was first named.
     #[cfg(feature = "anchoring-btc")]
-    Anchor {
-        /// The secp256k1 key whose native segwit coins pay for anchors: --evm-key's unless given.
-        #[arg(long)]
-        btc_key: Option<std::path::PathBuf>,
-        /// Seconds between passes; 0 for one pass.
-        #[arg(long, default_value_t = 60)]
-        every: u64,
-        /// The rate to pay, in satoshis a virtual byte: what Esplora asks for within a few blocks
-        /// unless given.
-        #[arg(long)]
-        fee_rate: Option<u64>,
-    },
+    Anchor(super::anchor::AnchorArgs),
     /// Starts the relay, deployed from contracts/examples/btc_relay, at the header Esplora has at
     /// a height: on main, a difficulty period's first, a height divisible by 2016.
     RelayStart {
@@ -298,33 +285,6 @@ pub(super) fn raw(value: &Value) -> Vec<u8> {
     }
 }
 
-/// How long between two questions to Esplora, so a sync does not burst.
-const ESPLORA_PACE: std::time::Duration = std::time::Duration::from_millis(150);
-
-/// How many times Esplora is asked before a question fails: waiting 2, 4, 8, 16 and 32 seconds
-/// between, about a minute in all.
-const ESPLORA_TRIES: u32 = 6;
-
-/// An answer, asked again while it fails or is a web page, which is how a throttled Esplora
-/// answers, waiting twice as long each time.
-fn asked_again(tries: u32, mut wait: impl FnMut(std::time::Duration), mut ask: impl FnMut() -> Result<String, String>) -> Result<String, String> {
-    let mut last = String::new();
-
-    for attempt in 0..tries.max(1) {
-        if attempt > 0 {
-            wait(std::time::Duration::from_secs(1 << attempt));
-        }
-
-        match ask() {
-            Ok(answer) if !answer.trim_start().starts_with('<') => return Ok(answer),
-            Ok(_) => last = "Esplora answered a web page, as it does when it throttles".to_string(),
-            Err(err) => last = err,
-        }
-    }
-
-    Err(format!("{last}; asked {} times", tries.max(1)))
-}
-
 fn whole_size(value: &Value) -> usize {
     whole(value) as usize
 }
@@ -350,26 +310,11 @@ pub(super) struct FeeRates {
     soon: f64,
 }
 
-/// What an answer from /fee-estimates comes to: its body for any success, as mempool.space answers
-/// these with 203; no estimates for a 404, as regtest's Esplora has none; and otherwise why not.
-fn fee_answer(status: u16, body: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
-    match status {
-        404 => Ok("{}".to_string()),
-        200..=299 => body(),
-        status => Err(format!("Esplora /fee-estimates: it answered {status}")),
-    }
-}
+/// Fee rates by how many blocks they are for: None for no rate at all, as a regtest Bitcoin answers.
+fn fee_rates_of(rates: &std::collections::BTreeMap<u32, f64>) -> Option<FeeRates> {
+    let fastest = rates.values().next().copied()?;
 
-/// Esplora's /fee-estimates, a rate by how many blocks it is for: None for no rate at all, as a
-/// regtest one answers, and an error for an answer that is no such thing.
-fn fee_rates_from(answer: &str) -> Result<Option<FeeRates>, String> {
-    let estimates: std::collections::BTreeMap<String, f64> = serde_json::from_str(answer).map_err(|_| "Esplora gave fee estimates that do not read".to_string())?;
-    let rates: std::collections::BTreeMap<u32, f64> = estimates.into_iter().filter_map(|(blocks, rate)| Some((blocks.parse().ok()?, rate))).filter(|(_, rate)| rate.is_finite() && *rate > 0.0).collect();
-    let Some(fastest) = rates.values().next().copied() else {
-        return Ok(None);
-    };
-
-    Ok(Some(FeeRates { fastest, soon: rates.range(SOON_BLOCKS..).next().map_or(fastest, |(_, rate)| *rate) }))
+    Some(FeeRates { fastest, soon: rates.range(SOON_BLOCKS..).next().map_or(fastest, |(_, rate)| *rate) })
 }
 
 /// How far a pass has found nothing left to do: what is paid, spent or released stays so, so a
@@ -381,13 +326,6 @@ pub(super) struct BtcDone {
     releases: u64,
 }
 
-/// The path in Esplora's Merkle proof, each sibling in Bitcoin's own byte order.
-fn merkle_path(proof: &Value) -> CliResult<Vec<u8>> {
-    let path = proof["merkle"].as_array().into_iter().flatten().map(|sibling| internal(sibling.as_str().unwrap_or_default())).collect::<CliResult<Vec<_>>>()?;
-
-    Ok(path.concat())
-}
-
 impl Bridge {
     /// The newest block at or below a height that the relay's main chain and Esplora agree on. Bitcoin
     /// reorganizing leaves the relay's tip on a branch that lost, and headers from just past its height
@@ -397,7 +335,7 @@ impl Bridge {
             let held = self.read(relay, "block_at", json!([{ "type": "u64", "value": height.to_string() }]))?;
             let held = held.first().map(raw).filter(|hash| !hash.is_empty()).ok_or("the relay and Esplora share no block: start a relay from a newer checkpoint")?;
 
-            if shown(&held) == self.esplora(&format!("/block-height/{height}"))?.trim() {
+            if shown(&held) == self.btc_api()?.block_hash(height)? {
                 return Ok(height);
             }
 
@@ -406,18 +344,9 @@ impl Bridge {
         }
     }
 
-    /// Asks Esplora, at an even pace, and again when it throttles: a public one such as
-    /// mempool.space answers a burst with an error or a web page, and a moment later answers again.
-    fn esplora(&self, path: &str) -> CliResult<String> {
-        let base = self.args.esplora.as_deref().ok_or("give --esplora: an Esplora API, such as https://mempool.space/api")?;
-        let url = format!("{}{path}", base.trim_end_matches('/'));
-
-        Ok(asked_again(ESPLORA_TRIES, std::thread::sleep, || {
-            std::thread::sleep(ESPLORA_PACE);
-            let mut answer = self.agent.get(&url).call().map_err(|err| format!("Esplora {path}: {err}"))?;
-
-            answer.body_mut().read_to_string().map_err(|err| format!("Esplora {path}: {err}"))
-        })?)
+    /// Bitcoin, as --esplora and --bitcoind name it.
+    pub(super) fn btc_api(&self) -> CliResult<&dyn crate::remote::bitcoin::BitcoinApi> {
+        Ok(self.bitcoin.as_ref().ok_or("give --esplora or --bitcoind: an Esplora API, such as https://mempool.space/api, or a bitcoind's JSON-RPC")?)
     }
 
     /// The Bitcoin gateway here: given, or the one the chain announces.
@@ -431,21 +360,22 @@ impl Bridge {
     /// A transaction as the gateway takes it, without its witness, with its block, place and
     /// Merkle path, as Esplora proves it.
     fn proof(&self, txid: &str) -> CliResult<Proof> {
-        let (tx, proof) = self.placed(txid)?;
-        let height = proof["block_height"].as_u64().ok_or("the transaction is not in a block yet")?;
-        let hash = self.esplora(&format!("/block-height/{height}"))?;
-        let (coinbase, of_coinbase) = self.placed(self.esplora(&format!("/block/{}/txid/0", hash.trim()))?.trim())?;
+        let bitcoin = self.btc_api()?;
+        let status = bitcoin.tx_status(txid)?;
+        let (tx, proof) = self.placed(txid, status.block_hash.as_deref())?;
+        let hash = bitcoin.block_hash(proof.block_height)?;
+        let (coinbase, of_coinbase) = self.placed(&bitcoin.coinbase_txid(&hash)?, Some(&hash))?;
 
-        Ok(Proof { tx, block: internal(&hash)?, index: proof["pos"].as_u64().unwrap_or(0), path: merkle_path(&proof)?, coinbase, coinbase_path: merkle_path(&of_coinbase)? })
+        Ok(Proof { tx, block: internal(&hash)?, index: proof.pos, path: proof.path.concat(), coinbase, coinbase_path: of_coinbase.path.concat() })
     }
 
-    /// A transaction without its witness, and Esplora's Merkle proof of it.
-    fn placed(&self, txid: &str) -> CliResult<(Vec<u8>, Value)> {
-        let hex = self.esplora(&format!("/tx/{txid}/hex"))?;
-        let (tx, _) = Transaction::read(&from_hex(&format!("0x{}", hex.trim())).ok_or("Esplora gave a transaction that is not hex")?)?;
-        let proof = serde_json::from_str(&self.esplora(&format!("/tx/{txid}/merkle-proof"))?).map_err(|_| "Esplora gave a proof that is not JSON")?;
+    /// A transaction without its witness, and the Merkle proof of it, its block given when known.
+    fn placed(&self, txid: &str, block: Option<&str>) -> CliResult<(Vec<u8>, crate::remote::bitcoin::BtcMerkleProof)> {
+        let bitcoin = self.btc_api()?;
+        let raw = bitcoin.raw_tx(txid)?.ok_or_else(|| format!("Bitcoin knows no transaction {txid}"))?;
+        let (tx, _) = Transaction::read(&raw)?;
 
-        Ok((tx.base(), proof))
+        Ok((tx.base(), bitcoin.merkle_proof(txid, block)?))
     }
 
     pub(super) fn btc(&self, action: &BtcAction) -> CliResult<()> {
@@ -454,30 +384,29 @@ impl Bridge {
 
         match action {
             BtcAction::RelayStart { relay, height, network } => {
-                let served = Followed::from_genesis(&self.esplora("/block-height/0")?);
+                let served = Followed::from_genesis(&self.btc_api()?.block_hash(0)?);
                 let network = match (network.as_deref().map(Followed::named).transpose()?, served) {
                     (Some(told), Some(served)) if told != served => return Err(format!("--network {} is not what Esplora serves: {}", told.name(), served.name()).into()),
                     (Some(network), _) | (None, Some(network)) => network,
                     (None, None) => return Err("Esplora serves a Bitcoin whose genesis block is none of main's, test's or regtest's: give --network".into()),
                 };
                 eprintln!("starting the relay on Bitcoin's {} network", network.name());
-                let hash = self.esplora(&format!("/block-height/{height}"))?;
-                let header = from_hex(&format!("0x{}", self.esplora(&format!("/block/{}/header", hash.trim()))?.trim())).ok_or("Esplora gave a header that is not hex")?;
+                let bitcoin = self.btc_api()?;
+                let header = bitcoin.header(&bitcoin.block_hash(*height)?)?;
                 self.call(*relay, "start", u256::ZERO, vec![bytes(header), number(*height), TxCallArgumentType::String(network.name().to_string())])
             }
             BtcAction::RelaySync { relay, batch } => {
                 let tip = self.read(relay, "tip", json!([]))?;
                 let mut height = self.last_shared(relay, tip.get(1).map_or(0, whole))?;
-                let top: u64 = self.esplora("/blocks/tip/height")?.trim().parse().map_err(|_| "Esplora gave a height that is not a number")?;
+                let bitcoin = self.btc_api()?;
+                let top = bitcoin.tip_height()?;
 
                 while height < top {
                     let mut headers = Vec::new();
                     let mut stopped = None;
 
                     while height < top && headers.len() / 80 < *batch {
-                        let header = self.esplora(&format!("/block-height/{}", height + 1)).and_then(|hash| {
-                            from_hex(&format!("0x{}", self.esplora(&format!("/block/{}/header", hash.trim()))?.trim())).ok_or_else(|| "Esplora gave a header that is not hex".into())
-                        });
+                        let header = bitcoin.block_hash(height + 1).and_then(|hash| bitcoin.header(&hash));
 
                         match header {
                             Ok(header) => {
@@ -485,7 +414,7 @@ impl Bridge {
                                 height += 1;
                             }
                             Err(err) => {
-                                stopped = Some(err);
+                                stopped = Some(err.into());
                                 break;
                             }
                         }
@@ -561,28 +490,7 @@ impl Bridge {
             BtcAction::Sign => self.sign_releases(&self.fee_rates(), false),
             BtcAction::Pass => self.btc_pass(),
             #[cfg(feature = "anchoring-btc")]
-            BtcAction::Anchor { btc_key, every, fee_rate } => {
-                let secret = match btc_key {
-                    Some(path) => match crate::cli::signer(Some(path))?.private() {
-                        crate::crypto::keypair::PrivateKey::Secp256k1(secret) => *secret,
-                        _ => return Err("--btc-key is a secp256k1 key: make one with keygen --scheme secp256k1".into()),
-                    },
-                    None => self.evm_secret()?,
-                };
-                let mut pending = None;
-
-                loop {
-                    if let Err(why) = self.anchor_pass(&secret, &mut pending, *fee_rate) {
-                        eprintln!("the anchor pass: {why}");
-                    }
-
-                    if *every == 0 {
-                        return Ok(());
-                    }
-
-                    std::thread::sleep(std::time::Duration::from_secs(*every));
-                }
-            }
+            BtcAction::Anchor(args) => self.run_anchorer(args),
             BtcAction::Watch { every } => loop {
                 if let Err(why) = self.btc_pass() {
                     eprintln!("the Bitcoin pass: {why}");
@@ -618,8 +526,8 @@ impl Bridge {
             Some(relay) => self.read(&relay, "network_name", json!([]))?.first().filter(|value| value["type"].as_str() == Some("string")).map(text),
             None => None,
         };
-        let genesis = match (&name, &self.args.esplora) {
-            (None, Some(_)) => self.esplora("/block-height/0").map_err(|why| eprintln!("Esplora did not say which Bitcoin it serves: {why}")).ok(),
+        let genesis = match (&name, &self.bitcoin) {
+            (None, Some(bitcoin)) => bitcoin.block_hash(0).map_err(|why| eprintln!("Bitcoin's source did not say which Bitcoin it serves: {why}")).ok(),
             _ => None,
         };
 
@@ -737,15 +645,9 @@ impl Bridge {
     /// and an error for one out of reach or throttling. Asked once a pass, and again only once: fees
     /// going unread must not hold up a pass for long.
     fn fee_rates(&self) -> Result<Option<FeeRates>, String> {
-        let base = self.args.esplora.as_deref().ok_or("no --esplora given")?;
-        let url = format!("{}/fee-estimates", base.trim_end_matches('/'));
-        let answer = asked_again(2, std::thread::sleep, || {
-            let mut answer = self.agent.get(&url).call().map_err(|err| format!("Esplora /fee-estimates: {err}"))?;
+        let bitcoin = self.bitcoin.as_ref().ok_or("no --esplora or --bitcoind given")?;
 
-            fee_answer(answer.status().as_u16(), || answer.body_mut().read_to_string().map_err(|err| format!("Esplora /fee-estimates: {err}")))
-        })?;
-
-        fee_rates_from(&answer)
+        Ok(fee_rates_of(&bitcoin.fee_estimates()?))
     }
 
     /// Whether this key is a signer of the federation in force.
@@ -905,7 +807,7 @@ impl Bridge {
         let count = self.proposal_count(gateway)?;
         let depth = self.status()?["federation"]["bitcoin_depth"].as_u64().unwrap_or(6);
         let mut done = self.btc_done.get();
-        let tip: u64 = self.esplora("/blocks/tip/height")?.trim().parse().map_err(|_| "Esplora gave a height that is not a number")?;
+        let tip = self.btc_api()?.tip_height()?;
         let (mut open, mut mined) = (std::collections::BTreeSet::new(), std::collections::HashSet::new());
 
         if done.releases > count {
@@ -953,13 +855,13 @@ impl Bridge {
     /// Whether Bitcoin mined a proposal, showing it once it is deep enough, in this signer's turn.
     fn show_if_mined(&self, gateway: &Address, id: u64, found: &[Value], tip: u64, depth: u64) -> CliResult<bool> {
         let txid = shown(&raw(found.get(1).ok_or("no such release")?));
-        let status: Value = serde_json::from_str(&self.esplora(&format!("/tx/{txid}/status"))?).unwrap_or(Value::Null);
+        let status = self.btc_api()?.tx_status(&txid)?;
 
-        if status["confirmed"] != true {
+        if !status.confirmed {
             return Ok(false);
         }
 
-        if (tip + 1).saturating_sub(status["block_height"].as_u64().unwrap_or(u64::MAX)) >= depth {
+        if (tip + 1).saturating_sub(status.block_height.unwrap_or(u64::MAX)) >= depth {
             self.show_in_turn(gateway, id, found)?;
         }
 
@@ -1312,10 +1214,7 @@ impl Bridge {
 
     /// Whether Esplora knows a transaction, mined or in its mempool: one more question, once.
     fn bitcoin_knows(&self, txid: &str) -> CliResult<bool> {
-        let base = self.args.esplora.as_deref().ok_or("give --esplora")?;
-        let answer = self.agent.get(format!("{}/tx/{txid}/hex", base.trim_end_matches('/'))).call().map_err(|err| format!("Esplora /tx: {err}"))?;
-
-        Ok(answer.status().is_success())
+        Ok(self.btc_api()?.raw_tx(txid)?.is_some())
     }
 
     /// What the gateway holds unspent, in the order it took it, each with what it says of it.
@@ -1675,9 +1574,7 @@ impl Bridge {
         let root = members.first().map_or(me.id, |member| member.id);
 
         for version in members.iter().filter(|member| member.group == root && member.id != me.id) {
-            let status: Value = serde_json::from_str(&self.esplora(&format!("/tx/{}/status", version.txid()))?).unwrap_or(Value::Null);
-
-            if status["confirmed"] == true {
+            if self.btc_api()?.tx_status(&version.txid())?.confirmed {
                 return Ok(Some(format!("release {root} is mined already, as {}", version.txid())));
             }
         }
@@ -1735,16 +1632,8 @@ impl Bridge {
             tx.inputs[index].witness = [vec![Vec::new()], signatures, vec![script]].concat();
         }
 
-        let base = self.args.esplora.as_deref().ok_or("give --esplora")?;
-        let mut answer = self.agent.post(format!("{}/tx", base.trim_end_matches('/'))).send(to_hex(&tx.encode()).trim_start_matches("0x").to_string()).map_err(|err| format!("Esplora would not take it: {err}"))?;
-        let accepted = answer.status().is_success();
-        let said = answer.body_mut().read_to_string()?;
-
-        if !accepted {
-            return Err(format!("Esplora would not take it: {}", said.trim()).into());
-        }
-
-        println!("broadcast {}", said.trim());
+        let txid = self.btc_api()?.broadcast(&to_hex(&tx.encode())).map_err(|why| format!("Bitcoin would not take it: {why}"))?;
+        println!("broadcast {txid}");
 
         Ok(())
     }
@@ -1752,50 +1641,19 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, std::time::Duration};
+    use super::*;
 
     #[test]
-    fn any_success_from_fee_estimates_is_an_answer_as_mempool_space_says_203() {
-        let body = || Ok("{\"1\":1}".to_string());
+    fn what_the_network_asks_is_read_from_its_estimates() {
+        let rates = |text: &str| fee_rates_of(&crate::remote::bitcoin::esplora_fee_map(text).unwrap());
 
-        for status in [200, 203] {
-            assert_eq!(fee_answer(status, body).unwrap(), "{\"1\":1}", "{status}");
-        }
-
-        assert_eq!(fee_answer(404, body).unwrap(), "{}", "an Esplora with no estimates");
-
-        for status in [301, 429, 500, 503] {
-            assert!(fee_answer(status, body).unwrap_err().contains(&status.to_string()), "{status}");
-        }
-    }
-
-    #[test]
-    fn what_the_network_asks_is_read_from_esplora_s_estimates() {
-        let rates = fee_rates_from(r#"{"1":87.5,"2":40.1,"3":20.3,"6":9.0,"144":1.0,"1008":1.0}"#).unwrap().unwrap();
-
-        assert_eq!(rates, FeeRates { fastest: 87.5, soon: 20.3 });
+        assert_eq!(rates(r#"{"1":87.5,"2":40.1,"3":20.3,"6":9.0,"144":1.0,"1008":1.0}"#).unwrap(), FeeRates { fastest: 87.5, soon: 20.3 });
         // Without an estimate for that many blocks, the next there is; without any later, the fastest.
-        assert_eq!(fee_rates_from(r#"{"1":8,"6":2}"#).unwrap().unwrap(), FeeRates { fastest: 8.0, soon: 2.0 });
-        assert_eq!(fee_rates_from(r#"{"1":8}"#).unwrap().unwrap(), FeeRates { fastest: 8.0, soon: 8.0 });
-        assert_eq!(fee_rates_from("{}").unwrap(), None, "regtest's: no rate at all");
-        assert_eq!(fee_rates_from(r#"{"1":0,"2":-3}"#).unwrap(), None, "nothing that is a rate");
-        assert!(fee_rates_from("<html>slow down</html>").is_err(), "an answer that is no such thing is no answer");
-    }
-
-    #[test]
-    fn a_throttled_esplora_is_asked_again_waiting_longer_each_time() {
-        let mut answers = vec![Err("timeout".to_string()), Ok("<html>slow down</html>".to_string()), Ok("00000000a1".to_string())].into_iter();
-        let mut waited = Vec::new();
-
-        assert_eq!(asked_again(6, |wait| waited.push(wait), || answers.next().unwrap()), Ok("00000000a1".to_string()));
-        assert_eq!(waited, [Duration::from_secs(2), Duration::from_secs(4)], "twice as long each time");
-
-        let mut waited = Vec::new();
-        let failed = asked_again(3, |wait| waited.push(wait), || Ok("  <!doctype html>".to_string())).unwrap_err();
-
-        assert!(failed.contains("web page") && failed.contains("3 times"), "{failed}");
-        assert_eq!(waited.len(), 2);
-        assert_eq!(asked_again(0, |_| {}, || Ok("1".to_string())), Ok("1".to_string()), "asked once at least");
+        assert_eq!(rates(r#"{"1":8,"6":2}"#).unwrap(), FeeRates { fastest: 8.0, soon: 2.0 });
+        assert_eq!(rates(r#"{"1":8}"#).unwrap(), FeeRates { fastest: 8.0, soon: 8.0 });
+        assert_eq!(rates("{}"), None, "regtest's: no rate at all");
+        assert_eq!(rates(r#"{"1":0,"2":-3}"#), None, "nothing that is a rate");
+        assert!(crate::remote::bitcoin::esplora_fee_map("<html>slow down</html>").is_err(), "an answer that is no such thing is no answer");
     }
 
     #[test]

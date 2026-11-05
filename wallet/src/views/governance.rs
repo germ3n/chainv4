@@ -2087,7 +2087,13 @@ mod tests {
                 Change::Limits(BlockLimits { tx_limits: Limits { fuel: 10_000_000, memory: 64 << 20 }, max_block_bytes: Some(2 << 20), contract: None, max_tx_bytes: None, multisig_members: None }),
                 "Limits: 10,000,000 fuel and 64 MiB of memory a transaction, blocks of at most 2 MiB",
             ),
-            (Change::Anchoring(chainv4::params::anchoring::AnchorSettings { ethereum: true, enforce: true, ..chainv4::params::anchoring::AnchorSettings::OFF }), "Anchoring: Bitcoin off, Ethereum on, enforced on, 6 blocks deep, 0 DEV every 90 epochs"),
+            (Change::Anchoring(chainv4::params::anchoring::AnchorSettings {
+                ethereum: true,
+                enforce: true,
+                eth_relay: Some(Address::Contract([5; 32])),
+                eth_start: Some(chainv4::params::anchoring::EthStart { root: [6; 32], network: chainv4::params::anchoring::EthNetwork::Preset("sepolia".into()) }),
+                ..chainv4::params::anchoring::AnchorSettings::OFF
+            }), "Anchoring: Bitcoin off, Ethereum on, enforced on, 6 blocks deep, 0 DEV every 90 epochs"),
             (Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })), "Finality: final once 6 blocks deep"),
             (Change::Finality(FinalityConfig::Ffg(ffg.clone())), "Finality: FFG, votes 3 blocks deep, bonds of at least 500 DEV, at most 1000 validators"),
             (Change::SwitchFinality { epoch: 40, config: FinalityConfig::Ffg(ffg) }, "Switch finality to ffg from epoch 40: FFG, votes 3 blocks deep"),

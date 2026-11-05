@@ -102,6 +102,9 @@ unsafe extern "C" {
     pub fn fast_aggregate_verify(pubkeys: *const u8, pubkeys_len: u32, message: *const u8, message_len: u32, signature: *const u8, signature_len: u32) -> u32;
     /// The federation's length in the result buffer, encoded, or -1 for none.
     pub fn federation() -> i32;
+    /// The Ethereum network anchoring's settings name, its SSZ's length in the result buffer, or
+    /// -1 for none.
+    pub fn eth_network() -> i32;
     /// The chain's id: what its EVM answers CHAINID with.
     pub fn chain_id() -> u64;
     pub fn abort(message: *const u8, len: u32) -> !;

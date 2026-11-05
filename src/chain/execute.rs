@@ -807,7 +807,7 @@ fn anchor(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Ad
     #[cfg(feature = "anchoring")]
     {
         let interval = rules.staking.as_ref().map(|staking| staking.checkpoint_interval).or(rules.signers.map(|signers| signers.checkpoint_interval));
-        let prove = crate::anchor::ProveRules { settings: &rules.anchoring, genesis: context.genesis, checkpoint_interval: interval, pooled: rules.pooled_fees };
+        let prove = crate::anchor::ProveRules { settings: &rules.anchoring, genesis: context.genesis, checkpoint_interval: interval, pooled: rules.pooled_fees, time: context.timestamp };
 
         match crate::anchor::prove(layer, &prove, sender, proof) {
             Ok(_) => Ok(Effect::Done),

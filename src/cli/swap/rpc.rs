@@ -4,6 +4,8 @@
 
 use {
     super::super::CliResult,
+    crate::remote::{Auth, Endpoint, EndpointFailure, Endpoints, Http, UreqHttp, judged},
+    std::sync::Arc,
     crate::crypto::secp256k1,
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::u256::u256,
@@ -12,44 +14,103 @@ use {
     std::time::{Duration, Instant},
 };
 
-/// One chain's JSON-RPC, by its URL.
+/// One chain's JSON-RPC, at one URL or several standing in for each other (crate::remote::Endpoints).
+#[derive(Clone)]
 pub struct Rpc {
-    agent: ureq::Agent,
-    url: String,
+    http: Arc<dyn Http>,
+    endpoints: Arc<Endpoints>,
+}
+
+/// JSON-RPC errors that are the endpoint throttling, not an answer: another may serve it.
+fn throttled(error: &Value) -> bool {
+    let message = error["message"].as_str().unwrap_or_default().to_ascii_lowercase();
+
+    error["code"].as_i64() == Some(-32005) || message.contains("rate limit") || message.contains("too many requests")
 }
 
 impl Rpc {
+    /// One URL, with no login, over a client made elsewhere.
     pub fn new(agent: ureq::Agent, url: &str) -> Rpc {
-        Rpc { agent, url: url.trim().to_string() }
+        Rpc::over(Arc::new(UreqHttp::from_agent(agent)), vec![Endpoint { url: url.trim().to_string(), auth: Auth::None }])
     }
 
-    /// The first of the URLs whose chain is this one.
-    pub fn for_chain(agent: &ureq::Agent, urls: &[String], chain_id: u64) -> CliResult<Rpc> {
-        for url in urls {
-            let rpc = Rpc::new(agent.clone(), url);
+    /// Endpoints standing in for each other, over an HTTP client.
+    pub fn over(http: Arc<dyn Http>, endpoints: Vec<Endpoint>) -> Rpc {
+        Rpc { http, endpoints: Arc::new(Endpoints::new(endpoints)) }
+    }
 
-            if rpc.chain_id().is_ok_and(|id| id == chain_id) {
-                return Ok(rpc);
+    /// The URLs given grouped by the chain each answers for, in the order given: each chain's an Rpc
+    /// over all of its URLs. A URL that does not say is left out, saying so.
+    pub fn by_chain(http: &Arc<dyn Http>, endpoints: &[Endpoint]) -> Vec<(u64, Rpc)> {
+        let mut chains: Vec<(u64, Vec<Endpoint>)> = Vec::new();
+
+        for endpoint in endpoints {
+            match Rpc::over(http.clone(), vec![endpoint.clone()]).chain_id() {
+                Ok(id) => match chains.iter_mut().find(|(chain, _)| *chain == id) {
+                    Some((_, list)) => list.push(endpoint.clone()),
+                    None => chains.push((id, vec![endpoint.clone()])),
+                },
+                Err(why) => eprintln!("--eth-rpc {} does not say its chain: {why}", endpoint.host()),
             }
         }
 
-        Err(format!("no --eth-rpc given answers for {}: give one of its JSON-RPC URLs", crate::swap::evm::chain_name(chain_id)).into())
+        chains.into_iter().map(|(chain, list)| (chain, Rpc::over(http.clone(), list))).collect()
     }
 
-    fn ask(&self, method: &str, params: Value) -> CliResult<Value> {
-        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-        let mut response = self
-            .agent
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .send(body.to_string())
-            .map_err(|err| format!("cannot reach {}: {err}", self.url))?;
-        let answer: Value = serde_json::from_str(&response.body_mut().read_to_string()?).map_err(|_| format!("{} did not answer JSON-RPC", self.url))?;
+    /// Every URL given whose chain is this one, standing in for each other.
+    pub fn for_chain_at(http: &Arc<dyn Http>, endpoints: &[Endpoint], chain_id: u64) -> CliResult<Rpc> {
+        Rpc::by_chain(http, endpoints)
+            .into_iter()
+            .find(|(chain, _)| *chain == chain_id)
+            .map(|(_, rpc)| rpc)
+            .ok_or_else(|| format!("no --eth-rpc given answers for {}: give one of its JSON-RPC URLs", crate::swap::evm::chain_name(chain_id)).into())
+    }
 
-        match answer.get("error") {
-            Some(error) if !error.is_null() => Err(format!("{method}: {}", error["message"].as_str().unwrap_or(&error.to_string())).into()),
-            _ => Ok(answer["result"].clone()),
-        }
+    /// Its URLs, as they may be shown.
+    pub fn hosts(&self) -> String {
+        self.endpoints.hosts().join(", ")
+    }
+
+    /// One call, of each URL in turn while each fails: its result, or the chain's error.
+    pub fn ask(&self, method: &str, params: Value) -> CliResult<Value> {
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }).to_string().into_bytes();
+
+        Ok(self.endpoints.ask(method, |endpoint| {
+            let reply = self.http.send(&endpoint.request(true, "", &[("content-type", "application/json")], body.clone())?).map_err(EndpointFailure::Endpoint)?;
+            let reply = judged(reply)?;
+            let answer: Value = serde_json::from_slice(&reply.body).map_err(|_| EndpointFailure::Endpoint("it did not answer JSON-RPC".to_string()))?;
+
+            match answer.get("error") {
+                Some(error) if !error.is_null() && throttled(error) => Err(EndpointFailure::Endpoint(format!("it throttles: {error}"))),
+                Some(error) if !error.is_null() => Err(EndpointFailure::Answer(error["message"].as_str().map_or_else(|| error.to_string(), str::to_string))),
+                _ => Ok(answer["result"].clone()),
+            }
+        })?)
+    }
+
+    /// Several calls in one JSON-RPC batch, their results in order: what reading a whole block's
+    /// transactions takes, rather than one request each.
+    #[cfg_attr(not(feature = "anchoring-eth"), allow(dead_code))]
+    pub fn ask_batch(&self, calls: &[(&str, Value)]) -> CliResult<Vec<Value>> {
+        let body = Value::Array(calls.iter().enumerate().map(|(id, (method, params))| json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).collect()).to_string().into_bytes();
+
+        Ok(self.endpoints.ask("a JSON-RPC batch", |endpoint| {
+            let reply = judged(self.http.send(&endpoint.request(true, "", &[("content-type", "application/json")], body.clone())?).map_err(EndpointFailure::Endpoint)?)?;
+            let answers: Vec<Value> = serde_json::from_slice(&reply.body).map_err(|_| EndpointFailure::Endpoint("it did not answer a JSON-RPC batch".to_string()))?;
+            let mut results = vec![Value::Null; calls.len()];
+
+            for answer in answers {
+                let id = answer["id"].as_u64().and_then(|id| usize::try_from(id).ok()).filter(|id| *id < calls.len()).ok_or_else(|| EndpointFailure::Endpoint("its batch answer names no call".to_string()))?;
+
+                match answer.get("error") {
+                    Some(error) if !error.is_null() && throttled(error) => return Err(EndpointFailure::Endpoint(format!("it throttles: {error}"))),
+                    Some(error) if !error.is_null() => return Err(EndpointFailure::Answer(error["message"].as_str().map_or_else(|| error.to_string(), str::to_string))),
+                    _ => results[id] = answer["result"].clone(),
+                }
+            }
+
+            Ok(results)
+        })?)
     }
 
     fn number(&self, method: &str, params: Value) -> CliResult<u256> {

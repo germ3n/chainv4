@@ -751,6 +751,20 @@ checkpoint no one has to hand over: the node first hears each peer's anchor list
 headers from their relays, and takes the newest checkpoint of the history Bitcoin saw first. See
 [Anchoring](anchoring.md#picking-a-history).
 
+**Ethereum anchors take a beacon API.** `--beacon URL`, given again for others to fall back to,
+names one serving the light client routes, such as `https://lodestar-sepolia.chainsafe.io`: the
+node follows Ethereum's sync committees through it from the `eth_start` peers name, on a thread
+of its own, and checks each Ethereum anchor's finality update by them. Nothing it serves is
+trusted, as signatures and branches are checked; what it gets wrong proves nothing. Without it,
+Ethereum anchors decide nothing, and Bitcoin alone compares histories. `--beacon-auth` gives each
+one's login by order (`file:PATH` or `env:NAME`, as [Bridges](bridges.md#endpoints) has them), and
+`--proxy socks5h://127.0.0.1:9050` sends these requests through a SOCKS5 proxy, Tor's say. Both
+need a build with `anchoring-eth` and `client`.
+
+```sh
+chainv4 --snapshot --anchored --beacon https://lodestar-sepolia.chainsafe.io --proxy socks5h://127.0.0.1:9050
+```
+
 A long-range fork, one built below the checkpoint by keys that have since left, cannot reach it:
 the node holds no headers below the checkpoint to compare against, and refuses any block at or
 below it. `GET /status` of a node you trust shows a checkpoint under `finality.finalized.block`.

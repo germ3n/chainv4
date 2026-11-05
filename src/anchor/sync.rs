@@ -19,6 +19,8 @@ use {
 
 #[cfg(feature = "anchoring-btc")]
 use super::bitcoin::HeaderChain;
+#[cfg(feature = "anchoring-eth")]
+use super::ethereum::EthCommittees;
 
 #[document(
     summary = "A peer's anchor list once checked: every entry, and which of them are proven to sit where they say in the chain holding them.",
@@ -31,6 +33,8 @@ pub struct History {
     pub entries: Vec<AnchorEntry>,
     #[document(summary = "The places proven, with where their proofs showed them: a Bitcoin block and height, or an Ethereum root and slot.")]
     pub proven: BTreeMap<u64, AnchorSource>,
+    #[document(summary = "The chains the node could check this history's anchors in: Bitcoin once a peer showed its headers, Ethereum once a beacon API showed the committees from the peer's eth_start. Only a chain both histories were checked in decides between them.")]
+    pub readable: Vec<AnchorChain>,
 }
 
 impl History {
@@ -60,13 +64,57 @@ pub struct Sources<'a> {
     #[cfg(feature = "anchoring-btc")]
     #[document(summary = "Bitcoin's headers, the most work any peer showed.")]
     pub bitcoin: Option<&'a HeaderChain>,
-    #[document(summary = "Holds the lifetime in a build that reads no Bitcoin.")]
+    #[cfg(feature = "anchoring-eth")]
+    #[document(summary = "Ethereum's sync committees, followed from each eth_start a peer named through the node's beacon APIs: none without --beacon, when Ethereum anchors prove nothing.")]
+    pub ethereum: &'a [EthCommittees],
+    #[document(summary = "Holds the lifetime in a build that reads neither chain.")]
     pub marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl Sources<'_> {
+    #[document(parent = "Sources", summary = "Whether anchors in a chain can be checked for a peer naming this Ethereum start: Bitcoin's once a peer showed its headers, Ethereum's once the committees from that start were followed.")]
+    pub fn reads(&self, chain: AnchorChain, eth_start: Option<&crate::params::anchoring::EthStart>) -> bool {
+        match chain {
+            #[cfg(feature = "anchoring-btc")]
+            AnchorChain::Bitcoin => self.bitcoin.is_some(),
+            #[cfg(feature = "anchoring-eth")]
+            AnchorChain::Ethereum => eth_start.is_some_and(|start| self.ethereum.iter().any(|committees| committees.start == *start)),
+            #[allow(unreachable_patterns)]
+            _ => {
+                let _ = eth_start;
+
+                false
+            }
+        }
+    }
+}
+
+#[document(
+    summary = "The newest entry of a peer's list in a chain the node can check: where a list whose newest anchors sit in a chain it cannot, Ethereum's without --beacon, is checked up to, and those after it decide nothing.",
+    category = "Anchoring",
+    see_also = "check_anchors, Sources::reads",
+)]
+pub fn newest_readable(answer: &AnchorsAnswer, sources: &Sources<'_>) -> Option<u64> {
+    answer.entries.iter().rposition(|entry| sources.reads(entry.source.chain(), answer.eth_start.as_ref())).map(|place| place as u64)
+}
+
+#[document(
+    summary = "A peer's list cut after a place: its entries to it, and the proofs it sent of them.",
+    category = "Anchoring",
+    see_also = "newest_readable",
+)]
+pub fn cut_at(answer: &AnchorsAnswer, place: u64) -> AnchorsAnswer {
+    AnchorsAnswer {
+        entries: answer.entries.iter().take(place as usize + 1).cloned().collect(),
+        proofs: answer.proofs.iter().filter(|(index, _)| *index <= place).cloned().collect(),
+        ..answer.clone()
+    }
 }
 
 /// Checks one proof of the entry at a place: it carries this chain's anchor of that entry's
 /// checkpoint, with the root of every entry before it, where the entry says, as deep as asked.
-fn check_proof(entries: &[AnchorEntry], index: usize, proof: &AnchorProof, sources: &Sources<'_>, genesis: &Hash, depth: u64) -> Result<AnchorSource, String> {
+fn check_proof(answer: &AnchorsAnswer, index: usize, proof: &AnchorProof, sources: &Sources<'_>, genesis: &Hash, depth: u64) -> Result<AnchorSource, String> {
+    let entries = &answer.entries[..];
     let entry = &entries[index];
 
     if proof.chain() != entry.source.chain() {
@@ -92,13 +140,31 @@ fn check_proof(entries: &[AnchorEntry], index: usize, proof: &AnchorProof, sourc
 
             Err(format!("anchor {index} is in Bitcoin, which this build reads nothing of"))
         }
-        AnchorProof::Ethereum(_) => Err(format!("anchor {index} is in Ethereum: Ethereum anchors are not counted yet")),
+        #[cfg(feature = "anchoring-eth")]
+        AnchorProof::Ethereum(proof) => {
+            let Some(start) = &answer.eth_start else {
+                return Err(format!("anchor {index} is in Ethereum, and the peer names no Ethereum start"));
+            };
+            let Some(committees) = sources.ethereum.iter().find(|committees| committees.start == *start) else {
+                return Err(format!("anchor {index} is in Ethereum, and no beacon API (--beacon) showed its sync committees"));
+            };
+            let (payload, _) = super::ethereum::check_shown(proof, &entry.source, committees, index)?;
+            check_payload(entries, index, &payload, genesis)?;
+
+            Ok(entry.source)
+        }
+        #[cfg(not(feature = "anchoring-eth"))]
+        AnchorProof::Ethereum(_) => {
+            let _ = (sources, genesis, &answer.eth_start);
+
+            Err(format!("anchor {index} is in Ethereum, which this build reads nothing of"))
+        }
     }
 }
 
 /// Checks an anchor's payload is of the entry at a place: this chain's, its checkpoint, and the
 /// root of every entry before it.
-#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "anchoring-btc", feature = "anchoring-eth")), allow(dead_code))]
 fn check_payload(entries: &[AnchorEntry], index: usize, payload: &Payload, genesis: &Hash) -> Result<(), String> {
     let entry = &entries[index];
 
@@ -114,10 +180,10 @@ fn check_payload(entries: &[AnchorEntry], index: usize, payload: &Payload, genes
 }
 
 #[document(
-    summary = "Checks a peer's anchor list against the headers of the chains holding it: the newest entry's proof must hold, and with it the root of every entry before it, and each other proof the peer sent must hold too. Ethereum proofs never hold yet.",
+    summary = "Checks a peer's anchor list against the chains holding it: the newest entry's proof must hold, and with it the root of every entry before it, and each other proof the peer sent must hold too. A Bitcoin proof holds against the most-work headers peers showed, an Ethereum one against the sync committees followed from the peer's eth_start; one in a chain the node heard nothing of holds nothing.",
     params = {
         answer = "What the peer sent.",
-        sources = "The headers heard of each chain: Bitcoin's, the most work any peer showed.",
+        sources = "What was heard of each chain: Bitcoin's headers, the most work any peer showed, and Ethereum's committees.",
         genesis = "This chain's genesis id.",
         depth = "How deep an anchor's Bitcoin block must be.",
     },
@@ -138,10 +204,12 @@ pub fn check_anchors(answer: &AnchorsAnswer, sources: &Sources<'_>, genesis: &Ha
 
     for (index, proof) in &answer.proofs {
         let place = usize::try_from(*index).ok().filter(|place| *place <= newest).ok_or_else(|| format!("a proof of anchor {index}, past the list"))?;
-        proven.insert(*index, check_proof(&answer.entries, place, proof, sources, genesis, depth)?);
+        proven.insert(*index, check_proof(answer, place, proof, sources, genesis, depth)?);
     }
 
-    Ok(History { entries: answer.entries.clone(), proven })
+    let readable = [AnchorChain::Bitcoin, AnchorChain::Ethereum].into_iter().filter(|chain| sources.reads(*chain, answer.eth_start.as_ref())).collect();
+
+    Ok(History { entries: answer.entries.clone(), proven, readable })
 }
 
 #[document(
@@ -173,6 +241,10 @@ fn same(a: &AnchorEntry, b: &AnchorEntry) -> bool {
 /// the place, if both have one.
 #[cfg_attr(not(any(feature = "anchoring-btc", feature = "anchoring-eth")), allow(dead_code))]
 fn decide(a: &History, b: &History, at: usize, chain: AnchorChain) -> Option<AnchorVerdict> {
+    if !a.readable.contains(&chain) || !b.readable.contains(&chain) {
+        return None;
+    }
+
     let (first, second) = (a.first_in(chain, at)?, b.first_in(chain, at)?);
 
     Some(match (a.proven_in(chain, first), b.proven_in(chain, second)) {

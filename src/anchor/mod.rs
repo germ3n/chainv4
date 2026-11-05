@@ -8,8 +8,8 @@
 //! settings enforced it.
 //!
 //! What a node does with the list on its own, picking the history the other chains saw first, is in
-//! sync.rs; Bitcoin's proofs, its relay's records and its headers in bitcoin.rs. Ethereum anchors
-//! are not counted yet.
+//! sync.rs; Bitcoin's proofs, its relay's records and its headers in bitcoin.rs; Ethereum's proofs,
+//! its relay's records and the sync committees a syncing node follows in ethereum.rs.
 
 use {
     crate::{
@@ -26,10 +26,14 @@ pub use crate::params::anchoring::{AnchorEntry, AnchorsAnswer};
 
 #[cfg(feature = "anchoring-btc")]
 pub mod bitcoin;
+#[cfg(feature = "anchoring-eth")]
+pub mod ethereum;
 pub mod sync;
 
 #[cfg(feature = "anchoring-btc")]
 pub use bitcoin::{Relay, RelayHeader};
+#[cfg(feature = "anchoring-eth")]
+pub use ethereum::{EthCommittees, EthRelay};
 
 #[cfg(test)]
 mod tests;
@@ -238,6 +242,8 @@ pub struct ProveRules<'a> {
     pub checkpoint_interval: Option<u64>,
     #[document(summary = "Whether rewards come from REWARD_POOL rather than being minted.")]
     pub pooled: bool,
+    #[document(summary = "The block's time, in milliseconds since the Unix epoch: no Ethereum finality update may be signed after the slot it falls in.")]
+    pub time: u64,
 }
 
 #[document(
@@ -254,7 +260,7 @@ pub struct Proven {
 }
 
 /// The chain's checkpoint interval, which an anchor's epoch counts in.
-#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "anchoring-btc", feature = "anchoring-eth")), allow(dead_code))]
 fn interval(rules: &ProveRules<'_>) -> Result<u64, ProveError> {
     rules.checkpoint_interval.filter(|interval| *interval > 0).ok_or_else(|| ProveError::Refused("this chain's finality has no checkpoints to anchor".to_string()))
 }
@@ -262,7 +268,7 @@ fn interval(rules: &ProveRules<'_>) -> Result<u64, ProveError> {
 /// Checks what an anchor says, whichever chain holds it: this chain's tag, the block at the epoch's
 /// checkpoint height on this branch, an epoch not anchored yet, and the list's root now. The
 /// checkpoint's block and height.
-#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "anchoring-btc", feature = "anchoring-eth")), allow(dead_code))]
 fn check_payload(state: &State, rules: &ProveRules<'_>, interval: u64, payload: &Payload) -> Result<(Hash, u64), ProveError> {
     let fail = |why: &str| Err(ProveError::Refused(why.to_string()));
 
@@ -294,7 +300,7 @@ fn check_payload(state: &State, rules: &ProveRules<'_>, interval: u64, payload: 
 
 /// What a proof showed: where the anchor sits, and the checkpoint it anchors, by its epoch, block
 /// and height.
-#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "anchoring-btc", feature = "anchoring-eth")), allow(dead_code))]
 struct Shown {
     source: AnchorSource,
     epoch: u64,
@@ -313,12 +319,19 @@ fn check(state: &State, rules: &ProveRules<'_>, proof: &AnchorProof) -> Result<S
 
             Err(ProveError::Refused("this build reads no Bitcoin, so it takes no Bitcoin anchors".to_string()))
         }
-        AnchorProof::Ethereum(_) => Err(ProveError::Refused("Ethereum anchors are not counted yet".to_string())),
+        #[cfg(feature = "anchoring-eth")]
+        AnchorProof::Ethereum(proof) => ethereum::check(state, rules, proof),
+        #[cfg(not(feature = "anchoring-eth"))]
+        AnchorProof::Ethereum(_) => {
+            let _ = (state, rules);
+
+            Err(ProveError::Refused("this build reads no Ethereum, so it takes no Ethereum anchors".to_string()))
+        }
     }
 }
 
 #[document(
-    summary = "Runs a Tx::Anchor: checks the proof shows this chain's anchor of a checkpoint on this branch, with a root the list held, in a block the other chain holds deep enough, and records it, paying the reward when it is due. A Bitcoin proof is checked against the relay; an Ethereum one fails, as Ethereum anchors are not counted yet.",
+    summary = "Runs a Tx::Anchor: checks the proof shows this chain's anchor of a checkpoint on this branch, with a root the list held, in a block the other chain holds deep enough, and records it, paying the reward when it is due. A Bitcoin proof is checked against the Bitcoin relay; an Ethereum one against the Ethereum relay and the sync committee that signed its finality update.",
     params = {
         state = "The transaction's layer.",
         rules = "What it runs under.",

@@ -22,7 +22,7 @@ fn id(lua: &Lua, (): ()) -> mlua::Result<f64> {
     name = "chain",
     category = "Chain",
     summary = "The chain a contract runs on: read-only, and nothing a contract's owner sets, so what a contract signs, pays or takes can be bound to this one chain.",
-    note = "Reading its id costs 20 fuel by default, its DEX fee 200.",
+    note = "Reading its id costs 20 fuel by default, its DEX fee and Ethereum network 200.",
     example = "assert(chain.id() == 11155111, \"this contract is for Sepolia\")",
     see_also = "federation",
 )]
@@ -57,9 +57,33 @@ fn dex_fee(lua: &Lua, (): ()) -> mlua::Result<f64> {
 )]
 fn chain_dex_fee() {}
 
+// The Ethereum network anchoring names, as SSZ.
+fn eth_network(lua: &Lua, (): ()) -> mlua::Result<Option<mlua::String>> {
+    let host = lua
+        .app_data_ref::<Host>()
+        .map(|host| host.clone())
+        .ok_or_else(|| Error::runtime("chain is only available inside a call"))?;
+    charge(lua, costs(lua).federation)?;
+
+    match host.eth_network().map_err(super::accounts::refused)? {
+        Some(bytes) => lua.create_string(&bytes).map(Some),
+        None => Ok(None),
+    }
+}
+
+#[document(
+    lua,
+    parent = "chain",
+    name = "eth_network",
+    summary = "The Ethereum beacon network anchoring's settings in force name, as eth_start's network: its whole definition, SSZ-encoded as ethlight's Network writes it, a preset's built-in one or the one governance carried. What an Ethereum light client follows, so a vote changes its fork schedule without a redeploy. Costs 200 fuel by default.",
+    returns = { ty = "string | nil", desc = "The SSZ bytes, or nil while the settings name no Ethereum network." },
+)]
+fn chain_eth_network() {}
+
 pub fn register_chain_lib(lua: &Lua) {
     let table = lua.create_table().expect("[chain] Failed to create chain table");
     table.set("id", lua.create_function(id).expect("[chain] Failed to create id")).expect("[chain] Failed to set id");
     table.set("dex_fee", lua.create_function(dex_fee).expect("[chain] Failed to create dex_fee")).expect("[chain] Failed to set dex_fee");
+    table.set("eth_network", lua.create_function(eth_network).expect("[chain] Failed to create eth_network")).expect("[chain] Failed to set eth_network");
     lua.globals().set("chain", table).expect("[chain] Failed to set chain table");
 }

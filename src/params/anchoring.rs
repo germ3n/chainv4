@@ -1,5 +1,6 @@
-//! Anchoring: the chain's finalized checkpoints written into Bitcoin, and in time Ethereum, so a
-//! long-range fork made from old validator keys loses to history Bitcoin's work already holds.
+//! Anchoring: the chain's finalized checkpoints written into Bitcoin and Ethereum, so a long-range
+//! fork made from old validator keys loses to history Bitcoin's work, or Ethereum's finality,
+//! already holds.
 //! These are the settings genesis's anchoring or a Change::Anchoring sets; what the chain does
 //! with them is in crate::anchor, and docs/anchoring.md tells the whole story.
 
@@ -78,7 +79,7 @@ impl Hashable for BtcStart {}
 pub struct AnchorSettings {
     #[document(summary = "Whether the chain takes Bitcoin anchors: Tx::Anchor fails while it is off.")]
     pub bitcoin: bool,
-    #[document(summary = "Whether anchorers write to Ethereum too. The chain does not count an Ethereum anchor yet: that waits for a light client of Ethereum's finality.")]
+    #[document(summary = "Whether the chain takes Ethereum anchors: Tx::Anchor with an Ethereum proof fails while it is off.")]
     pub ethereum: bool,
     #[document(summary = "Whether the anchors recorded from now on bind nodes: no block replaces an enforced anchored checkpoint, and anchored sync goes by them.")]
     pub enforce: bool,
@@ -86,6 +87,10 @@ pub struct AnchorSettings {
     pub relay: Option<Address>,
     #[document(summary = "Where the relay started, which its records must hold, and anchored sync checks headers from.")]
     pub btc_start: Option<BtcStart>,
+    #[document(summary = "The Ethereum relay contract Ethereum proofs are checked against, laid out as contracts/examples/eth_relay keeps its headers and committees.")]
+    pub eth_relay: Option<Address>,
+    #[document(summary = "Where the Ethereum relay started, the trusted beacon block root, and the beacon network it and every node checking Ethereum anchors follow.")]
+    pub eth_start: Option<EthStart>,
     #[document(summary = "How deep a Bitcoin block must be in the relay before an anchor in it counts: 1 is the tip.")]
     pub depth: u64,
     #[document(summary = "Epochs between anchors that earn the reward: anchors in between are recorded and enforced, unpaid.")]
@@ -117,15 +122,29 @@ impl AnchorSettings {
         enforce: false,
         relay: None,
         btc_start: None,
+        eth_relay: None,
+        eth_start: None,
         depth: DEFAULT_ANCHOR_DEPTH,
         every: DEFAULT_ANCHOR_EVERY,
         reward: u256::ZERO,
     };
 
-    #[document(parent = "AnchorSettings", summary = "Why no chain could run under them: Bitcoin on without a relay or a start, a start that is no header, a depth of 0 or past a day of blocks, or no epochs between rewards.")]
+    #[document(parent = "AnchorSettings", summary = "Why no chain could run under them: Bitcoin on without a relay or a start, a start that is no header, Ethereum on without an Ethereum relay or start, a beacon network that is no preset and no network's definition, a depth of 0 or past a day of blocks, or no epochs between rewards.")]
     pub fn problem(&self) -> Option<&'static str> {
         if self.bitcoin && (self.relay.is_none() || self.btc_start.is_none()) {
             return Some("anchoring.bitcoin needs anchoring.relay and anchoring.btc_start");
+        }
+
+        if self.ethereum && (self.eth_relay.is_none() || self.eth_start.is_none()) {
+            return Some("anchoring.ethereum needs anchoring.eth_relay and anchoring.eth_start");
+        }
+
+        if self.eth_relay.is_some_and(|relay| !matches!(relay, Address::Contract(_))) {
+            return Some("anchoring.eth_relay is a native contract");
+        }
+
+        if let Some(problem) = self.eth_start.as_ref().and_then(|start| start.network.problem()) {
+            return Some(problem);
         }
 
         if self.relay.is_some_and(|relay| !matches!(relay, Address::Contract(_))) {
@@ -249,16 +268,77 @@ pub struct AnchorEntry {
 impl Hashable for AnchorEntry {}
 
 #[document(
-    summary = "Where the Ethereum headers anchoring trusts begin: the beacon block root the Ethereum relay was started at, and its network by name. What a peer's answer names so a node checking its Ethereum anchors knows where to start; the chain takes no Ethereum anchors yet, so nothing sets it.",
+    summary = "The beacon network Ethereum anchors are checked on: one built in by name, or one governance defined whole, as ethlight's Network SSZ-encoded. A definition named as a preset overrides that preset's fork table: a vote can add a fork without a new build, or name a network not built in, such as Gnosis, Chiado or a private beacon chain.",
     category = "Anchoring",
-    see_also = "AnchorsAnswer, BtcStart",
+    see_also = "EthStart, AnchorSettings",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum EthNetwork {
+    #[document(summary = "A network built in, by its name: mainnet, sepolia or hoodi.")]
+    #[wincode(tag = 0)]
+    Preset(String),
+    #[document(summary = "A network defined whole: its SSZ, as ethlight's Network::encode writes it.")]
+    #[wincode(tag = 1)]
+    Custom(Vec<u8>),
+}
+
+impl Hashable for EthNetwork {
+    const TAG_LEN: usize = 1;
+}
+
+impl EthNetwork {
+    #[document(parent = "EthNetwork", summary = "The networks built in, by name.")]
+    pub const PRESETS: [&'static str; 3] = ["mainnet", "sepolia", "hoodi"];
+
+    #[document(parent = "EthNetwork", summary = "A preset by its name, main standing for mainnet; None for any other name.")]
+    pub fn preset(name: &str) -> Option<EthNetwork> {
+        let name = if name == "main" { "mainnet" } else { name };
+
+        EthNetwork::PRESETS.contains(&name).then(|| EthNetwork::Preset(name.to_string()))
+    }
+
+    #[document(parent = "EthNetwork", summary = "Its definition: the preset's built-in one, or the one carried, read and checked.", returns = "The network, or why it is none.")]
+    pub fn definition(&self) -> Result<ethlight::Network, &'static str> {
+        match self {
+            EthNetwork::Preset(name) => ethlight::Network::by_name(name).cloned().ok_or("anchoring.eth_start.network is mainnet, sepolia, hoodi or a network's definition"),
+            EthNetwork::Custom(ssz) => ethlight::Network::decode(ssz).map_err(ethlight::Error::message),
+        }
+    }
+
+    #[document(parent = "EthNetwork", summary = "Its definition as SSZ: what the eth_network host call gives a contract.")]
+    pub fn ssz(&self) -> Result<Vec<u8>, &'static str> {
+        match self {
+            EthNetwork::Preset(_) => Ok(self.definition()?.encode()),
+            EthNetwork::Custom(ssz) => self.definition().map(|_| ssz.clone()),
+        }
+    }
+
+    #[document(parent = "EthNetwork", summary = "Its name: the preset's, or the definition's own; empty for a definition that does not read.")]
+    pub fn name(&self) -> String {
+        match self {
+            EthNetwork::Preset(name) => name.clone(),
+            EthNetwork::Custom(_) => self.definition().map(|network| network.name.into_owned()).unwrap_or_default(),
+        }
+    }
+
+    #[document(parent = "EthNetwork", summary = "Why no chain could follow it: a preset no build has, or a definition that does not read or that Network::problem refuses.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        self.definition().err()
+    }
+}
+
+#[document(
+    summary = "Where the Ethereum headers anchoring trusts begin: the beacon block root the Ethereum relay was started at, and the beacon network it follows. A node checking Ethereum anchors on its own follows sync committees from that root, so it is what the relay was started at and nothing a fork could move without a vote from before the fork.",
+    category = "Anchoring",
+    see_also = "AnchorSettings, EthNetwork, AnchorsAnswer, BtcStart",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, SchemaWrite, SchemaRead)]
 pub struct EthStart {
-    #[document(summary = "The trusted beacon block root the relay was started at.")]
+    #[document(summary = "The trusted beacon block root the relay was started at: a finalized checkpoint's, as a bootstrap is served for.")]
     pub root: [u8; 32],
-    #[document(summary = "Its network, as the relay was started with: mainnet, sepolia, hoodi or one defined.")]
-    pub network: String,
+    #[document(summary = "Its network.")]
+    pub network: EthNetwork,
 }
 
 impl Hashable for EthStart {}
@@ -274,7 +354,7 @@ pub struct AnchorsAnswer {
     pub start: Option<BtcStart>,
     #[document(summary = "The height of its Bitcoin relay's tip.")]
     pub btc_tip: u64,
-    #[document(summary = "Where the peer's Ethereum relay started; none until the chain takes Ethereum anchors.")]
+    #[document(summary = "Where the peer's Ethereum relay started, as its anchoring settings say; none on a chain that names none.")]
     pub eth_start: Option<EthStart>,
     #[document(summary = "Every entry, oldest first.")]
     pub entries: Vec<AnchorEntry>,

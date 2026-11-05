@@ -225,6 +225,51 @@ paid for from `~/.chainv4-pow/relay.key` so that key stays on this machine, and 
 host, then two minutes' sleep, for ever, under `/etc/systemd/system/chainv4-relay.service` (`Restart=always`). After a rebuild of the
 image, copy the binary out again and `systemctl restart chainv4-relay`.
 
+## 6a. The Ethereum relay on `.57`
+
+`contracts/examples/eth_relay`, deployed as btc_relay is, then started at a finalized Sepolia
+checkpoint's root, which Lodestar's bootstrap serves (`curl -s
+https://lodestar-sepolia.chainsafe.io/eth/v1/beacon/states/finalized/finality_checkpoints`, its
+`finalized.root`), and named in the anchoring settings with `eth_start` at that root:
+
+```sh
+$B send --node $N --key $K deploy --wasm contracts/target/wasm32-unknown-unknown/release/eth_relay.wasm
+$B bridge --node $N --key $K --beacon https://lodestar-sepolia.chainsafe.io \
+  eth relay-start <relay> <finalized root> --network sepolia
+$B send --node $N --key $K vote-change --vote yes --change '{"anchoring":{"ethereum":true,
+  "eth_relay":"contract:0x…","eth_start":{"root":"0x…","network":"sepolia"}}}'
+```
+
+Lodestar serves the light client routes; PublicNode's beacon does not. The feeder runs on `.57`
+from a binary copied out as in step 6 and a key of its own, `/root/chainv4-eth-relay/eth-relay.key`,
+paid from `~/.chainv4-pow/relay.key`, under `/etc/systemd/system/chainv4-eth-relay.service`:
+
+```ini
+[Unit]
+Description=chainv4's Ethereum relay feeder: Sepolia's light client updates into eth_relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/chainv4-eth-relay
+ExecStart=/root/chainv4-eth-relay/chainv4 bridge --node https://PUBLIC --key eth-relay.key \
+  --beacon https://lodestar-sepolia.chainsafe.io \
+  eth relay-sync <relay> --every 384
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`systemctl daemon-reload && systemctl enable --now chainv4-eth-relay`. A pass an epoch, 384
+seconds, submits each period's update the relay lacks and the newest finality update, each only
+when a dry run says it takes it. More `--beacon` URLs may follow the first, to fall back to.
+
+The anchorer writes into Sepolia too once `ethereum` is on: give it `--eth-rpc
+https://ethereum-sepolia-rpc.publicnode.com`, `--evm-key` holding Sepolia ether, and the same
+`--beacon` (see [Anchoring](anchoring.md#the-anchorer)).
+
 ## 6b. The onion
 
 `TOR=1` and `TOR_MINING=1` in `docker/.env`, then push and up: tor starts with the stack, the

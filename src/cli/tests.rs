@@ -1743,7 +1743,8 @@ mod send {
             key: None,
             to,
             fee_rate: Some(2),
-            esplora: None,
+            bitcoin: Default::default(),
+            proxy: Default::default(),
             multisig: Some(account),
             multisig_index: None,
             psbt: Some(psbt.clone()),
@@ -1800,7 +1801,7 @@ mod send {
         let node = format!("http://{}", running.api);
         // The terms name the contract the lock goes into. Bob locks second; the first lock is
         // Bitcoin's, which the CLI cannot see, so he checks it himself.
-        let action = || LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: Vec::new(), tls: Default::default(), key: None, anyway: false, multisig: None, out: None };
+        let action = || LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: Vec::new(), eth_auth: Default::default(), proxy: Default::default(), tls: Default::default(), key: None, anyway: false, multisig: None, out: None };
 
         let unchecked = swap(SwapArgs { action: SwapAction::Lock(action()) }).unwrap_err();
         assert!(unchecked.to_string().contains("--anyway"), "{unchecked}");
@@ -1830,7 +1831,7 @@ mod send {
         let key = dir.0.join("bob.key");
         fs::write(&key, bob_bitcoin.to_key_file()).unwrap();
         let to = crate::structs::bech32::encode_segwit("tb", &crate::crypto::bitcoin::hash160(&bitcoin_key(&bob_bitcoin)));
-        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key: Some(key), to, fee_rate: Some(2), esplora: None, multisig: None, multisig_index: None, psbt: None, node: String::new() };
+        let spend = BitcoinSpend { terms: terms.to_text(), funding: format!("{}:1", "ab".repeat(32)), sats: 100_000, key: Some(key), to, fee_rate: Some(2), bitcoin: Default::default(), proxy: Default::default(), multisig: None, multisig_index: None, psbt: None, node: String::new() };
         let signed = bitcoin(&spend, Spend::Claim { secret }).unwrap();
         let (tx, witnessed) = Transaction::read(&from_hex(&format!("0x{signed}")).unwrap()).unwrap();
 
@@ -2180,7 +2181,8 @@ mod send {
                 eth_rpc: Vec::new(),
                 evm_key: None,
                 btc_gateway: None,
-                esplora: Some(esplora.clone()),
+                bitcoin: crate::cli::outside::BitcoinArgs { esplora: vec![esplora.clone()], ..Default::default() },
+                beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(),
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
@@ -2271,7 +2273,8 @@ mod send {
                 eth_rpc: Vec::new(),
                 evm_key,
                 btc_gateway,
-                esplora: Some(esplora.clone()),
+                bitcoin: crate::cli::outside::BitcoinArgs { esplora: vec![esplora.clone()], ..Default::default() },
+                beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(),
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
@@ -2301,7 +2304,8 @@ mod send {
                 eth_rpc: Vec::new(),
                 evm_key: None,
                 btc_gateway: None,
-                esplora,
+                bitcoin: crate::cli::outside::BitcoinArgs { esplora: esplora.into_iter().collect(), ..Default::default() },
+                beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(),
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
@@ -2524,7 +2528,8 @@ mod send {
                 eth_rpc: Vec::new(),
                 evm_key: key,
                 btc_gateway: Some(self.gateway),
-                esplora: Some(self.esplora.clone()),
+                bitcoin: crate::cli::outside::BitcoinArgs { esplora: vec![self.esplora.clone()], ..Default::default() },
+                beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(),
                 evm_gateways: Vec::new(),
                 max_fee_rate: None,
                 cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
@@ -2910,7 +2915,7 @@ mod send {
         fixture.propose_by_hand(23, 80_000);
 
         // Esplora gone: refused, as it is past the fixed limit, but it may be the going rate.
-        let gone = crate::cli::bridge::BridgeArgs { esplora: Some("http://127.0.0.1:1".to_string()), ..fixture.args(crate::cli::bridge::btc::BtcAction::Pass, Some(21)) };
+        let gone = crate::cli::bridge::BridgeArgs { bitcoin: crate::cli::outside::BitcoinArgs { esplora: vec!["http://127.0.0.1:1".to_string()], ..Default::default() }, ..fixture.args(crate::cli::bridge::btc::BtcAction::Pass, Some(21)) };
         crate::cli::bridge::bridge(gone).unwrap();
         assert_eq!((fixture.voted("1", 21), fixture.signed("1")), (false, 0));
 
@@ -3101,7 +3106,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node_a}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
-        let args = |action: BridgeAction, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
+        let args = |action: BridgeAction, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, bitcoin: Default::default(), beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(), evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| bridge(args(action, evm_key));
         bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, None) }).unwrap();
         run(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
@@ -3316,7 +3321,8 @@ mod send {
             eth_rpc: Vec::new(),
             evm_key,
             btc_gateway,
-            esplora: Some(esplora.to_string()),
+            bitcoin: crate::cli::outside::BitcoinArgs { esplora: vec![esplora.to_string()], ..Default::default() },
+            beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(),
             evm_gateways: Vec::new(),
             max_fee_rate,
             cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS,
@@ -3485,7 +3491,7 @@ mod send {
         let relayer_address = from_key(&[0x42; 32]).unwrap();
         send(b.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
         let run = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, bitcoin: Default::default(), beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(), evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS })
         };
         let wait = |what: &str, done: &dyn Fn() -> bool| {
             let started = std::time::Instant::now();
@@ -3502,7 +3508,7 @@ mod send {
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
         assert!(run(BridgeAction::Deploy, None).is_ok());
         let with_gateway = |action: BridgeAction, evm_key: Option<PathBuf>| {
-            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS })
+            bridge(BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, bitcoin: Default::default(), beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(), evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS })
         };
         with_gateway(BridgeAction::DeployEvm { coin_name: "Dev".into(), coin_symbol: "DEV".into() }, Some(relayer.clone())).unwrap();
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
@@ -3586,7 +3592,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let nonce = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap();
         let gateway = deployed_at(&me, nonce + 3, crate::structs::hash::HashType::default_chain());
-        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, esplora: None, evm_gateways, max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
+        let args = |action: BridgeAction, evm_gateways: Vec<(u64, [u8; 20])>| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: Some(gateway), eth_rpc: Vec::new(), evm_key: Some(key.clone()), btc_gateway: None, bitcoin: Default::default(), beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(), evm_gateways, max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
         bridge(BridgeArgs { gateway: None, ..args(BridgeAction::Deploy, Vec::new()) }).unwrap();
 
         // Its owner's own peer, and a coin sent to it.
@@ -3683,7 +3689,7 @@ mod send {
         // This chain has no directory, so each signer vouches for Gateway.sol itself.
         let Address::Evm(evm_gateway) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 3) else { unreachable!() };
         let vouched = vec![(rpc.chain_id().unwrap(), evm_gateway)];
-        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, esplora: None, evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
+        let args = |action: BridgeAction, gateway: Option<Address>, evm_key: Option<PathBuf>| BridgeArgs { action, node: node_a.clone(), tls: Default::default(), key: None, gateway, eth_rpc: vec![rpc_b.clone()], evm_key, btc_gateway: None, bitcoin: Default::default(), beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(), evm_gateways: vouched.clone(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
         let wait = |what: &str, done: &mut dyn FnMut() -> bool| {
             let started = std::time::Instant::now();
 
@@ -3916,7 +3922,7 @@ mod send {
         let now = now_ms();
         let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &starter).unwrap().answer(&bob).unwrap();
         let lock = dir.0.join("lock.evm");
-        let action = LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: vec![eth_rpc.clone()], tls: Default::default(), key: Some(files[0].clone()), anyway: false, multisig: Some(account), out: Some(lock.clone()) };
+        let action = LegAction { terms: terms.to_text(), leg: None, node: node.clone(), eth_rpc: vec![eth_rpc.clone()], eth_auth: Default::default(), proxy: Default::default(), tls: Default::default(), key: Some(files[0].clone()), anyway: false, multisig: Some(account), out: Some(lock.clone()) };
         swap(SwapArgs { action: SwapAction::Lock(action) }).unwrap();
         multisig(&files[3], EvmAction::Sign { bundle: lock.clone(), yes: true }).unwrap();
         multisig(&files[3], EvmAction::Submit { bundle: lock, eth_rpc: eth_rpc.clone() }).unwrap();
@@ -4038,7 +4044,7 @@ mod send {
         let gets = Leg::Evm(EvmLeg { item: None, chain_id: rpc.chain_id().unwrap(), contract: swap_sol, token: None, amount: u256::new(7_000), payer: None, receiver: None });
         let terms = Terms::offer(hash, pays, gets, now + crate::swap::FIRST_DEADLINE_MS, now + crate::swap::SECOND_DEADLINE_MS, &alice).unwrap().answer(&bob).unwrap();
         terms.check(now).unwrap();
-        let action = |key: Option<PathBuf>, leg: Option<LegArg>| LegAction { terms: terms.to_text(), leg, node: node.clone(), eth_rpc: vec![format!("{node}/rpc")], tls: Default::default(), key, anyway: false, multisig: None, out: None };
+        let action = |key: Option<PathBuf>, leg: Option<LegArg>| LegAction { terms: terms.to_text(), leg, node: node.clone(), eth_rpc: vec![format!("{node}/rpc")], eth_auth: Default::default(), proxy: Default::default(), tls: Default::default(), key, anyway: false, multisig: None, out: None };
 
         // Bob cannot lock before Alice: her lock does not stand yet.
         let early = swap(SwapArgs { action: SwapAction::Lock(action(Some(bob_file.clone()), None)) }).unwrap_err();

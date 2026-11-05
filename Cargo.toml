@@ -40,10 +40,12 @@ anchoring = ["dep:sha2"]
 # Bitcoin's headers checked by work for --anchored, served to peers, and bridge btc anchor; on the
 # header rules btclight shares with contracts/examples/btc_relay.
 anchoring-btc = ["anchoring", "bitcoin", "dep:btclight"]
-# Anchors in Ethereum, on the light client ethlight shares with contracts/examples/eth_relay, and
-# the anchorer writing each anchor to an EVM chain too. The chain does not count them yet: an
-# Ethereum proof fails until their checks are in.
-anchoring-eth = ["anchoring", "bls12-381", "dep:ethlight"]
+# Anchors in Ethereum, on the light client ethlight shares with contracts/examples/eth_relay:
+# Tx::Anchor's Ethereum proofs, read against the Ethereum relay's records with its sync committees'
+# BLS signatures checked, --anchored checking them against committees followed from a beacon API
+# (--beacon), and the anchorer writing anchors to Ethereum. ethlight itself is in every build, as
+# anchoring's settings name a beacon network every node must read alike.
+anchoring-eth = ["anchoring", "bls12-381"]
 # Atomic swaps between any two of chainv4, Bitcoin and EVM chains: the terms both sides agree, as
 # ur:chainv4-swap codes, Bitcoin's HTLC script and its spends, and Swap.sol's calls. chainv4's side
 # is a contract, contracts/lua/swap.lua; an EVM chain's, contracts/evm/Swap.sol.
@@ -78,7 +80,7 @@ faucet = ["http", "sha256"]
 # with --stream.
 stream = ["http", "dep:tokio-stream"]
 # The client side of the CLI: chainv4 send talks to a node's HTTP API.
-client = ["dep:ureq", "json", "node"]
+client = ["dep:ureq", "ureq/socks-proxy", "json", "node"]
 # Kinds of finality a node can run, as genesis picks: bonded validators voting (FFG), a fixed set
 # of signers voting, or a number of blocks on top.
 finality-ffg = ["staking"]
@@ -156,7 +158,7 @@ ethnum = "1.5.3"
 # Bitcoin's header rules, shared with contracts/examples/btc_relay.
 btclight = { path = "btclight", optional = true }
 # Ethereum's light client, shared with contracts/examples/eth_relay.
-ethlight = { path = "ethlight", optional = true }
+ethlight = { path = "ethlight" }
 rayon = { version = "1.12.0", optional = true }
 libp2p = { version = "0.57.1", features = ["tokio", "quic", "tcp", "noise", "yamux", "gossipsub", "kad", "mdns", "identify", "request-response", "macros"], optional = true }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "io-util"], optional = true }

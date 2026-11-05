@@ -416,6 +416,17 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "The Ethereum beacon network anchoring's settings in force name, as eth_start's network, SSZ-encoded as ethlight's Network writes it: a preset's built-in definition, or the one governance carried. None while the settings in force, the last decided or genesis's, name none. What an Ethereum light client contract follows. Engines charge cost::FEDERATION, as for the federation.",
+    )]
+    pub fn eth_network(&self) -> Result<Option<Vec<u8>>, VmError> {
+        let decided = crate::registry::changes::Changes::new(&self.state).anchoring().map_err(|err| self.fail(err))?;
+        let settings = decided.as_ref().or(self.vm.anchoring());
+
+        Ok(settings.and_then(|settings| settings.eth_start.as_ref()).and_then(|start| start.network.ssz().ok()))
+    }
+
+    #[document(
+        parent = "Host",
         summary = "The chain's id, as the gateways name it and the EVM's CHAINID answers: six bytes of its genesis id. Nothing a contract's owner sets, so a contract may bind what it signs or pays to this one chain. Engines charge cost::CHAIN_ID.",
     )]
     pub fn chain_id(&self) -> u64 {

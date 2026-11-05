@@ -6,7 +6,10 @@
 //! over and over. refund takes a transfer refused for good back to who sent it, a signer's operator
 //! at a time ([refund]). btc does Bitcoin's side ([btc]).
 
+#[cfg(feature = "anchoring")]
+pub(crate) mod anchor;
 pub(crate) mod btc;
+pub(crate) mod eth;
 mod refund;
 
 use {
@@ -51,17 +54,25 @@ pub struct BridgeArgs {
     #[arg(long, global = true)]
     pub gateway: Option<Address>,
     /// EVM chains' JSON-RPC URLs, each asked its chain id; separated by commas or given again.
+    /// Several of one chain stand in for each other, the first asked first.
     #[arg(long, global = true, value_delimiter = ',')]
     pub eth_rpc: Vec<String>,
+    #[command(flatten)]
+    pub eth_auth: crate::cli::outside::EthAuthArgs,
     /// A secp256k1 key file for EVM chains: what pays their gas, and a signer's federation key.
     #[arg(long, global = true)]
     pub evm_key: Option<PathBuf>,
     /// The Bitcoin gateway here, contracts/lua/btc_gateway.lua, for btc's commands.
     #[arg(long, global = true)]
     pub btc_gateway: Option<Address>,
-    /// An Esplora API, such as https://mempool.space/api: where btc's commands read Bitcoin.
-    #[arg(long, global = true)]
-    pub esplora: Option<String>,
+    /// Where btc's commands and the anchorer read and write Bitcoin: --esplora, --bitcoind.
+    #[command(flatten)]
+    pub bitcoin: crate::cli::outside::BitcoinArgs,
+    /// Where the Ethereum relay's feeder and the anchorer read Ethereum's beacon chain.
+    #[command(flatten)]
+    pub beacon: crate::cli::outside::BeaconArgs,
+    #[command(flatten)]
+    pub proxy: crate::cli::outside::ProxyArgs,
     /// A Gateway.sol this operator vouches for on a chain the directory lists none on, as
     /// CHAIN:0x…; repeat for each. A signer signs for no other chain, as whatever the gateway's
     /// owner set there could say anything left it. On a chain with a directory, listing it there is
@@ -190,6 +201,18 @@ pub enum BridgeAction {
         #[command(subcommand)]
         action: btc::BtcAction,
     },
+    /// Ethereum's beacon chain for anchoring: the Ethereum relay's start and its feeder.
+    Eth {
+        #[command(subcommand)]
+        action: eth::EthAction,
+    },
+    /// Anchors the chain into Bitcoin and Ethereum, each anchoring takes (docs/anchoring.md): writes
+    /// its newest finalized checkpoint into each every anchoring.every epochs, the two taking turns,
+    /// and shows each to the chain once that chain holds it, which pays the reward. Bitcoin's from
+    /// --btc-key's coins through --esplora or --bitcoind; Ethereum's from --evm-key, through
+    /// --eth-rpc, proven with --beacon.
+    #[cfg(feature = "anchoring")]
+    Anchor(anchor::AnchorArgs),
     /// sign and relay, then again after a pause, until stopped. With --esplora, Bitcoin's pass too:
     /// btc pass.
     Watch {
@@ -299,6 +322,10 @@ impl Refusals {
 /// What a command reaches the node with.
 pub(crate) struct Bridge {
     agent: ureq::Agent,
+    /// What reaches outside services, through --proxy.
+    http: std::sync::Arc<dyn crate::remote::Http>,
+    /// Bitcoin, as --esplora and --bitcoind name it.
+    bitcoin: Option<crate::remote::bitcoin::Fallback>,
     node: String,
     args: BridgeArgs,
     refused: std::cell::RefCell<Refusals>,
@@ -348,6 +375,9 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Refund { nonce, from_evm, why, yes } => bridge.refund(*nonce, *from_evm, why.as_deref(), *yes, &mut std::io::stdin().lock()),
         BridgeAction::RefundTo { nonce, recipient, from_evm } => bridge.refund_to(*nonce, recipient, *from_evm),
         BridgeAction::Btc { action } => bridge.btc(action),
+        BridgeAction::Eth { action } => bridge.eth(action),
+        #[cfg(feature = "anchoring")]
+        BridgeAction::Anchor(args) => bridge.run_anchorer(args),
         BridgeAction::Watch { from_block, every, .. } => loop {
             bridge.pass(*from_block);
             std::thread::sleep(std::time::Duration::from_secs(*every));
@@ -362,7 +392,10 @@ impl Bridge {
             _ => None,
         };
 
-        Ok(Bridge { agent: agent(&args.tls)?, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default(), btc_done: Default::default(), turns })
+        let http = args.proxy.http()?;
+        let bitcoin = crate::remote::bitcoin::from_flags(http.clone(), &args.bitcoin.esplora, &args.bitcoin.bitcoind, &args.bitcoin.bitcoind_auth)?;
+
+        Ok(Bridge { agent: agent(&args.tls)?, http, bitcoin, node: args.node.trim_end_matches('/').to_string(), args, refused: Default::default(), btc_done: Default::default(), turns })
     }
 
     /// What this signer or relayer holds refused, each with why.
@@ -382,7 +415,7 @@ impl Bridge {
             eprintln!("relaying: {err}");
         }
 
-        if self.args.esplora.is_some()
+        if self.bitcoin.is_some()
             && let Err(err) = self.btc_pass()
         {
             eprintln!("the Bitcoin pass: {err}");
@@ -437,6 +470,13 @@ impl Bridge {
         self.tx(TxArgs::Call { to, function: function.to_string(), amount, args })
     }
 
+    /// GET /anchors: anchoring's settings and the list.
+    pub(super) fn anchors(&self) -> CliResult<Value> {
+        let answer = self.agent.get(format!("{}/anchors", self.node)).call().map_err(|err| format!("GET /anchors: {err}"))?.body_mut().read_to_string()?;
+
+        Ok(serde_json::from_str(&answer).map_err(|_| "GET /anchors answered something that is not JSON")?)
+    }
+
     fn status(&self) -> CliResult<Value> {
         slowed(std::thread::sleep, || ok(self.agent.get(format!("{}/status", self.node)).call()))
     }
@@ -484,11 +524,27 @@ impl Bridge {
         self.status()?["chain_id"].as_u64().ok_or_else(|| "the node does not say its chain id".into())
     }
 
-    /// The one EVM chain given, for commands about one.
+    /// Every --eth-rpc with its login, by order.
+    fn eth_endpoints(&self) -> CliResult<Vec<crate::remote::Endpoint>> {
+        self.args.eth_auth.endpoints(&self.args.eth_rpc)
+    }
+
+    /// Each EVM chain given, its URLs standing in for each other.
+    fn rpcs(&self) -> CliResult<Vec<(u64, Rpc)>> {
+        Ok(Rpc::by_chain(&self.http, &self.eth_endpoints()?))
+    }
+
+    /// The one EVM chain given, for commands about one: every --eth-rpc must be of it.
     fn rpc(&self) -> CliResult<Rpc> {
-        match self.args.eth_rpc.as_slice() {
-            [url] => Ok(Rpc::new(self.agent.clone(), url)),
-            _ => Err("give one --eth-rpc: the EVM chain's JSON-RPC URL".into()),
+        let endpoints = self.eth_endpoints()?;
+
+        match endpoints.len() {
+            0 => Err("give --eth-rpc: the EVM chain's JSON-RPC URL".into()),
+            1 => Ok(Rpc::over(self.http.clone(), endpoints)),
+            _ => match &mut self.rpcs()?[..] {
+                [(_, rpc)] => Ok(rpc.clone()),
+                _ => Err("give --eth-rpc of one EVM chain: the URLs given answer for several, or none".into()),
+            },
         }
     }
 
@@ -705,9 +761,9 @@ impl Bridge {
         }
 
         // What left each EVM chain, final there, and not yet arrived here.
-        for url in &self.args.eth_rpc {
-            if let Err(err) = self.sign_from_evm(url, &gateway, &identity, here, federation, from_block, &secret) {
-                eprintln!("signing what left {url}: {err}");
+        for (chain, rpc) in self.rpcs()? {
+            if let Err(err) = self.sign_from_evm(&rpc, &gateway, &identity, here, federation, from_block, &secret) {
+                eprintln!("signing what left chain {chain} ({}): {err}", rpc.hosts());
             }
         }
 
@@ -716,8 +772,7 @@ impl Bridge {
 
     /// What left one EVM chain, final there, and not yet arrived here.
     #[allow(clippy::too_many_arguments)]
-    fn sign_from_evm(&self, url: &str, gateway: &Address, identity: &[u8], here: u64, federation: &Value, from_block: u64, secret: &[u8; 32]) -> CliResult<()> {
-        let rpc = Rpc::new(self.agent.clone(), url);
+    fn sign_from_evm(&self, rpc: &Rpc, gateway: &Address, identity: &[u8], here: u64, federation: &Value, from_block: u64, secret: &[u8; 32]) -> CliResult<()> {
         let chain = rpc.chain_id()?;
         let evm_gateway = self.evm_gateway(gateway, chain)?;
         let (tip, finalized) = rpc.heads()?;
@@ -740,7 +795,7 @@ impl Bridge {
                     continue;
                 }
 
-                let result = self.sign_one_from_evm(&rpc, gateway, identity, &evm_gateway, here, chain, nonce, secret);
+                let result = self.sign_one_from_evm(rpc, gateway, identity, &evm_gateway, here, chain, nonce, secret);
                 self.settle_or_done(gateway, what, result.map(|()| true));
             }
 
@@ -844,20 +899,11 @@ impl Bridge {
         };
         let count = self.read(&gateway, "sent_count", json!([]))?.first().and_then(|value| value["value"].as_str()?.parse::<u64>().ok()).unwrap_or(0);
 
-        for url in &self.args.eth_rpc {
-            let rpc = Rpc::new(self.agent.clone(), url);
-            let chain = match rpc.chain_id() {
-                Ok(chain) => chain,
-                Err(err) => {
-                    eprintln!("relaying to {url}: {err}");
-
-                    continue;
-                }
-            };
+        for (chain, rpc) in self.rpcs()? {
             let evm_gateway = match self.evm_gateway(&gateway, chain) {
                 Ok(evm_gateway) => evm_gateway,
                 Err(err) => {
-                    eprintln!("relaying to {url}: {err}");
+                    eprintln!("relaying to chain {chain} ({}): {err}", rpc.hosts());
 
                     continue;
                 }

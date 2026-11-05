@@ -346,6 +346,8 @@ pub struct Vm {
     names: Option<crate::registry::names::NamesConfig>,
     /// Genesis's federation, version 0, until governance decides another.
     federation: Option<crate::registry::federation::Federation>,
+    /// Genesis's anchoring settings, until governance decides others.
+    anchoring: Option<crate::params::anchoring::AnchorSettings>,
     /// The chain's id, as the EVM's CHAINID reads it.
     chain_id: u64,
 }
@@ -394,7 +396,7 @@ impl Vm {
             engines.push((*kind, engine));
         }
 
-        Ok(Vm { engines, evm, hash, names: None, federation: None, chain_id: 0 })
+        Ok(Vm { engines, evm, hash, names: None, federation: None, anchoring: None, chain_id: 0 })
     }
 
     #[document(parent = "Vm", summary = "The engines, with the chain's names for contracts to resolve: genesis's names, or None for a chain without them.")]
@@ -412,6 +414,17 @@ impl Vm {
     #[document(parent = "Vm", summary = "Genesis's federation, if any.")]
     pub fn federation(&self) -> Option<&crate::registry::federation::Federation> {
         self.federation.as_ref()
+    }
+
+    #[document(parent = "Vm", summary = "The engines, with genesis's anchoring settings, which name the Ethereum network contracts read until governance decides others: None for a chain that starts without them.")]
+    pub fn with_anchoring(mut self, anchoring: Option<crate::params::anchoring::AnchorSettings>) -> Vm {
+        self.anchoring = anchoring;
+        self
+    }
+
+    #[document(parent = "Vm", summary = "Genesis's anchoring settings, if any.")]
+    pub fn anchoring(&self) -> Option<&crate::params::anchoring::AnchorSettings> {
+        self.anchoring.as_ref()
     }
 
     #[document(parent = "Vm", summary = "The engines, with the chain's id for EVM calls contracts make: chain_id of the genesis block's id.")]

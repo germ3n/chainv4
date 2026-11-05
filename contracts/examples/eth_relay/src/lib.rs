@@ -8,9 +8,12 @@
 //! The rules are ethlight's (the repository's `ethlight/`), the same the node runs: SHA-256 and the
 //! BLS check go to the host, `hash` and `fast_aggregate_verify`.
 //!
-//! Networks: mainnet, sepolia and hoodi, by name, through each one's latest fork the build knows.
-//! A fork after it signs under a version the schedule lacks, so updates stop until the contract is
-//! upgraded with the new schedule.
+//! Networks: the one the chain's anchoring settings name (the host's `eth_network`), else mainnet,
+//! sepolia or hoodi by name, through each one's latest fork the build knows. The relay follows the
+//! governed definition whenever its name is the one the relay started on, and the definition it
+//! started with otherwise: so a vote adds a fork to the schedule, or defines a network no build has
+//! (Gnosis, Chiado, a private beacon chain), without redeploying the relay. A fork past the
+//! schedule in force signs under a version it lacks, so updates stop until a vote names it.
 //!
 //! # Storage
 //!
@@ -21,7 +24,9 @@
 //! | Key | Value |
 //! | --- | --- |
 //! | `owner` | The deployer's address, 33 bytes: the only one who may start it. |
-//! | `network` | The network's name, UTF-8: `mainnet`, `sepolia` or `hoodi`. |
+//! | `network` | The network's name, UTF-8, such as `mainnet`, `sepolia` or `hoodi`. |
+//! | `network_def` | The network's definition it started with, as ethlight's `Network` SSZ: what it follows while the chain's settings name no network of that name. |
+//! | `start` | The trusted block root it started at, 32 bytes: what the chain's `anchoring.eth_start.root` must be. |
 //! | `store` | 57 bytes: the finalized header's slot (u64) and root (32), the current committee's period (u64), whether the next committee is known (1 byte), and how many headers were ever kept (u64). |
 //! | `finalized` | The finalized header's record, 288 bytes, as `headers` holds it. |
 //!
@@ -118,10 +123,24 @@ fn kept() -> Option<Kept> {
     storage::own().get(b"store").and_then(|bytes| Kept::decode(&bytes))
 }
 
-fn network() -> Result<&'static Network, &'static str> {
+/// The network the chain's anchoring settings name, if they name one.
+fn governed() -> Option<Network> {
+    Network::decode(&chainv4_sdk::eth_network()?).ok()
+}
+
+/// The network it follows: the governed one, when it bears the name the relay started on; else the
+/// definition it started with.
+fn network() -> Result<Network, &'static str> {
     let name = storage::own().get(b"network").ok_or("the relay has not started")?;
 
-    core::str::from_utf8(&name).ok().and_then(Network::by_name).ok_or("the relay's network is unknown")
+    if let Some(governed) = governed().filter(|governed| governed.name.as_bytes() == name.as_slice()) {
+        return Ok(governed);
+    }
+
+    match storage::own().get(b"network_def") {
+        Some(definition) => Network::decode(&definition).map_err(Error::message),
+        None => core::str::from_utf8(&name).ok().and_then(Network::by_name).cloned().ok_or("the relay's network is unknown"),
+    }
 }
 
 fn committee(period: u64) -> Result<SyncCommittee, &'static str> {
@@ -187,9 +206,10 @@ fn init() {
 }
 
 /// Starts the relay from a light client bootstrap, as SSZ, as a beacon node serves it at
-/// /eth/v1/beacon/light_client/bootstrap/{root}, on a network, mainnet, sepolia or hoodi, at the
-/// block root its deployer trusts: the header must be that block, and its state must hold the
-/// committee. The deployer's, once.
+/// /eth/v1/beacon/light_client/bootstrap/{root}, at the block root its deployer trusts: the header
+/// must be that block, and its state must hold the committee. The network is the one the chain's
+/// anchoring settings name when network_name is empty or names it, else mainnet, sepolia or hoodi
+/// by name. The deployer's, once.
 #[export]
 fn start(bootstrap: Vec<u8>, network_name: String, trusted_root: Vec<u8>) -> Result<bool, &'static str> {
     if owner() != Some(sender()) {
@@ -200,13 +220,19 @@ fn start(bootstrap: Vec<u8>, network_name: String, trusted_root: Vec<u8>) -> Res
         return Err("the relay has started already");
     }
 
-    let network = Network::by_name(&network_name).ok_or(Error::UnknownNetwork.message())?;
+    let network = match governed() {
+        Some(governed) if network_name.is_empty() || governed.name == network_name.as_str() => governed,
+        _ if network_name.is_empty() => return Err("the chain's anchoring names no Ethereum network: name one"),
+        _ => Network::by_name(&network_name).cloned().ok_or(Error::UnknownNetwork.message())?,
+    };
     let trusted: Root = trusted_root.try_into().map_err(|_| "a block root is 32 bytes")?;
-    let bootstrap = LightClientBootstrap::decode(&bootstrap, network).map_err(Error::message)?;
-    let store = Store::bootstrap(&Host, network, &trusted, &bootstrap).map_err(Error::message)?;
+    let bootstrap = LightClientBootstrap::decode(&bootstrap, &network).map_err(Error::message)?;
+    let store = Store::bootstrap(&Host, &network, &trusted, &bootstrap).map_err(Error::message)?;
     let mut kept = Kept { finalized_slot: store.finalized.beacon.slot, finalized_root: store.finalized.root, period: store.period(), next_known: false, count: 0 };
 
     storage::own().set(b"network", network.name.as_bytes());
+    storage::own().set(b"network_def", &network.encode());
+    storage::own().set(b"start", &trusted);
     committees().set(&kept.period.to_be_bytes(), &store.current.encode());
     storage::own().set(b"finalized", &store.finalized.encode());
     keep(&store.finalized, &mut kept);
@@ -231,7 +257,7 @@ fn submit(update: Vec<u8>) -> Result<u64, &'static str> {
     };
     let finalized = finalized_record().ok_or("the relay lost its finalized header")?;
     let mut store = Store { network: network.clone(), finalized, current: committee(kept.period)?, next };
-    let update = LightClientUpdate::decode(&update, network).map_err(Error::message)?;
+    let update = LightClientUpdate::decode(&update, &network).map_err(Error::message)?;
     let applied = store.process_update(&Host, &update, network.slot_at(block_time() / 1_000)).map_err(Error::message)?;
 
     if applied.rotated {
@@ -268,14 +294,14 @@ fn prove_header(held_root: Vec<u8>, header: Vec<u8>, branch: Vec<u8>) -> Result<
     let network = network()?;
     let mut kept = kept().ok_or("the relay has not started")?;
     let held = by_root(&held_root).ok_or("a block root the relay does not hold")?;
-    let header = LightClientHeader::decode_for(&header, network).map_err(Error::message)?;
+    let header = LightClientHeader::decode_for(&header, &network).map_err(Error::message)?;
 
     if !branch.len().is_multiple_of(32) {
         return Err("a branch is 32 bytes a node");
     }
 
     let branch: Vec<Root> = branch.as_chunks::<32>().0.to_vec();
-    let ancestor = prove_ancestor(&Host, network, &held, &header, &branch).map_err(Error::message)?;
+    let ancestor = prove_ancestor(&Host, &network, &held, &header, &branch).map_err(Error::message)?;
 
     if keep(&ancestor, &mut kept) {
         storage::own().set(b"store", &kept.encode());
