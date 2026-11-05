@@ -20,7 +20,24 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # As rust-toolchain.toml pins it; tests/toolchains.rs checks they agree.
+          toolchain: "1.98.1"
+      # Luau's and RocksDB's C and C++ by the very clang the Docker image has, LLVM's release by its
+      # SHA-256 (docker/llvm.sh; docs/development.md, "Toolchains"): the runner's own cc is GCC.
+      - name: clang
+        if: runner.os == 'Linux'
+        run: |
+          sudo sh docker/llvm.sh /opt/llvm
+          echo "CC=/opt/llvm/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/opt/llvm/bin/clang++" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/opt/llvm/lib" >> "$GITHUB_ENV"
+          echo "/opt/llvm/bin" >> "$GITHUB_PATH"
+      # macOS builds with the runner's Apple clang, which cannot be pinned as clang is: say which.
+      - name: clang (macOS)
+        if: runner.os == 'macOS'
+        run: clang --version | head -n 1
       - uses: Swatinem/rust-cache@v2
       - name: build
         run: cargo build --release --locked
@@ -38,8 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          # As rust-toolchain.toml pins it; tests/toolchains.rs checks they agree.
+          toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:

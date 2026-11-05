@@ -8,7 +8,43 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-You need stable Rust, a C/C++ toolchain and clang: RocksDB and Luau are built from source.
+You need Rust 1.98.1, which `rust-toolchain.toml` pins and rustup installs on its own, and clang:
+RocksDB and Luau are built from source. See [Toolchains](#toolchains).
+
+## Toolchains
+
+Luau's fuel and memory metering and RocksDB are C and C++, so the compiler that builds them is part
+of what a node runs. Two nodes built by different compilers should still meter alike, but that is
+something to check, not assume (the todo's cross-OS item). So both toolchains are pinned:
+
+| What | Pinned to | Where |
+| --- | --- | --- |
+| Rust | 1.98.1, with clippy, rustfmt and `wasm32-unknown-unknown` | `rust-toolchain.toml` at the root, which rustup reads in every folder below it: the node, `wallet/`, `explorer/`, `ui/`, `contracts/`. Also `docker/Dockerfile`'s `RUST_VERSION` and every workflow's `toolchain` |
+| clang, for the C and C++ | 19.1.7, LLVM's own release, by its SHA-256 for x86_64 and for arm64 | `docker/llvm.sh`, which downloads it, checks the hash, and unpacks clang, its headers and libclang to `/opt/llvm`. The Docker image runs it and sets `CC`, `CXX` and `LIBCLANG_PATH`, with `/opt/llvm/bin` first on `PATH`, where bindgen asks clang for its headers, and so do the CI's node jobs (test, features, build on Linux): the very same compiler in both |
+
+- **`tests/toolchains.rs` checks that the places agree.** A version changed in one and not the
+  others fails `cargo test`, as does an image or a workflow that compiles with another clang.
+- **Why LLVM's release, not Debian's or Ubuntu's `clang-19`:** each distribution builds its own
+  package of a different 19.1 patch, so the servers and the CI would compile with different
+  compilers. LLVM's tarball is one file, the same everywhere. It is large, 1.65 GB for x86_64,
+  downloaded once per image build (a cached layer after) and once per CI job.
+- **How the hashes were checked (2026-11-05):** x86_64's by LLVM's signed build attestation
+  (`gh attestation verify LLVM-19.1.7-Linux-X64.tar.xz --repo llvm/llvm-project --bundle ….jsonl`),
+  arm64's by its GPG signature from an LLVM release signing key
+  (https://releases.llvm.org/release-keys.asc). A new version is checked the same way before its
+  hashes go into `docker/llvm.sh`.
+- **The C++ standard library still comes from the system:** clang compiles against the GCC
+  installation's libstdc++ headers, GCC 12's in the image and the runner's own in CI. The compiler
+  is identical; the headers can differ between the two. Running the CI's node jobs in the image's
+  own base (`rust:1.98.1-bookworm`) would make those the same too.
+- **Changing a version** means changing it everywhere the table says, then rebuilding the image.
+- **GCC is no longer used.** Debian's and Ubuntu's own `cc` and `c++` are GCC, which the servers'
+  images used until 2026-11-05. Naming clang in `CC` and `CXX` is what makes it the compiler.
+- **macOS** builds with Xcode's Apple clang, which can't be pinned the same way. The CI's macOS
+  build prints its version.
+- **Phones and the web:** the Android, iOS and other targets are added by the builds that need them
+  (`rustup target add`, or the workflow's `targets`), on the same pinned Rust. The Android build
+  links with the runner's clang and lld, which is not consensus code.
 
 **Building:** the build also writes the wiki, `target/wiki/index.html`, from every
 `#[document]` in `src` and the guides in `docs/` and the README (`build.rs`, the `wiki` and

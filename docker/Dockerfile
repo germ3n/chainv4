@@ -9,15 +9,23 @@
 # docker/compose.yaml runs it behind nginx, with Docker or Podman (docker/compose.sh); see
 # docs/docker.md. Images are named with their registry, as Podman wants them.
 
+# The toolchains, pinned (see docs/development.md, "Toolchains"): Rust as rust-toolchain.toml names
+# it, which tests/toolchains.rs checks, and clang as docker/llvm.sh installs it, LLVM's own release
+# by its SHA-256, which compiles the C and C++ that Luau's metering and RocksDB are made of. The CI
+# runs the same script. Debian's own cc is GCC, so CC and CXX name clang.
 ARG RUST_VERSION=1.98.1
 ARG DEBIAN=bookworm
 ARG TRUNK_VERSION=0.22.0
 
-# The node. RocksDB and Luau build from source, and bindgen needs libclang.
+# The node. RocksDB and Luau build from source, by clang, and bindgen needs its libclang.
 FROM docker.io/library/rust:${RUST_VERSION}-${DEBIAN} AS node
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends clang libclang-dev \
-    && rm -rf /var/lib/apt/lists/*
+COPY docker/llvm.sh /usr/local/lib/llvm.sh
+RUN sh /usr/local/lib/llvm.sh /opt/llvm && rustc --version
+# bindgen asks the clang on PATH where clang's own headers are, so libclang finds stdbool.h.
+ENV CC=/opt/llvm/bin/clang \
+    CXX=/opt/llvm/bin/clang++ \
+    LIBCLANG_PATH=/opt/llvm/lib \
+    PATH=/opt/llvm/bin:${PATH}
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

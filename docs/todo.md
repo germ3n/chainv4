@@ -32,7 +32,10 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   - tests that test nothing, or the wrong thing, and places that want more;
   - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
     todo asks for it), and fix what turns up, a commit per feature.
-- [ ] **Pin the Rust and clang toolchains.** Nothing pins either today: no `rust-toolchain.toml`,
+- [x] **Pin the Rust and clang toolchains.** Done 2026-11-05: Rust 1.98.1 in `rust-toolchain.toml`,
+  clang 19.1.7, LLVM's own release by its SHA-256 (`docker/llvm.sh`), in the image and the CI's
+  node jobs as `CC`/`CXX`, checked alike by `tests/toolchains.rs`
+  (see [Development](development.md#toolchains)). Was: Nothing pins either today: no `rust-toolchain.toml`,
   and the Luau fork's C++ (built by `luau0-src`) and RocksDB are compiled by whatever `cc`/clang the
   machine has. Fuel and memory metering go through that C++, so two nodes built with different
   compilers could, in principle, meter alike or not. That is the same worry as the cross-OS

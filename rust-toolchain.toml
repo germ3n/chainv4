@@ -1,0 +1,10 @@
+# The Rust every build here uses: the node, the wallet, the explorer, the UI and the contracts, as
+# rustup reads this file from any folder below it. The Docker image (docker/Dockerfile's
+# RUST_VERSION) and the CI (each workflow's toolchain) name the same version, which
+# tests/toolchains.rs checks. Targets for phones are added by the builds that need them, so the
+# Docker image does not fetch them. See docs/development.md, "Toolchains".
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

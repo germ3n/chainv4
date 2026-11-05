@@ -25,7 +25,8 @@ cargo build --release
 ./target/release/chainv4 --help
 ```
 
-You need stable Rust, a C/C++ toolchain and clang: RocksDB and Luau are built from source.
+You need Rust 1.98.1 (`rust-toolchain.toml` pins it; rustup fetches it) and clang (LLVM 19.1.7 for Linux builds): RocksDB and
+Luau are built from source. See [Development](docs/development.md#toolchains).
 Everything is on by default; each piece sits behind a cargo feature (`lvm` and `wasm` for the
 contract engines, `node`, `http` for the API, `client` for `chainv4 send`, one per hash, key
 scheme and [kind of finality](#finality)) if you want a smaller build.
