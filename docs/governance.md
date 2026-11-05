@@ -40,6 +40,8 @@ What can change today:
 - **Host costs, contract limits, the slash, the PoW steps and the Bitcoin policy,** as parts of
   fees, limits, finality, the consensus and the federation (see
   [What else each kind carries](#what-else-each-kind-carries)).
+- **The locks:** settings, whole or a field of one, that no vote changes from then on, and which
+  nothing unlocks (see [Locks](#locks)).
 
 The parameters that define finality's epochs, `checkpoint_interval` and `activation_delay`, stay
 what genesis says: every node's and light client's epoch arithmetic rests on them.
@@ -72,7 +74,7 @@ Each kind of setting has a ballot and a version of its own, its `ChangeKind`: th
 (with finality's tuning and a switch of finality's kind, which are checked against each other
 and so share one), bootnodes, names, collections, token functions, the federation, the
 directory, fees, the reward, limits, an upgrade, the name, governance itself, the EVM spec, the
-DEX's fee and anchoring. Deciding a change of one kind leaves every other kind's votes standing, but for
+DEX's fee, anchoring and the locks. Deciding a change of one kind leaves every other kind's votes standing, but for
 governance itself, which clears them all.
 
 1. **Proposing and voting** are one transaction: `Tx::VoteChange` names the `version` of the
@@ -487,6 +489,59 @@ Bitcoin the chain takes, whether they bind nodes, the relay and start they are c
 deep, and the reward, each part on its own and all of it off when unset. In force from the block
 after the decision. Anchors recorded while `enforce` was on stay enforced. See
 [Anchoring](anchoring.md#settings).
+
+## Locks
+
+A lock holds a setting against every vote, for good. Genesis names the first (`locked`, see
+[Genesis](genesis.md#fields)); a change of locks adds more:
+
+```sh
+chainv4 send --key member.key vote-change --vote yes --lock anchoring.enforce,federation.threshold
+chainv4 send --key member.key vote-change --vote yes --change '{"locks":["reward"]}'
+```
+
+- **A lock is a path:** a change's name alone, which holds all of it, such as `reward` or
+  `upgrade`, or followed by the dotted names of its fields as `GET /governance` writes the change,
+  which holds that field and anything under it: `anchoring.enforce`, `fees.burn_permille`,
+  `limits.tx_limits.fuel`, `fees.costs`. A vote may change everything else in the kind.
+- **What is compared:** the change's value at each locked path of its kind, against the value in
+  force there, as `GET /governance`'s `in_force` shows it: the consensus fixed for the epoch, the
+  finality it runs, and of every other setting the last decided or genesis's. JSON against JSON,
+  so every kind is held alike; a field left out is the same as `null`. A change whose value
+  differs at any locked path is refused, with "`anchoring.enforce` is locked".
+- **When:** at every vote on a change, Yes, No or Abstain, and so again at the vote that would
+  decide it, against what stands then. A lock decided after a change's first votes holds that
+  change too: its deciding Yes is refused, and its votes expire. Clearing a vote is never refused.
+- **Variants.** A path under a kind whose `type` picks its fields names that field in whichever
+  variant has it, and a change of variant is refused as soon as what it holds there differs, a
+  field the new variant lacks or adds included. With `consensus.slot_ms` locked under an
+  authority producing every 2 s, the chain may move to `staked` or `rotating` at 2 s, never to
+  `pow`, which has no slot; with `consensus.target_block_ms` locked, it never moves to proof of
+  work at all, since nothing stands there. The same goes for `fees.schedule`, `fees.pricing` and
+  finality's kinds.
+- **The variant kinds whole.** `consensus` refuses any change of the consensus, `finality` any
+  retune and any switch, `upgrade` any upgrade. A switch of finality is locked whole, as
+  `switch_finality`: no switch stands to compare one with, so `switch_finality.epoch` names
+  nothing. What a switch sets is held by the locks under `finality`, against the finality that
+  runs: `finality.type` refuses every switch, `finality.vote_reward` one that pays otherwise.
+- **Locks only grow.** A change of locks names the paths to add, in order, each once, none locked
+  already by itself or a lock over it (`dex.fee_bps` under `dex` is refused, `dex` over
+  `dex.fee_bps` is not). Deciding it adds them to what stands, from the next vote on; nothing
+  takes one away, governance changing itself included. A lock on `locks` freezes the set: no more
+  may be added.
+- **Any kind may be locked,** consensus and upgrade included. A chain that locks `upgrade` can
+  never announce an upgrade, and one that locks `consensus` never changes how blocks are made:
+  any fix to either needs a new genesis, which such a chain accepts.
+- **A path that names nothing is refused,** in genesis and in a change of locks: an unknown kind
+  (`colour`), a field no variant of the kind has (`reward.initia`), or a field of a list or string
+  (`bootnodes.0`).
+- **One state entry,** `change:locks` in the validators column, holds them all, genesis's written
+  there as the chain starts while it names any, so a genesis without locks keeps its id and its
+  state, and a light client proves them. `GET /governance` lists them as `locks`.
+- **The tools refuse first.** `send vote-change` refuses a change that breaks a lock, in the
+  chain's words, before it signs; the wallet's propose form shows a locked field read-only and
+  marked locked, and a kind locked whole as locked in its list; the explorer's Governance page
+  lists the locks and marks each setting locked whole.
 
 ## What else each kind carries
 

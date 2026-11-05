@@ -872,10 +872,15 @@ On a chain with [governance](governance.md):
 - `members`, a council's accounts, or `null` under the electorate, whose voters are finality's;
 - `in_force`, every setting governance may change as it stands at the tip, by kind: `consensus`,
   `name`, `bootnodes`, `names`, `collections`, `token_functions`, `federation`, `directory`, `fees`,
-  `reward`, `limits`, `finality`, `upgrade`, `governance`, `evm_spec` and `dex`, a kind left out
-  when the chain has none of it.
+  `reward`, `limits`, `finality`, `upgrade`, `governance`, `evm_spec`, `dex`, `anchoring` and
+  `locks`, a kind left out when the chain has none of it.
   Each has its `value`, as a change writes it, and `decided`, the version of the change that set
-  it last, or `null` while genesis's stands.
+  it last, or `null` while genesis's stands. It is what the chain compares a change with to hold
+  its locks;
+- `locks`, the paths no vote may change, in order, genesis's and those decided since, such as
+  `["anchoring.enforce", "reward"]`, `[]` while nothing is locked (see
+  [Locks](governance.md#locks)). A vote on a change whose value at one of them differs from
+  `in_force`'s fails with "`PATH` is locked".
 
 404 on a chain without governance.
 

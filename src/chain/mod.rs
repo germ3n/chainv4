@@ -315,6 +315,9 @@ pub struct Genesis {
     #[document(summary = "Anchoring's settings, or None for everything off. Under governance, Change::Anchoring replaces them. Added after chains launched: None adds nothing to genesis's encoding.")]
     #[wincode(with = "crate::structs::unset::UnsetOption<crate::params::anchoring::AnchorSettings>")]
     pub anchoring: Option<crate::params::anchoring::AnchorSettings>,
+    #[document(summary = "Settings no vote may change, by path: a change's name, such as reward, alone or with the dotted names of fields as change_json writes its value, such as anchoring.enforce or limits.tx_limits.fuel, each once. Under governance, Change::Locks adds more and nothing takes one away; a chain without governance names none. A chain that locks upgrade or consensus needs a new genesis for any fix to them. Added after chains launched: empty adds nothing to genesis's encoding.")]
+    #[wincode(with = "crate::structs::unset::UnsetMarkedList")]
+    pub locked: Vec<String>,
 }
 
 impl Hashable for Genesis {}
@@ -596,6 +599,7 @@ impl Genesis {
             evm_spec: None,
             max_tx_bytes: None,
             multisig_members: None,
+            locked: Vec::new(),
         }
     }
 
@@ -649,6 +653,7 @@ impl Genesis {
             evm_spec: None,
             max_tx_bytes: None,
             multisig_members: None,
+            locked: Vec::new(),
         }
     }
 
@@ -785,6 +790,11 @@ impl Genesis {
             crate::registry::changes::Changes::new(state).write_name(name);
         }
 
+        // Written only when there are any, so a genesis without locks starts from the state it did.
+        if self.governance.is_some() && !self.locked.is_empty() {
+            crate::registry::changes::Changes::new(state).add_locks(&self.locked)?;
+        }
+
         if self.directory_admin.is_some() {
             crate::registry::directory::write_directory_admin(state, self.directory_admin);
         }
@@ -892,6 +902,10 @@ impl Genesis {
             return Some(problem);
         }
 
+        if !self.locked.is_empty() && self.governance.is_none() {
+            return Some("locked holds settings against governance: a chain without governance changes nothing, so it locks nothing");
+        }
+
         if self.directory_admin.is_some() && self.governance.is_some() {
             return Some("a chain with governance changes its directory by governance: leave directory_admin out");
         }
@@ -953,7 +967,7 @@ impl Genesis {
                 .governance
                 .as_ref()
                 .zip(self.finality.as_ref())
-                .map(|(governance, finality)| GovernanceRules::new(governance, finality.checkpoint_interval(), finality)),
+                .map(|(governance, finality)| GovernanceRules::new(governance, finality.checkpoint_interval(), finality, Arc::new(self.governance_settings()))),
             fees: self.fees.as_ref().map(|config| Arc::new(config.build())),
             pooled_fees: self.vote_reward_source == Some(VoteRewardSource::Fees),
             names: self.names.clone().map(Arc::new),
@@ -971,6 +985,24 @@ impl Genesis {
             dex: self.dex.unwrap_or_default(),
             max_tx_bytes: self.max_tx_bytes,
             multisig_members: self.multisig_members.unwrap_or(crate::params::MULTISIG_MEMBERS),
+        }
+    }
+
+    #[document(parent = "Genesis", summary = "What it sets of each setting governance changes, as Changes::in_force falls back to while nothing was decided.")]
+    pub fn governance_settings(&self) -> crate::registry::changes::GenesisSettings {
+        crate::registry::changes::GenesisSettings {
+            consensus: self.consensus.clone(),
+            bootnodes: self.bootnodes.clone(),
+            names: self.names.as_ref().map(crate::registry::names::NamesConfig::settings),
+            token_functions: self.token_functions.clone(),
+            collections: self.collections.clone(),
+            evm_spec: self.evm_spec.unwrap_or_default(),
+            dex: self.dex.unwrap_or_default(),
+            anchoring: self.anchoring.clone().unwrap_or_default(),
+            federation: self.federation.clone(),
+            fees: self.fees.clone(),
+            reward: self.reward,
+            limits: self.block_limits(),
         }
     }
 
@@ -1260,6 +1292,10 @@ impl Chain {
     pub fn open_with(db: Arc<dyn Database>, genesis: &Genesis, options: ChainOptions) -> Result<Chain, ChainError> {
         if let Some(problem) = genesis.problem() {
             return Err(ChainError::BadGenesis(problem.to_string()));
+        }
+
+        if let Some(problem) = crate::governance::locks::genesis_problem(&genesis.locked) {
+            return Err(ChainError::BadGenesis(problem));
         }
 
         let block = genesis.block();

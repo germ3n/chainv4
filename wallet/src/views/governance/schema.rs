@@ -41,6 +41,8 @@ pub enum Line {
     Price,
     /// An account here, such as a council's member.
     Account,
+    /// A setting's path, as a lock names it: anchoring.enforce.
+    Path,
 }
 
 /// The control a field takes, and how what is typed in it is written in the change's JSON.
@@ -379,6 +381,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("btc.repay_pct", "A release repays what children cost, up to this percent of its fee", "0 never repays.", Control::Whole).under("Bitcoin").when(WHEN_BTC).most(100),
             field("btc.repay_most", "The most one withdrawal repays of it, in sats", "Within what it agreed to lose.", Control::Whole).under("Bitcoin").when(WHEN_BTC),
         ],
+        "locks" => vec![field("", "Paths to lock", "Each a setting no vote may change from then on, such as reward or anchoring.enforce. Nothing unlocks one, and a lock on locks freezes the set.", Control::List(Line::Path))],
         "directory" => vec![
             field("gateway", "The bridges' gateway", "", Control::MaybeContract),
             field("btc_gateway", "The Bitcoin gateway", "", Control::MaybeContract),
@@ -396,7 +399,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
 /// it does not run now.
 pub fn defaults(kind: &str) -> Value {
     match kind {
-        "bootnodes" | "token_functions" => json!([]),
+        "bootnodes" | "token_functions" | "locks" => json!([]),
         "names" => json!({ "prices": [], "grace_ms": 7_776_000_000u64, "max_years": 100 }),
         "evm_spec" => json!({ "spec": "prague", "from": null }),
         "dex" => json!({ "fee_bps": 30 }),

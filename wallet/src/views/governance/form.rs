@@ -11,7 +11,7 @@ use {
     crate::format,
     crate::theme,
     chainv4::crypto::keypair::PublicKey,
-    chainv4::governance::Change,
+    chainv4::governance::{Change, locks},
     chainv4::params::fees::TX_KINDS,
     chainv4::params::json::{change_from_json, over},
     chainv4::registry::collections::CollectionFunctions,
@@ -43,6 +43,9 @@ pub struct Env<'a> {
     pub consensus: Option<&'a str>,
     /// Whether a switch of finality's kind is on its way, which holds back all that touches it.
     pub switching: bool,
+    /// The paths no vote may change, and every setting as it stands, which a lock compares with.
+    pub locks: &'a [String],
+    pub in_force: &'a [super::Setting],
 }
 
 /// What is typed in the form, by each field's path.
@@ -337,6 +340,10 @@ fn line_value(line: Line, text: &str, env: &Env) -> Result<Value, String> {
         Line::Compressed if !from_hex(text).is_some_and(|bytes| bytes.len() == 33) => Err("A compressed key: 0x and 66 hex digits.".to_string()),
         Line::Price => amount(text, env).map(Value::String),
         Line::Account => text.parse::<Address>().map(|address| Value::String(address.to_string())).map_err(|_| "An address, such as ed25519:0x and 64 hex digits.".to_string()),
+        Line::Path => match locks::path_problem(text) {
+            Some(why) => Err(why),
+            None => Ok(Value::String(text.to_string())),
+        },
         _ => Ok(Value::String(text.to_string())),
     }
 }
@@ -613,6 +620,10 @@ pub fn judge(kind: &str, whole: &Value, env: &Env, built: &mut Built) {
                 }
             }
 
+            if let Some((path, why)) = locked(kind, &change, env) {
+                built.errors.entry(path).or_insert(why);
+            }
+
             if built.errors.is_empty() {
                 built.change = Some(change);
             }
@@ -621,6 +632,42 @@ pub fn judge(kind: &str, whole: &Value, env: &Env, built: &mut Built) {
             built.errors.entry(blame(kind, &why)).or_insert(why);
         }
     }
+}
+
+/// Why the node would refuse a change for its locks, in its words, under the field the lock holds,
+/// or at the foot of the form: a locked path the change moves from what stands, or a change of
+/// locks adding what it cannot.
+fn locked(kind: &str, change: &Change, env: &Env) -> Option<(String, String)> {
+    if let Change::Locks(paths) = change
+        && let Some(why) = locks::adding_problem(env.locks, paths)
+    {
+        return Some((GENERAL.to_string(), why));
+    }
+
+    let stands = |name: &str| env.in_force.iter().find(|setting| setting.kind == name).map_or(Value::Null, |setting| setting.value.clone());
+    let lock = locks::broken(env.locks, &chainv4::params::json::change_json(change), &stands)?;
+    // A switch's finality is a field of its own, under finality.
+    let field = match kind {
+        "switch_finality" => lock.strip_prefix("finality.").map(|rest| format!("finality.{rest}")),
+        kind => lock.strip_prefix(kind).and_then(|rest| rest.strip_prefix('.')).map(str::to_string),
+    };
+    let path = field.filter(|field| schema(kind).iter().any(|spec| spec.path == field)).unwrap_or_else(|| GENERAL.to_string());
+
+    Some((path, format!("{lock} is locked")))
+}
+
+/// The lock that holds a field, if one does: one on it or on what holds it, or for an object
+/// switched on or off, one on anything under it, which switching it would move.
+pub fn lock_on<'e>(kind: &str, spec: &Spec, env: &Env<'e>) -> Option<&'e str> {
+    let path = match spec.path {
+        "" => kind.to_string(),
+        field => format!("{kind}.{field}"),
+    };
+
+    env.locks
+        .iter()
+        .find(|lock| locks::covers(lock, &path) || (matches!(spec.control, Control::Switch { .. }) && locks::covers(&path, lock)))
+        .map(String::as_str)
 }
 
 /// What the chain checks of a change against what it runs, which a node alone reads there; asked
@@ -920,6 +967,9 @@ fn line_edit<'a>(text: &'a mut String, hint: &'a str, mono: bool) -> egui::TextE
 fn field(ui: &mut Ui, palette: &theme::Palette, kind: &str, spec: &Spec, draft: &mut Draft, standing: Option<&Value>, env: &Env, built: &Built) {
     let old = standing.and_then(|standing| at(standing, spec.path));
     let unchanged = draft.unchanged(spec, standing, env);
+    let lock = lock_on(kind, spec, env);
+    // A locked field shows what stands, and takes nothing typed.
+    let held = spec.fixed || lock.is_some();
     let label = match spec.control {
         Control::Amount => format!("{}, in {}", spec.label, env.symbol),
         _ => spec.label.to_string(),
@@ -930,12 +980,16 @@ fn field(ui: &mut Ui, palette: &theme::Palette, kind: &str, spec: &Spec, draft: 
         ui,
         |ui| {
             ui.add(egui::Label::new(theme::strong(label, 13.5).color(palette.ink)).wrap());
+
+            if lock.is_some() {
+                theme::pill(ui, "locked", palette.bad);
+            }
         },
         |ui| {
             let now = format!("now {}", short_words(spec, old, env));
             ui.add(egui::Label::new(RichText::new(now).small().color(if unchanged { palette.muted } else { palette.accent })).truncate());
 
-            if !unchanged && !spec.fixed && ui.link(RichText::new("Put back").small()).clicked() {
+            if !unchanged && !held && ui.link(RichText::new("Put back").small()).clicked() {
                 put_back = true;
             }
         },
@@ -964,7 +1018,9 @@ fn field(ui: &mut Ui, palette: &theme::Palette, kind: &str, spec: &Spec, draft: 
     ui.scope(|ui| {
         ui.set_max_width(ui.available_width().min(FIELD_MOST));
 
-        if spec.fixed {
+        if let Some(lock) = lock {
+            ui.add(egui::Label::new(RichText::new(format!("Locked by {lock}: no vote changes it")).small().color(palette.soft)).wrap());
+        } else if held {
             fixed(ui, palette, spec, old, env);
         } else {
             control(ui, palette, spec, draft, &price_hint, built);
@@ -1064,6 +1120,7 @@ fn list(ui: &mut Ui, palette: &theme::Palette, spec: &Spec, line: Line, draft: &
         Line::Compressed => ("0x02…", true),
         Line::Price => (price_hint, false),
         Line::Account => ("ed25519:0x…", true),
+        Line::Path => ("anchoring.enforce", true),
     };
 
     for (index, typed) in lines.iter_mut().enumerate() {

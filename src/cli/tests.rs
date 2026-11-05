@@ -1008,15 +1008,15 @@ mod send {
         // A window stays genesis's; nothing to withdraw before approving; the council of one
         // decides at once, so there is nothing to withdraw after either.
         let bootnode = "/ip4/203.0.113.7/udp/4001/quic-v1".to_string();
-        let kept = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let kept = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: Some(windowed), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, lock: None, version: None }));
         let nothing = send(running.args(TxArgs::ClearVote { kind: None, change: None, version: None }));
-        let approved = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let approved = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: Some(staked), bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, lock: None, version: None }));
         let decided = send(running.args(TxArgs::ClearVote { kind: None, change: None, version: None }));
         // Production by stake needs FFG, so finality cannot switch away from it under staked.
         let authority = crate::cli::genesis::finality_json(&FinalityConfig::Authority(crate::chain::AuthorityConfig::dev(dev.public()))).to_string();
-        let switched = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: Some(authority), switch_epoch: Some(1_000), upgrade: None, upgrade_from: None, chain_name: None, version: None }));
-        let unreadable = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
-        let booted = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, version: None }));
+        let switched = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: None, name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: Some(authority), switch_epoch: Some(1_000), upgrade: None, upgrade_from: None, chain_name: None, lock: None, version: None }));
+        let unreadable = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: Some(vec!["203.0.113.7:4001".to_string()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, lock: None, version: None }));
+        let booted = send(running.args(TxArgs::VoteChange { vote: crate::governance::ChangeVote::Yes, change: None, governance: None, consensus: None, bootnodes: Some(vec![bootnode.clone()]), name_prices: None, collections: None, federation: None, directory: None, fees: None, reward: None, limits: None, finality: None, switch_finality: None, switch_epoch: None, upgrade: None, upgrade_from: None, chain_name: None, lock: None, version: None }));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
 
@@ -1038,6 +1038,61 @@ mod send {
         assert_eq!(governance["version"], 2, "the consensus, then the bootnodes");
         assert_eq!(governance["decided"]["type"], "staked");
         assert!(node.chain().tip().height >= 2);
+    }
+
+    #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+    #[test]
+    fn vote_change_refuses_what_a_lock_holds_before_it_sends() {
+        use crate::governance::GovernanceConfig;
+
+        let dev = DevAuthority::dev_keypair();
+        let council = GovernanceConfig::Council { members: vec![dev.public().address()], threshold: 1, approval_epochs: 64, quorum_permille: 0 };
+        let finality = Some(FinalityConfig::Ffg(crate::chain::FfgConfig::dev(dev.public())));
+        let running = Running::launch_genesis(true, false, |genesis| Genesis { finality, governance: Some(council), locked: vec!["reward.initial".to_string()], ..genesis }, |node| node, Default::default());
+        let vote = |change: Option<&str>, lock: Option<&str>| TxArgs::VoteChange {
+            vote: crate::governance::ChangeVote::Yes,
+            change: change.map(str::to_string),
+            governance: None,
+            consensus: None,
+            bootnodes: None,
+            name_prices: None,
+            collections: None,
+            federation: None,
+            directory: None,
+            fees: None,
+            reward: None,
+            limits: None,
+            finality: None,
+            switch_finality: None,
+            switch_epoch: None,
+            upgrade: None,
+            upgrade_from: None,
+            chain_name: None,
+            lock: lock.map(|paths| paths.split(',').map(str::to_string).collect()),
+            version: None,
+        };
+
+        let raised = send(running.args(vote(Some(r#"{"reward":{"initial":"5"}}"#), None)));
+        let halving = send(running.args(vote(Some(r#"{"reward":{"halving_interval":1000}}"#), None)));
+        let locked = send(running.args(vote(None, Some("dex"))));
+        let under = send(running.args(vote(None, Some("dex.fee_bps"))));
+        let dex = send(running.args(vote(Some(r#"{"dex":{"fee_bps":50}}"#), None)));
+        let nothing = send(running.args(vote(None, Some("dex.nothing"))));
+        let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
+        let node = running.stop();
+
+        assert_eq!(raised.unwrap_err().to_string(), "reward.initial is locked");
+        halving.unwrap();
+        locked.unwrap();
+        assert_eq!(under.unwrap_err().to_string(), "dex.fee_bps is locked already, under dex");
+        assert_eq!(dex.unwrap_err().to_string(), "dex is locked");
+        assert!(nothing.unwrap_err().to_string().contains("names nothing in dex"));
+        assert_eq!(governance["locks"], serde_json::json!(["dex", "reward.initial"]));
+        assert_eq!(governance["in_force"]["locks"]["value"], serde_json::json!(["dex", "reward.initial"]));
+        assert_eq!(governance["in_force"]["reward"]["value"]["halving_interval"], 1000);
+
+        // What was refused was never sent: the account sent the two that went, and nothing else.
+        assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&dev.public().address()).unwrap().nonce, 2);
     }
 
     #[test]

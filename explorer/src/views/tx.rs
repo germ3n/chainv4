@@ -353,6 +353,7 @@ pub fn change(change: &Value) -> String {
         "limits" => "new limits".to_string(),
         "finality" => "new finality settings".to_string(),
         "governance" => "new governance settings".to_string(),
+        "locks" => format!("locking {} for good", value.as_array().map_or_else(|| "?".to_string(), |paths| paths.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))),
         other => format!("a change of its {}", other.replace('_', " ")),
     }
 }

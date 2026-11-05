@@ -50,17 +50,18 @@ const REFRESH: u64 = 15_000;
 const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
-const KINDS: [&str; 18] = ["name", "bootnodes", "upgrade", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring"];
+const KINDS: [&str; 19] = ["name", "bootnodes", "upgrade", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
 
 /// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
 const KIND_LIST_HEIGHT: f32 = 620.0;
 
 /// The kinds the propose form takes in part: a JSON object naming only some fields, laid over what
-/// stands, as the CLI's vote-change takes them.
-const PARTIAL: [&str; 10] = ["fees", "reward", "limits", "finality", "federation", "directory", "names", "governance", "dex", "anchoring"];
+/// stands, as the CLI's vote-change takes them; and the locks, a change of which names only the
+/// paths it adds to those that stand.
+const PARTIAL: [&str; 11] = ["fees", "reward", "limits", "finality", "federation", "directory", "names", "governance", "dex", "anchoring", "locks"];
 
 /// The settings in force, in the order the API lists them.
-const IN_FORCE: [&str; 16] = ["consensus", "name", "bootnodes", "names", "collections", "token_functions", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade", "governance", "evm_spec", "dex"];
+const IN_FORCE: [&str; 18] = ["consensus", "name", "bootnodes", "names", "collections", "token_functions", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade", "governance", "evm_spec", "dex", "anchoring", "locks"];
 
 /// GET /governance, read.
 #[derive(Clone, Debug, PartialEq)]
@@ -91,6 +92,8 @@ pub struct Listing {
     pub finality: Option<String>,
     /// A switch of finality's kind ahead: its epoch and kind.
     pub switch: Option<(u64, String)>,
+    /// The paths no vote may change, in order: genesis's and those decided since.
+    pub locks: Vec<String>,
 }
 
 /// An open change and its votes.
@@ -791,11 +794,15 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
         ui.label(RichText::new("A change is proposed by voting Yes on it: others then vote on the same change, and it is decided once Yes weighs what it needs and the quorum has voted, or rejected once it no longer can. Change only the fields that should move: the rest keep what stands.").small().color(palette.muted));
         ui.add_space(4.0);
 
-        egui::ComboBox::from_id_salt("governance-kind").selected_text(label(&state.kind)).width(ui.available_width()).height(KIND_LIST_HEIGHT).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("governance-kind").selected_text(kind_choice(listing, &state.kind)).width(ui.available_width()).height(KIND_LIST_HEIGHT).show_ui(ui, |ui| {
             for kind in KINDS {
-                ui.selectable_value(&mut state.kind, kind.to_string(), label(kind));
+                ui.selectable_value(&mut state.kind, kind.to_string(), kind_choice(listing, kind));
             }
         });
+
+        if let Some(lock) = chainv4::governance::locks::whole(&listing.locks, &state.kind) {
+            ui.add(egui::Label::new(RichText::new(format!("Locked: {lock} holds all of it, and no vote changes it.")).small().color(palette.bad)).wrap());
+        }
         ui.add_space(6.0);
 
         let built = match state.form.advanced {
@@ -874,9 +881,10 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, listing: &Li
 fn advanced(ui: &mut Ui, palette: &theme::Palette, state: &mut GovernanceState, built: &Built, stands: Option<&Value>) {
     let was = state.form.advanced;
     let header = egui::CollapsingHeader::new(RichText::new("Advanced: the change as JSON").small().color(palette.muted)).id_salt(("governance-advanced", &state.kind)).default_open(was).show(ui, |ui| {
-        let partial = match PARTIAL.contains(&state.kind.as_str()) {
-            true => " Fields left out keep what stands, so an object naming only the fields to change will do.",
-            false => "",
+        let partial = match (state.kind.as_str(), PARTIAL.contains(&state.kind.as_str())) {
+            ("locks", _) => " Name only the paths to add, as a list: those locked already stay locked.",
+            (_, true) => " Fields left out keep what stands, so an object naming only the fields to change will do.",
+            (_, false) => "",
         };
         ui.add(egui::Label::new(RichText::new(format!("For what the form above does not cover. While this is open, this is what is proposed.{partial}")).small().color(palette.muted)).wrap());
 
@@ -1008,9 +1016,16 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, listing: &Listing) {
 
         for setting in &listing.in_force {
             super::row(ui, &palette, label(&setting.kind), |ui| {
-                let words = setting_change(setting).map_or_else(|_| setting.value.to_string(), |change| standing_words(&change, &coin));
+                let words = match setting.kind.as_str() {
+                    "locks" => locks_words(&listing.locks),
+                    _ => setting_change(setting).map_or_else(|_| setting.value.to_string(), |change| standing_words(&change, &coin)),
+                };
                 ui.label(RichText::new(words).color(palette.ink));
                 ui.label(RichText::new(since(setting.decided)).small().color(palette.muted));
+
+                if setting.kind != "locks" && chainv4::governance::locks::whole(&listing.locks, &setting.kind).is_some() {
+                    ui.label(RichText::new("locked").small().color(palette.bad));
+                }
             });
         }
     });
@@ -1133,6 +1148,7 @@ fn listing(value: &Value) -> Result<Listing, String> {
         in_force: settings,
         finality: value["finality"].as_str().map(str::to_string),
         switch: value["switch"]["epoch"].as_u64().zip(value["switch"]["type"].as_str().map(str::to_string)),
+        locks: value["locks"].as_array().map(|locks| locks.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
     })
 }
 
@@ -1142,7 +1158,12 @@ fn versions(value: &Value) -> Result<BTreeMap<ChangeKind, u64>, String> {
 
     ChangeKind::ALL
         .into_iter()
-        .map(|kind| versions.get(kind.name()).and_then(Value::as_u64).map(|version| (kind, version)).ok_or(format!("it says no version for {}", kind.name())))
+        .map(|kind| match versions.get(kind.name()).and_then(Value::as_u64) {
+            Some(version) => Ok((kind, version)),
+            // A node from before locks has none to change.
+            None if kind == ChangeKind::Locks => Ok((kind, 0)),
+            None => Err(format!("it says no version for {}", kind.name())),
+        })
         .collect()
 }
 
@@ -1287,6 +1308,8 @@ fn standing<'a>(listing: &'a Listing, kind: &str) -> Option<&'a Value> {
 fn standing_for(listing: &Listing, kind: &str) -> Option<Value> {
     match kind {
         "switch_finality" => standing(listing, "finality").map(|finality| json!({ "epoch": null, "finality": finality })),
+        // A change of locks names only what it adds: the form starts from none.
+        "locks" => None,
         kind => standing(listing, kind).cloned(),
     }
 }
@@ -1301,6 +1324,8 @@ fn env_of<'a>(listing: &'a Listing, coin: &'a Coin, tip: Option<u64>) -> Env<'a>
         finality: standing(listing, "finality").and_then(|finality| finality["type"].as_str()).or(listing.finality.as_deref()),
         consensus: standing(listing, "consensus").and_then(|consensus| consensus["type"].as_str()),
         switching: listing.switch.is_some(),
+        locks: &listing.locks,
+        in_force: &listing.in_force,
     }
 }
 
@@ -1378,7 +1403,24 @@ fn label(kind: &str) -> &str {
         "federation" => "Federation",
         "directory" => "Directory",
         "governance" => "Governance",
+        "locks" => "Locks",
         other => other,
+    }
+}
+
+/// A kind of change as the kind list names it: marked locked once a lock holds all of it.
+fn kind_choice(listing: &Listing, kind: &str) -> String {
+    match chainv4::governance::locks::whole(&listing.locks, kind) {
+        Some(_) => format!("{} · locked", label(kind)),
+        None => label(kind).to_string(),
+    }
+}
+
+/// What is locked, in words.
+fn locks_words(paths: &[String]) -> String {
+    match paths {
+        [] => "Nothing is locked".to_string(),
+        paths => format!("Locked for good: {}", paths.join(", ")),
     }
 }
 
@@ -1549,6 +1591,7 @@ fn stated(change: &Change, coin: &Coin) -> String {
                 false => format!("Directory: announce {}", named.join(", ")),
             }
         }
+        Change::Locks(paths) => format!("Lock for good: {}", paths.join(", ")),
         Change::Governance(_) => {
             let value = &change_json(change)["governance"];
             let quorum = match value["quorum_permille"].as_u64().unwrap_or_default() {
@@ -1625,7 +1668,7 @@ mod tests {
             "version": 2,
             "versions": {
                 "consensus": 0, "bootnodes": 1, "names": 0, "collections": 0, "federation": 0, "directory": 0, "token_functions": 0, "evm_spec": 0, "dex": 0, "anchoring": 0,
-                "fees": 0, "reward": 0, "limits": 0, "upgrade": 0, "name": 1, "governance": 0,
+                "fees": 0, "reward": 0, "limits": 0, "upgrade": 0, "name": 1, "governance": 0, "locks": 0,
             },
             "approval_epochs": 16,
             "needed": "1",
@@ -1939,7 +1982,7 @@ mod tests {
 
         // The consensus is not laid over: a part of it is not one.
         assert!(raw("consensus", r#"{ "slot_ms": 1000 }"#, standing(&listing, "consensus")).is_err());
-        assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 10], "each a kind the form lists");
+        assert_eq!(PARTIAL.map(|kind| kind.parse::<ChangeKind>().is_ok()), [true; 11], "each a kind the form lists");
         assert!(PARTIAL.iter().all(|kind| KINDS.contains(kind)));
     }
 
@@ -2117,6 +2160,7 @@ mod tests {
             (Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]), "Tokens: 2 functions make one: balance_of, transfer"),
             (Change::EvmSpec { spec: chainv4::params::vm::EvmSpec::Osaka, from: 9_000 }, "EVM spec: osaka from block 9,000"),
             (Change::Dex(chainv4::params::vm::DexSettings { fee_bps: 25 }), "DEX fee: 0.25% a trade"),
+            (Change::Locks(vec!["anchoring.enforce".to_string(), "reward".to_string()]), "Lock for good: anchoring.enforce, reward"),
             (
                 Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32])], threshold: 1, approval_epochs: 8, quorum_permille: 500 }),
                 "Governance: a council of 1",
@@ -2135,6 +2179,27 @@ mod tests {
 
         assert_eq!(kinds.len(), KINDS.len(), "every kind the form lists is described");
         assert!(KINDS.iter().all(|kind| kinds.contains(kind)));
+    }
+
+    #[test]
+    fn the_kind_list_marks_a_kind_locked_whole_and_the_listing_reads_the_locks() {
+        let mut value = council();
+        value["locks"] = json!(["reward", "fees.burn_permille"]);
+        let listing = listing(&value).unwrap();
+
+        assert_eq!(listing.locks, ["reward", "fees.burn_permille"]);
+        assert_eq!(kind_choice(&listing, "reward"), "Block reward · locked");
+        assert_eq!(kind_choice(&listing, "fees"), "Fees", "a field locked is not all of it");
+        assert_eq!(locks_words(&listing.locks), "Locked for good: reward, fees.burn_permille");
+        assert_eq!(locks_words(&[]), "Nothing is locked");
+
+        // A node from before locks lists none, and no version for them.
+        let mut old = council();
+        old["versions"].as_object_mut().unwrap().remove("locks");
+        let listing = super::listing(&old).unwrap();
+        assert!(listing.locks.is_empty());
+        assert_eq!(listing.version_of(ChangeKind::Locks), 0);
+        assert_eq!(standing_for(&listing, "locks"), None, "a change of locks names only what it adds");
     }
 
     #[test]

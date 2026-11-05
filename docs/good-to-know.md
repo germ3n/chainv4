@@ -1679,6 +1679,33 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **Every new setting changes genesis's encoding,** so the devnet moves to them with a new genesis
   (see [Governance](governance.md#what-else-each-kind-carries)).
 
+## Governance locks
+
+- **A lock is a path, compared as JSON.** `reward` holds the whole reward, `anchoring.enforce` one
+  field, `limits.tx_limits.fuel` one field two levels down. A vote on a change whose value at a
+  locked path differs from the one in force (as `GET /governance`'s `in_force` shows it) fails
+  with "`PATH` is locked"; the rest of the kind still changes. A field left out is the same as
+  `null`, so a change of variant breaks a lock as soon as what it holds there differs: with
+  `consensus.slot_ms` locked, authority may move to staked at the same slot, never to proof of
+  work, which has none.
+- **Every vote is checked, the one that would decide included,** against what stands then, so a
+  lock decided after a change's first Yes still holds it. No and Abstain on a locked change are
+  refused too; clearing a vote never is.
+- **Locks only grow.** Genesis's `locked` sets the first, `Change::Locks` adds more (in order, each
+  once, none locked already, by itself or a lock over it), and nothing removes one; governance
+  changing itself leaves them. A lock on `locks` freezes the set.
+- **A switch of finality is locked whole** (`switch_finality` alone; `switch_finality.epoch` is
+  refused). What a switch sets is held by the locks under `finality`: with `finality.type` locked,
+  no switch passes.
+- **Locking `upgrade` or `consensus` is for good.** A chain that does accepts that any fix to them
+  needs a new genesis.
+- **One state entry, `change:locks`,** written at genesis only while it names any, so a genesis
+  without locks keeps its id and its state root. Consensus: it ships on the next genesis.
+- **The tools refuse first.** `send vote-change` checks the change against `GET /governance`'s
+  `locks` and `in_force` before it signs; the wallet's form shows a locked field read-only, marked
+  locked, and a kind locked whole as locked in its list; the explorer lists the locks. The chain
+  has the last word.
+
 ## Names
 
 - **A name's price is burned, by length, per year.** Its fee is paid on top. A registration that

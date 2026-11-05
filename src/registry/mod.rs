@@ -112,6 +112,10 @@ pub enum RegistryError {
     BadChange(&'static str),
     #[document(summary = "A change to what was decided already: the same consensus, bootnodes, name prices or collection standards.")]
     SameChange,
+    #[document(summary = "A vote on a change whose value at a locked path differs from what stands: the lock it breaks.")]
+    Locked(String),
+    #[document(summary = "A change of locks that cannot add its paths, and why: one names nothing, or is locked already.")]
+    BadLocks(String),
     #[document(summary = "The contract exports what makes a token on this chain, but its name(), symbol() or decimals() did not answer as the registry needs, and why.")]
     BadToken(String),
     #[document(summary = "The contract exports what makes a collection on this chain, but its name() or symbol() did not answer as the registry needs, and why.")]
@@ -177,6 +181,8 @@ impl fmt::Display for RegistryError {
             RegistryError::StaleChange(version) => write!(f, "a change of this kind was decided since; the decided version is {version}"),
             RegistryError::BadChange(why) => write!(f, "{why}"),
             RegistryError::SameChange => write!(f, "that change was decided already"),
+            RegistryError::Locked(path) => write!(f, "{path} is locked"),
+            RegistryError::BadLocks(why) => write!(f, "{why}"),
             RegistryError::BadToken(why) => write!(f, "it is a token, but {why}"),
             RegistryError::BadCollection(why) => write!(f, "it is a collection, but {why}"),
             #[cfg(feature = "vm")]

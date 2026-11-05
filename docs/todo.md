@@ -476,6 +476,17 @@ with.
 
 ### Governance
 
+- [x] **Governance locks** (2026-11-05). Genesis's `locked` names paths no vote may change, a whole
+  kind such as `reward` or one field such as `anchoring.enforce`. `Change::Locks` adds more and
+  nothing removes one; a lock on `locks` freezes the set. Every vote is checked against them, in the
+  chain, in the CLI before it signs, and in the wallet's form, which shows locked fields read-only.
+  `GET /governance` and the explorer list them. See [Governance](governance.md#locks).
+- [ ] **Prove the locks to the apps.** The wallet and the explorer read `locks` and `in_force` from
+  the node, unproven. `change:locks` is one state entry, so a light-client proof of it could back
+  them, as it backs balances.
+- [ ] **Tidy the warnings in a build without governance:** an unused `Changes` import in
+  `execute.rs`, and four unused helpers in `chain/finality/switch.rs`.
+
 - [x] **Governance over the consensus.** Genesis's `governance` names a kind, behind the
   `Governance` trait: `electorate`, finality's own validators by stake or signers by
   `change_threshold`, or `council`, accounts genesis names with a threshold. `Tx::ApproveChange`

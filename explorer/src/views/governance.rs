@@ -28,7 +28,7 @@ use {
 const ABOUT: &str = "What the chain's governance may change, who votes, and every change it decided or rejected.";
 
 /// The settings governance may change, in the order the page lists them.
-const KINDS: [&str; 16] = ["consensus", "name", "bootnodes", "names", "collections", "token_functions", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade", "governance", "evm_spec", "dex"];
+const KINDS: [&str; 18] = ["consensus", "name", "bootnodes", "names", "collections", "token_functions", "federation", "directory", "fees", "reward", "limits", "finality", "upgrade", "governance", "evm_spec", "dex", "anchoring", "locks"];
 
 /// What the turnout asks of each voter's transactions: its votes alone.
 pub const VOTES_QUERY: &str = "kind=vote_change";
@@ -106,6 +106,15 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState) {
         |ui| proposals(ui, ctx, view, state, &coin),
     );
     super::section(ui, look, "In force", |ui| in_force(ui, ctx, view, state, &coin));
+    super::section_with(
+        ui,
+        look,
+        "Locks",
+        |ui| {
+            ui.label(RichText::new(view.locks.len().to_string()).monospace().color(look.palette.muted));
+        },
+        |ui| locks(ui, ctx, view),
+    );
     super::section(ui, look, "Along the chain", |ui| history(ui, ctx, &coin));
     super::section_with(
         ui,
@@ -730,7 +739,17 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gover
         true => {
             for (kind, setting) in &settings {
                 super::list_row(ui, look, |ui| {
-                    widgets::end_row(ui, |ui| ui.label(widgets::strong(label(kind), 13.5).color(look.palette.ink)), |ui| set_by(ui, setting.decided));
+                    widgets::end_row(
+                        ui,
+                        |ui| {
+                            ui.label(widgets::strong(label(kind), 13.5).color(look.palette.ink));
+
+                            if locked_whole(view, kind) {
+                                widgets::pill(ui, "locked", look.palette.soft);
+                            }
+                        },
+                        |ui| set_by(ui, setting.decided),
+                    );
                     ui.add(egui::Label::new(RichText::new(summary(kind, &setting.value, coin)).color(look.palette.soft)).wrap());
                 });
             }
@@ -739,7 +758,13 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gover
             super::table(ui, look, "in force", &["setting", "in force", "set by"], |ui| {
                 for (kind, setting) in &settings {
                     // Each cell from the top of its row, however many lines what the setting is takes.
-                    ui.vertical(|ui| ui.label(widgets::strong(label(kind), 13.0)));
+                    ui.vertical(|ui| {
+                        ui.label(widgets::strong(label(kind), 13.0));
+
+                        if locked_whole(view, kind) {
+                            widgets::pill(ui, "locked", look.palette.soft);
+                        }
+                    });
                     ui.vertical(|ui| {
                         ui.set_width(words);
                         ui.add(egui::Label::new(summary(kind, &setting.value, coin)).wrap()).on_hover_text(setting.value.to_string());
@@ -750,6 +775,41 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView, state: &mut Gover
             });
         }
     }
+}
+
+/// The settings no vote may change, each by its path, with what the lock holds.
+fn locks(ui: &mut Ui, ctx: &mut Ctx, view: &GovernanceView) {
+    let look = ctx.look;
+
+    if view.locks.is_empty() {
+        super::note(ui, look, "Nothing is locked: governance may change every setting above.");
+
+        return;
+    }
+
+    super::note(ui, look, "No vote changes these, and nothing unlocks one: a change whose value at a locked path differs from what stands is refused.");
+
+    for lock in &view.locks {
+        super::list_row(ui, look, |ui| {
+            widgets::end_row(ui, |ui| ui.label(RichText::new(lock).monospace().color(look.palette.ink)), |ui| {
+                ui.label(RichText::new(lock_words(lock)).small().color(look.palette.muted));
+            });
+        });
+    }
+}
+
+/// What a lock holds, in words: a whole setting, or one of its fields.
+pub fn lock_words(lock: &str) -> String {
+    match lock.split_once('.') {
+        None if lock == "locks" => "the locks themselves: no more may be added".to_string(),
+        None => format!("all of {}", lowered(&label(lock))),
+        Some((kind, field)) => format!("{} of {}", field.replace('.', " "), lowered(&label(kind))),
+    }
+}
+
+/// Whether a lock holds all of a setting.
+fn locked_whole(view: &GovernanceView, kind: &str) -> bool {
+    chainv4::governance::locks::whole(&view.locks, kind).is_some()
 }
 
 /// What the In force table's other columns take of its width, gaps included.
@@ -1266,6 +1326,7 @@ pub fn describe(change: &Value, coin: &Coin) -> String {
         "switch_finality" => format!("Switch finality to {said}"),
         "upgrade" => capitalized(&said),
         "governance" => format!("Set governance's own settings: {said}"),
+        "locks" => format!("Lock for good: {said}"),
         other => format!("Change the chain's {}", other.replace('_', " ")),
     }
 }
@@ -1378,6 +1439,11 @@ pub fn summary(kind: &str, value: &Value, coin: &Coin) -> String {
                 _ => format!("finality's voters, votes counting {epochs}, {quorum}"),
             }
         }
+        "locks" => match value.as_array().map(|paths| paths.iter().filter_map(Value::as_str).collect::<Vec<_>>()) {
+            Some(paths) if paths.is_empty() => "nothing".to_string(),
+            Some(paths) => paths.join(", "),
+            None => "?".to_string(),
+        },
         _ => value.to_string(),
     }
 }

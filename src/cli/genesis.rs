@@ -839,6 +839,37 @@ mod tests {
         assert_eq!(over(&Value::Null, &json!({ "x": 1 })), json!({ "x": 1 }), "nothing standing: what is given");
     }
 
+    /// The paths of a JSON value's leaves: an empty object or list, or anything else.
+    fn leaves(value: &Value, path: String, found: &mut Vec<String>) {
+        match value {
+            Value::Object(map) if !map.is_empty() => {
+                for (key, value) in map {
+                    let next = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                    leaves(value, next, found);
+                }
+            }
+            _ => found.push(path),
+        }
+    }
+
+    #[cfg(feature = "governance-council")]
+    #[test]
+    fn locked_round_trips_and_a_file_without_it_keeps_its_id() {
+        let mut genesis = dev(DevChain::Authority);
+        genesis.governance = Some(GovernanceConfig::Council { members: vec![crate::consensus::DevAuthority::dev_keypair().public().address()], threshold: 1, approval_epochs: 64, quorum_permille: 0 });
+        let plain = genesis.clone();
+        genesis.locked = vec!["reward".to_string(), "anchoring.enforce".to_string()];
+        let value = to_json(&genesis);
+
+        assert_eq!(value["locked"], json!(["reward", "anchoring.enforce"]));
+        assert_eq!(from_json(&value).unwrap(), genesis);
+        assert_ne!(genesis.block().id(), plain.block().id(), "a chain's locks are part of it");
+
+        let mut without = to_json(&plain);
+        without.as_object_mut().unwrap().remove("locked");
+        assert_eq!(from_json(&without).unwrap().block().id(), plain.block().id());
+    }
+
     #[test]
     fn every_change_round_trips_through_its_json_and_bad_ones_are_refused() {
         use crate::governance::Change;
@@ -858,6 +889,7 @@ mod tests {
             Change::Limits(crate::chain::BlockLimits { tx_limits: genesis.tx_limits, max_block_bytes: Some(2 * 1024 * 1024), contract: None, max_tx_bytes: None, multisig_members: None }),
             Change::Upgrade(crate::structs::version::Upgrade { least: "0.2.0".parse().unwrap(), from: 1_000 }),
             Change::Name("chainv4 testnet".to_string()),
+            Change::Locks(vec!["anchoring.enforce".to_string(), "reward".to_string()]),
         ];
 
         if let Some(finality) = FinalityConfig::dev(crate::consensus::DevAuthority::dev_keypair().public()) {
@@ -879,7 +911,25 @@ mod tests {
             let value = change_json(&change);
 
             assert_eq!(change_from_json(&value).as_ref(), Ok(&change), "{value}");
+
+            // Every field a change writes is one a lock may name.
+            let mut found = Vec::new();
+            leaves(&value, String::new(), &mut found);
+
+            for leaf in found {
+                // A switch is locked whole, and its finality's fields are finality's.
+                let leaf = match (leaf.strip_prefix("switch_finality.finality."), leaf.starts_with("switch_finality.")) {
+                    (Some(rest), _) => format!("finality.{rest}"),
+                    (None, true) => continue,
+                    (None, false) => leaf,
+                };
+
+                assert_eq!(crate::governance::locks::path_problem(&leaf), None, "{leaf}");
+            }
         }
+
+        // A change of locks is put in order; one naming a path twice, none, or nothing, is not one.
+        assert_eq!(change_from_json(&json!({ "locks": ["reward", "dex"] })), Ok(Change::Locks(vec!["dex".to_string(), "reward".to_string()])));
 
         for (bad, why) in [
             (json!({ "name": " spaced " }), "name"),
@@ -888,6 +938,10 @@ mod tests {
             (json!({ "name": "a", "bootnodes": [] }), "one field"),
             (json!({ "colour": "blue" }), "not something governance changes"),
             (json!({ "upgrade": { "least": "0.2.0" } }), "upgrade.from"),
+            (json!({ "locks": ["reward.nope"] }), "names nothing in reward"),
+            (json!({ "locks": ["dex", "dex"] }), "each path once"),
+            (json!({ "locks": [] }), "at least one"),
+            (json!({ "locks": "dex" }), "a list of paths"),
         ] {
             let refused = change_from_json(&bad).unwrap_err();
 

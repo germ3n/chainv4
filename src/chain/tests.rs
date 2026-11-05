@@ -2136,6 +2136,8 @@ mod range;
 // A council governs them, on the dev chain, whose finality votes only under FFG.
 #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
 mod settings;
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+mod locks;
 
 /// The state at a main-chain height, through history.
 fn state_at(db: &Arc<MemoryDb>, chain: &Chain, height: u64) -> Option<Arc<State>> {

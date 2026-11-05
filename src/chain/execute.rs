@@ -127,6 +127,8 @@ pub struct GovernanceRules {
     pub checkpoint_interval: u64,
     #[document(summary = "The chain's finality, which a proposed consensus must fit.")]
     pub finality: FinalityConfig,
+    #[document(summary = "What genesis set of each setting governance changes: what stands while nothing was decided, which locks compare a change with.")]
+    pub genesis: Arc<crate::registry::changes::GenesisSettings>,
 }
 
 impl fmt::Debug for GovernanceRules {
@@ -148,12 +150,13 @@ impl GovernanceRules {
             config = "The settings, genesis's or decided.",
             checkpoint_interval = "Blocks per epoch.",
             finality = "The chain's finality from genesis.",
+            genesis = "What genesis set of each setting governance changes.",
         },
     )]
     // A node built without either kind of governance has an empty GovernanceConfig, so build
     // never returns and what follows it goes unused.
     #[cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unused_variables))]
-    pub fn new(config: &crate::governance::GovernanceConfig, checkpoint_interval: u64, finality: &FinalityConfig) -> GovernanceRules {
+    pub fn new(config: &crate::governance::GovernanceConfig, checkpoint_interval: u64, finality: &FinalityConfig, genesis: Arc<crate::registry::changes::GenesisSettings>) -> GovernanceRules {
         GovernanceRules {
             governance: config.build(finality),
             config: config.clone(),
@@ -161,6 +164,7 @@ impl GovernanceRules {
             quorum_permille: config.quorum_permille(),
             checkpoint_interval,
             finality: finality.clone(),
+            genesis,
         }
     }
 
@@ -171,9 +175,32 @@ impl GovernanceRules {
     )]
     pub fn in_state(&self, state: &State) -> Result<GovernanceRules, DbError> {
         Ok(match Changes::new(state).governance()? {
-            Some(decided) if decided.config != self.config => GovernanceRules::new(&decided.config, self.checkpoint_interval, &self.finality),
+            Some(decided) if decided.config != self.config => GovernanceRules::new(&decided.config, self.checkpoint_interval, &self.finality, self.genesis.clone()),
             _ => self.clone(),
         })
+    }
+
+    #[cfg(feature = "governance")]
+    #[document(
+        parent = "GovernanceRules",
+        summary = "The lock a change would break in a state: a locked path where its value differs from what stands there, as Changes::in_force gives it for the epoch. None while nothing is locked, or the change keeps every lock.",
+    )]
+    pub fn broken_lock(&self, state: &State, epoch: u64, change: &Change) -> Result<Option<String>, DbError> {
+        let changes = Changes::new(state);
+        let locks = changes.locks()?;
+
+        if locks.is_empty() {
+            return Ok(None);
+        }
+
+        let standing: std::collections::HashMap<&'static str, serde_json::Value> = changes
+            .in_force(epoch, &self.genesis, &self.finality, &self.config)?
+            .iter()
+            .map(|setting| (setting.name(), crate::params::json::change_json(setting)[setting.name()].clone()))
+            .collect();
+        let stands = |name: &str| standing.get(name).cloned().unwrap_or(serde_json::Value::Null);
+
+        Ok(crate::governance::locks::broken(&locks, &crate::params::json::change_json(change), &stands).map(str::to_string))
     }
 
     #[cfg(feature = "governance")]
@@ -1130,11 +1157,27 @@ fn run(
                 Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),
                 Change::Name(name) => Ok(crate::governance::chain_name_problem(name)),
                 Change::Governance(config) => Ok(governance.config.change_problem(config)),
+                Change::Locks(paths) => match Changes::new(layer).locks() {
+                    Ok(standing) => match crate::governance::locks::adding_problem(&standing, paths) {
+                        Some(problem) => return (Err(Failure::Registry(RegistryError::BadLocks(problem))), Contracted::default()),
+                        None => Ok(None),
+                    },
+                    Err(err) => Err(err),
+                },
             };
 
             match problem {
                 Ok(None) => {}
                 Ok(Some(problem)) => return (Err(Failure::Registry(RegistryError::BadChange(problem))), Contracted::default()),
+                Err(err) => return (Err(Failure::Registry(err.into())), Contracted::default()),
+            }
+
+            // A change that moves what a lock holds is refused at every vote on it, the one that
+            // would decide it included, against what stands then: a lock added since a vote was
+            // cast holds that change too.
+            match governance.broken_lock(layer, epoch, change) {
+                Ok(None) => {}
+                Ok(Some(lock)) => return (Err(Failure::Registry(RegistryError::Locked(lock))), Contracted::default()),
                 Err(err) => return (Err(Failure::Registry(err.into())), Contracted::default()),
             }
 

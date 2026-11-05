@@ -719,3 +719,31 @@ fn the_page_fits_a_phone_upright_and_on_its_side_and_a_desktop() {
         }
     }
 }
+
+#[test]
+fn the_page_lists_the_locks_and_marks_a_setting_locked_whole() {
+    let mut value = listing();
+    value["locks"] = json!(["anchoring.enforce", "reward"]);
+    let view: GovernanceView = serde_json::from_value(value).unwrap();
+
+    assert_eq!(view.locks, ["anchoring.enforce", "reward"]);
+    assert!(locked_whole(&view, "reward") && !locked_whole(&view, "anchoring"));
+    assert_eq!(lock_words("reward"), "all of block reward");
+    assert_eq!(lock_words("limits.tx_limits.fuel"), "tx_limits fuel of limits");
+    assert_eq!(lock_words("locks"), "the locks themselves: no more may be added");
+    assert_eq!(describe(&json!({ "locks": ["dex", "reward"] }), &coin()), "Lock for good: dex, reward");
+    assert_eq!(crate::views::tx::change(&json!({ "locks": ["dex"] })), "locking dex for good");
+
+    // A node from before locks lists none.
+    let old: GovernanceView = serde_json::from_value(listing()).unwrap();
+    assert!(old.locks.is_empty());
+
+    let store = Store::default();
+    let (drawn, _) = crate::views::render_frames(&store, &mut Light::default(), 620.0, 4, |ui, ctx| {
+        locks(ui, ctx, &view);
+        in_force(ui, ctx, &view, &mut GovernanceState::default(), &coin());
+    });
+
+    assert!(drawn.iter().any(|(text, _)| text == "anchoring.enforce"), "{drawn:?}");
+    assert!(drawn.iter().any(|(text, _)| text == "locked"), "the reward, locked whole: {drawn:?}");
+}

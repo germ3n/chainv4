@@ -1078,6 +1078,10 @@ pub struct GovernanceView {
     /// is left out.
     #[serde(default)]
     pub in_force: BTreeMap<String, InForce>,
+    /// The settings no vote may change, by path, in order: genesis's and those decided since. None
+    /// from a node before locks.
+    #[serde(default)]
+    pub locks: Vec<String>,
 }
 
 impl GovernanceView {

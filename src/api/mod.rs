@@ -1446,6 +1446,7 @@ async fn governance(Shared(api): Shared<Api>) -> Answer {
         "members": rules.governance.members().map(|members| members.iter().map(Address::to_string).collect::<Vec<_>>()),
         "voters": voters.iter().map(|(account, weight)| json!({ "account": account.to_string(), "weight": weight.to_string() })).collect::<Vec<_>>(),
         "in_force": in_force(&api, &state, epoch, decided.version)?,
+        "locks": changes.locks()?,
     })))
 }
 
@@ -1470,31 +1471,9 @@ fn tally_json(tally: &crate::registry::changes::Tally) -> Value {
 /// Each setting governance may change, as it stands in the tip's state, under its kind: genesis's
 /// while governance never changed it, with decided naming the version that last did, or null.
 fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, ApiError> {
-    use crate::governance::Change;
     let rules = api.rules.governance.as_ref().expect("only a governed chain asks");
-    let changes = Changes::new(state);
-    let genesis = &api.genesis;
-    let limits = genesis.block_limits();
-    let settings = [
-        // The consensus the tip's epoch runs: fixed for it at a checkpoint, else genesis's.
-        Some(Change::Consensus(changes.consensus_for(epoch)?.unwrap_or_else(|| genesis.consensus.clone()))),
-        changes.name()?.map(Change::Name),
-        Some(Change::Bootnodes(api.bootnodes(state)?)),
-        changes.names()?.or_else(|| genesis.names.as_ref().map(crate::registry::names::NamesConfig::settings)).map(Change::Names),
-        api.rules.standards_in(state).map(|standards| Change::TokenFunctions(standards.tokens.to_vec()))?.into(),
-        Some(Change::EvmSpec { spec: changes.evm_specs()?.eras.last().map_or(genesis.evm_spec.unwrap_or_default(), |(_, spec)| *spec), from: changes.evm_specs()?.eras.last().map_or(0, |(from, _)| *from) }),
-        Some(Change::Dex(changes.dex()?.or(genesis.dex).unwrap_or_default())),
-        Some(Change::Anchoring(changes.anchoring()?.or_else(|| genesis.anchoring.clone()).unwrap_or_default())),
-        api.rules.standards_in(state)?.collections.map(Change::Collections),
-        changes.federation()?.map(|decided| decided.federation).or_else(|| genesis.federation.clone()).map(Change::Federation),
-        changes.directory()?.map(Change::Directory),
-        changes.fees()?.or_else(|| genesis.fees.clone()).map(Change::Fees),
-        Some(Change::Reward(changes.reward()?.map_or(genesis.reward, |decided| decided.reward))),
-        Some(Change::Limits(changes.limits()?.unwrap_or(limits))),
-        Some(Change::Finality(changes.finality_in(epoch, &rules.finality)?)),
-        changes.upgrade()?.map(Change::Upgrade),
-        Some(Change::Governance(rules.in_state(state)?.config)),
-    ];
+    // What the chain compares a change with to hold its locks, the same list.
+    let settings = Changes::new(state).in_force(epoch, &rules.genesis, &rules.finality, &rules.in_state(state)?.config)?;
     // The version that last changed each kind, from the decisions this node indexed.
     let mut last = HashMap::new();
 
@@ -1506,7 +1485,7 @@ fn in_force(api: &Api, state: &State, epoch: u64, newest: u64) -> Result<Value, 
 
     let mut value = json!({});
 
-    for change in settings.into_iter().flatten() {
+    for change in settings {
         let kind = change.name();
         let mut setting = json!({ "value": json::change(&change).as_object().and_then(|change| change.values().next().cloned()).unwrap_or(Value::Null) });
         // A switch of finality's kind is decided as a change of its own, of the same setting.

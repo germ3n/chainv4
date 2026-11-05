@@ -38,6 +38,7 @@ const UPGRADE: &[u8] = b"change:upgrade";
 const NAME: &[u8] = b"change:name";
 const GOVERNANCE: &[u8] = b"change:governance";
 const REJECTED: &[u8] = b"change:rejected";
+const LOCKS: &[u8] = b"change:locks";
 
 /// How many changes of one kind were decided, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -338,6 +339,47 @@ pub struct DecidedGovernance {
 }
 
 impl Hashable for DecidedGovernance {}
+
+/// The locks that stand, as a state value: genesis's and those decided since, in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct Locks {
+    paths: Vec<String>,
+}
+
+impl Hashable for Locks {}
+
+#[document(
+    summary = "What genesis set of each setting governance changes: what Changes::in_force gives for a setting while governance decided none of it. Built once from genesis, with the chain's governance rules.",
+    category = "Governance",
+    see_also = "Changes::in_force, Genesis::governance_settings",
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenesisSettings {
+    #[document(summary = "The consensus, which genesis fixes for its first epochs.")]
+    pub consensus: ConsensusConfig,
+    #[document(summary = "The bootnodes.")]
+    pub bootnodes: Vec<String>,
+    #[document(summary = "The names' prices, grace and most years, on a chain with names.")]
+    pub names: Option<crate::registry::names::NameSettings>,
+    #[document(summary = "What makes a token.")]
+    pub token_functions: Vec<String>,
+    #[document(summary = "What makes a collection, if genesis keeps a registry.")]
+    pub collections: Option<crate::registry::collections::CollectionFunctions>,
+    #[document(summary = "The EVM's spec, Prague while genesis names none.")]
+    pub evm_spec: crate::params::vm::EvmSpec,
+    #[document(summary = "The DEX's fee.")]
+    pub dex: crate::params::vm::DexSettings,
+    #[document(summary = "Anchoring's settings, all off while genesis names none.")]
+    pub anchoring: crate::params::anchoring::AnchorSettings,
+    #[document(summary = "The bridges' federation, if any.")]
+    pub federation: Option<crate::registry::federation::Federation>,
+    #[document(summary = "The fees, on a chain with them.")]
+    pub fees: Option<crate::params::fees::FeeConfig>,
+    #[document(summary = "The block reward.")]
+    pub reward: crate::params::Reward,
+    #[document(summary = "The limits, as a change of limits carries them.")]
+    pub limits: crate::params::BlockLimits,
+}
 
 /// How many changes were rejected, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -651,6 +693,60 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, GOVERNANCE)
     }
 
+    #[document(parent = "Changes", summary = "The locks that stand, in order: genesis's, written as the chain starts, and every one decided since. None is ever taken away.")]
+    pub fn locks(&self) -> Result<Vec<String>, DbError> {
+        Ok(self.state.get_value::<Locks>(Column::Validators, LOCKS)?.unwrap_or_default().paths)
+    }
+
+    #[document(parent = "Changes", summary = "Adds locks to those that stand, keeping them in order, each once: genesis's as the chain starts, or a decided Change::Locks's. One state entry, change:locks, so a light client proves them.")]
+    pub fn add_locks(&self, paths: &[String]) -> Result<(), DbError> {
+        let mut locks = self.locks()?;
+        locks.extend_from_slice(paths);
+        locks.sort();
+        locks.dedup();
+        self.state.put_value(Column::Validators, LOCKS.to_vec(), &Locks { paths: locks });
+
+        Ok(())
+    }
+
+    #[cfg(feature = "governance")]
+    #[document(
+        parent = "Changes",
+        summary = "Every setting governance changes, as it stands in this state: the consensus fixed for the epoch, the finality it runs, and of every other setting the last decided, or genesis's while none was, with the locks; what GET /governance shows as in_force and what a lock compares a change with. A setting with neither, such as a chain's first directory, is left out.",
+        params = {
+            epoch = "The epoch it is read for.",
+            genesis = "What genesis set.",
+            finality = "Genesis's finality.",
+            governance = "Governance's own settings in force.",
+        },
+    )]
+    pub fn in_force(&self, epoch: u64, genesis: &GenesisSettings, finality: &crate::params::finality::FinalityConfig, governance: &crate::governance::GovernanceConfig) -> Result<Vec<Change>, DbError> {
+        let specs = self.evm_specs()?;
+        let collections = self.collections()?.or_else(|| genesis.collections.clone());
+        let settings = [
+            Some(Change::Consensus(self.consensus_for(epoch)?.unwrap_or_else(|| genesis.consensus.clone()))),
+            self.name()?.map(Change::Name),
+            Some(Change::Bootnodes(self.bootnodes()?.unwrap_or_else(|| genesis.bootnodes.clone()))),
+            self.names()?.or_else(|| genesis.names.clone()).map(Change::Names),
+            Some(Change::TokenFunctions(self.token_functions()?.unwrap_or_else(|| genesis.token_functions.clone()))),
+            Some(Change::EvmSpec { spec: specs.eras.last().map_or(genesis.evm_spec, |(_, spec)| *spec), from: specs.eras.last().map_or(0, |(from, _)| *from) }),
+            Some(Change::Dex(self.dex()?.unwrap_or(genesis.dex))),
+            Some(Change::Anchoring(self.anchoring()?.unwrap_or_else(|| genesis.anchoring.clone()))),
+            collections.map(Change::Collections),
+            self.federation()?.map(|decided| decided.federation).or_else(|| genesis.federation.clone()).map(Change::Federation),
+            self.directory()?.map(Change::Directory),
+            self.fees()?.or_else(|| genesis.fees.clone()).map(Change::Fees),
+            Some(Change::Reward(self.reward()?.map_or(genesis.reward, |decided| decided.reward))),
+            Some(Change::Limits(self.limits()?.unwrap_or(genesis.limits))),
+            Some(Change::Finality(self.finality_in(epoch, finality)?)),
+            self.upgrade()?.map(Change::Upgrade),
+            Some(Change::Governance(governance.clone())),
+            Some(Change::Locks(self.locks()?)),
+        ];
+
+        Ok(settings.into_iter().flatten().collect())
+    }
+
     #[document(parent = "Changes", summary = "How many changes were rejected since genesis, of every kind: the count a light client follows without gaps, as it does the decisions.")]
     pub fn rejections(&self) -> Result<u64, DbError> {
         Ok(self.state.get_value::<Rejections>(Column::Validators, REJECTED)?.unwrap_or_default().count)
@@ -731,6 +827,10 @@ impl<'a> Changes<'a> {
             Change::Upgrade(upgrade) => self.upgrade()?.as_ref() == Some(upgrade),
             Change::Name(name) => self.name()?.as_ref() == Some(name),
             Change::Governance(config) => self.governance()?.map(|decided| decided.config).as_ref() == Some(config),
+            Change::Locks(paths) => {
+                let standing = self.locks()?;
+                paths.iter().all(|path| standing.contains(path))
+            }
         };
 
         if same {
@@ -887,6 +987,12 @@ impl<'a> Changes<'a> {
                 eras.eras.retain(|era| era.from < from);
                 eras.eras.push(FinalityEra { from, config });
                 self.state.put_value(Column::Validators, FINALITY.to_vec(), &eras);
+
+                decided.consensus
+            }
+            // Locks hold at once, for every vote after this one: they are only ever added to.
+            Change::Locks(paths) => {
+                self.add_locks(&paths)?;
 
                 decided.consensus
             }

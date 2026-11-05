@@ -19,7 +19,7 @@ use {
 const DEV: u128 = 1_000_000_000_000_000_000;
 
 fn env<'a>() -> Env<'a> {
-    Env { decimals: 18, symbol: "DEV", epoch: 40, tip: Some(1_000), finality: Some("ffg"), consensus: Some("pow"), switching: false }
+    Env { decimals: 18, symbol: "DEV", epoch: 40, tip: Some(1_000), finality: Some("ffg"), consensus: Some("pow"), switching: false, locks: &[], in_force: &[] }
 }
 
 fn compressed(byte: u8) -> [u8; 33] {
@@ -143,6 +143,7 @@ fn every_shape() -> Vec<Change> {
         Change::Collections(chainv4::registry::collections::CollectionFunctions::standard()),
         Change::Federation(Federation { signers: vec![compressed(2), compressed(3), compressed(4)], threshold: 2, chain_depth: 20, evm_depth: 12, bitcoin_depth: 6, btc: None }),
         Change::Directory(directory()),
+        Change::Locks(vec!["anchoring.enforce".to_string(), "reward".to_string()]),
     ]
 }
 
@@ -702,4 +703,93 @@ fn ethlight_network() -> Vec<u8> {
     network.name = "private".into();
 
     network.encode()
+}
+
+#[test]
+fn every_field_of_the_form_is_a_path_a_lock_may_name() {
+    use chainv4::governance::locks::path_problem;
+
+    for kind in crate::views::governance::KINDS {
+        assert_eq!(path_problem(kind), None, "{kind}");
+
+        // A switch is locked whole: what it sets is held by finality's locks.
+        for spec in schema(kind).iter().filter(|spec| !spec.path.is_empty()) {
+            let path = match kind {
+                "switch_finality" => match spec.path.strip_prefix("finality.") {
+                    Some(rest) => format!("finality.{rest}"),
+                    None => continue,
+                },
+                kind => format!("{kind}.{}", spec.path),
+            };
+
+            assert_eq!(path_problem(&path), None, "{path}");
+        }
+    }
+}
+
+#[test]
+fn a_locked_field_shows_what_stands_while_the_rest_of_the_kind_changes() {
+    let stands = change_json(&Change::Fees(fees(ScheduleConfig::Weighted(weights()), base_fee())))["fees"].clone();
+    let in_force = [crate::views::governance::Setting { kind: "fees".to_string(), value: stands.clone(), decided: None }];
+    let locks = vec!["fees.burn_permille".to_string(), "fees.costs.hash".to_string(), "reward".to_string()];
+    let env = Env { locks: &locks, in_force: &in_force, ..env() };
+    let spec = |kind: &str, path: &str| schema(kind).into_iter().find(|spec| spec.path == path).unwrap();
+
+    assert_eq!(lock_on("fees", &spec("fees", "burn_permille"), &env), Some("fees.burn_permille"));
+    assert_eq!(lock_on("fees", &spec("fees", "block_gas_limit"), &env), None);
+    assert_eq!(lock_on("fees", &spec("fees", "costs"), &env), Some("fees.costs.hash"), "switching the costs on or off would move it");
+    assert_eq!(lock_on("fees", &spec("fees", "costs.hash"), &env), Some("fees.costs.hash"));
+    assert_eq!(lock_on("fees", &spec("fees", "costs.call"), &env), None);
+    assert_eq!(lock_on("reward", &spec("reward", "initial"), &env), Some("reward"), "a kind locked whole holds every field");
+
+    // The rest of the kind changes.
+    let mut draft = Draft::of("fees", Some(&stands), &env);
+    draft.texts.insert("block_gas_limit".to_string(), "60000000".to_string());
+    let built = build("fees", &draft, Some(&stands), &env);
+    assert_eq!(built.errors, BTreeMap::new());
+    assert!(built.change.is_some());
+
+    // What only Advanced could type past it is refused under its field, in the node's words.
+    draft.texts.insert("burn_permille".to_string(), "600".to_string());
+    let built = build("fees", &draft, Some(&stands), &env);
+    assert_eq!(built.change, None);
+    assert_eq!(built.errors.get("burn_permille").map(String::as_str), Some("fees.burn_permille is locked"));
+
+    // The locked field draws as a field that stays, marked locked, on a phone too.
+    let ctx = egui::Context::default();
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(340.0, 4000.0));
+    let mut widest: f32 = 0.0;
+    let built = build("fees", &Draft::of("fees", Some(&stands), &env), Some(&stands), &env);
+
+    for _ in 0..2 {
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            widest = ui.scope(|ui| draw(ui, &theme::DARK, "fees", &mut draft, Some(&stands), &env, &built)).response.rect.right();
+        });
+        output.textures_delta.clear();
+    }
+
+    assert!(widest <= 340.5, "{widest}");
+}
+
+#[test]
+fn a_change_of_locks_names_paths_each_once_and_none_locked_already() {
+    let locks = vec!["reward".to_string()];
+    let open = Env { locks: &locks, ..env() };
+    let mut draft = Draft::of("locks", None, &open);
+
+    draft.lists.insert(String::new(), vec!["dex".to_string(), "anchoring.enforce".to_string()]);
+    assert_eq!(build("locks", &draft, None, &open).change, Some(Change::Locks(vec!["anchoring.enforce".to_string(), "dex".to_string()])), "put in order");
+
+    draft.lists.insert(String::new(), vec!["dex.nothing".to_string()]);
+    assert!(build("locks", &draft, None, &open).errors.values().any(|why| why.contains("names nothing in dex")));
+
+    draft.lists.insert(String::new(), vec!["reward.initial".to_string()]);
+    assert_eq!(build("locks", &draft, None, &open).errors.get(GENERAL).map(String::as_str), Some("reward.initial is locked already, under reward"));
+
+    // Locks locked: no more may be added.
+    let frozen = vec!["locks".to_string()];
+    let in_force = [crate::views::governance::Setting { kind: "locks".to_string(), value: serde_json::json!(["locks"]), decided: None }];
+    let frozen = Env { locks: &frozen, in_force: &in_force, ..env() };
+    draft.lists.insert(String::new(), vec!["dex".to_string()]);
+    assert_eq!(build("locks", &draft, None, &frozen).errors.get(GENERAL).map(String::as_str), Some("locks is locked"));
 }

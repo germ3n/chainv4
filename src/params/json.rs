@@ -1180,6 +1180,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::EvmSpec { spec, from } => json!({ "evm_spec": { "spec": spec.name(), "from": from } }),
         Change::Dex(dex) => json!({ "dex": dex_json(dex) }),
         Change::Anchoring(settings) => json!({ "anchoring": anchoring_json(settings) }),
+        Change::Locks(paths) => json!({ "locks": paths }),
     }
 }
 
@@ -1285,6 +1286,30 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
             checked(config.problem())?;
 
             Change::Governance(config)
+        }
+        // The paths to add, put in order, each once: what the chain takes.
+        "locks" => {
+            let mut paths = value
+                .as_array()
+                .ok_or("locks must be a list of paths, such as [\"anchoring.enforce\"]")?
+                .iter()
+                .map(|path| path.as_str().map(|path| path.trim().to_string()).ok_or("locks must be strings"))
+                .collect::<Result<Vec<_>, _>>()?;
+            paths.sort();
+
+            if paths.is_empty() {
+                return Err("locks: name at least one path to lock".to_string());
+            }
+
+            if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err("locks: name each path once".to_string());
+            }
+
+            if let Some(problem) = paths.iter().find_map(|path| crate::governance::locks::path_problem(path)) {
+                return Err(format!("locks: {problem}"));
+            }
+
+            Change::Locks(paths)
         }
         other => return Err(format!("{other} is not something governance changes")),
     };

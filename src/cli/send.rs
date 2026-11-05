@@ -210,7 +210,7 @@ pub enum TxArgs {
     /// governance changes. A new vote replaces this account's old one on the same change. Sign
     /// with an account governance lets vote: a validator's or signer's account under the
     /// electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("what").required(true).args(["change", "governance", "consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name"]))]
+    #[command(group = clap::ArgGroup::new("what").required(true).args(["change", "governance", "consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name", "lock"]))]
     VoteChange {
         /// yes, no or abstain. Abstain counts toward the quorum alone.
         #[arg(long)]
@@ -285,6 +285,11 @@ pub enum TxArgs {
         /// A new name for the chain, such as "chainv4 testnet": what the apps call the network.
         #[arg(long)]
         chain_name: Option<String>,
+        /// Settings to lock for good, by path, separated by commas: a change's name, such as
+        /// reward, or a field of it, such as anchoring.enforce or limits.tx_limits.fuel. Once
+        /// decided, no vote changes them, and nothing unlocks them.
+        #[arg(long, value_delimiter = ',')]
+        lock: Option<Vec<String>>,
         /// The version of the decision this changes. Defaults to the one the node reports.
         #[arg(long)]
         version: Option<u64>,
@@ -1149,6 +1154,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             upgrade,
             upgrade_from,
             chain_name,
+            lock,
             version,
         } => {
             use crate::governance::Change;
@@ -1184,6 +1190,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 (_, _, _, _, _, _) if reward.is_some() => Change::Reward(super::genesis::reward_from_text(&over("reward", reward.as_deref())).map_err(|why| format!("--reward: {why}"))?),
                 (_, _, _, _, _, _) if limits.is_some() => Change::Limits(super::genesis::limits_from_text(&over("limits", limits.as_deref())).map_err(|why| format!("--limits: {why}"))?),
                 (_, _, _, _, _, _) if finality.is_some() => Change::Finality(super::genesis::finality_from_text(&over("finality", finality.as_deref())).map_err(|why| format!("--finality: {why}"))?),
+                (_, _, _, _, _, _) if lock.is_some() => crate::params::json::change_from_json(&json!({ "locks": lock.unwrap_or_default() })).map_err(|why| format!("--lock: {why}"))?,
                 (_, _, _, _, _, _) if chain_name.is_some() => {
                     let name = chain_name.unwrap_or_default();
 
@@ -1244,6 +1251,12 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 (None, None, None, None, None, None) => unreachable!("clap requires one"),
             };
 
+            // What a lock holds is refused here, as the chain would refuse it, before anything is
+            // signed or sent.
+            if let Some(why) = locked_problem(&governance, &change) {
+                return Err(why.into());
+            }
+
             // The version of the change's kind: each kind's ballot is its own.
             let version = match version {
                 Some(version) => version,
@@ -1289,6 +1302,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                     format!("a directory of {listed}")
                 }
                 crate::governance::Change::Governance(config) => format!("governance's settings: {}", crate::chain::json::governance_json(config)),
+                crate::governance::Change::Locks(paths) => format!("locking {} for good", paths.join(", ")),
             };
             println!("voting {} on {what}, from version {version}", vote.name());
 
@@ -1465,6 +1479,24 @@ pub(super) fn pooled(tls: &TlsArgs, connections: usize) -> CliResult<Agent> {
         .tls_config(config.build())
         .build()
         .into())
+}
+
+#[cfg(feature = "governance")]
+/// Why the chain would refuse a change for its locks, as GET /governance lists them: one of them
+/// holds a path the change moves from what stands, as in_force shows it, or a change of locks adds
+/// what it cannot. The chain's own words.
+pub(super) fn locked_problem(governance: &Value, change: &crate::governance::Change) -> Option<String> {
+    let locks: Vec<String> = governance["locks"].as_array().into_iter().flatten().filter_map(|lock| lock.as_str().map(str::to_string)).collect();
+
+    if let crate::governance::Change::Locks(paths) = change
+        && let Some(problem) = crate::governance::locks::adding_problem(&locks, paths)
+    {
+        return Some(problem);
+    }
+
+    let stands = |name: &str| governance["in_force"][name]["value"].clone();
+
+    crate::governance::locks::broken(&locks, &crate::params::json::change_json(change), &stands).map(|lock| format!("{lock} is locked"))
 }
 
 /// The JSON a request came back with, or the node's error.

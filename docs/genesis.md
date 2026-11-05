@@ -48,6 +48,7 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `bootnodes` | Where nodes of the chain find their first peers: up to 32 libp2p addresses, such as `/ip4/203.0.113.7/udp/4001/quic-v1`, each named once. Every node dials them while it has fewer peers than `--target-peers`. Fixed with the chain's id; under governance, `approve-change --bootnodes` replaces them on the live chain. Left out or `[]`, none, and a file from before it keeps its id. See [Node](node.md#finding-peers). |
 | `names` | `null` for a chain without names, or the [name registry](names.md#turning-it-on): `suffix`, `prices` by length, `grace_ms` and `max_years`. The dev chains have names under `dev`. Left out, `null`, and a file from before it keeps its id. `chainv4 genesis --names SUFFIX` sets the suffix, `--names none` leaves them out. |
 | `governance` | `null`, or how the chain changes what genesis set by transaction: the kind and its settings, by `type`: `electorate` or `council`. Needs finality that votes. Left out or `null`, nothing changes, and a file from before it keeps its id. `chainv4 genesis --governance electorate` sets it. See [Governance](governance.md). |
+| `locked` | Settings no vote may ever change, by path: a change's name, such as `"reward"`, alone or followed by its fields' names as `GET /governance` writes the change, such as `"anchoring.enforce"`, `"federation.threshold"` or `"limits.tx_limits.fuel"`; each named once. Governance may add more (`Change::Locks`) and nothing takes one away; `"locks"` itself freezes the set. Needs `governance`. Left out or `[]`, nothing is locked, and a file from before it keeps its id; written into the state from the first block while it names any. See [Locks](governance.md#locks). |
 
 Governance may replace `fees`, `reward`, `tx_limits` with `max_block_bytes`, and finality's
 tunables on a running chain (see [Governance](governance.md#fees)); the file, and the chain's id,
@@ -160,6 +161,8 @@ of transaction the scorer is called for, such as `["call", "deploy"]`; left out,
 - **`names`** with a suffix that is not one label, no prices or more than 61, or `max_years` 0.
 - **`governance`** without finality that votes, with an `approval_epochs` of 0, or a council with
   no members, a member named twice, or a `threshold` of 0 or more than the members.
+- **`locked`** without `governance`, with a path that names nothing (`reward.initia`, `colour`,
+  `switch_finality.epoch`), or with a path twice.
 - **Fees:**
   - a `block_gas_limit` of 0, a `burn_permille` over 1000, or a `fuel_per_gas` of 0;
   - a scorer's `kinds` naming something that is no kind of transaction, or one twice;

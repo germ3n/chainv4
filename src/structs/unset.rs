@@ -118,6 +118,35 @@ unsafe impl<C: Config, T: SchemaWrite<C, Src = T>> SchemaWrite<C> for UnsetOptio
 }
 
 #[document(
+    summary = "Encodes a list of strings added after chains launched to a type that is hashed but never decoded, such as Genesis: as nothing at all while empty, and as a 1 and the list once it holds anything, as UnsetOption encodes Some. As Unset, only for a type's last fields.",
+    category = "Chain",
+    see_also = "UnsetOption, Genesis::locked",
+)]
+pub struct UnsetMarkedList;
+
+// SAFETY: size_of is exactly what write writes: nothing when empty, a byte and the list otherwise.
+unsafe impl<C: Config> SchemaWrite<C> for UnsetMarkedList {
+    type Src = Vec<String>;
+
+    fn size_of(src: &Vec<String>) -> WriteResult<usize> {
+        match src.is_empty() {
+            true => Ok(0),
+            false => Ok(1 + <Vec<String> as SchemaWrite<C>>::size_of(src)?),
+        }
+    }
+
+    fn write(mut writer: impl Writer, src: &Vec<String>) -> WriteResult<()> {
+        if src.is_empty() {
+            return Ok(());
+        }
+
+        <[u8; 1] as SchemaWrite<C>>::write(&mut writer, &[1])?;
+
+        <Vec<String> as SchemaWrite<C>>::write(writer, src)
+    }
+}
+
+#[document(
     summary = "Encodes a value framed: its encoding's length, eight bytes little-endian, then the encoding, read back as a message of its own. For a type whose last fields are Unset ones, which read only at a message's end, carried in the middle of another: the finality config a governance change names.",
     category = "Chain",
     see_also = "Unset, Change::Finality",

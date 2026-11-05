@@ -54,6 +54,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "evm_spec": genesis.evm_spec.map(|spec| spec.name()),
         "dex": genesis.dex.as_ref().map(crate::params::json::dex_json),
         "anchoring": genesis.anchoring.as_ref().map(crate::params::json::anchoring_json),
+        "locked": genesis.locked,
     })
 }
 
@@ -198,6 +199,16 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         true => root.optional_object("anchoring")?.map(crate::params::json::anchoring_from_json).transpose()?,
         false => None,
     };
+    // Absent from files written before it: those chains keep their id, with nothing locked.
+    let locked = match root.map.contains_key("locked") {
+        true => root.strings("locked")?,
+        false => Vec::new(),
+    };
+
+    if let Some(problem) = crate::governance::locks::genesis_problem(&locked) {
+        return Err(problem);
+    }
+
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -229,6 +240,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         evm_spec,
         dex,
         anchoring,
+        locked,
     };
     root.done()?;
 
