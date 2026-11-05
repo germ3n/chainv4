@@ -14,7 +14,7 @@ which shows as `cannot reach the node: timeout`.
 B=~/.chainv4-pow/bin/chainv4
 N=https://chain.homepage.gs       # the public node's API, behind nginx
 K=~/.chainv4-pow/owner.key
-VPS=root@66.78.40.94; SSH="ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes"
+VPS=root@150.40.117.239; SSH="ssh -i ~/.ssh/id_kyun2 -o IdentitiesOnly=yes"
 ```
 
 ## 0. Fresh machines
@@ -103,7 +103,7 @@ directory's and shows the flags apart as `operator`, which only fills what the d
 unset.
 
 ```sh
-docker/pow.sh push $VPS -i ~/.ssh/id_kyun
+docker/pow.sh push $VPS -i ~/.ssh/id_kyun2
 $SSH $VPS 'cd chainv4 && docker/pow.sh reset --yes'
 $SSH $VPS 'cd chainv4 && (setsid nohup docker/pow.sh up > /root/pow-up.log 2>&1 < /dev/null &)'
 until curl -s $N/status | grep -q '"genesis":"0x<new id>'; do sleep 20; done    # ~5 minutes
@@ -126,8 +126,8 @@ restart nginx with it.
 them without compiling (see [Docker](docker.md#building-once-for-several-servers)):
 
 ```sh
-docker/pow.sh images root@66.78.40.57 root@66.78.40.94 root@65.87.7.168 -i ~/.ssh/KEY
-for h in 66.78.40.94 65.87.7.168; do
+docker/pow.sh images root@150.40.117.247 root@150.40.117.239 root@150.40.117.196 -i ~/.ssh/KEY
+for h in 150.40.117.239 150.40.117.196; do
   $SSH root@$h 'cd chainv4 && (setsid nohup docker/pow.sh up --no-build > /root/pow-up.log 2>&1 < /dev/null &)'
 done
 ```
@@ -294,7 +294,7 @@ curl --socks5-hostname 127.0.0.1:9050 http://ADDRESS.onion/status
 ## 7. The laptop and the apps
 
 ```sh
-nohup docker/pow.sh join 66.78.40.94 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
+nohup docker/pow.sh join 150.40.117.239 --cpu > ~/.chainv4-pow/join.log 2>&1 &   # never the GPU
 sh <scratchpad>/apps-build.sh      # trunk web bundles, then arm64 APKs of the explorer and wallet
 ```
 
@@ -307,20 +307,21 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0x2b86ad5c2f22d659…`, 2026-11-01, named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; a block mints 10, halving every 2,000,000 blocks, about 116 days, and a vote 0.01; names under `cv4` |
-| Machines | Public node `66.78.40.94`, others `66.78.40.57` and `65.87.7.168`: 2 cores, 4 GB and 50 GB each, with 4 GB of swap and the [firewall](docker.md#firewall) |
+| Genesis | `0xb04eef3aff841df3…`, 2026-11-05 (the seventh), named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; on the old keys, their rotation still to come |
+| Machines | Public node `150.40.117.239` (`chain.homepage.gs`), others `150.40.117.247` (builds the images) and `150.40.117.196`: Debian forky, 2 cores, 4 GB and 46 GB each, with 4 GB of swap and the [firewall](docker.md#firewall); `ssh -i ~/.ssh/id_kyun2` |
 | Swap contract, `swap.cv4` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.cv4` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
 | NFT factory, `nfts.cv4` | `contract:0x5c352729…4297` |
-| Gateway, `gateway.cv4` | `contract:0x4a8fe33e…cacd` |
-| Bitcoin relay, `btcrelay.cv4` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0xb0c23ea9…1ff0`, a key on the public node |
-| Bitcoin gateway, `btcgateway.cv4` | `contract:0x034178c0…5e2d`, signers on the servers, one key each, under `chainv4-signer` |
-| Swap.sol | `0xb3f77d55ac803f023df8f4d21fd1d103e5be2d50` |
-| Tokens `gold.cv4`, `silver.cv4`, `tusd.cv4`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin, 1,000 CV4 to 10,000; TETH `0x2625baf4…c4c9`, 100 CV4 to 400 on the EVM DEX |
-| Collections `pixels.cv4`, `items.cv4` | `contract:0x48ae529c…73cd`, 3 NFTs; `contract:0xf915ac76…2406`, ids 1 and 2, 100 each |
+| Gateway, `gateway.cv4` | `contract:0xe6912df3…55dc` |
+| Bitcoin relay, `btcrelay.cv4` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0x13813a41…4a7b`, a key on the public node |
+| Bitcoin gateway, `btcgateway.cv4` | `contract:0xc53df990…04e7`, signers on the servers, one key each, under `chainv4-signer` |
+| Sepolia Gateway.sol | `0x077697feade01edde53f34b43f1bf84a176588ce`, from Sepolia block 12070089, peered and in the directory |
+| Swap.sol | `0x14ee1befcc7efde4801bb6535c0521f9e09a4e4a` |
+| Tokens `gold.cv4`, `silver.cv4`, `tusd.cv4`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH `0x2625baf4…c4c9` on the EVM DEX |
+| Collections `pixels.cv4`, `items.cv4` | `contract:0x48ae529c…73cd`; `contract:0xf915ac76…2406` |
 | Examples | `guestbook.cv4`, `counter.cv4`, Counter.sol `0x3c262351…88e8` |
 | Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
-| Onion | `njo4fijntpqch73yv4477hhn2vcngnpcxtw2vb4qwjasqdwbdeektuqd.onion` |
-| Mining | An open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`): `chainv4 worker --node https://66-78-40-94.sslip.io --payout ADDRESS`, over `/mining/ws` behind nginx. `66.78.40.94:4002` is the same port over plain TCP, for `--insecure-open-port` alone |
+| Onion | `l4vxo57pjimu7gowftwrcnvytb4b3vrywo34cxi3etc56vqpvams4iid.onion` |
+| Mining | An open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`): `chainv4 worker --node https://chain.homepage.gs --payout ADDRESS`, over `/mining/ws` |
 | Apps | https://gofile.io/d/QkxlLYsI |

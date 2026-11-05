@@ -140,7 +140,7 @@ validators' bonds, governance, or the relay's key, and restart nothing.
 - **The onion address, from outside:** through Tor to the explorer, the wallet and the API. `docker/pow.sh onion`
   on the public node prints the address: see [Deploying](deploy.md).
 
-**Also watch:** node logs for panics and reorgs (`ssh -i ~/.ssh/id_kyun -o IdentitiesOnly=yes`, read-only), and
+**Also watch:** node logs for panics and reorgs (`ssh -i ~/.ssh/id_kyun2 -o IdentitiesOnly=yes`, read-only), and
 whether any app hits the rate limit by itself, as the wallet did.
 
 **Report:** a table of each exercise: what you ran, the transaction ids, what the chain said, and what the apps
