@@ -51,10 +51,10 @@ three ways:
 - **Top-level locals would survive.** In Lua they live on as upvalues, so
   `local calls = 0; function M.count() calls += 1 end` would count across calls and
   transactions, differently on each node.
-- **Memory limits would depend on history.** The memory limit counts the whole heap. In a reused
-  state, the heap holds leftovers that depend on what that node ran before: garbage, interned
-  strings, the garbage collector's pacing. A call near the limit could then fail on one node and
-  pass on another.
+- **Memory limits would depend on history.** In a reused state, the heap holds leftovers that
+  depend on what that node ran before: garbage, interned strings, where the garbage collector is
+  in its cycle. The collector frees that garbage while the next call runs, so a call near the
+  limit could fail on one node and pass on another (see [Memory](#memory)).
 - **Nested calls would share limits.** Each call in a chain of calls has its own fuel and memory
   limit; in one shared state they would share them.
 
@@ -420,6 +420,43 @@ A call that runs out of fuel fails with `OutOfFuel`. On a chain with fees, fuel 
 gas limit bounds the fuel too (see [Fees](fees.md)).
 
 Storage keys are at most 256 bytes and values at most 64 KiB.
+
+## Memory
+
+Each call may hold `tx_limits.memory` bytes, 32 MiB on the dev chains. A call past it fails with
+`OutOfMemory`, and every node must fail it at the same allocation, with the same fuel used, or
+their receipts differ.
+
+**In Lua, the forked Luau counts it:**
+- **From zero, at the call's start.** What the pristine state already holds, about 95 KiB of
+  libraries and environment, is not counted.
+- **By the sizes Luau asks for:** every string, table, function, userdata, buffer and stack, as it
+  is made or grows. What the collector frees comes off.
+- **Not by what the allocator holds.** Luau keeps small objects in pages, and which allocation
+  needs a new page depends on where earlier frees left room, so a count of pages would move
+  differently for the same script.
+- **Caught or not.** A script can `pcall` running out and go on, with what it still holds counted.
+- **Strings are interned.** Luau keeps one copy of each string, so making the same text twice
+  counts once.
+
+**The collector runs on bytes alone.** It starts a cycle once the heap is twice what the last one
+left (Luau's goal of 200%) and does a fixed amount of work per kilobyte allocated, so it frees
+garbage at the same allocations on every node.
+- **Not on the clock.** Upstream Luau starts a cycle early by a guess of how much the program
+  allocates while it marks, made from the clock. A loaded machine took longer, started earlier, and
+  freed garbage at other points. Under load, a call that made garbage up to the limit failed a few
+  strings sooner, for less fuel. The block that was built and the same block imported then gave
+  different receipts (seen 2026-11-05). The fork starts every cycle at the goal.
+- **Pristine states wait collected.** Each one is fully collected once built, so every call starts
+  with the same heap and the collector paused, however long the state waited.
+- **Weak tables** lose their entries at those same points, so what one still holds is the same on
+  every node too.
+
+**Across platforms:** the sizes are those of a 64-bit build, the same on x86-64 and arm64. A 32-bit
+build would count smaller objects and run out later.
+
+**In WebAssembly**, the limit is on the module's linear memory, in 64 KiB pages: a `memory.grow`
+past it fails the call with `OutOfMemory`, and a module that starts with more cannot load.
 
 ## Lua contracts
 

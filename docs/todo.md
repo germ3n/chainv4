@@ -549,7 +549,17 @@ with.
 
 ### Script layer
 
-- [ ] **A Lua block came out two ways on one machine (seen 2026-11-05).**
+- [ ] **Push the Luau and mlua forks, then drop the local `[patch]`.** The Lua memory fix lives in
+  `germ3n/luau-src-rs` 93df670 and `germ3n/mlua` 3832a79, committed locally only. chainv4's
+  `Cargo.toml` points at `../luau-src-rs` and `../mlua` until they are pushed, so no server or CI
+  can build it until then. After the push, remove the `[patch]` section and run
+  `cargo update -p luau0-src -p mlua`.
+- [x] **A Lua block came out two ways on one machine (seen 2026-11-05).** Fixed 2026-11-05. Luau's
+  collector timed its cycles by the clock (`getheaptrigger` read `lua_clock()`), so under load it
+  freed garbage at other points, and a call near the memory limit failed at another allocation, for
+  other fuel. Now every cycle starts at the heap goal, the limit is counted in Luau from zero by the
+  sizes it asks for, and pristine states are collected once built. Proven by 60 calls under load,
+  which came out four ways before and one way after.
   `chain::tests::pentest_lua::building_big_strings_stops_at_the_memory_limit` once failed with
   `Invalid(ReceiptsRoot)`, under load from a parallel build. The block that was built and the same
   block imported gave different receipts. It passed every time alone. The likely cause is Lua's
@@ -559,6 +569,8 @@ with.
   deterministic. One way is to count what the script asked to allocate, not what the allocator
   holds. Another is to collect at fixed points.
 - [ ] **Check that memory limits and fuel metering come out the same on every OS and machine.**
+  Lua's memory now counts 64-bit object sizes. These should match on x86-64 and arm64, but would
+  differ on any 32-bit or wasm32 build of a node.
   Asked about 2026-11-04, during the pentest. A transaction that runs out of fuel or memory on one
   node and not another splits the chain, and the devnet already mixes x86-64 Linux servers with
   arm64 macOS laptops and Android phones. For each engine, run the same contracts and blocks on

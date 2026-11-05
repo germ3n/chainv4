@@ -1,10 +1,10 @@
 //! The Lua VM. Contracts are Luau scripts run on the forked Luau, which charges fuel for every
 //! instruction. Every call gets a fresh Lua state, so nothing one call leaves behind can reach
 //! the next, and a node that restarts computes exactly what one that never stopped does. Fresh
-//! matters for more than globals: a script's top-level locals live on as upvalues, and the memory
-//! limit counts the whole heap, so a state that ran something before could fail a call another
-//! node passes. Building a state is most of what a call costs, so the engine builds them ahead,
-//! on a thread of its own, and still uses each one once.
+//! matters for more than globals: a script's top-level locals live on as upvalues, and a state
+//! that ran something before holds its garbage, which the collector frees at its own pace, so it
+//! could fail a call another node passes. Building a state is most of what a call costs, so the
+//! engine builds them ahead, on a thread of its own, and still uses each one once.
 
 use {
     super::{Host, Limits, Loaded, Loading, Outcome, ScriptEngine, VmError, selector},
@@ -316,12 +316,19 @@ impl Pristine {
         replace_tostring(&lua)?;
         lua.sandbox(true)?;
         let env = environment(&lua)?;
+        // What building left behind goes now, so every state waits with the same heap and the
+        // collector paused, its next cycle set by that heap alone: a call's collections then
+        // come at the same allocations in any state, wherever and however long it waited.
+        lua.gc_collect()?;
 
         Ok(Pristine { lua, env })
     }
 
-    /// Sets what the one call this state is for may use. The memory limit counts the whole heap,
-    /// which is the same in every pristine state, so every node gives a call the same room.
+    /// Sets what the one call this state is for may use. The memory limit counts from zero here:
+    /// the bytes of what the call makes, less what is freed, as the forked Luau counts them, by
+    /// the sizes it asks for. Neither the allocator's pages nor when the collector runs, which
+    /// follows those bytes alone, changes where a call runs out, so every node fails it at the
+    /// same allocation, with the same fuel used.
     fn ready(self, limits: Limits) -> Result<Pristine, VmError> {
         self.lua.set_memory_limit(limits.memory)?;
         self.lua.set_fuel(limits.fuel)?;

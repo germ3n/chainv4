@@ -542,3 +542,165 @@ fn a_pool_sized_on_the_node_gives_states_as_fresh_as_the_default_one() {
         assert_eq!((pooled.result, pooled.fuel_used), (fresh.result.clone(), fresh.fuel_used));
     }
 }
+
+/// Calls that go up to the memory limit by garbage, by what they keep and by one buffer joined
+/// over and over, and two whose results show when the collector ran and where the limit stopped
+/// them.
+const HEAVY: &str = r#"
+local M = {}
+
+function M.repeat_strings(n, size)
+    for i = 1, n do local s = string.rep("a", size) end
+    return n
+end
+
+function M.kept(n)
+    local kept = {}
+    for i = 1, n do kept[i] = { i, { i } } end
+    return #kept
+end
+
+function M.joined(n)
+    local parts = {}
+    for i = 1, n do parts[i] = "abcdefgh" end
+    local total = 0
+    for i = 1, 200 do total = total + #table.concat(parts) end
+    return total
+end
+
+-- What a weak table still holds once garbage is made: whatever the collector has not freed yet.
+function M.weak(n)
+    local weak = setmetatable({}, { __mode = "k" })
+    for i = 1, n do
+        weak[{}] = i
+        local s = string.rep("b", 1000)
+    end
+    local held = 0
+    for _ in pairs(weak) do held += 1 end
+    return held
+end
+
+-- Running out, caught, and how far it got. Luau interns every string, so each one differs.
+function M.caught(size)
+    local parts, made = {}, 0
+    local ok = pcall(function()
+        while true do
+            made += 1
+            parts[made] = string.rep("c", size) .. made
+        end
+    end)
+    return ok, made
+end
+
+return M
+"#;
+
+/// The development chains' limits, which the heavy calls run into.
+const HEAVY_LIMITS: Limits = Limits { fuel: 10_000_000, memory: 32 * 1024 * 1024 };
+
+/// The fuel a call used, what it came to, and the bytes its memory limit counted at the end.
+fn heavy(state: Pristine, code: &[u8], name: &str, args: &[TxCallArgumentType]) -> (u64, String, i64) {
+    let state = state.ready(HEAVY_LIMITS).unwrap();
+    let outcome = super::call(&state, code, name, args, host(), HEAVY_LIMITS);
+
+    (outcome.fuel_used, format!("{:?}", outcome.result), state.lua.memory_counted())
+}
+
+/// Where a call runs out of memory, the fuel it used by then, and when the collector freed what
+/// it did, are the same in a new state and a pooled one, on threads side by side, while other
+/// threads load every core. Luau's pacer once timed its cycles by the clock, so a loaded machine
+/// collected at other points and failed calls at other allocations, which split blocks.
+#[test]
+fn memory_heavy_calls_come_out_the_same_in_any_state_under_load() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let number = TxCallArgumentType::Number;
+    let calls: Vec<(&str, Vec<TxCallArgumentType>)> = vec![
+        ("repeat_strings", vec![number(1000.0), number(1_000_000.0)]),
+        ("kept", vec![number(1_000_000.0)]),
+        ("joined", vec![number(50_000.0)]),
+        ("weak", vec![number(20_000.0)]),
+        ("caught", vec![number(100_000.0)]),
+    ];
+    let engine = Arc::new(LuaEngine::with_pool(4, 1));
+    let code = Arc::new(engine.load(HEAVY.as_bytes(), HEAVY_LIMITS).result.unwrap().code);
+    let stop = Arc::new(AtomicBool::new(false));
+    let cores = std::thread::available_parallelism().map_or(4, |cores| cores.get());
+    let burners: Vec<_> = (0..cores)
+        .map(|_| {
+            let stop = stop.clone();
+
+            std::thread::spawn(move || {
+                let mut spun = 0u64;
+
+                while !stop.load(Ordering::Relaxed) {
+                    spun = std::hint::black_box(spun.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
+                }
+            })
+        })
+        .collect();
+    let workers: Vec<_> = (0..6)
+        .map(|worker| {
+            let (engine, code, calls) = (engine.clone(), code.clone(), calls.clone());
+
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+
+                for round in 0..6 {
+                    for (name, args) in &calls {
+                        // Half from the pool, which may build one there too, and half built here.
+                        let state = if (worker + round) % 2 == 0 { engine.pool().take() } else { Pristine::new() };
+
+                        seen.push((name.to_string(), heavy(state.unwrap(), &code, name, args)));
+                    }
+                }
+
+                seen
+            })
+        })
+        .collect();
+    let mut outcomes = BTreeMap::<String, BTreeSet<(u64, String, i64)>>::new();
+
+    for worker in workers {
+        for (name, outcome) in worker.join().unwrap() {
+            outcomes.entry(name).or_default().insert(outcome);
+        }
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    burners.into_iter().for_each(|burner| burner.join().unwrap());
+
+    for (name, seen) in &outcomes {
+        assert_eq!(seen.len(), 1, "{name} came out {} ways: {seen:?}", seen.len());
+    }
+
+    let only = |name: &str| outcomes[name].first().unwrap().clone();
+
+    for name in ["repeat_strings", "kept", "joined"] {
+        assert_eq!(only(name).1, "Err(OutOfMemory)", "{name}");
+    }
+
+    assert!(only("weak").1.starts_with("Ok("), "{:?}", only("weak"));
+    assert!(only("caught").1.starts_with("Ok([Bool(false)"), "{:?}", only("caught"));
+}
+
+/// The memory limit counts from zero at the call's start, by the bytes Luau asks for: a call
+/// that makes nothing counts nothing whatever the state holds, and what one makes counts the same
+/// in any state.
+#[test]
+fn the_memory_limit_counts_from_the_call_s_start() {
+    let engine = LuaEngine::new();
+    let code = engine.load(HEAVY.as_bytes(), HEAVY_LIMITS).result.unwrap().code;
+    let state = Pristine::new().unwrap().ready(HEAVY_LIMITS).unwrap();
+
+    assert_eq!(state.lua.memory_counted(), 0);
+
+    let kept = |state: Pristine| heavy(state, &code, "kept", &[TxCallArgumentType::Number(1000.0)]);
+    let fresh = kept(state);
+
+    assert!(fresh.1.starts_with("Ok(") && fresh.2 > 1000 * 64, "{fresh:?}");
+    assert_eq!(kept(engine.pool().take().unwrap()), fresh);
+}
+
+

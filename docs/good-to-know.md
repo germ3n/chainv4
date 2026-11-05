@@ -290,7 +290,8 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   the commit in `Cargo.lock`; `cargo update` would move them, so pinning a `rev` would be safer.
   Never swap them for upstream. Its comparisons are consensus too: a number against a userdata,
   and two userdata of different types, ask the userdata's metamethods, where plain Luau would
-  fail or call them unequal (see below).
+  fail or call them unequal (see below). So are its memory limit and its collector's pacing,
+  below.
 - **Luau compiler settings.** Optimization level 1, debug level 1, no type information. The
   bytecode, and so every call's fuel, depends on them.
 - **Fuel costs** (`vm::cost`) and every limit: call depth, key and value sizes, event sizes,
@@ -907,6 +908,20 @@ voting finality it now goes back to the checkpoint and follows the node from the
   `ns:set_number` in Lua, not `tostring`, which spells 10^15 as `1e+15`.
 - **Each call in a chain of calls gets its own memory limit.** The worst case is 8 nested calls ×
   32 MiB in one transaction on the dev chains.
+- **Lua's memory limit counts the call's own bytes, from zero.** The Luau fork counts what each
+  object asks for as it is made, less what the collector frees, from the call's start. The
+  allocator's pages are not counted: which allocation needs a new page depends on where earlier
+  frees left room. mlua's own limit is off for Luau, and `Lua::set_memory_limit` sets the fork's.
+  The pristine state's 95 KiB or so is not counted, where the whole heap of pages, about 464 KiB,
+  used to be. See [Memory](contracts.md#memory).
+- **Luau's collector never reads the clock.** Upstream starts a cycle early by a guess made from
+  the clock: how fast the program allocates, and how long marking takes. On a loaded machine that
+  freed garbage at other points, and a call near the memory limit failed at another allocation,
+  for other fuel. A block built and the same block imported then gave different receipts (seen
+  2026-11-05, in `building_big_strings_stops_at_the_memory_limit`). The fork starts every cycle
+  once the heap reaches the goal. Pristine states are fully collected once built, so each call
+  starts with the collector paused and the same heap. The same goes for weak tables, which lose
+  entries when the collector runs.
 - **The WebAssembly `call` import takes a value pointer:**
   `call(address, value, name, name_len, args, args_len)`. Rebuild contracts made against the
   older five-argument form. Contracts can also import `emit` and `delegate`.
