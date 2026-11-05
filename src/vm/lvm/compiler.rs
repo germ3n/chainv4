@@ -5,7 +5,7 @@
 
 use {
     crate::vm::VmError,
-    mlua::Compiler,
+    mlua::chunk::Compiler,
     r#macro::document,
 };
 

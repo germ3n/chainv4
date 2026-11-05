@@ -171,7 +171,7 @@ pub fn register_hash_lib(lua: &Lua) {
         hash_table
             .set(
                 name,
-                lua.create_function(move |lua, data: mlua::String| {
+                lua.create_function(move |lua, data: mlua::LuaString| {
                     let data = data.as_bytes();
                     charge(lua, costs(lua).hash + data.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 

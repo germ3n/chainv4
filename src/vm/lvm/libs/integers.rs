@@ -415,7 +415,9 @@ pub fn int_of(value: &Value) -> Option<Int> {
 /// A number that holds a whole value exactly.
 fn whole_number(value: &Value) -> Option<Exact> {
     match value {
-        Value::Integer(number) => Some(Exact::new(*number < 0, u256::from(number.unsigned_abs()))),
+        // mlua hands over any whole number that fits an i64 as an Integer, but past 2^53 a number
+        // may already have been rounded, so it is refused the same as a Number there.
+        Value::Integer(number) if number.unsigned_abs() <= MAX_EXACT => Some(Exact::new(*number < 0, u256::from(number.unsigned_abs()))),
         Value::Number(number) if number.fract() == 0.0 && number.abs() <= MAX_EXACT as f64 => {
             Some(Exact::new(*number < 0.0, u256::from(number.abs() as u64)))
         }
@@ -564,7 +566,9 @@ enum Side {
 fn side(value: &Value) -> Option<Side> {
     match (int_of(value), value) {
         (Some(int), _) => Some(Side::Int(int.exact())),
-        (None, Value::Integer(number)) => Some(Side::Int(Exact::new(*number < 0, u256::from(number.unsigned_abs())))),
+        (None, Value::Integer(number)) if number.unsigned_abs() <= MAX_EXACT => Some(Side::Int(Exact::new(*number < 0, u256::from(number.unsigned_abs())))),
+        // Past 2^53 a number is a plain one, held exactly by an f64 as it came from one.
+        (None, Value::Integer(number)) => Some(Side::Number(*number as f64)),
         (None, Value::Number(number)) => Some(Side::Number(*number)),
         _ => None,
     }
@@ -826,7 +830,7 @@ fn register<T: Prim>(lua: &Lua) {
         .create_function(move |_, (_, value): (Table, Value)| new_int(&value, kind))
         .unwrap_or_else(|err| failed("create __call", err));
     meta.set("__call", call).unwrap_or_else(|err| failed("set __call", err));
-    table.set_metatable(Some(meta));
+    table.set_metatable(Some(meta)).unwrap_or_else(|err| failed("set its metatable", err));
     lua.globals().set(name, table).unwrap_or_else(|err| failed("set its global", err));
 }
 

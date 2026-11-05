@@ -1892,7 +1892,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.9",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -4068,8 +4068,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "luau0-src"
-version = "0.11.2+luau653"
-source = "git+https://github.com/germ3n/luau-src-rs#93df670af65bfb2572d92f03484d4b5b0ed06274"
+version = "0.23.0+luau745"
 dependencies = [
  "cc",
 ]
@@ -4172,12 +4171,11 @@ dependencies = [
 
 [[package]]
 name = "mlua"
-version = "0.10.2"
-source = "git+https://github.com/germ3n/mlua?branch=main#3832a79d53a221672d1d694f93ffe2d904862ff7"
+version = "0.12.2"
 dependencies = [
  "bstr",
  "either",
- "libloading",
+ "libc",
  "mlua-sys",
  "num-traits",
  "parking_lot",
@@ -4186,11 +4184,11 @@ dependencies = [
 
 [[package]]
 name = "mlua-sys"
-version = "0.6.6"
-source = "git+https://github.com/germ3n/mlua?branch=main#3832a79d53a221672d1d694f93ffe2d904862ff7"
+version = "0.13.0"
 dependencies = [
  "cc",
  "cfg-if",
+ "libc",
  "luau0-src",
  "pkg-config",
 ]

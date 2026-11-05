@@ -34,7 +34,7 @@ pub(super) fn whole(value: &Value, what: &str) -> mlua::Result<u64> {
     }
 }
 
-fn verify(lua: &Lua, (scheme, key, message, signature): (String, mlua::String, mlua::String, mlua::String)) -> mlua::Result<bool> {
+fn verify(lua: &Lua, (scheme, key, message, signature): (String, mlua::LuaString, mlua::LuaString, mlua::LuaString)) -> mlua::Result<bool> {
     let message = message.as_bytes();
     charge(lua, costs(lua).verify + message.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 
@@ -42,27 +42,27 @@ fn verify(lua: &Lua, (scheme, key, message, signature): (String, mlua::String, m
 }
 
 #[cfg(feature = "secp256k1")]
-fn recover(lua: &Lua, (digest, signature): (Value, mlua::String)) -> mlua::Result<Option<mlua::String>> {
+fn recover(lua: &Lua, (digest, signature): (Value, mlua::LuaString)) -> mlua::Result<Option<mlua::LuaString>> {
     charge(lua, costs(lua).recover)?;
     let digest: [u8; 32] = bytes(&digest, "the digest")?.try_into().map_err(|_| Error::runtime("the digest is 32 bytes"))?;
 
     crypto::recover_key(&digest, &signature.as_bytes()).map(|key| lua.create_string(key)).transpose()
 }
 
-fn address(lua: &Lua, (scheme, key): (String, mlua::String)) -> mlua::Result<LuaAddress> {
+fn address(lua: &Lua, (scheme, key): (String, mlua::LuaString)) -> mlua::Result<LuaAddress> {
     charge(lua, costs(lua).key_address)?;
 
     crypto::key_address(&scheme, &key.as_bytes()).map(LuaAddress).map_err(Error::runtime)
 }
 
-fn digest(lua: &Lua, name: &'static str, data: mlua::String) -> mlua::Result<mlua::String> {
+fn digest(lua: &Lua, name: &'static str, data: mlua::LuaString) -> mlua::Result<mlua::LuaString> {
     let data = data.as_bytes();
     charge(lua, costs(lua).hash + data.len() as u64 / costs(lua).hash_bytes_per_fuel)?;
 
     lua.create_string(crypto::digest(name, &data).ok_or_else(|| Error::runtime(format!("{name} is not in this build")))?)
 }
 
-fn check_state(lua: &Lua, (root, column, key, value, proof): (Value, String, mlua::String, Option<mlua::String>, mlua::String)) -> mlua::Result<bool> {
+fn check_state(lua: &Lua, (root, column, key, value, proof): (Value, String, mlua::LuaString, Option<mlua::LuaString>, mlua::LuaString)) -> mlua::Result<bool> {
     let proof = proof.as_bytes();
     charge(lua, costs(lua).check_proof + costs(lua).proof_sibling * (proof.len() as u64 / 32))?;
     let hash = host(lua)?.chain_hash();
@@ -71,7 +71,7 @@ fn check_state(lua: &Lua, (root, column, key, value, proof): (Value, String, mlu
     Ok(crypto::check_state(hash, &bytes(&root, "the root")?, &column, &key.as_bytes(), value.as_deref(), &proof))
 }
 
-fn check_merkle(lua: &Lua, (root, data, index, count, path): (Value, mlua::String, Value, Value, mlua::String)) -> mlua::Result<bool> {
+fn check_merkle(lua: &Lua, (root, data, index, count, path): (Value, mlua::LuaString, Value, Value, mlua::LuaString)) -> mlua::Result<bool> {
     let path = path.as_bytes();
     charge(lua, costs(lua).check_proof + costs(lua).proof_sibling * (path.len() as u64 / 32))?;
     let hash = host(lua)?.chain_hash();
@@ -88,7 +88,7 @@ fn pubkeys(value: &Value) -> mlua::Result<Vec<u8>> {
         Value::Table(keys) => {
             let mut joined = Vec::with_capacity(keys.raw_len() * 48);
 
-            for key in keys.sequence_values::<mlua::String>() {
+            for key in keys.sequence_values::<mlua::LuaString>() {
                 joined.extend_from_slice(&key.map_err(|_| refused())?.as_bytes());
             }
 
@@ -98,7 +98,7 @@ fn pubkeys(value: &Value) -> mlua::Result<Vec<u8>> {
     }
 }
 
-fn fast_aggregate_verify(lua: &Lua, (keys, message, signature): (Value, Value, mlua::String)) -> mlua::Result<bool> {
+fn fast_aggregate_verify(lua: &Lua, (keys, message, signature): (Value, Value, mlua::LuaString)) -> mlua::Result<bool> {
     // Charged by the keys' count before they are joined: a table's length is known up front.
     let count = match &keys {
         Value::Table(table) => table.raw_len() as u64 * 48,
@@ -232,7 +232,7 @@ pub fn register_crypto_lib(lua: &Lua) {
     set("address", lua.create_function(address).expect("[crypto] Failed to create address"));
 
     for name in ["ripemd160", "hash160", "sha256d"] {
-        set(name, lua.create_function(move |lua, data: mlua::String| digest(lua, name, data)).expect("[crypto] Failed to create a hash"));
+        set(name, lua.create_function(move |lua, data: mlua::LuaString| digest(lua, name, data)).expect("[crypto] Failed to create a hash"));
     }
 
     set("check_state", lua.create_function(check_state).expect("[crypto] Failed to create check_state"));

@@ -58,7 +58,7 @@ fn dex_fee(lua: &Lua, (): ()) -> mlua::Result<f64> {
 fn chain_dex_fee() {}
 
 // The Ethereum network anchoring names, as SSZ.
-fn eth_network(lua: &Lua, (): ()) -> mlua::Result<Option<mlua::String>> {
+fn eth_network(lua: &Lua, (): ()) -> mlua::Result<Option<mlua::LuaString>> {
     let host = lua
         .app_data_ref::<Host>()
         .map(|host| host.clone())

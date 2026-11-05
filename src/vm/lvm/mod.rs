@@ -16,7 +16,7 @@ use {
         ctx::CallArgs, register_accounts_lib, register_address_lib, register_contracts_lib, register_ctx_lib,
         register_events_lib, register_hash_lib, register_storage_lib, register_tokens_lib, register_crypto_lib, register_federation_lib, register_chain_lib, register_integer_libs, register_names_lib, register_evm_lib, values::Given,
     },
-    mlua::{ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
+    mlua::{chunk::ChunkMode, Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value},
     r#macro::document,
     std::collections::HashMap,
     std::sync::{Mutex, OnceLock, mpsc},

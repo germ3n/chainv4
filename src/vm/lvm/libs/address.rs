@@ -230,14 +230,14 @@ pub fn register_address_lib(lua: &Lua) {
     address_table
         .set(
             "from_bytes",
-            lua.create_function(|_, bytes: mlua::String| from_bytes(&bytes.as_bytes()))
+            lua.create_function(|_, bytes: mlua::LuaString| from_bytes(&bytes.as_bytes()))
                 .expect("[address] Failed to create from_bytes"),
         )
         .expect("[address] Failed to set from_bytes");
     address_table
         .set(
             "decode",
-            lua.create_function(|_, bytes: mlua::String| decode(&bytes.as_bytes()))
+            lua.create_function(|_, bytes: mlua::LuaString| decode(&bytes.as_bytes()))
                 .expect("[address] Failed to create decode"),
         )
         .expect("[address] Failed to set decode");
@@ -251,7 +251,7 @@ pub fn register_address_lib(lua: &Lua) {
             .expect("[address] Failed to create __call"),
     )
     .expect("[address] Failed to set __call");
-    address_table.set_metatable(Some(meta));
+    address_table.set_metatable(Some(meta)).expect("[address] Failed to set its metatable");
     lua.globals()
         .set("address", address_table)
         .expect("[address] Failed to set address table");

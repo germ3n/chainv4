@@ -58,7 +58,7 @@ fn check_layout(lua: &Lua, (from, to): (AnyUserData, AnyUserData)) -> mlua::Resu
     host.check_layout(&from.0, &to.0).map_err(refused)
 }
 
-fn clone_contract(lua: &Lua, (template, salt, args): (AnyUserData, mlua::String, MultiValue)) -> mlua::Result<LuaAddress> {
+fn clone_contract(lua: &Lua, (template, salt, args): (AnyUserData, mlua::LuaString, MultiValue)) -> mlua::Result<LuaAddress> {
     let template = *template.borrow::<LuaAddress>()?;
     let host = lua
         .app_data_ref::<Host>()
@@ -81,7 +81,7 @@ fn clone_contract(lua: &Lua, (template, salt, args): (AnyUserData, mlua::String,
     }
 }
 
-fn cloned_at(lua: &Lua, salt: mlua::String) -> mlua::Result<LuaAddress> {
+fn cloned_at(lua: &Lua, salt: mlua::LuaString) -> mlua::Result<LuaAddress> {
     let host = lua
         .app_data_ref::<Host>()
         .map(|host| host.clone())

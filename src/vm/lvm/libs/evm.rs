@@ -15,7 +15,7 @@ fn host(lua: &Lua) -> mlua::Result<Host> {
         .ok_or_else(|| Error::runtime("evm is only available inside a call"))
 }
 
-fn call(lua: &Lua, (to, input, value): (AnyUserData, mlua::String, Option<Value>)) -> mlua::Result<mlua::String> {
+fn call(lua: &Lua, (to, input, value): (AnyUserData, mlua::LuaString, Option<Value>)) -> mlua::Result<mlua::LuaString> {
     let to = *to.borrow::<LuaAddress>()?;
     let value = match &value {
         Some(value) => exact_as::<u256>(value)?,
@@ -60,7 +60,7 @@ mod abi {
         }
     }
 
-    pub fn encode(lua: &Lua, (signature, args): (String, MultiValue)) -> mlua::Result<mlua::String> {
+    pub fn encode(lua: &Lua, (signature, args): (String, MultiValue)) -> mlua::Result<mlua::LuaString> {
         let host = host(lua)?;
         charge(lua, costs(lua).abi + signature.len() as u64 / costs(lua).copy_bytes_per_fuel)?;
         let (selector, types) = parse_signature(&signature).map_err(Error::runtime)?;
@@ -76,7 +76,7 @@ mod abi {
         lua.create_string([selector.map(Vec::from).unwrap_or_default(), encoded].concat())
     }
 
-    pub fn decode(lua: &Lua, (types, data): (String, mlua::String)) -> mlua::Result<MultiValue> {
+    pub fn decode(lua: &Lua, (types, data): (String, mlua::LuaString)) -> mlua::Result<MultiValue> {
         let host = host(lua)?;
         let data = data.as_bytes().to_vec();
         charge(lua, costs(lua).abi + (types.len() + data.len()) as u64 / costs(lua).copy_bytes_per_fuel)?;
@@ -152,11 +152,11 @@ mod abi {
 mod abi {
     use mlua::{Error, Lua, MultiValue};
 
-    pub fn encode(_: &Lua, _: (String, MultiValue)) -> mlua::Result<mlua::String> {
+    pub fn encode(_: &Lua, _: (String, MultiValue)) -> mlua::Result<mlua::LuaString> {
         Err(Error::runtime("this node was built without the EVM"))
     }
 
-    pub fn decode(_: &Lua, _: (String, mlua::String)) -> mlua::Result<MultiValue> {
+    pub fn decode(_: &Lua, _: (String, mlua::LuaString)) -> mlua::Result<MultiValue> {
         Err(Error::runtime("this node was built without the EVM"))
     }
 }

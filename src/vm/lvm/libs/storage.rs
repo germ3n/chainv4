@@ -25,11 +25,11 @@ pub struct LuaNamespace(pub Space);
 
 impl UserData for LuaNamespace {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("get", |lua, this, key: mlua::String| storage_get(lua, &this.0, &key.as_bytes()));
-        methods.add_method("iter", |lua, this, (prefix, start): (Option<mlua::String>, Option<mlua::String>)| {
+        methods.add_method("get", |lua, this, key: mlua::LuaString| storage_get(lua, &this.0, &key.as_bytes()));
+        methods.add_method("iter", |lua, this, (prefix, start): (Option<mlua::LuaString>, Option<mlua::LuaString>)| {
             storage_iter(lua, this.0.clone(), prefix.map(|prefix| prefix.as_bytes().to_vec()), start.map(|start| start.as_bytes().to_vec()))
         });
-        methods.add_method("set", |lua, this, (key, value): (mlua::String, Option<mlua::String>)| {
+        methods.add_method("set", |lua, this, (key, value): (mlua::LuaString, Option<mlua::LuaString>)| {
             let value = value.as_ref().map(|value| value.as_bytes());
 
             storage_set(lua, &this.0, &key.as_bytes(), value.as_deref())
@@ -37,7 +37,7 @@ impl UserData for LuaNamespace {
 
         // The number kind, whole numbers written one way, which tostring does not keep to: 1e15
         // comes out as 1e+15.
-        methods.add_method("get_number", |lua, this, key: mlua::String| {
+        methods.add_method("get_number", |lua, this, key: mlua::LuaString| {
             let Some(value) = storage_get(lua, &this.0, &key.as_bytes())? else {
                 return Ok(None);
             };
@@ -49,7 +49,7 @@ impl UserData for LuaNamespace {
                 .map(|number| Some(number as f64))
                 .ok_or_else(|| Error::runtime("the value is not a number: a whole number within 2^53 either way, in digits"))
         });
-        methods.add_method("set_number", |lua, this, (key, value): (mlua::String, Option<f64>)| {
+        methods.add_method("set_number", |lua, this, (key, value): (mlua::LuaString, Option<f64>)| {
             let text = match value {
                 None => None,
                 Some(number) if number.fract() == 0.0 && (-EXACT as f64..=EXACT as f64).contains(&number) => Some((number as i64).to_string()),
@@ -62,66 +62,66 @@ impl UserData for LuaNamespace {
         // The binary kinds Rust contracts write, so a Lua version keeps what a Rust one stored.
         // Each integer kind reads back as its own type, and takes any integer or whole number
         // it holds.
-        methods.add_method("get_u256", |lua, this, key: mlua::String| {
+        methods.add_method("get_u256", |lua, this, key: mlua::LuaString| {
             Ok(fixed::<32>(lua, &this.0, &key.as_bytes(), "u256")?.map(|bytes| LuaInt(u256::from_le_bytes(bytes))))
         });
-        methods.add_method("set_u256", |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_method("set_u256", |lua, this, (key, value): (mlua::LuaString, Value)| {
             let bytes = integer::<u256>(&value)?.map(u256::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
-        methods.add_method("get_i256", |lua, this, key: mlua::String| {
+        methods.add_method("get_i256", |lua, this, key: mlua::LuaString| {
             Ok(fixed::<32>(lua, &this.0, &key.as_bytes(), "i256")?.map(|bytes| LuaInt(i256::from_le_bytes(bytes))))
         });
-        methods.add_method("set_i256", |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_method("set_i256", |lua, this, (key, value): (mlua::LuaString, Value)| {
             let bytes = integer::<i256>(&value)?.map(i256::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
-        methods.add_method("get_u128", |lua, this, key: mlua::String| {
+        methods.add_method("get_u128", |lua, this, key: mlua::LuaString| {
             Ok(fixed::<16>(lua, &this.0, &key.as_bytes(), "u128")?.map(|bytes| LuaInt(u128::from_le_bytes(bytes))))
         });
-        methods.add_method("set_u128", |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_method("set_u128", |lua, this, (key, value): (mlua::LuaString, Value)| {
             let bytes = integer::<u128>(&value)?.map(u128::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
-        methods.add_method("get_i128", |lua, this, key: mlua::String| {
+        methods.add_method("get_i128", |lua, this, key: mlua::LuaString| {
             Ok(fixed::<16>(lua, &this.0, &key.as_bytes(), "i128")?.map(|bytes| LuaInt(i128::from_le_bytes(bytes))))
         });
-        methods.add_method("set_i128", |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_method("set_i128", |lua, this, (key, value): (mlua::LuaString, Value)| {
             let bytes = integer::<i128>(&value)?.map(i128::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
-        methods.add_method("get_u64", |lua, this, key: mlua::String| {
+        methods.add_method("get_u64", |lua, this, key: mlua::LuaString| {
             Ok(fixed::<8>(lua, &this.0, &key.as_bytes(), "u64")?.map(|bytes| LuaInt(u64::from_le_bytes(bytes))))
         });
-        methods.add_method("set_u64", |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_method("set_u64", |lua, this, (key, value): (mlua::LuaString, Value)| {
             let bytes = integer::<u64>(&value)?.map(u64::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
-        methods.add_method("get_i64", |lua, this, key: mlua::String| {
+        methods.add_method("get_i64", |lua, this, key: mlua::LuaString| {
             Ok(fixed::<8>(lua, &this.0, &key.as_bytes(), "i64")?.map(|bytes| LuaInt(i64::from_le_bytes(bytes))))
         });
-        methods.add_method("set_i64", |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_method("set_i64", |lua, this, (key, value): (mlua::LuaString, Value)| {
             let bytes = integer::<i64>(&value)?.map(i64::to_le_bytes);
 
             storage_set(lua, &this.0, &key.as_bytes(), bytes.as_ref().map(|bytes| &bytes[..]))
         });
-        methods.add_method("get_bool", |lua, this, key: mlua::String| match fixed::<1>(lua, &this.0, &key.as_bytes(), "bool")? {
+        methods.add_method("get_bool", |lua, this, key: mlua::LuaString| match fixed::<1>(lua, &this.0, &key.as_bytes(), "bool")? {
             None => Ok(None),
             Some([0]) => Ok(Some(false)),
             Some([1]) => Ok(Some(true)),
             Some(_) => Err(Error::runtime("the value is not a bool: one byte, 0 or 1")),
         });
-        methods.add_method("set_bool", |lua, this, (key, value): (mlua::String, Option<bool>)| {
+        methods.add_method("set_bool", |lua, this, (key, value): (mlua::LuaString, Option<bool>)| {
             let byte = value.map(|flag| [u8::from(flag)]);
 
             storage_set(lua, &this.0, &key.as_bytes(), byte.as_ref().map(|byte| &byte[..]))
         });
-        methods.add_method("get_address", |lua, this, key: mlua::String| {
+        methods.add_method("get_address", |lua, this, key: mlua::LuaString| {
             let Some(bytes) = fixed::<33>(lua, &this.0, &key.as_bytes(), "address")? else {
                 return Ok(None);
             };
@@ -130,7 +130,7 @@ impl UserData for LuaNamespace {
                 .map(|address| Some(LuaAddress(address)))
                 .ok_or_else(|| Error::runtime("the value is not an address: 33 bytes, its kind's tag then its bytes"))
         });
-        methods.add_method("set_address", |lua, this, (key, value): (mlua::String, Option<mlua::AnyUserData>)| {
+        methods.add_method("set_address", |lua, this, (key, value): (mlua::LuaString, Option<mlua::AnyUserData>)| {
             let bytes = match value {
                 Some(data) => Some(
                     data.borrow::<LuaAddress>()
@@ -177,7 +177,7 @@ fn host(lua: &Lua) -> mlua::Result<Host> {
         .ok_or_else(|| Error::runtime("storage is only available inside a call"))
 }
 
-fn storage_get(lua: &Lua, space: &Space, key: &[u8]) -> mlua::Result<Option<mlua::String>> {
+fn storage_get(lua: &Lua, space: &Space, key: &[u8]) -> mlua::Result<Option<mlua::LuaString>> {
     let host = host(lua)?;
 
     let longest = host.limits().key_len as usize;
@@ -606,14 +606,14 @@ pub fn register_storage_lib(lua: &Lua) {
     storage_table
         .set(
             "get",
-            lua.create_function(|lua, key: mlua::String| storage_get(lua, &Space::Plain, &key.as_bytes()))
+            lua.create_function(|lua, key: mlua::LuaString| storage_get(lua, &Space::Plain, &key.as_bytes()))
                 .expect("[storage] Failed to create get"),
         )
         .expect("[storage] Failed to set get");
     storage_table
         .set(
             "set",
-            lua.create_function(|lua, (key, value): (mlua::String, Option<mlua::String>)| {
+            lua.create_function(|lua, (key, value): (mlua::LuaString, Option<mlua::LuaString>)| {
                 let value = value.as_ref().map(|value| value.as_bytes());
 
                 storage_set(lua, &Space::Plain, &key.as_bytes(), value.as_deref())
@@ -624,7 +624,7 @@ pub fn register_storage_lib(lua: &Lua) {
     storage_table
         .set(
             "iter",
-            lua.create_function(|lua, (prefix, start): (Option<mlua::String>, Option<mlua::String>)| {
+            lua.create_function(|lua, (prefix, start): (Option<mlua::LuaString>, Option<mlua::LuaString>)| {
                 storage_iter(lua, Space::Plain, prefix.map(|prefix| prefix.as_bytes().to_vec()), start.map(|start| start.as_bytes().to_vec()))
             })
             .expect("[storage] Failed to create iter"),
@@ -633,7 +633,7 @@ pub fn register_storage_lib(lua: &Lua) {
     storage_table
         .set(
             "namespace",
-            lua.create_function(|_, name: mlua::String| namespace(&name.as_bytes()))
+            lua.create_function(|_, name: mlua::LuaString| namespace(&name.as_bytes()))
                 .expect("[storage] Failed to create namespace"),
         )
         .expect("[storage] Failed to set namespace");

@@ -677,9 +677,12 @@ fn memory_heavy_calls_come_out_the_same_in_any_state_under_load() {
 
     let only = |name: &str| outcomes[name].first().unwrap().clone();
 
-    for name in ["repeat_strings", "kept", "joined"] {
-        assert_eq!(only(name).1, "Err(OutOfMemory)", "{name}");
-    }
+    // What it holds runs out of memory. Garbage made and dropped at once is freed as it goes, so
+    // repeating big strings runs out of fuel first and joining them finishes; both by the same
+    // collections everywhere, as the single outcome each came to says.
+    assert_eq!(only("kept").1, "Err(OutOfMemory)");
+    assert_eq!(only("repeat_strings").1, "Err(OutOfFuel)");
+    assert!(only("joined").1.starts_with("Ok("), "{:?}", only("joined"));
 
     assert!(only("weak").1.starts_with("Ok("), "{:?}", only("weak"));
     assert!(only("caught").1.starts_with("Ok([Bool(false)"), "{:?}", only("caught"));

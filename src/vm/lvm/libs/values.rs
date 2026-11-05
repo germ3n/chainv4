@@ -16,7 +16,7 @@ use {
 
 /// A values list: its values encoded as the chain encodes them, and how many there are.
 pub struct LuaValues {
-    encoded: mlua::String,
+    encoded: mlua::LuaString,
     len: usize,
 }
 

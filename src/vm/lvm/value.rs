@@ -66,7 +66,7 @@ pub(super) fn from_lua(value: Value) -> Result<TxCallArgumentType, VmError> {
     let arg = match value {
         Value::Nil => TxCallArgumentType::Nil,
         Value::Boolean(flag) => TxCallArgumentType::Bool(flag),
-        Value::Integer(number) => TxCallArgumentType::I64(whole(f64::from(number)).ok_or_else(|| numbers_leave_whole(f64::from(number)))?),
+        Value::Integer(number) => TxCallArgumentType::I64(whole(number as f64).ok_or_else(|| numbers_leave_whole(number as f64))?),
         Value::Number(number) => TxCallArgumentType::I64(whole(number).ok_or_else(|| numbers_leave_whole(number))?),
         Value::String(text) => {
             let bytes = text.as_bytes().to_vec();
