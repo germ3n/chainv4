@@ -1303,7 +1303,10 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
         TxArgs::Anchor { proof } => {
             let bytes = from_hex(&proof).ok_or("--proof is not hex")?;
             let proof: crate::structs::tx::AnchorProof = wincode::deserialize(&bytes).map_err(|_| "--proof is not an encoded anchor proof")?;
-            println!("showing an anchor in Bitcoin block {}", crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>()));
+            match &proof {
+                crate::structs::tx::AnchorProof::Bitcoin(proof) => println!("showing an anchor in Bitcoin block {}", crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>())),
+                crate::structs::tx::AnchorProof::Ethereum(proof) => println!("showing an anchor in Ethereum, resting on beacon block {}", crate::structs::hex::to_hex(&proof.root)),
+            }
 
             Tx::Anchor { proof }
         }

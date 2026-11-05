@@ -1,107 +1,42 @@
-//! Bitcoin's headers checked by a node on its own, as contracts/examples/btc_relay checks them on
-//! chain: proof of work, the retarget every 2016 blocks on main, the median time past, and the most
-//! work wins. Anchored sync feeds it every peer's relay headers from anchoring's btc_start, so the
-//! Bitcoin chain it compares anchors on is the one with the most work any peer showed, whatever a
-//! fork's relay claims.
+//! Anchors in Bitcoin. A Bitcoin anchor's proof is checked against the Bitcoin relay contract's
+//! records, read natively; and anchored sync checks Bitcoin's headers on its own, as
+//! contracts/examples/btc_relay checks them on chain, by the rules both take from btclight: proof
+//! of work, the retarget every 2016 blocks on main, the median time past, and the most work wins.
+//! Anchored sync feeds it every peer's relay headers from anchoring's btc_start, so the Bitcoin
+//! chain it compares anchors on is the one with the most work any peer showed, whatever a fork's
+//! relay claims.
 
 use {
-    crate::{crypto::bitcoin::sha256d, params::anchoring::{BtcNetworkRules, BtcStart}, structs::u256::u256},
+    super::{Payload, ProveError, ProveRules, Shown},
+    crate::{
+        crypto::bitcoin::{sha256d, tx::Transaction},
+        db::{Column, DbError, State, namespace_key},
+        params::anchoring::{AnchorSource, BtcNetworkRules, BtcStart},
+        structs::{address::Address, tx::{BtcAnchorProof, MAX_ANCHOR_PATH, MAX_ANCHOR_TX}, u256::u256},
+    },
+    btclight::{Header, Kept, MainChain},
     r#macro::document,
-    std::collections::HashMap,
+    std::collections::{BTreeMap, HashMap},
 };
 
-/// Blocks between difficulty changes, and the time they are meant to take, in seconds.
-const INTERVAL: u64 = 2016;
-const TIMESPAN: u64 = 14 * 24 * 60 * 60;
-/// How many past blocks' times the median is taken over.
-const MEDIAN_SPAN: usize = 11;
-/// How far ahead of the node's clock a header's time may be, in seconds.
-const MOST_AHEAD: u64 = 2 * 60 * 60;
+#[cfg(test)]
+mod tests;
 
-fn limit(network: BtcNetworkRules) -> u32 {
+/// SHA-256 twice, natively, for btclight's rules.
+struct Native;
+
+impl btclight::Crypto for Native {
+    fn sha256d(&self, data: &[u8]) -> [u8; 32] {
+        sha256d(data)
+    }
+}
+
+/// The rules a network's headers are checked by.
+fn rules(network: BtcNetworkRules) -> btclight::Network {
     match network {
-        BtcNetworkRules::Main => 0x1d00_ffff,
-        BtcNetworkRules::Regtest | BtcNetworkRules::Test => 0x207f_ffff,
-    }
-}
-
-#[document(
-    summary = "A compact difficulty as the target it stands for, or None for one Bitcoin refuses: negative, or past 256 bits.",
-    category = "Anchoring",
-)]
-pub fn target(bits: u32) -> Option<u256> {
-    let (size, mantissa) = ((bits >> 24) as usize, bits & 0x007f_ffff);
-
-    if bits & 0x0080_0000 != 0 || (mantissa != 0 && size > 34) {
-        return None;
-    }
-
-    let mut bytes = [0u8; 32];
-
-    for (index, byte) in mantissa.to_le_bytes()[..3].iter().enumerate() {
-        match (size + index).checked_sub(3) {
-            Some(at) if at < 32 => bytes[at] = *byte,
-            Some(_) if *byte != 0 => return None,
-            _ => {}
-        }
-    }
-
-    Some(u256::from_le_bytes(bytes))
-}
-
-#[document(
-    summary = "A target as compact difficulty, as Bitcoin rounds it.",
-    category = "Anchoring",
-)]
-pub fn compact_bits(target: u256) -> u32 {
-    let bytes = target.to_le_bytes();
-    let size = bytes.iter().rposition(|byte| *byte != 0).map_or(0, |top| top + 1);
-    let mantissa = |size: usize| -> u32 { (0..3).fold(0, |mantissa, index| mantissa << 8 | size.checked_sub(1 + index).map_or(0, |at| u32::from(bytes[at]))) };
-    let (mut size, mut value) = (size, mantissa(size));
-
-    if value & 0x0080_0000 != 0 {
-        value >>= 8;
-        size += 1;
-    }
-
-    value | (size as u32) << 24
-}
-
-#[document(
-    summary = "The work a target stands for: about 2^256 / (target + 1).",
-    category = "Anchoring",
-)]
-pub fn work(target: u256) -> u256 {
-    (u256::MAX - target).checked_div(target + u256::ONE).unwrap_or(u256::ZERO) + u256::ONE
-}
-
-/// The difficulty after a period, as Bitcoin retargets.
-fn retarget(bits: u32, first: u32, last: u32, network: BtcNetworkRules) -> Option<u32> {
-    let span = u64::from(last.saturating_sub(first)).clamp(TIMESPAN / 4, TIMESPAN * 4);
-    let next = target(bits)?.checked_mul(u256::from(span))?.checked_div(u256::from(TIMESPAN))?;
-
-    Some(compact_bits(next.min(target(limit(network))?)))
-}
-
-/// What the chain keeps of each header.
-#[derive(Clone, Debug)]
-struct Kept {
-    prev: [u8; 32],
-    merkle: [u8; 32],
-    height: u64,
-    work: u256,
-    bits: u32,
-    time: u32,
-    period_start: u32,
-    times: Vec<u32>,
-}
-
-impl Kept {
-    fn median_time(&self) -> u32 {
-        let mut sorted = self.times.clone();
-        sorted.sort_unstable();
-
-        sorted[sorted.len() / 2]
+        BtcNetworkRules::Main => btclight::Network::Main,
+        BtcNetworkRules::Regtest => btclight::Network::Regtest,
+        BtcNetworkRules::Test => btclight::Network::Test,
     }
 }
 
@@ -114,20 +49,35 @@ pub struct HeaderChain {
     network: BtcNetworkRules,
     kept: HashMap<[u8; 32], Kept>,
     tip: [u8; 32],
-    /// The main chain by height, from the start, rebuilt when the tip moves.
-    main: Vec<[u8; 32]>,
-    start_height: u64,
+    /// The main chain by height, from the start, moved when the tip moves.
+    main: BTreeMap<u64, [u8; 32]>,
+}
+
+impl MainChain for HeaderChain {
+    fn link(&self, hash: &[u8; 32]) -> Option<(u64, [u8; 32])> {
+        self.kept.get(hash).map(|kept| (kept.height, kept.prev))
+    }
+
+    fn main_at(&self, height: u64) -> Option<[u8; 32]> {
+        self.main.get(&height).copied()
+    }
+
+    fn set_main(&mut self, height: u64, hash: &[u8; 32]) {
+        self.main.insert(height, *hash);
+    }
+
+    fn unset_main(&mut self, height: u64) {
+        self.main.remove(&height);
+    }
 }
 
 impl HeaderChain {
     #[document(parent = "HeaderChain", summary = "The chain at its start, which it trusts.", returns = "The chain, or why the start is no header.")]
     pub fn new(start: &BtcStart) -> Result<HeaderChain, String> {
-        let header: &[u8; 80] = start.header.as_slice().try_into().map_err(|_| "a header is 80 bytes".to_string())?;
-        let (hash, word) = (sha256d(header), |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("4 bytes")));
-        let time = word(68);
-        let kept = Kept { prev: header[4..36].try_into().expect("32 bytes"), merkle: header[36..68].try_into().expect("32 bytes"), height: start.height, work: u256::ZERO, bits: word(72), time, period_start: time, times: vec![time] };
+        let header = Header::read(&start.header).ok_or("a header is 80 bytes")?;
+        let hash = sha256d(&start.header);
 
-        Ok(HeaderChain { network: start.network, kept: HashMap::from([(hash, kept)]), tip: hash, main: vec![hash], start_height: start.height })
+        Ok(HeaderChain { network: start.network, kept: HashMap::from([(hash, Kept::start(&header, start.height))]), tip: hash, main: BTreeMap::from([(start.height, hash)]) })
     }
 
     #[document(
@@ -137,89 +87,26 @@ impl HeaderChain {
         returns = "Whether it was new, or why it breaks a rule.",
     )]
     pub fn add(&mut self, header: &[u8], now: u64) -> Result<bool, String> {
-        let header: &[u8; 80] = header.try_into().map_err(|_| "a header is 80 bytes".to_string())?;
+        let parsed = Header::read(header).ok_or("a header is 80 bytes")?;
         let hash = sha256d(header);
 
         if self.kept.contains_key(&hash) {
             return Ok(false);
         }
 
-        let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().expect("4 bytes"));
-        let (prev_hash, merkle, time, bits): ([u8; 32], [u8; 32], u32, u32) = (header[4..36].try_into().expect("32 bytes"), header[36..68].try_into().expect("32 bytes"), word(68), word(72));
-        let prev = self.kept.get(&prev_hash).ok_or("a header that builds on none it holds")?;
-        let height = prev.height + 1;
-        let claimed = target(bits).ok_or("a difficulty Bitcoin refuses")?;
+        let prev = self.kept.get(&parsed.prev).ok_or("a header that builds on none it holds")?;
+        let kept = prev.child(&parsed, &hash, rules(self.network), now).map_err(|err| err.message().to_string())?;
+        let best = &self.kept[&self.tip];
 
-        if u256::from_le_bytes(hash) > claimed {
-            return Err("a header without the work its difficulty asks".to_string());
+        if kept.work > best.work {
+            let old_height = best.height;
+            btclight::follow(self, &hash, kept.height, kept.prev, old_height);
+            self.tip = hash;
         }
 
-        if claimed > target(limit(self.network)).expect("the limit is a target") {
-            return Err("a difficulty easier than the network allows".to_string());
-        }
-
-        let expected = match self.network {
-            BtcNetworkRules::Main if height.is_multiple_of(INTERVAL) => Some(retarget(prev.bits, prev.period_start, prev.time, self.network).ok_or("a retarget out of range")?),
-            BtcNetworkRules::Main | BtcNetworkRules::Regtest => Some(prev.bits),
-            BtcNetworkRules::Test => None,
-        };
-
-        if expected.is_some_and(|expected| expected != bits) {
-            return Err("a difficulty other than the network's rules give".to_string());
-        }
-
-        if time <= prev.median_time() {
-            return Err("a time not after the median of the last eleven".to_string());
-        }
-
-        if u64::from(time) > now + MOST_AHEAD {
-            return Err("a time more than two hours ahead".to_string());
-        }
-
-        let mut times = prev.times.clone();
-        times.push(time);
-
-        if times.len() > MEDIAN_SPAN {
-            times.remove(0);
-        }
-
-        let kept = Kept {
-            prev: prev_hash,
-            merkle,
-            height,
-            work: prev.work + work(claimed),
-            bits,
-            time,
-            period_start: if height.is_multiple_of(INTERVAL) { time } else { prev.period_start },
-            times,
-        };
-        let better = kept.work > self.kept[&self.tip].work;
         self.kept.insert(hash, kept);
 
-        if better {
-            self.follow(hash);
-        }
-
         Ok(true)
-    }
-
-    fn follow(&mut self, tip: [u8; 32]) {
-        let mut chain = Vec::new();
-        let mut at = tip;
-
-        while let Some(kept) = self.kept.get(&at) {
-            chain.push(at);
-
-            if kept.height == self.start_height {
-                break;
-            }
-
-            at = kept.prev;
-        }
-
-        chain.reverse();
-        self.tip = tip;
-        self.main = chain;
     }
 
     #[document(parent = "HeaderChain", summary = "The main chain's tip: its hash, height and work from the start.")]
@@ -231,7 +118,7 @@ impl HeaderChain {
 
     #[document(parent = "HeaderChain", summary = "The main chain's block at a height.")]
     pub fn main_at(&self, height: u64) -> Option<[u8; 32]> {
-        self.main.get(usize::try_from(height.checked_sub(self.start_height)?).ok()?).copied()
+        MainChain::main_at(self, height)
     }
 
     #[document(parent = "HeaderChain", summary = "How deep a block is in the main chain: 1 for the tip, 0 off it or unknown.")]
@@ -251,4 +138,199 @@ impl HeaderChain {
     pub fn holds(&self, hash: &[u8; 32]) -> bool {
         self.kept.contains_key(hash)
     }
+}
+
+impl BtcAnchorProof {
+    #[document(parent = "BtcAnchorProof", summary = "Why it could never prove anything, before any header is read: bytes too many or 64, paths too long or of different lengths, or a coinbase that is none.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.raw.len() > MAX_ANCHOR_TX || self.coinbase.len() > MAX_ANCHOR_TX {
+            return Some("an anchor's transaction and coinbase are at most 100,000 bytes each");
+        }
+
+        if self.raw.len() == 64 {
+            return Some("a transaction of 64 bytes, which a Merkle tree's inner node could pass for");
+        }
+
+        if self.path.len() > MAX_ANCHOR_PATH || self.path.len() != self.coinbase_path.len() {
+            return Some("the paths are as long as each other, at most 32");
+        }
+
+        (!btclight::is_coinbase(&self.coinbase)).then_some("the coinbase is no coinbase: one input, spending nothing")
+    }
+
+    #[document(parent = "BtcAnchorProof", summary = "Whether it leads to a Merkle root, the coinbase's path and the transaction's both, as the relay's own includes checks (CVE-2017-12842).")]
+    pub fn leads_to(&self, merkle: &[u8; 32]) -> bool {
+        self.problem().is_none() && btclight::includes(&Native, merkle, &sha256d(&self.raw), self.index, &self.path, &self.coinbase, &self.coinbase_path)
+    }
+}
+
+impl Payload {
+    #[document(
+        parent = "Payload",
+        summary = "The anchor a Bitcoin transaction carries: the first output whose script is one. The transaction comes without its witnesses, as its id hashes it.",
+        returns = "The payload, or why the bytes hold none.",
+    )]
+    pub fn find(raw: &[u8]) -> Result<Payload, String> {
+        let (tx, witnessed) = Transaction::read(raw)?;
+
+        if witnessed {
+            return Err("an anchor's transaction comes without its witnesses, as its id hashes it".to_string());
+        }
+
+        tx.outputs
+            .iter()
+            .find_map(|output| match output.script.as_slice() {
+                [0x6a, 0x4c, len, data @ ..] if usize::from(*len) == super::PAYLOAD_LEN => Payload::decode(data),
+                _ => None,
+            })
+            .ok_or_else(|| "the transaction carries no anchor: no OP_RETURN of cv4a's 80 bytes".to_string())
+    }
+}
+
+#[document(
+    summary = "What the Bitcoin relay keeps of one header, read from its namespaces as contracts/examples/btc_relay lays it out.",
+    category = "Anchoring",
+    see_also = "Relay",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelayHeader {
+    #[document(summary = "The header's Merkle root.")]
+    pub merkle: [u8; 32],
+    #[document(summary = "Its height.")]
+    pub height: u64,
+}
+
+#[document(
+    summary = "A Bitcoin relay contract's records in a state, read as the chain reads its own: no call into it, so nothing it runs can change what a proof shows. Each header's record decodes as btclight's Kept, the layout the relay stores.",
+    category = "Anchoring",
+    see_also = "RelayHeader, AnchorSettings::relay",
+)]
+pub struct Relay<'a> {
+    state: &'a State,
+    address: Address,
+}
+
+impl<'a> Relay<'a> {
+    #[document(parent = "Relay", summary = "The relay at an address.")]
+    pub fn new(state: &'a State, address: Address) -> Relay<'a> {
+        Relay { state, address }
+    }
+
+    fn own(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        self.state.get(Column::Namespaces, &namespace_key(&self.address, &[], key))
+    }
+
+    fn kept(&self, hash: &[u8; 32]) -> Result<Option<Kept>, DbError> {
+        Ok(self.state.get(Column::Namespaces, &namespace_key(&self.address, b"headers", hash))?.and_then(|bytes| Kept::decode(&bytes)))
+    }
+
+    #[document(parent = "Relay", summary = "A header it took, by its hash in Bitcoin's byte order.")]
+    pub fn header(&self, hash: &[u8; 32]) -> Result<Option<RelayHeader>, DbError> {
+        Ok(self.kept(hash)?.map(|kept| RelayHeader { merkle: kept.merkle, height: kept.height }))
+    }
+
+    #[document(parent = "Relay", summary = "A header it took, written whole again, 80 bytes, from what it keeps: None for one it does not hold, or whose record does not write the header it is kept under.")]
+    pub fn raw_header(&self, hash: &[u8; 32]) -> Result<Option<[u8; 80]>, DbError> {
+        Ok(self.kept(hash)?.map(|kept| kept.header().encode()).filter(|header| sha256d(header) == *hash))
+    }
+
+    #[document(parent = "Relay", summary = "Its main chain's block at a height.")]
+    pub fn main_at(&self, height: u64) -> Result<Option<[u8; 32]>, DbError> {
+        let bytes = self.state.get(Column::Namespaces, &namespace_key(&self.address, b"main", &height.to_be_bytes()))?;
+
+        Ok(bytes.and_then(|bytes| bytes.try_into().ok()))
+    }
+
+    #[document(parent = "Relay", summary = "Its main chain's tip: its hash and height.")]
+    pub fn tip(&self) -> Result<Option<([u8; 32], u64)>, DbError> {
+        let Some(hash) = self.own(b"tip")?.and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()) else {
+            return Ok(None);
+        };
+
+        Ok(self.header(&hash)?.map(|header| (hash, header.height)))
+    }
+
+    #[document(parent = "Relay", summary = "The network it was started on.")]
+    pub fn network(&self) -> Result<Option<BtcNetworkRules>, DbError> {
+        Ok(self.own(b"network")?.and_then(|bytes| BtcNetworkRules::from_name(std::str::from_utf8(&bytes).ok()?)))
+    }
+
+    #[document(parent = "Relay", summary = "How deep a block is in its main chain: 1 for the tip, 0 off it or unknown.")]
+    pub fn depth(&self, hash: &[u8; 32]) -> Result<u64, DbError> {
+        let (Some(header), Some((_, tip))) = (self.header(hash)?, self.tip()?) else {
+            return Ok(0);
+        };
+
+        Ok(match self.main_at(header.height)? == Some(*hash) {
+            true => tip - header.height + 1,
+            false => 0,
+        })
+    }
+}
+
+/// Checks a Bitcoin anchor's proof: Bitcoin anchoring on and set up, the relay the settings name,
+/// this chain's anchor of a checkpoint on this branch with the list's root now, in a block the
+/// relay holds deep enough, by Merkle paths that lead there.
+pub(super) fn check(state: &State, rules: &ProveRules<'_>, proof: &BtcAnchorProof) -> Result<Shown, ProveError> {
+    let settings = rules.settings;
+    let fail = |why: &str| Err(ProveError::Refused(why.to_string()));
+
+    if !settings.bitcoin {
+        return fail("anchoring to Bitcoin is off on this chain");
+    }
+
+    let (Some(relay), Some(start)) = (settings.relay, &settings.btc_start) else {
+        return fail("anchoring has no relay or start");
+    };
+    let interval = super::interval(rules)?;
+
+    if let Some(problem) = proof.problem() {
+        return fail(problem);
+    }
+
+    let relay = Relay::new(state, relay);
+
+    if relay.network()? != Some(start.network) || relay.header(&sha256d(&start.header))?.map(|header| header.height) != Some(start.height) {
+        return fail("the relay did not start where anchoring's btc_start says");
+    }
+
+    let payload = Payload::find(&proof.raw).map_err(ProveError::Refused)?;
+    let (block, height) = super::check_payload(state, rules, interval, &payload)?;
+
+    let Some(found) = relay.header(&proof.block)? else {
+        return fail("the relay holds no such Bitcoin block");
+    };
+
+    if relay.depth(&proof.block)? < settings.depth {
+        return fail("the Bitcoin block is not yet as deep as anchoring.depth, or off the relay's main chain");
+    }
+
+    if !proof.leads_to(&found.merkle) {
+        return fail("the Merkle paths do not lead to the block's root");
+    }
+
+    Ok(Shown { source: AnchorSource::Bitcoin { block: proof.block, height: found.height }, epoch: payload.epoch, block, height })
+}
+
+/// Checks a Bitcoin anchor's proof the way anchored sync does, against headers rather than the
+/// relay: the block in the headers shown, the one the entry names, the paths leading to its root,
+/// and as deep as asked in the main chain. Its height.
+pub(super) fn check_shown(proof: &BtcAnchorProof, source: &AnchorSource, headers: &HeaderChain, index: usize, depth: u64) -> Result<u64, String> {
+    let Some((height, merkle)) = headers.block(&proof.block) else {
+        return Err(format!("anchor {index}'s Bitcoin block is in no header shown"));
+    };
+
+    if *source != (AnchorSource::Bitcoin { block: proof.block, height }) {
+        return Err(format!("anchor {index}'s proof is of another Bitcoin block than its entry"));
+    }
+
+    if !proof.leads_to(&merkle) {
+        return Err(format!("anchor {index}'s Merkle paths do not lead to its block's root"));
+    }
+
+    if headers.depth(&proof.block) < depth {
+        return Err(format!("anchor {index}'s Bitcoin block is off the main chain, or not {depth} deep"));
+    }
+
+    Ok(height)
 }

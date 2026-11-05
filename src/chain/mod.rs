@@ -1837,24 +1837,42 @@ impl Chain {
 
     #[document(parent = "Chain", summary = "The highest checkpoint an enforced anchor holds on the main chain, by height: no block at or under it replaces the chain's.")]
     pub fn anchored_height(&self) -> Result<Option<u64>, DbError> {
-        #[cfg(feature = "anchoring-btc")]
+        #[cfg(feature = "anchoring")]
         return crate::anchor::Anchors::new(&self.state()).enforced_height();
 
-        #[cfg(not(feature = "anchoring-btc"))]
+        #[cfg(not(feature = "anchoring"))]
         Ok(None)
     }
 
-    #[cfg(feature = "anchoring-btc")]
+    #[cfg(feature = "anchoring")]
     #[document(
         parent = "Chain",
-        summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's headers start and the relay's tip. None while the chain holds no anchors, or anchoring has no relay or start.",
+        summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's Bitcoin headers start and the relay's tip. None while the chain holds no anchors, or anchoring has no relay or start this build reads.",
     )]
     pub fn anchors_answer(&self, asked: &[u64]) -> Result<Option<crate::params::anchoring::AnchorsAnswer>, DbError> {
         let settings = self.anchoring()?;
-        let (Some(relay), Some(start)) = (settings.relay, settings.btc_start) else {
-            return Ok(None);
-        };
         let state = self.state();
+        #[cfg(feature = "anchoring-btc")]
+        let (start, btc_tip) = match (settings.relay, settings.btc_start) {
+            (Some(relay), Some(start)) => {
+                let tip = crate::anchor::Relay::new(&state, relay).tip()?.map_or(start.height, |(_, height)| height);
+
+                (Some(start), tip)
+            }
+            _ => (None, 0),
+        };
+        #[cfg(not(feature = "anchoring-btc"))]
+        let (start, btc_tip) = {
+            let _ = settings;
+
+            (None, 0)
+        };
+        let eth_start = None;
+
+        if start.is_none() && eth_start.is_none() {
+            return Ok(None);
+        }
+
         let anchors = crate::anchor::Anchors::new(&state);
         let Some(newest) = anchors.count()?.checked_sub(1) else {
             return Ok(None);
@@ -1869,9 +1887,7 @@ impl Chain {
             proofs.push((index, anchors.proof(index)?.ok_or_else(|| DbError::Corrupt(format!("anchor {index}'s proof is missing")))?));
         }
 
-        let btc_tip = crate::anchor::Relay::new(&state, relay).tip()?.map_or(start.height, |(_, height)| height);
-
-        Ok(Some(crate::params::anchoring::AnchorsAnswer { start, btc_tip, entries: anchors.entries(0, newest + 1)?, proofs }))
+        Ok(Some(crate::params::anchoring::AnchorsAnswer { start, btc_tip, eth_start, entries: anchors.entries(0, newest + 1)?, proofs }))
     }
 
     #[cfg(feature = "anchoring-btc")]

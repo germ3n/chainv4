@@ -242,7 +242,7 @@ fn pays_nothing() -> Vec<u8> {
 #[test]
 fn anchoring_reads_the_relay_s_own_records_and_proves_an_anchor_by_them() {
     use crate::anchor::{Anchors, Payload, ProveRules, Relay as Records, chain_tag, prove};
-    use crate::structs::tx::AnchorProof;
+    use crate::structs::tx::{AnchorProof, BtcAnchorProof};
     use crate::params::anchoring::{AnchorSettings, BtcNetworkRules, BtcStart};
 
     let relay = Relay::new();
@@ -287,14 +287,14 @@ fn anchoring_reads_the_relay_s_own_records_and_proves_an_anchor_by_them() {
         ..AnchorSettings::OFF
     };
     let rules = ProveRules { settings: &settings, genesis, checkpoint_interval: Some(8), pooled: false };
-    let proof = AnchorProof {
+    let proof = AnchorProof::Bitcoin(BtcAnchorProof {
         block,
         raw: anchor,
         index: 1,
         path: crate::crypto::bitcoin::merkle_path(&ids, 1),
         coinbase,
         coinbase_path: crate::crypto::bitcoin::merkle_path(&ids, 0),
-    };
+    });
 
     prove(&relay.world.state, &rules, &Address::Ed25519([1; 32]), &proof).unwrap();
     assert_eq!(Anchors::new(&relay.world.state).enforced_height().unwrap(), Some(16));

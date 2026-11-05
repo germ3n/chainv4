@@ -144,14 +144,25 @@ pub fn tx(transaction: &Tx) -> Value {
             "index": index,
             "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(),
         }),
-        Tx::Anchor { proof } => json!({
+        Tx::Anchor { proof: crate::structs::tx::AnchorProof::Bitcoin(proof) } => json!({
             "type": "anchor",
+            "chain": "bitcoin",
             "btc_block": crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>()),
             "raw": crate::structs::hex::to_hex(&proof.raw),
             "index": proof.index,
             "path": proof.path.iter().map(|hash| crate::structs::hex::to_hex(hash)).collect::<Vec<_>>(),
             "coinbase": crate::structs::hex::to_hex(&proof.coinbase),
             "coinbase_path": proof.coinbase_path.iter().map(|hash| crate::structs::hex::to_hex(hash)).collect::<Vec<_>>(),
+        }),
+        Tx::Anchor { proof: crate::structs::tx::AnchorProof::Ethereum(proof) } => json!({
+            "type": "anchor",
+            "chain": "ethereum",
+            "eth_root": crate::structs::hex::to_hex(&proof.root),
+            "header": crate::structs::hex::to_hex(&proof.header),
+            "tx": crate::structs::hex::to_hex(&proof.tx),
+            "index": proof.index,
+            "branch": proof.branch.iter().map(|node| crate::structs::hex::to_hex(node)).collect::<Vec<_>>(),
+            "ancestry": proof.ancestry.as_ref().map(|branch| branch.iter().map(|node| crate::structs::hex::to_hex(node)).collect::<Vec<_>>()),
         }),
         Tx::Batch { steps } => json!({ "type": "batch", "steps": steps.iter().map(tx).collect::<Vec<_>>() }),
     }

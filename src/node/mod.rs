@@ -1321,11 +1321,11 @@ impl Node {
                     .map(|(start, work)| crate::net::CheckpointAnswer { start, work }),
             ),
             SyncRequest::Finality { from, count } => SyncResponse::Finality(self.chain.light_finality_from(from, u64::from(count.min(MAX_SYNC_FINALITY)))?),
-            #[cfg(feature = "anchoring-btc")]
+            #[cfg(feature = "anchoring")]
             SyncRequest::Anchors { proofs } => SyncResponse::Anchors(self.chain.anchors_answer(&proofs)?),
             #[cfg(feature = "anchoring-btc")]
             SyncRequest::BtcHeaders { from, count } => SyncResponse::BtcHeaders(self.chain.btc_headers(from, count.min(crate::net::MAX_SYNC_BTC_HEADERS))?),
-            #[cfg(not(feature = "anchoring-btc"))]
+            #[cfg(not(feature = "anchoring"))]
             SyncRequest::Anchors { .. } => SyncResponse::Anchors(None),
             #[cfg(not(feature = "anchoring-btc"))]
             SyncRequest::BtcHeaders { .. } => SyncResponse::BtcHeaders(Vec::new()),

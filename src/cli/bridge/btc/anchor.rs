@@ -10,7 +10,7 @@ use {
     crate::cli::{CliResult, bridge::Bridge, send::TxArgs},
     crate::crypto::bitcoin::{hash160, sign, tx::{Transaction, TxIn, TxOut, der, p2wpkh}},
     crate::structs::hex::{from_hex, to_hex},
-    crate::structs::tx::AnchorProof,
+    crate::structs::tx::{AnchorProof, BtcAnchorProof},
     serde_json::{Value, json},
 };
 
@@ -139,7 +139,7 @@ impl Bridge {
 
         let proof = self.proof(&written.txid)?;
         let to_hashes = |path: &[u8]| path.chunks(32).map(|chunk| chunk.try_into().expect("32 bytes")).collect::<Vec<[u8; 32]>>();
-        let proof = AnchorProof { block: proof.block, raw: proof.tx, index: proof.index, path: to_hashes(&proof.path), coinbase: proof.coinbase, coinbase_path: to_hashes(&proof.coinbase_path) };
+        let proof = AnchorProof::Bitcoin(BtcAnchorProof { block: proof.block, raw: proof.tx, index: proof.index, path: to_hashes(&proof.path), coinbase: proof.coinbase, coinbase_path: to_hashes(&proof.coinbase_path) });
         let encoded = wincode::serialize(&proof).map_err(|err| format!("encoding the proof: {err}"))?;
         self.tx(TxArgs::Anchor { proof: to_hex(&encoded) })?;
 

@@ -1,0 +1,14 @@
+[package]
+name = "btclight"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Bitcoin's header rules, no_std: proof of work, the retarget, the median time past, the most-work chain, the relay's kept-header record and Merkle inclusion. The node and the btc_relay contract run them alike."
+
+[dependencies]
+# 256-bit targets and work, no_std: the node's own u256 is ethnum's too.
+ethnum = { version = "1.5.3", default-features = false }
+
+[dev-dependencies]
+sha2 = { version = "0.10.9", default-features = false }

@@ -1174,6 +1174,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "btclight"
+version = "0.1.0"
+dependencies = [
+ "ethnum",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1322,6 +1330,7 @@ dependencies = [
  "blake2 0.11.0",
  "blake3",
  "bls12_381",
+ "btclight",
  "chainv4-gpu",
  "clap",
  "curve25519-dalek 5.0.0",

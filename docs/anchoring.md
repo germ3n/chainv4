@@ -7,17 +7,32 @@ since left, been sold or been stolen. It can carry as many votes as the real one
 that meets it first has nothing to tell the two apart. `--checkpoint` fixes that by having the
 operator trust a block id someone gave them.
 
-Anchoring fixes it without trusting anyone, by borrowing Bitcoin's proof of work:
-- Anyone writes the chain's finalized checkpoints into Bitcoin transactions.
-- The chain records each one once it is shown deep enough in its Bitcoin relay.
-- A new node picks, among the histories its peers show, the one Bitcoin saw first.
+Anchoring fixes it without trusting anyone, by borrowing Bitcoin's proof of work, and in time
+Ethereum's finality:
+- Anyone writes the chain's finalized checkpoints into Bitcoin transactions, or Ethereum ones.
+- The chain records each one once it is shown deep enough in its Bitcoin relay. One list holds
+  them all, whichever chain holds each.
+- A new node picks, among the histories its peers show, the one anchored first.
 
 A fork made later from old keys cannot have put its checkpoints into Bitcoin's past. Doing that
 would mean outworking Bitcoin.
 
-Governance turns each part on and off, and a chain starts with all of them off. Builds choose too: the cargo features
-`anchoring-btc` and `anchoring-eth`, both on by default (see [Development](development.md)). A node
-built without `anchoring-btc` takes no anchors, so it cannot follow a chain that has them on.
+**Ethereum anchors are not counted yet.** The list, the proofs and the comparison already know
+them, but a `Tx::Anchor` carrying an Ethereum proof fails with "Ethereum anchors are not counted
+yet" until its checks against the Ethereum relay (`contracts/examples/eth_relay`) are in.
+
+Governance turns each part on and off, and a chain starts with all of them off. Builds choose too
+(see [Development](development.md)):
+- **`anchoring`** is what every anchor shares: the list and its root, `Tx::Anchor`'s dispatch and
+  reward, the guard against branches leaving an enforced anchor, `GET /anchors`, serving the list
+  to peers, and `--anchored`.
+- **`anchoring-btc`** adds Bitcoin: its proofs, read against the relay, Bitcoin's headers for
+  `--anchored`, and `bridge btc anchor`.
+- **`anchoring-eth`** adds Ethereum, without Bitcoin, on `ethlight` and `bls12-381`.
+
+All three are on by default, and each of the chains builds without the other. A node built without
+`anchoring` takes no anchors, and one without `anchoring-btc` no Bitcoin anchors, so neither can
+follow a chain that has them on.
 
 ## What goes into Bitcoin
 
@@ -38,7 +53,10 @@ later than it did. See [Picking a history](#picking-a-history).
 
 ## On chain
 
-**`Tx::Anchor { proof }`** shows Bitcoin holds an anchor. The proof is:
+**`Tx::Anchor { proof }`** shows another chain holds an anchor. The proof is an `AnchorProof`, by
+the chain it is in: `Bitcoin` (tag 0) or `Ethereum` (tag 1).
+
+**A Bitcoin proof** (`BtcAnchorProof`) is:
 - the Bitcoin transaction, without its witnesses;
 - its block, keyed as the relay keys it (the header's SHA-256 twice, unreversed);
 - its Merkle path;
@@ -60,12 +78,20 @@ Anyone may send it, whoever wrote the Bitcoin transaction. It is recorded when a
 - **The epoch has no anchor yet.**
 
 The relay is read natively, from its records in `Column::Namespaces`, as
-`contracts/examples/btc_relay` lays them out. Nothing it runs can change what a proof shows.
+`contracts/examples/btc_relay` lays them out: each header's record decodes as `btclight`'s `Kept`,
+the code the relay writes it with. Nothing it runs can change what a proof shows.
+
+**An Ethereum proof** (`EthAnchorProof`) carries what its checks will need: the light client header
+of the block holding the transaction, as SSZ; the beacon root of the finalized header the relay
+holds that it rests on; the transaction, its place, and its SSZ branch to the payload's
+transactions root, 21 nodes; and, for a block the relay holds only as an ancestor of a finalized
+one, the branch through that header's `block_roots`. It fails for now, whatever it shows.
 
 **What the chain keeps** (`anchor::Anchors`, chain state in `Column::Validators`, beside
 governance's):
-- **Each entry,** in the order they were recorded: the epoch, the block, the Bitcoin block and its
-  height, and whether `enforce` was on when it was recorded.
+- **Each entry,** in the order they were recorded: the epoch, the block, where the anchor sits
+  (`AnchorSource`: a Bitcoin block and its height, tag 0, or an Ethereum beacon root and its slot,
+  tag 1), and whether `enforce` was on when it was recorded.
 - **The running root after each entry:** SHA-256 of the root before it and the entry's encoding.
 - **The proof that showed it,** so any node can show it to a peer.
 - **The highest checkpoint an enforced entry holds.**
@@ -94,19 +120,28 @@ pick, rather than at one it is told to trust (`node::snapshot::anchored`):
    entry, the newest one's proof, and where the peer's relay starts and how far it reaches.
 2. **It asks each peer's relay for Bitcoin's headers** (`SyncRequest::BtcHeaders`), from the
    start. The relay keeps each header's version and nonce, so any node can write a header whole
-   again. The node checks them as Bitcoin's nodes do (`anchor::bitcoin::HeaderChain`): proof of
-   work, the retarget on main, the median time past. The most work any peer showed is Bitcoin's
+   again. The node checks them as Bitcoin's nodes do (`anchor::bitcoin::HeaderChain`), by the
+   rules the relay itself runs, from the `btclight` crate: proof of work, the retarget on main, the
+   median time past. The most work any peer showed is Bitcoin's
    main chain. A fork's relay can claim nothing of Bitcoin that Bitcoin's work does not back.
 3. **It checks each list against those headers** (`anchor::sync::check_anchors`). The newest
    entry's proof must lead to a main-chain block at least `anchors.depth` deep. The root its
    payload carries must be the root of every entry before it, so the whole list is that chain's
    own.
-4. **Where two lists part, the one whose entry there sits lower in Bitcoin wins**
-   (`compare_histories`). Both entries at that place must be proven, and the node asks each peer
-   for its proof of that place. Two lists of which one starts the other are the same history, and
-   the longer wins. Two entries in the same Bitcoin block are two histories anchored at once. No
-   rule picks between them, so the node says so and waits, and you start it with `--checkpoint`
-   from someone you trust.
+4. **Where two lists part, the one anchored first after that place wins** (`compare_histories`).
+   Bitcoin decides where both histories have Bitcoin anchors after they part; Ethereum fills the
+   gaps:
+   - In each list, it takes the first Bitcoin entry at or after the place they part. If both have
+     one, those decide: the lower in Bitcoin wins.
+   - Else it does the same with Ethereum entries: the earlier slot wins.
+   - Else no chain holds an anchor of both after they part, and nothing decides.
+
+   Both entries deciding must be proven. They may sit at different places in the two lists, so the
+   node asks each peer for its proof of its own (`NeedProofs`). Two lists of which one starts the
+   other are the same history, and the longer wins. Two entries in the same block, or slot, are two
+   histories anchored at once. No rule picks between them, nor where nothing decides, so the node
+   says so and waits, and you start it with `--checkpoint` from someone you trust. A build that
+   reads only one of the chains goes by that one alone.
 5. **It starts at the winner's newest anchored checkpoint,** as `--checkpoint` would.
 
 It hears from `anchors.peers` peers first, 2 unless tuned. One honest peer among them is enough. A
@@ -136,7 +171,7 @@ anchor lives in the anchorer's memory: one stopped before showing its anchor wri
 it starts again.
 
 `chainv4 send anchor --proof 0x…` sends a proof by hand. The proof is `AnchorProof` encoded, as
-hex.
+hex: its tag, 0 for Bitcoin, then the proof.
 
 ## Settings
 
@@ -157,7 +192,9 @@ Genesis's `anchoring`, or a `Change::Anchoring` decided by governance
 `--change '{"anchoring":{"bitcoin":true,"enforce":true}}'` names only what it changes. It is laid
 over what stands, as with every kind that takes a part. `GET /anchors` shows the settings in
 force, the list's count, root and enforced height, the relay's tip, and a page of entries (`?from`,
-`?limit`). The explorer's Finality page shows them, and the wallet proposes them.
+`?limit`). Each entry names its `chain`, `bitcoin` or `ethereum`, and where that chain holds it:
+`btc_block` and `btc_height`, or `eth_root` and `eth_slot`. A `Tx::Anchor`'s JSON names its
+`chain` too. The explorer's Finality page shows them, and the wallet proposes them.
 
 ## Why it is built this way
 
@@ -171,5 +208,13 @@ force, the list's count, root and enforced height, the relay's tip, and a page o
 - **No Bitcoin height in block headers.** The relay's tip is chain state already, which every node
   agrees on, so a header field would add nothing a proof against the state root cannot show. On its
   own it would prove only that a block was made after some Bitcoin block.
-- **Ethereum waits for a light client.** Without one, an Ethereum anchor counts only as far as
+- **Ethereum waits for its checks.** Without them, an Ethereum anchor counts only as far as
   whoever vouches for it, which a long-range attacker holding old signer keys could do as well.
+  The light client is in (`ethlight`, and `eth_relay` on chain); proving anchors against it is
+  next.
+- **Bitcoin decides first.** Its proof of work costs a fork the same however old the keys it
+  holds; Ethereum's finality rests on validators, whose old keys could in time sign a fork of
+  their own. So Ethereum only decides where Bitcoin cannot.
+- **The header rules are written once.** `btclight` holds them, `no_std`, and both the relay
+  contract and the node's anchored sync run it, so the two can never disagree on what a valid
+  Bitcoin header is.

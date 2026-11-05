@@ -1466,7 +1466,25 @@ voting finality it now goes back to the checkpoint and follows the node from the
   with fewer it waits. A node that hears only an attacker's peers follows what they show.
 - **The anchorer keeps its pending anchor in memory:** one restarted before showing its anchor
   writes another, at another Bitcoin fee.
-- **Ethereum anchors are written, not counted,** until a light client of Ethereum's finality is in.
+- **Ethereum anchors are written, not counted,** until their checks against the Ethereum relay are
+  in. The types are there already: an entry names its chain, Bitcoin or Ethereum, and a
+  `Tx::Anchor` carrying an Ethereum proof fails with "Ethereum anchors are not counted yet".
+- **One list holds anchors from both chains,** in the order they were recorded. Its root covers each
+  entry's chain and where that chain holds it, so it changed with them: a chain from before it
+  needs a new genesis.
+- **Where two histories part, Bitcoin decides if it can:** each history's first Bitcoin anchor at or
+  after the parting place, the lower winning, even if Ethereum says otherwise. Only where one of
+  them has none does each one's first Ethereum anchor decide, the earlier slot winning. Where no
+  chain holds an anchor of both after they part, nothing decides, and the node stops as for a tie.
+  A build that reads only one of the chains goes by that one alone.
+- **The places compared may differ:** each history's first anchor in the deciding chain can sit at
+  another place in its list, so the node may ask each peer for the proof of a different entry.
+- **Three features:** `anchoring` is the list, the guard, the reward, `GET /anchors` and
+  `--anchored`; `anchoring-btc` and `anchoring-eth` add each chain, and either builds without the
+  other. A build without `anchoring-btc` refuses Bitcoin anchors, so it cannot follow a chain that
+  takes them.
+- **Bitcoin's header rules live once, in `btclight`:** the relay contract and the node's anchored
+  sync run the same code, so a change to them changes both, and the relay's code with it.
 
 ## Ethereum's light client
 

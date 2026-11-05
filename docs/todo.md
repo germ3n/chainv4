@@ -525,6 +525,15 @@ with.
 
 ### Script layer
 
+- [ ] **A Lua block came out two ways on one machine (seen 2026-11-05).**
+  `chain::tests::pentest_lua::building_big_strings_stops_at_the_memory_limit` once failed with
+  `Invalid(ReceiptsRoot)`, under load from a parallel build. The block that was built and the same
+  block imported gave different receipts. It passed every time alone. The likely cause is Lua's
+  memory limit: where an allocation crosses it, and so the fuel used before a transaction fails,
+  can follow when the collector runs, which load changes. If that's it, it is a consensus split
+  waiting to happen. Find out what differs between the two runs, and make running out of memory
+  deterministic. One way is to count what the script asked to allocate, not what the allocator
+  holds. Another is to collect at fixed points.
 - [ ] **Check that memory limits and fuel metering come out the same on every OS and machine.**
   Asked about 2026-11-04, during the pentest. A transaction that runs out of fuel or memory on one
   node and not another splits the chain, and the devnet already mixes x86-64 Linux servers with

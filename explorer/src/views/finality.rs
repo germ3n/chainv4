@@ -140,6 +140,7 @@ fn anchors(ui: &mut Ui, ctx: &mut Ctx) {
             super::list_row(ui, look, |ui| {
                 let epoch = entry["epoch"].as_u64().unwrap_or(0);
                 let block = entry["block"].as_str().unwrap_or_default().to_string();
+                let ethereum = entry["chain"].as_str() == Some("ethereum");
                 widgets::end_row(
                     ui,
                     |ui| {
@@ -147,11 +148,14 @@ fn anchors(ui: &mut Ui, ctx: &mut Ctx) {
                         super::block(ui, ctx, &block, &format::short(&block));
                     },
                     |ui| {
-                        ui.label(RichText::new(format!("Bitcoin {}", format::thousands(&entry["btc_height"].as_u64().unwrap_or(0).to_string()))).monospace());
+                        ui.label(RichText::new(match ethereum {
+                            true => format!("Ethereum slot {}", format::thousands(&entry["eth_slot"].as_u64().unwrap_or(0).to_string())),
+                            false => format!("Bitcoin {}", format::thousands(&entry["btc_height"].as_u64().unwrap_or(0).to_string())),
+                        }).monospace());
                     },
                 );
-                let btc = entry["btc_block"].as_str().unwrap_or_default();
-                super::copyable_as(ui, RichText::new(format::short(btc)).small().color(look.palette.muted), btc);
+                let held = entry[if ethereum { "eth_root" } else { "btc_block" }].as_str().unwrap_or_default();
+                super::copyable_as(ui, RichText::new(format::short(held)).small().color(look.palette.muted), held);
             });
         }
     });

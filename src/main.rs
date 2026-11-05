@@ -870,7 +870,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             None => None,
         };
 
-        #[cfg(feature = "anchoring-btc")]
+        #[cfg(feature = "anchoring")]
         if args.anchored {
             match node.sync_from_anchors()? {
                 true => log::info!("[node] syncing from a snapshot, at the checkpoint the anchors pick"),
@@ -878,9 +878,9 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        #[cfg(not(feature = "anchoring-btc"))]
+        #[cfg(not(feature = "anchoring"))]
         if args.anchored {
-            return Err("--anchored needs a build with the bitcoin feature".into());
+            return Err("--anchored needs a build with the anchoring feature".into());
         }
 
         if !args.anchored {

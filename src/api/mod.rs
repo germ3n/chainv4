@@ -319,7 +319,7 @@ struct Api {
     /// Genesis's bootnodes, which stand until governance decides others.
     genesis_bootnodes: Arc<Vec<String>>,
     /// Genesis itself, for what governance may change to show genesis's while it has not.
-    #[cfg(feature = "governance")]
+    #[cfg(any(feature = "governance", feature = "anchoring"))]
     genesis: Arc<Genesis>,
     /// The faucet, on a node that runs one.
     #[cfg(feature = "faucet")]
@@ -695,7 +695,7 @@ pub fn start(
     let federation = genesis.federation.clone().map(Arc::new);
     let (rules, max_block_bytes, reward, vote_rewards) = (Arc::new(genesis.rules()), genesis.max_block_bytes, genesis.reward, genesis.vote_rewards());
     let genesis_bootnodes = Arc::new(genesis.bootnodes.clone());
-    #[cfg(feature = "governance")]
+    #[cfg(any(feature = "governance", feature = "anchoring"))]
     let whole = Arc::new(genesis.clone());
     let vm = Arc::new(
         Vm::with_pools(&genesis.engines, genesis.hash, options.pools)
@@ -756,7 +756,7 @@ pub fn start(
                     built_fees: Arc::default(),
                     vote_rewards,
                     genesis_bootnodes,
-                    #[cfg(feature = "governance")]
+                    #[cfg(any(feature = "governance", feature = "anchoring"))]
                     genesis: whole,
                     #[cfg(feature = "faucet")]
                     faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
@@ -848,7 +848,7 @@ fn router(api: Api) -> Router {
     let router = router.route("/stream", get(stream));
     #[cfg(feature = "updates")]
     let router = router.route("/release", get(release));
-    #[cfg(feature = "anchoring-btc")]
+    #[cfg(feature = "anchoring")]
     let router = router.route("/anchors", get(anchors));
     let router = router.route("/claims/{pool}/{address}", get(claims)).route("/mining", get(mining::about)).route(mining::SOCKET_PATH, get(mining::socket));
     #[cfg(feature = "pool")]
@@ -1611,16 +1611,11 @@ async fn rich(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, Stri
     })))
 }
 
-#[cfg(feature = "governance")]
-/// Governance's decisions, newest first, below the version in ?before: each the version it made,
-/// the approval that decided it, its block, who sent it and the change. A light client proves each
-/// with GET /proofs/receipts/{tx}, whose outcome is Decided at that version; versions count up
-/// one at a time, so a gap shows. from is the oldest this node keeps, 1 unless it synced from a
-/// snapshot.
 /// The anchor list: anchoring's settings in force, how many anchors the chain recorded, the list's
 /// root, the highest enforced checkpoint, the relay's tip, and a page of entries, the newest last,
-/// from ?from on, the newest page unless told.
-#[cfg(feature = "anchoring-btc")]
+/// from ?from on, the newest page unless told. Each entry names its chain, bitcoin or ethereum, and
+/// where that chain holds it: btc_block and btc_height, or eth_root and eth_slot.
+#[cfg(feature = "anchoring")]
 async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     let state = State::new(api.db.clone());
     let settings = Changes::new(&state).anchoring()?.or_else(|| api.genesis.anchoring.clone()).unwrap_or_default();
@@ -1633,19 +1628,36 @@ async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, S
         .entries(from, limit)?
         .iter()
         .zip(from..)
-        .map(|(entry, index)| json!({
-            "index": index,
-            "epoch": entry.epoch,
-            "block": entry.block.to_string(),
-            "btc_block": shown(&entry.btc_block),
-            "btc_height": entry.btc_height,
-            "enforced": entry.enforced,
-        }))
+        .map(|(entry, index)| {
+            let mut value = json!({
+                "index": index,
+                "epoch": entry.epoch,
+                "block": entry.block.to_string(),
+                "chain": entry.source.chain().name(),
+                "enforced": entry.enforced,
+            });
+
+            match entry.source {
+                crate::params::anchoring::AnchorSource::Bitcoin { block, height } => {
+                    value["btc_block"] = shown(&block).into();
+                    value["btc_height"] = height.into();
+                }
+                crate::params::anchoring::AnchorSource::Ethereum { root, slot } => {
+                    value["eth_root"] = crate::structs::hex::to_hex(&root).into();
+                    value["eth_slot"] = slot.into();
+                }
+            }
+
+            value
+        })
         .collect();
+    #[cfg(feature = "anchoring-btc")]
     let relay_tip = match settings.relay {
         Some(relay) => crate::anchor::Relay::new(&state, relay).tip()?.map(|(hash, height)| json!({ "hash": shown(&hash), "height": height })),
         None => None,
     };
+    #[cfg(not(feature = "anchoring-btc"))]
+    let relay_tip: Option<Value> = None;
 
     Ok(Json(json!({
         "settings": crate::params::json::anchoring_json(&settings),
@@ -1660,6 +1672,12 @@ async fn anchors(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, S
     })))
 }
 
+#[cfg(feature = "governance")]
+/// Governance's decisions, newest first, below the version in ?before: each the version it made,
+/// the approval that decided it, its block, who sent it and the change. A light client proves each
+/// with GET /proofs/receipts/{tx}, whose outcome is Decided at that version; versions count up
+/// one at a time, so a gap shows. from is the oldest this node keeps, 1 unless it synced from a
+/// snapshot.
 async fn governance_history(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
     if api.rules.governance.is_none() {
         return Err(ApiError::NotFound("this chain has no governance".to_string()));

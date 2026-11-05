@@ -299,6 +299,10 @@ fn means(tx: &TxView) -> Option<String> {
             super::governance::kinds(&kind_of(tx)),
             next(&tx.tx["version"]),
         )),
+        "anchor" if tx.tx["chain"].as_str() == Some("ethereum") => Some(format!(
+            "Shows that Ethereum holds an anchor of one of this chain's checkpoints, in a block final by beacon block {}, which the chain records and may pay for",
+            tx.tx["eth_root"].as_str().map_or_else(|| "?".to_string(), format::short),
+        )),
         "anchor" => Some(format!(
             "Shows that Bitcoin block {} holds an anchor of one of this chain's checkpoints, which the chain records and may pay for",
             tx.tx["btc_block"].as_str().map_or_else(|| "?".to_string(), format::short),

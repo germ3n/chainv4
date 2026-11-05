@@ -51,6 +51,8 @@ matrix=(
     node,blake3,ed25519,gpu
     release,blake3,ed25519
     updates,http,sha256,edblake
+    http,blake3,ed25519,finality-ffg,anchoring-btc
+    http,sha256,ed25519,finality-ffg,anchoring-eth
 )
 
 names=()

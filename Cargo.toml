@@ -5,13 +5,13 @@ edition = "2024"
 license = "MIT"
 
 [workspace]
-members = ["macro", "wiki", "gpu", "ethlight"]
+members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
 # Contracts build for wasm32, and the explorer for the desktop and the browser; each has a
 # workspace of its own, so neither shares the node's lockfile.
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -30,18 +30,23 @@ bls12-381 = ["dep:bls12_381", "dep:sha2-010"]
 # Bitcoin's keys: ECDSA on secp256k1 over double SHA-256, and addresses of the key's HASH160,
 # written bc1q… as Bitcoin's native segwit (P2WPKH) ones are.
 bitcoin = ["secp256k1", "dep:sha2", "dep:ripemd", "dep:hmac"]
+# Anchoring the chain's finalized checkpoints into other chains (docs/anchoring.md), whichever
+# they are: the anchor list and its root, Tx::Anchor's dispatch and reward, the guard against
+# branches leaving an enforced anchored checkpoint, GET /anchors, serving anchors to peers, and
+# --anchored, which compares the histories peers show. Without it, the types stay, so encodings do
+# not change, but the node takes no anchors, serves none and enforces none.
+anchoring = ["dep:sha2"]
+# Anchors in Bitcoin: Tx::Anchor's Bitcoin proofs, read against the Bitcoin relay's records,
+# Bitcoin's headers checked by work for --anchored, served to peers, and bridge btc anchor; on the
+# header rules btclight shares with contracts/examples/btc_relay.
+anchoring-btc = ["anchoring", "bitcoin", "dep:btclight"]
+# Anchors in Ethereum, on the light client ethlight shares with contracts/examples/eth_relay, and
+# the anchorer writing each anchor to an EVM chain too. The chain does not count them yet: an
+# Ethereum proof fails until their checks are in.
+anchoring-eth = ["anchoring", "bls12-381", "dep:ethlight"]
 # Atomic swaps between any two of chainv4, Bitcoin and EVM chains: the terms both sides agree, as
 # ur:chainv4-swap codes, Bitcoin's HTLC script and its spends, and Swap.sol's calls. chainv4's side
 # is a contract, contracts/lua/swap.lua; an EVM chain's, contracts/evm/Swap.sol.
-# Anchoring the chain's finalized checkpoints into Bitcoin (docs/anchoring.md): Tx::Anchor's checks
-# and reward, the guard against branches leaving an anchored checkpoint, --anchored, GET /anchors
-# and bridge btc anchor. Without it, the types stay, so encodings do not change, but the node takes
-# no anchors, serves none and enforces none.
-anchoring-btc = ["bitcoin"]
-# Anchoring into Ethereum: the anchorer writing each anchor to an EVM chain too, which the chain
-# does not count until a light client of Ethereum's finality is in. It builds on anchoring-btc for
-# now, as the anchor list, the guard and the anchorer live there.
-anchoring-eth = ["anchoring-btc", "secp256k1", "bls12-381"]
 swap = ["bitcoin", "dep:ur"]
 # The DEX's arithmetic for the apps: the trade formula and routes through pools, quoting
 # contracts/lua/dex.lua and the EVM's contracts/evm/Dex.sol alike, and the node naming them.
@@ -148,6 +153,10 @@ getrandom = "0.4.3"
 ur = { version = "0.5.2", optional = true }
 zeroize = "1.9.1"
 ethnum = "1.5.3"
+# Bitcoin's header rules, shared with contracts/examples/btc_relay.
+btclight = { path = "btclight", optional = true }
+# Ethereum's light client, shared with contracts/examples/eth_relay.
+ethlight = { path = "ethlight", optional = true }
 rayon = { version = "1.12.0", optional = true }
 libp2p = { version = "0.57.1", features = ["tokio", "quic", "tcp", "noise", "yamux", "gossipsub", "kad", "mdns", "identify", "request-response", "macros"], optional = true }
 tokio = { version = "1.54.1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "io-util"], optional = true }

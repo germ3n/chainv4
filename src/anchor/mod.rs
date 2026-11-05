@@ -1,28 +1,35 @@
-//! Anchoring the chain into Bitcoin (docs/anchoring.md). Anyone writes a finalized checkpoint into
-//! a Bitcoin transaction's OP_RETURN, then shows it here with Tx::Anchor: the transaction, its
-//! Merkle path and its block's coinbase, checked against the Bitcoin relay contract's headers, as
-//! the Bitcoin gateway checks a deposit. The chain records each anchored checkpoint in a list whose
-//! running root every later anchor writes into Bitcoin as well, so the list a peer shows can be
-//! checked against Bitcoin itself; and nodes refuse any block that would replace a checkpoint
-//! anchored while the settings enforced it.
+//! Anchoring the chain into other chains (docs/anchoring.md). Anyone writes a finalized checkpoint
+//! into a Bitcoin transaction's OP_RETURN, or an Ethereum transaction, then shows it here with
+//! Tx::Anchor: in Bitcoin, the transaction, its Merkle path and its block's coinbase, checked
+//! against the Bitcoin relay contract's headers, as the Bitcoin gateway checks a deposit. The chain
+//! records each anchored checkpoint in one list, whichever chain holds it, whose running root every
+//! later anchor writes as well, so the list a peer shows can be checked against those chains
+//! themselves; and nodes refuse any block that would replace a checkpoint anchored while the
+//! settings enforced it.
 //!
-//! What a node does with the list on its own, checking Bitcoin's headers by their work and picking
-//! the history Bitcoin saw first, is in sync.rs; the header rules in bitcoin.rs.
+//! What a node does with the list on its own, picking the history the other chains saw first, is in
+//! sync.rs; Bitcoin's proofs, its relay's records and its headers in bitcoin.rs. Ethereum anchors
+//! are not counted yet.
 
 use {
     crate::{
-        crypto::{bitcoin::{sha256, sha256d, tx::Transaction}, hashable::Hashable},
-        db::{Column, DbError, State, namespace_key},
-        params::anchoring::{AnchorSettings, BtcNetworkRules},
-        structs::{address::Address, hash::Hash, tx::{AnchorProof, MAX_ANCHOR_PATH, MAX_ANCHOR_TX}, u256::u256},
+        crypto::hashable::Hashable,
+        db::{Column, DbError, State},
+        params::anchoring::{AnchorSettings, AnchorSource},
+        structs::{address::Address, hash::Hash, tx::AnchorProof, u256::u256},
     },
     r#macro::document,
+    sha2::{Digest, Sha256},
 };
 
 pub use crate::params::anchoring::{AnchorEntry, AnchorsAnswer};
 
+#[cfg(feature = "anchoring-btc")]
 pub mod bitcoin;
 pub mod sync;
+
+#[cfg(feature = "anchoring-btc")]
+pub use bitcoin::{Relay, RelayHeader};
 
 #[cfg(test)]
 mod tests;
@@ -85,27 +92,6 @@ impl Payload {
     pub fn script(&self) -> Vec<u8> {
         [&[0x6a, 0x4c, PAYLOAD_LEN as u8][..], &self.encode()].concat()
     }
-
-    #[document(
-        parent = "Payload",
-        summary = "The anchor a Bitcoin transaction carries: the first output whose script is one. The transaction comes without its witnesses, as its id hashes it.",
-        returns = "The payload, or why the bytes hold none.",
-    )]
-    pub fn find(raw: &[u8]) -> Result<Payload, String> {
-        let (tx, witnessed) = Transaction::read(raw)?;
-
-        if witnessed {
-            return Err("an anchor's transaction comes without its witnesses, as its id hashes it".to_string());
-        }
-
-        tx.outputs
-            .iter()
-            .find_map(|output| match output.script.as_slice() {
-                [0x6a, 0x4c, len, data @ ..] if usize::from(*len) == PAYLOAD_LEN => Payload::decode(data),
-                _ => None,
-            })
-            .ok_or_else(|| "the transaction carries no anchor: no OP_RETURN of cv4a's 80 bytes".to_string())
-    }
 }
 
 #[document(
@@ -118,63 +104,12 @@ pub fn chain_tag(genesis: &Hash) -> [u8; 4] {
 }
 
 #[document(
-    summary = "What showed an anchor: Tx::Anchor's proof, kept with the entry so any node can show it to a peer.",
-    category = "Anchoring",
-    see_also = "AnchorProof, AnchorEntry",
-)]
-pub type BtcProof = AnchorProof;
-
-impl AnchorProof {
-    #[document(parent = "AnchorProof", summary = "Why it could never prove anything, before any header is read: bytes too many or 64, paths too long or of different lengths, or a coinbase that is none.")]
-    pub fn problem(&self) -> Option<&'static str> {
-        if self.raw.len() > MAX_ANCHOR_TX || self.coinbase.len() > MAX_ANCHOR_TX {
-            return Some("an anchor's transaction and coinbase are at most 100,000 bytes each");
-        }
-
-        if self.raw.len() == 64 {
-            return Some("a transaction of 64 bytes, which a Merkle tree's inner node could pass for");
-        }
-
-        if self.path.len() > MAX_ANCHOR_PATH || self.path.len() != self.coinbase_path.len() {
-            return Some("the paths are as long as each other, at most 32");
-        }
-
-        (!is_coinbase(&self.coinbase)).then_some("the coinbase is no coinbase: one input, spending nothing")
-    }
-
-    #[document(parent = "AnchorProof", summary = "Whether it leads to a Merkle root, the coinbase's path and the transaction's both.")]
-    pub fn leads_to(&self, merkle: &[u8; 32]) -> bool {
-        self.problem().is_none() && leads_to(&sha256d(&self.coinbase), 0, &self.coinbase_path, merkle) && leads_to(&sha256d(&self.raw), self.index, &self.path, merkle)
-    }
-}
-
-/// Whether bytes are a coinbase without its witness: one input, spending nothing. Never 64 bytes.
-fn is_coinbase(raw: &[u8]) -> bool {
-    raw.len() != 64 && raw.len() >= 41 && raw[4] == 1 && raw[5..37] == [0; 32] && raw[37..41] == [0xff; 4]
-}
-
-/// Whether a leaf at a place, by its path, comes to a Merkle root, as btc_relay's includes checks.
-fn leads_to(leaf: &[u8; 32], index: u64, path: &[[u8; 32]], root: &[u8; 32]) -> bool {
-    let (mut at, mut index) = (*leaf, index);
-
-    for sibling in path {
-        at = match index & 1 {
-            0 => sha256d(&[at, *sibling].concat()),
-            _ => sha256d(&[*sibling, at].concat()),
-        };
-        index >>= 1;
-    }
-
-    index == 0 && at == *root
-}
-
-#[document(
     summary = "The anchor list's root after one more entry: SHA-256 of the root before it and the entry's encoding. The empty list's root is all zeros.",
     category = "Anchoring",
     see_also = "AnchorEntry, Payload",
 )]
 pub fn next_root(prev: &[u8; 32], entry: &AnchorEntry) -> [u8; 32] {
-    sha256(&[&prev[..], &entry.hashable_bytes_with_tag()].concat())
+    Sha256::digest([&prev[..], &entry.hashable_bytes_with_tag()].concat()).into()
 }
 
 #[document(
@@ -184,104 +119,6 @@ pub fn next_root(prev: &[u8; 32], entry: &AnchorEntry) -> [u8; 32] {
 )]
 pub fn list_root(entries: &[AnchorEntry]) -> [u8; 32] {
     entries.iter().fold([0; 32], |root, entry| next_root(&root, entry))
-}
-
-#[document(
-    summary = "What the Bitcoin relay keeps of one header, read from its namespaces as contracts/examples/btc_relay lays it out.",
-    category = "Anchoring",
-    see_also = "Relay",
-)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RelayHeader {
-    #[document(summary = "The header's Merkle root.")]
-    pub merkle: [u8; 32],
-    #[document(summary = "Its height.")]
-    pub height: u64,
-}
-
-#[document(
-    summary = "A Bitcoin relay contract's records in a state, read as the chain reads its own: no call into it, so nothing it runs can change what a proof shows.",
-    category = "Anchoring",
-    see_also = "RelayHeader, AnchorSettings::relay",
-)]
-pub struct Relay<'a> {
-    state: &'a State,
-    address: Address,
-}
-
-impl<'a> Relay<'a> {
-    #[document(parent = "Relay", summary = "The relay at an address.")]
-    pub fn new(state: &'a State, address: Address) -> Relay<'a> {
-        Relay { state, address }
-    }
-
-    fn own(&self, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
-        self.state.get(Column::Namespaces, &namespace_key(&self.address, &[], key))
-    }
-
-    #[document(parent = "Relay", summary = "A header it took, by its hash in Bitcoin's byte order.")]
-    pub fn header(&self, hash: &[u8; 32]) -> Result<Option<RelayHeader>, DbError> {
-        let bytes = self.state.get(Column::Namespaces, &namespace_key(&self.address, b"headers", hash))?;
-
-        Ok(bytes.filter(|bytes| bytes.len() >= 117).map(|bytes| RelayHeader {
-            merkle: bytes[32..64].try_into().expect("32 bytes"),
-            height: u64::from_le_bytes(bytes[64..72].try_into().expect("8 bytes")),
-        }))
-    }
-
-    #[document(parent = "Relay", summary = "A header it took, written whole again, 80 bytes, from what it keeps: None for one it does not hold, or keeps without its version and nonce, as relays from before anchoring did.")]
-    pub fn raw_header(&self, hash: &[u8; 32]) -> Result<Option<[u8; 80]>, DbError> {
-        let Some(bytes) = self.state.get(Column::Namespaces, &namespace_key(&self.address, b"headers", hash))? else {
-            return Ok(None);
-        };
-        let Some(count) = bytes.get(116).map(|count| usize::from(*count)) else {
-            return Ok(None);
-        };
-        let Some(tail) = bytes.get(117 + 4 * count..125 + 4 * count) else {
-            return Ok(None);
-        };
-        let mut header = [0u8; 80];
-        header[..4].copy_from_slice(&tail[..4]);
-        header[4..68].copy_from_slice(&bytes[..64]);
-        header[68..72].copy_from_slice(&bytes[108..112]);
-        header[72..76].copy_from_slice(&bytes[104..108]);
-        header[76..].copy_from_slice(&tail[4..]);
-
-        Ok((sha256d(&header) == *hash).then_some(header))
-    }
-
-    #[document(parent = "Relay", summary = "Its main chain's block at a height.")]
-    pub fn main_at(&self, height: u64) -> Result<Option<[u8; 32]>, DbError> {
-        let bytes = self.state.get(Column::Namespaces, &namespace_key(&self.address, b"main", &height.to_be_bytes()))?;
-
-        Ok(bytes.and_then(|bytes| bytes.try_into().ok()))
-    }
-
-    #[document(parent = "Relay", summary = "Its main chain's tip: its hash and height.")]
-    pub fn tip(&self) -> Result<Option<([u8; 32], u64)>, DbError> {
-        let Some(hash) = self.own(b"tip")?.and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()) else {
-            return Ok(None);
-        };
-
-        Ok(self.header(&hash)?.map(|header| (hash, header.height)))
-    }
-
-    #[document(parent = "Relay", summary = "The network it was started on.")]
-    pub fn network(&self) -> Result<Option<BtcNetworkRules>, DbError> {
-        Ok(self.own(b"network")?.and_then(|bytes| BtcNetworkRules::from_name(std::str::from_utf8(&bytes).ok()?)))
-    }
-
-    #[document(parent = "Relay", summary = "How deep a block is in its main chain: 1 for the tip, 0 off it or unknown.")]
-    pub fn depth(&self, hash: &[u8; 32]) -> Result<u64, DbError> {
-        let (Some(header), Some((_, tip))) = (self.header(hash)?, self.tip()?) else {
-            return Ok(0);
-        };
-
-        Ok(match self.main_at(header.height)? == Some(*hash) {
-            true => tip - header.height + 1,
-            false => 0,
-        })
-    }
 }
 
 /// Keys in Column::Validators, beside governance's own.
@@ -348,7 +185,7 @@ impl<'a> Anchors<'a> {
     }
 
     #[document(parent = "Anchors", summary = "The proof that showed the entry at a place.")]
-    pub fn proof(&self, index: u64) -> Result<Option<BtcProof>, DbError> {
+    pub fn proof(&self, index: u64) -> Result<Option<AnchorProof>, DbError> {
         self.state.get_value(Column::Validators, &keyed(PROOF, &index.to_be_bytes()))
     }
 
@@ -368,7 +205,7 @@ impl<'a> Anchors<'a> {
     }
 
     /// Appends an entry with its proof, at its checkpoint's height.
-    fn record(&self, entry: &AnchorEntry, proof: &BtcProof, height: u64) -> Result<u64, DbError> {
+    fn record(&self, entry: &AnchorEntry, proof: &AnchorProof, height: u64) -> Result<u64, DbError> {
         let index = self.count()?;
         let root = next_root(&self.root()?, entry);
         let at = index.to_be_bytes();
@@ -416,44 +253,18 @@ pub struct Proven {
     pub reward: u256,
 }
 
-#[document(
-    summary = "Runs a Tx::Anchor: checks the Bitcoin transaction carries this chain's anchor of a checkpoint on this branch, with a root the list held, in a block the relay holds deep enough, and records it, paying the reward when it is due.",
-    params = {
-        state = "The transaction's layer.",
-        rules = "What it runs under.",
-        sender = "Who sent it, and earns the reward.",
-        proof = "The Bitcoin transaction and its proof.",
-    },
-    returns = "What it did, or why it fails.",
-    category = "Anchoring",
-    see_also = "Tx::Anchor, Anchors",
-)]
-pub fn prove(state: &State, rules: &ProveRules<'_>, sender: &Address, proof: &BtcProof) -> Result<Proven, ProveError> {
-    let settings = rules.settings;
+/// The chain's checkpoint interval, which an anchor's epoch counts in.
+#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+fn interval(rules: &ProveRules<'_>) -> Result<u64, ProveError> {
+    rules.checkpoint_interval.filter(|interval| *interval > 0).ok_or_else(|| ProveError::Refused("this chain's finality has no checkpoints to anchor".to_string()))
+}
+
+/// Checks what an anchor says, whichever chain holds it: this chain's tag, the block at the epoch's
+/// checkpoint height on this branch, an epoch not anchored yet, and the list's root now. The
+/// checkpoint's block and height.
+#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+fn check_payload(state: &State, rules: &ProveRules<'_>, interval: u64, payload: &Payload) -> Result<(Hash, u64), ProveError> {
     let fail = |why: &str| Err(ProveError::Refused(why.to_string()));
-
-    if !settings.bitcoin {
-        return fail("anchoring to Bitcoin is off on this chain");
-    }
-
-    let (Some(relay), Some(start)) = (settings.relay, &settings.btc_start) else {
-        return fail("anchoring has no relay or start");
-    };
-    let Some(interval) = rules.checkpoint_interval.filter(|interval| *interval > 0) else {
-        return fail("this chain's finality has no checkpoints to anchor");
-    };
-
-    if let Some(problem) = proof.problem() {
-        return fail(problem);
-    }
-
-    let relay = Relay::new(state, relay);
-
-    if relay.network()? != Some(start.network) || relay.header(&sha256d(&start.header))?.map(|header| header.height) != Some(start.height) {
-        return fail("the relay did not start where anchoring's btc_start says");
-    }
-
-    let payload = Payload::find(&proof.raw).map_err(ProveError::Refused)?;
 
     if payload.chain != chain_tag(&rules.genesis) {
         return fail("the anchor is another chain's");
@@ -472,27 +283,59 @@ pub fn prove(state: &State, rules: &ProveRules<'_>, sender: &Address, proof: &Bt
         return fail("that epoch's checkpoint is anchored already");
     }
 
-    // The root of every entry before this one, so the list a peer shows checks against Bitcoin
-    // whole: an anchor written while another was proven in between is written again.
+    // The root of every entry before this one, so the list a peer shows checks against the chain
+    // holding it whole: an anchor written while another was proven in between is written again.
     if payload.root != anchors.root()? {
         return fail("the anchor's list root is not the list's root now: another anchor was proven since it was written");
     }
 
-    let Some(header) = relay.header(&proof.block)? else {
-        return fail("the relay holds no such Bitcoin block");
-    };
+    Ok((block, height))
+}
 
-    if relay.depth(&proof.block)? < settings.depth {
-        return fail("the Bitcoin block is not yet as deep as anchoring.depth, or off the relay's main chain");
+/// What a proof showed: where the anchor sits, and the checkpoint it anchors, by its epoch, block
+/// and height.
+#[cfg_attr(not(feature = "anchoring-btc"), allow(dead_code))]
+struct Shown {
+    source: AnchorSource,
+    epoch: u64,
+    block: Hash,
+    height: u64,
+}
+
+/// What a proof shows, by the chain it is in.
+fn check(state: &State, rules: &ProveRules<'_>, proof: &AnchorProof) -> Result<Shown, ProveError> {
+    match proof {
+        #[cfg(feature = "anchoring-btc")]
+        AnchorProof::Bitcoin(proof) => bitcoin::check(state, rules, proof),
+        #[cfg(not(feature = "anchoring-btc"))]
+        AnchorProof::Bitcoin(_) => {
+            let _ = (state, rules);
+
+            Err(ProveError::Refused("this build reads no Bitcoin, so it takes no Bitcoin anchors".to_string()))
+        }
+        AnchorProof::Ethereum(_) => Err(ProveError::Refused("Ethereum anchors are not counted yet".to_string())),
     }
+}
 
-    if !proof.leads_to(&header.merkle) {
-        return fail("the Merkle paths do not lead to the block's root");
-    }
-
-    let entry = AnchorEntry { epoch: payload.epoch, block, btc_block: proof.block, btc_height: header.height, enforced: settings.enforce };
+#[document(
+    summary = "Runs a Tx::Anchor: checks the proof shows this chain's anchor of a checkpoint on this branch, with a root the list held, in a block the other chain holds deep enough, and records it, paying the reward when it is due. A Bitcoin proof is checked against the relay; an Ethereum one fails, as Ethereum anchors are not counted yet.",
+    params = {
+        state = "The transaction's layer.",
+        rules = "What it runs under.",
+        sender = "Who sent it, and earns the reward.",
+        proof = "The anchor's transaction and its proof.",
+    },
+    returns = "What it did, or why it fails.",
+    category = "Anchoring",
+    see_also = "Tx::Anchor, Anchors",
+)]
+pub fn prove(state: &State, rules: &ProveRules<'_>, sender: &Address, proof: &AnchorProof) -> Result<Proven, ProveError> {
+    let settings = rules.settings;
+    let Shown { source, epoch, block, height } = check(state, rules, proof)?;
+    let anchors = Anchors::new(state);
+    let entry = AnchorEntry { epoch, block, source, enforced: settings.enforce };
     let index = anchors.record(&entry, proof, height)?;
-    let due = anchors.rewarded()?.is_none_or(|last| payload.epoch >= last.saturating_add(settings.every));
+    let due = anchors.rewarded()?.is_none_or(|last| epoch >= last.saturating_add(settings.every));
     let mut reward = u256::ZERO;
 
     if due && settings.reward > u256::ZERO {
@@ -516,7 +359,7 @@ pub fn prove(state: &State, rules: &ProveRules<'_>, sender: &Address, proof: &Bt
     }
 
     if due {
-        put_plain(state, REWARDED.to_vec(), &payload.epoch);
+        put_plain(state, REWARDED.to_vec(), &epoch);
     }
 
     Ok(Proven { index, reward })

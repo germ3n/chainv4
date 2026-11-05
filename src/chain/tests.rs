@@ -847,7 +847,7 @@ fn the_heavier_branch_wins_and_state_follows_it() {
 
 /// A checkpoint anchored while anchoring was enforced holds against any branch, however heavy:
 /// none that leaves it is followed, and no block at or under it is taken.
-#[cfg(feature = "anchoring-btc")]
+#[cfg(feature = "anchoring")]
 #[test]
 fn no_branch_leaves_a_checkpoint_anchored_while_enforced() {
     let db = Arc::new(MemoryDb::default());

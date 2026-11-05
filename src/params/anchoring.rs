@@ -155,9 +155,84 @@ impl Default for AnchorSettings {
 }
 
 #[document(
-    summary = "One anchored checkpoint, as the chain records it: which, where Bitcoin holds it, and whether the settings enforced it when it was recorded.",
+    summary = "Which chain an anchor sits in: Bitcoin or Ethereum.",
     category = "Anchoring",
-    see_also = "Anchors, Tx::Anchor",
+    see_also = "AnchorSource, AnchorEntry",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AnchorChain {
+    #[document(summary = "Bitcoin, by its proof of work.")]
+    Bitcoin,
+    #[document(summary = "Ethereum's beacon chain, by its finality.")]
+    Ethereum,
+}
+
+impl AnchorChain {
+    #[document(parent = "AnchorChain", summary = "Its name, as the API writes it in an entry's chain: bitcoin or ethereum.")]
+    pub fn name(self) -> &'static str {
+        match self {
+            AnchorChain::Bitcoin => "bitcoin",
+            AnchorChain::Ethereum => "ethereum",
+        }
+    }
+}
+
+#[document(
+    summary = "Where an anchored checkpoint sits in the chain that holds it: a Bitcoin block and its height, or an Ethereum beacon block's root and its slot. What anchored sync compares two histories by where they part.",
+    category = "Anchoring",
+    see_also = "AnchorEntry, AnchorChain, compare_histories",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum AnchorSource {
+    #[document(
+        summary = "In Bitcoin.",
+        params = { block = "The Bitcoin block holding the anchor, as the relay keys it: its header's SHA-256 twice, unreversed.", height = "Its height." },
+    )]
+    #[wincode(tag = 0)]
+    Bitcoin { block: [u8; 32], height: u64 },
+    #[document(
+        summary = "In Ethereum.",
+        params = { root = "The beacon block root of the block whose execution payload holds the anchor.", slot = "Its slot." },
+    )]
+    #[wincode(tag = 1)]
+    Ethereum { root: [u8; 32], slot: u64 },
+}
+
+impl Hashable for AnchorSource {
+    const TAG_LEN: usize = 1;
+}
+
+impl AnchorSource {
+    #[document(parent = "AnchorSource", summary = "The chain it is in.")]
+    pub fn chain(&self) -> AnchorChain {
+        match self {
+            AnchorSource::Bitcoin { .. } => AnchorChain::Bitcoin,
+            AnchorSource::Ethereum { .. } => AnchorChain::Ethereum,
+        }
+    }
+
+    #[document(parent = "AnchorSource", summary = "How far along its chain it sits: a Bitcoin height, or an Ethereum slot. Only two of one chain compare.")]
+    pub fn position(&self) -> u64 {
+        match self {
+            AnchorSource::Bitcoin { height, .. } => *height,
+            AnchorSource::Ethereum { slot, .. } => *slot,
+        }
+    }
+
+    #[document(parent = "AnchorSource", summary = "Where it sits, in words: Bitcoin block 840000, or Ethereum slot 9000000.")]
+    pub fn describe(&self) -> String {
+        match self {
+            AnchorSource::Bitcoin { height, .. } => format!("Bitcoin block {height}"),
+            AnchorSource::Ethereum { slot, .. } => format!("Ethereum slot {slot}"),
+        }
+    }
+}
+
+#[document(
+    summary = "One anchored checkpoint, as the chain records it: which, where the chain that holds it holds it, and whether the settings enforced it when it was recorded.",
+    category = "Anchoring",
+    see_also = "Anchors, Tx::Anchor, AnchorSource",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct AnchorEntry {
@@ -165,10 +240,8 @@ pub struct AnchorEntry {
     pub epoch: u64,
     #[document(summary = "The checkpoint's block.")]
     pub block: Hash,
-    #[document(summary = "The Bitcoin block holding the anchor, in Bitcoin's byte order.")]
-    pub btc_block: [u8; 32],
-    #[document(summary = "Its height.")]
-    pub btc_height: u64,
+    #[document(summary = "Where the anchor sits: a Bitcoin block, or an Ethereum one.")]
+    pub source: AnchorSource,
     #[document(summary = "Whether nodes refuse to replace it: the settings' enforce when it was recorded.")]
     pub enforced: bool,
 }
@@ -176,19 +249,35 @@ pub struct AnchorEntry {
 impl Hashable for AnchorEntry {}
 
 #[document(
-    summary = "A peer's anchor list, as SyncResponse::Anchors carries it: where its relay's headers start and how far they reach, every entry in the order its chain recorded them, and proofs of those asked for, the newest's always.",
+    summary = "Where the Ethereum headers anchoring trusts begin: the beacon block root the Ethereum relay was started at, and its network by name. What a peer's answer names so a node checking its Ethereum anchors knows where to start; the chain takes no Ethereum anchors yet, so nothing sets it.",
+    category = "Anchoring",
+    see_also = "AnchorsAnswer, BtcStart",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, SchemaWrite, SchemaRead)]
+pub struct EthStart {
+    #[document(summary = "The trusted beacon block root the relay was started at.")]
+    pub root: [u8; 32],
+    #[document(summary = "Its network, as the relay was started with: mainnet, sepolia, hoodi or one defined.")]
+    pub network: String,
+}
+
+impl Hashable for EthStart {}
+
+#[document(
+    summary = "A peer's anchor list, as SyncResponse::Anchors carries it: where its relays' headers start and how far its Bitcoin relay reaches, every entry in the order its chain recorded them, and proofs of those asked for, the newest's always.",
     category = "Anchoring",
     see_also = "SyncRequest::Anchors, History",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct AnchorsAnswer {
-    #[document(summary = "Where the peer's relay started, as its anchoring settings say.")]
-    pub start: BtcStart,
-    #[document(summary = "The height of its relay's tip.")]
+    #[document(summary = "Where the peer's Bitcoin relay started, as its anchoring settings say; none on a chain that takes no Bitcoin anchors.")]
+    pub start: Option<BtcStart>,
+    #[document(summary = "The height of its Bitcoin relay's tip.")]
     pub btc_tip: u64,
+    #[document(summary = "Where the peer's Ethereum relay started; none until the chain takes Ethereum anchors.")]
+    pub eth_start: Option<EthStart>,
     #[document(summary = "Every entry, oldest first.")]
     pub entries: Vec<AnchorEntry>,
     #[document(summary = "Proofs by place in the list: the newest entry's, and any asked for.")]
     pub proofs: Vec<(u64, AnchorProof)>,
 }
-

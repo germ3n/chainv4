@@ -10,3 +10,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 chainv4-sdk = { path = "../../sdk" }
+# Bitcoin's header rules, shared with the node.
+btclight = { path = "../../../btclight" }

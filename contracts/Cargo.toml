@@ -17,3 +17,7 @@ opt-level = "s"
 
 [profile.release.package.ethlight]
 opt-level = "s"
+
+# The Bitcoin relay's rules: "s" makes them smaller than "z" here, and cheaper to run.
+[profile.release.package.btclight]
+opt-level = "s"

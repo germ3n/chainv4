@@ -157,6 +157,9 @@ jobs:
           # Releases for the apps alone, and a node fetching them with HTTP but no pool.
           - release,blake3,ed25519
           - updates,http,sha256,edblake
+          # Anchoring into each chain on its own, on a node whose finality has checkpoints.
+          - http,blake3,ed25519,finality-ffg,anchoring-btc
+          - http,sha256,ed25519,finality-ffg,anchoring-eth
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

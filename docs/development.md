@@ -39,6 +39,16 @@ client: `no_std`, without hashing or signatures of its own, so the node and
 synthetic sync committees from BLS keys of its own, which sign real-format updates, for its tests
 and the node's; `cargo test -p ethlight` runs its own.
 
+**The `btclight` crate,** `btclight/`, a member of the node's workspace beside `ethlight` and built
+the same way, is Bitcoin's header rules: `no_std`, without hashing of its own (a `Crypto` passes
+SHA-256 twice in), so the node's anchored sync and `contracts/examples/btc_relay` run them from one
+source. It holds compact difficulty, work and the retarget, the networks' limits and rules, the 80
+bytes of a header, the record the relay keeps of each (`Kept`, byte for byte as the relay stores
+it, version and nonce last) with `Kept::child`, which checks a header by every rule, the most-work
+chain (`MainChain` and `follow`), and Merkle inclusion with the coinbase's path showing the tree's
+height (CVE-2017-12842). Its 256-bit integers are `ethnum`'s, the node's own `u256`, on both sides.
+The contracts workspace builds it at `opt-level = "s"`, as it does `ethlight`: the relay came out smaller, and cheaper in fuel, than at `"z"`. `cargo test -p btclight` runs its own tests; the relay's tests in the node check it as a contract.
+
 **Tests that open sockets** are ignored by default: `cargo test -- --ignored net::` floods one
 real libp2p node from another on 127.0.0.1 and checks the flooder is turned away, then
 disconnected.
@@ -132,8 +142,9 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `ethereum` | [Ethereum's tools](ethereum.md): `POST /rpc`, and the index of Ethereum-signed transactions by their keccak256 it answers from. Brings `evm`, `secp256k1` and `http`. Checking and running those transactions is every build's with `secp256k1` and `evm`, so a node without this feature agrees on every block. |
 | `names` | The [name registry](names.md): running name transactions, `GET /names`, `chainv4 send name` and names in `transfer --to`, and the EVM's names precompile. A build without it refuses a chain whose genesis has names. |
 | `swap` | [Atomic swaps](swaps.md): the terms, Bitcoin's HTLC, Swap.sol's calls, `--swap-contract` and, with `client`, `chainv4 swap`. Brings `bitcoin`. |
-| `anchoring-btc` | [Anchoring](anchoring.md) into Bitcoin: `Tx::Anchor`'s checks and reward, nodes refusing branches that leave an enforced anchor, `--anchored`, `GET /anchors`, serving anchors and Bitcoin headers to peers, and, with `bridge`, `chainv4 bridge btc anchor`. Brings `bitcoin`. Without it the types stay, so nothing encodes differently, but the node takes, serves and enforces no anchors. |
-| `anchoring-eth` | The anchorer writing each anchor to an EVM chain too, which the chain does not count until a light client of Ethereum's finality is in. Brings `anchoring-btc` for now, where the anchor list and the anchorer live, and `bls12-381`, which Ethereum's light client checks with. |
+| `anchoring` | [Anchoring](anchoring.md)'s base, whichever chains hold the anchors: the anchor list and its root, `Tx::Anchor`'s dispatch and reward, nodes refusing branches that leave an enforced anchor, `GET /anchors`, serving the list to peers, and `--anchored`, which compares the histories peers show. Without it the types stay, so nothing encodes differently, but the node takes, serves and enforces no anchors. |
+| `anchoring-btc` | Anchors in Bitcoin: `Tx::Anchor`'s Bitcoin proofs, read against the relay's records, Bitcoin's headers checked by work for `--anchored` and served to peers, and, with `bridge`, `chainv4 bridge btc anchor`. Brings `anchoring`, `bitcoin` and the `btclight` crate. Without it a Bitcoin proof fails, so the build cannot follow a chain that takes them. |
+| `anchoring-eth` | Anchors in Ethereum, without Bitcoin: the anchorer writing each anchor to an EVM chain too, with `anchoring-btc` and `bridge`. The chain does not count them yet: an Ethereum proof fails until its checks are in. Brings `anchoring`, `bls12-381` and the `ethlight` crate, which Ethereum's light client checks with. |
 | `dex` | The [DEX](dex.md)'s arithmetic, `--dex-contract` and `--dex-router`, and, with `client` and `evm`, `chainv4 dex`. |
 | `bridge` | [Bridges](bridges.md) for the apps and the federation's tools: transfers as the gateways hash and the signers sign them, and, with `client` and `swap`, `chainv4 bridge`, `chainv4 bridge btc` among it. The gateways and the federation are contracts and consensus, in every build. |
 | `nft` | [NFTs](nft-standard.md) for the apps: where a token URI leads and the metadata it names, and, with `client`, `chainv4 nft`. The collection registry itself is every build's, as it is consensus. |

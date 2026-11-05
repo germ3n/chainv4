@@ -325,21 +325,61 @@ pub enum Tx {
         steps: Vec<Tx>,
     },
     #[document(
-        summary = "Shows that Bitcoin holds an anchor of one of this chain's checkpoints: the Bitcoin transaction whose OP_RETURN carries it and the proof that a block the relay holds, deep enough, includes it. The chain records the checkpoint in its anchor list and pays the sender the reward when one is due; whoever wrote the Bitcoin transaction, anyone may show it. See docs/anchoring.md.",
-        params = { proof = "The Bitcoin transaction, without its witnesses, its block, its Merkle path, and the block's coinbase with its own." },
-        see_also = "BtcProof, Payload, AnchorSettings, Anchors",
+        summary = "Shows that another chain holds an anchor of one of this chain's checkpoints: in Bitcoin, the transaction whose OP_RETURN carries it and the proof that a block the relay holds, deep enough, includes it; in Ethereum, a transaction carrying it in a finalized block, which the chain does not count yet. The chain records the checkpoint in its anchor list and pays the sender the reward when one is due; whoever wrote the anchor, anyone may show it. See docs/anchoring.md.",
+        params = { proof = "The anchor's transaction and the proof that the other chain holds it." },
+        see_also = "AnchorProof, Payload, AnchorSettings, Anchors",
     )]
     #[wincode(tag = 27)]
     Anchor { proof: crate::structs::tx::AnchorProof },
 }
 
 #[document(
-    summary = "What Tx::Anchor carries: a Bitcoin transaction and the proof a relay block includes it, as BtcProof keeps it once recorded.",
+    summary = "What Tx::Anchor carries, and the chain keeps with each entry so any node can show it to a peer: the proof that Bitcoin, or Ethereum, holds an anchor.",
     category = "Transactions",
-    see_also = "Tx::Anchor, BtcProof",
+    see_also = "Tx::Anchor, BtcAnchorProof, EthAnchorProof",
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
-pub struct AnchorProof {
+#[wincode(tag_encoding = "u8")]
+pub enum AnchorProof {
+    #[document(summary = "An anchor in Bitcoin, proven against the Bitcoin relay.")]
+    #[wincode(tag = 0)]
+    Bitcoin(BtcAnchorProof),
+    #[document(summary = "An anchor in Ethereum, proven against the Ethereum relay's finalized headers. Not counted yet: Tx::Anchor fails with it.")]
+    #[wincode(tag = 1)]
+    Ethereum(EthAnchorProof),
+}
+
+impl crate::crypto::hashable::Hashable for AnchorProof {
+    const TAG_LEN: usize = 1;
+}
+
+impl AnchorProof {
+    #[document(parent = "AnchorProof", summary = "The chain it proves an anchor in.")]
+    pub fn chain(&self) -> crate::params::anchoring::AnchorChain {
+        match self {
+            AnchorProof::Bitcoin(_) => crate::params::anchoring::AnchorChain::Bitcoin,
+            AnchorProof::Ethereum(_) => crate::params::anchoring::AnchorChain::Ethereum,
+        }
+    }
+
+    #[document(parent = "AnchorProof", summary = "Whether its parts fit the limits a transaction checks before it runs: MAX_ANCHOR_TX bytes for each transaction and MAX_ANCHOR_HEADER for an Ethereum header, at most MAX_ANCHOR_PATH nodes a path.")]
+    pub fn within_limits(&self) -> bool {
+        match self {
+            AnchorProof::Bitcoin(proof) => proof.raw.len() <= MAX_ANCHOR_TX && proof.coinbase.len() <= MAX_ANCHOR_TX && proof.path.len() <= MAX_ANCHOR_PATH && proof.coinbase_path.len() <= MAX_ANCHOR_PATH,
+            AnchorProof::Ethereum(proof) => {
+                proof.header.len() <= MAX_ANCHOR_HEADER && proof.tx.len() <= MAX_ANCHOR_TX && proof.branch.len() <= MAX_ANCHOR_PATH && proof.ancestry.as_ref().is_none_or(|branch| branch.len() <= MAX_ANCHOR_PATH)
+            }
+        }
+    }
+}
+
+#[document(
+    summary = "A Bitcoin transaction and the proof a relay block includes it: what AnchorProof::Bitcoin carries.",
+    category = "Transactions",
+    see_also = "AnchorProof, Tx::Anchor",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct BtcAnchorProof {
     #[document(summary = "The Bitcoin block, as the relay keys it: its header's SHA-256 twice, unreversed.")]
     pub block: [u8; 32],
     #[document(summary = "The transaction, without its witnesses.")]
@@ -354,21 +394,51 @@ pub struct AnchorProof {
     pub coinbase_path: Vec<[u8; 32]>,
 }
 
-impl crate::crypto::hashable::Hashable for AnchorProof {}
+impl crate::crypto::hashable::Hashable for BtcAnchorProof {}
 
 #[document(
-    summary = "The most bytes an anchor's Bitcoin transaction, or the coinbase with it, may take: 100,000, Bitcoin's standard limit for one transaction.",
+    summary = "An Ethereum transaction carrying an anchor, and the proof that a finalized block holds it: what AnchorProof::Ethereum carries. The header is the block's light client header; the transaction is proven against its execution payload's transactions root, and the header against a finalized header the Ethereum relay holds: the header itself, or, with an ancestry branch, a later one whose state's block_roots hold it.",
+    category = "Transactions",
+    see_also = "AnchorProof, Tx::Anchor",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct EthAnchorProof {
+    #[document(summary = "The light client header of the block holding the transaction, SSZ-encoded as beacon nodes serve it.")]
+    pub header: Vec<u8>,
+    #[document(summary = "The beacon block root of the finalized header the relay holds that the proof rests on: the header's own, or, with ancestry, a later one's.")]
+    pub root: [u8; 32],
+    #[document(summary = "The transaction, its bytes as the execution payload holds them.")]
+    pub tx: Vec<u8>,
+    #[document(summary = "Its place in the payload.")]
+    pub index: u64,
+    #[document(summary = "Its SSZ branch to the payload's transactions root: 21 nodes, the last the count.")]
+    pub branch: Vec<[u8; 32]>,
+    #[document(summary = "The branch from the header's root to the state root of the held header at root, through its block_roots, when the header is an ancestor of it rather than held itself.")]
+    pub ancestry: Option<Vec<[u8; 32]>>,
+}
+
+impl crate::crypto::hashable::Hashable for EthAnchorProof {}
+
+#[document(
+    summary = "The most bytes an anchor's Bitcoin transaction, or the coinbase with it, or its Ethereum transaction, may take: 100,000, Bitcoin's standard limit for one transaction.",
     category = "Transactions",
     see_also = "Tx::Anchor",
 )]
 pub const MAX_ANCHOR_TX: usize = 100_000;
 
 #[document(
-    summary = "The longest Merkle path an anchor's proof may carry: 32 levels, more than any Bitcoin block has.",
+    summary = "The longest Merkle path an anchor's proof may carry: 32 levels, more than any Bitcoin block has, or any SSZ branch an Ethereum anchor needs.",
     category = "Transactions",
     see_also = "Tx::Anchor",
 )]
 pub const MAX_ANCHOR_PATH: usize = 32;
+
+#[document(
+    summary = "The most bytes an Ethereum anchor's light client header may take: 4,096, several times what one is.",
+    category = "Transactions",
+    see_also = "Tx::Anchor, EthAnchorProof",
+)]
+pub const MAX_ANCHOR_HEADER: usize = 4_096;
 
 #[document(
     summary = "The longest Merkle path a claim may carry, 64 hashes: enough for a pool root over every claim there could be.",
@@ -696,7 +766,7 @@ impl Verifiable for Tx {
             Tx::ApproveMultisig { account, tx, .. } => multisig_inner(account, tx),
             Tx::CreateMultisig { members, .. } | Tx::ChangeMultisig { members, .. } => members.iter().try_for_each(|member| member.key.verify()),
             Tx::WithdrawMultisig { .. } => Ok(()),
-            Tx::Anchor { proof } => match proof.raw.len() <= MAX_ANCHOR_TX && proof.coinbase.len() <= MAX_ANCHOR_TX && proof.path.len() <= MAX_ANCHOR_PATH && proof.coinbase_path.len() <= MAX_ANCHOR_PATH {
+            Tx::Anchor { proof } => match proof.within_limits() {
                 true => Ok(()),
                 false => Err(VerifyError::BadAnchor),
             },
