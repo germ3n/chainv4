@@ -11,7 +11,7 @@ use {
 
 /// The largest integer a Lua number holds exactly. Numbers cross a contract's edges whole and
 /// within it either way: Luau has floats inside a script, but none get in or out.
-const MAX_EXACT: i128 = 1 << 53;
+const MAX_EXACT: i128 = (1 << 53) - 1;
 
 /// Integers arrive as their own types, U64 to I256, and amounts as U256, so no value is ever
 /// rounded. Only the number type arrives as a plain number, and must fit one exactly.

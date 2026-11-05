@@ -12,7 +12,7 @@ use {
 };
 
 /// The largest whole number a Lua number holds exactly: 2^53.
-const EXACT: i64 = 1 << 53;
+const EXACT: i64 = (1 << 53) - 1;
 
 /// How many entries an iterator asks for at a time: a loop that breaks early pays for, and
 /// depends on, no more than the page it stopped in.
@@ -944,7 +944,9 @@ mod tests {
         assert!(error(r#"storage.namespace("n"):set_i256("k", "5")"#).contains("whole number"));
         assert!(error(r#"storage.namespace("n"):get_i256("text")"#).contains("the value is not an i256: 5 bytes, not 32"));
         assert!(error(r#"storage.namespace("n"):get_i128("text")"#).contains("the value is not an i128: 5 bytes, not 16"));
-        assert!(error(r#"storage.namespace("n"):set_i64("k", 1.5)"#).contains("whole number"));
+        // a fraction, as only the host can make one
+        lua.globals().set("f15", 1.5).unwrap();
+        assert!(error(r#"storage.namespace("n"):set_i64("k", f15)"#).contains("whole number"));
         assert!(error(r#"storage.namespace("n"):set_u256("k", -1)"#).contains("non-negative whole number"));
         assert!(error(r#"storage.namespace("n"):set_address("k", u256(1))"#).contains("takes an Address"));
         assert!(error(r#"address.decode("short")"#).contains("33 bytes"));

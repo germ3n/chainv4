@@ -942,7 +942,17 @@ voting finality it now goes back to the checkpoint and follows the node from the
   plain number takes the integer's type. Comparisons mix freely, by the true value.
 - **`/` and `%` round as Rust's do; `//` as Lua's.** For the signed types `i64(-7) / 2` is `-3`
   and `i64(-7) % 2` is `-1`, as in Rust and the SDK's `I256`, so the two engines agree; `//` rounds
-  down, `-4`. Plain numbers keep Lua's arithmetic.
+  down, `-4`. Plain numbers keep Lua's arithmetic, but whole: `/` on them fails unless it divides
+  evenly.
+- **Lua numbers are whole, within 2^53 − 1, in the Luau fork.** A fractional literal does not
+  compile, and `7 / 2`, `1 / 0`, `2 ^ -1` or a sum past the bound fail where they happen. `//` and
+  `%` are exact, worked out in integers. The bound is 2^53 − 1, not 2^53, because a sum whose true
+  value is 2^53 + 1 rounds to 2^53, and allowing that would let a wrong result through. Fractions
+  still reach a script from the host, such as an argument a Rust caller passes, and compare
+  exactly; arithmetic on them is checked like any other (see [Contracts](contracts.md)).
+- **`math.sqrt(4)` fails even though it would fold to 2.** The compiler is told the math
+  functions scripts lack are not builtins, so it folds none of them through the platform's C
+  library, and a call compiles to a lookup that finds nothing, as at run time.
 - **Numbers compare with integers, in the Luau fork.** `u256(5) == 5`, `x > 1000` and
   `table.sort` over a mix all ask the integer's metamethods, exactly: past 2^53, with fractions,
   and against NaN, which orders against nothing. Plain Luau never calls `__eq` across types and

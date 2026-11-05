@@ -11,7 +11,9 @@ use {
 };
 
 /// 2^53: past it a number no longer holds every whole value.
-const MAX_EXACT: u64 = 1 << 53;
+// The largest whole number every step of arithmetic keeps exact, as the Luau fork's VM has it:
+// past it a sum or product may already have rounded.
+const MAX_EXACT: u64 = (1 << 53) - 1;
 
 /// A value of one of the integer types, as a script holds it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -618,7 +620,7 @@ fn against_number(value: Exact, number: f64) -> Option<Ordering> {
 
 /// A non-negative whole f64 as a u256, or None at 2^256 and past it.
 fn whole_u256(whole: f64) -> Option<u256> {
-    if whole < MAX_EXACT as f64 {
+    if whole < (1u64 << 53) as f64 {
         return Some(u256::from(whole as u64));
     }
 

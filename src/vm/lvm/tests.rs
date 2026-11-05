@@ -240,15 +240,97 @@ fn values_cross_into_lua_and_back() {
 
 #[test]
 fn numbers_cross_a_contracts_edges_whole() {
-    for fraction in [1.5, f64::INFINITY, f64::NAN, 9007199254740994.0] {
+    for fraction in [1.5, f64::INFINITY, f64::NAN, 9007199254740992.0, 9007199254740994.0] {
         let err = call("echo", &[TxCallArgumentType::Number(fraction)]).result.unwrap_err();
 
         assert!(err.to_string().contains("a Lua contract takes whole numbers"), "{fraction}: {err}");
     }
 
+    // A contract cannot make a fraction to return: 1 / 2 is refused where it is divided.
     let err = call("half", &[]).result.unwrap_err();
 
-    assert!(err.to_string().contains("numbers leave a contract whole"), "{err}");
+    assert!(err.to_string().contains("numbers are whole"), "{err}");
+}
+
+/// What `return <expressions>` gives as a contract's function, or why it fails to load or run.
+fn evaluate(expressions: &str) -> Result<Vec<TxCallArgumentType>, String> {
+    let source = format!("local M = {{}}\nfunction M.f()\n    return {expressions}\nend\nreturn M");
+    let contract = Contract::load(&source, LIMITS).map_err(|err| err.to_string())?;
+
+    contract.call(&func("f"), &[], host(), LIMITS).result.map_err(|err| err.to_string())
+}
+
+/// Numbers are whole, within 2^53 - 1 either way, so every one is exact: a fraction does not
+/// compile, and arithmetic that would make a fraction, an infinity or a number past the bound is
+/// refused where it happens, whether the compiler folded it or the VM works it out. Division,
+/// floor division and remainders are exact, in integers: (2^53 - 1) / (2^53 - 2) would round to 1
+/// as a double.
+#[test]
+fn numbers_are_whole_within_2_to_the_53() {
+    use TxCallArgumentType::{I64, Nil};
+
+    for (expression, value) in [
+        ("6 / 3", 2),
+        ("-6 / 3", -2),
+        ("select(1, 6) / 3", 2),
+        ("7 // 2", 3),
+        ("-7 // 2", -4),
+        ("select(1, 7) // -2", -4),
+        ("7 % 3", 1),
+        ("-7 % 3", 2),
+        ("select(1, 7) % -3", -2),
+        ("2 ^ 52", 4503599627370496),
+        ("9007199254740990 + 1", 9007199254740991),
+        ("select(1, 9007199254740990) + 1", 9007199254740991),
+        ("-9007199254740991", -9007199254740991),
+        ("1e15", 1_000_000_000_000_000),
+        ("0x1F", 31),
+        ("'6' / '3'", 2),
+        ("tonumber('12')", 12),
+        ("tonumber('ff', 16)", 255),
+    ] {
+        assert_eq!(evaluate(expression), Ok(vec![I64(value)]), "{expression}");
+    }
+
+    for expression in [
+        "7 / 2",
+        "select(1, 7) / 2",
+        "9007199254740991 / 9007199254740990",
+        "select(1, 9007199254740991) / 9007199254740990",
+        "1 / 0",
+        "0 / 0",
+        "select(1, 1) // 0",
+        "5 % 0",
+        "9007199254740991 + 1",
+        "select(1, 9007199254740991) + 1",
+        "-9007199254740991 - 1",
+        "4503599627370496 * 2",
+        "2 ^ 53",
+        "2 ^ -1",
+        "'7' / 2",
+    ] {
+        let err = evaluate(expression).unwrap_err();
+
+        assert!(err.contains("numbers are whole, within 2^53 either way"), "{expression}: {err}");
+    }
+
+    for literal in ["1.5", "0.1", "1e-3", "9007199254740992", "1e300", "0x20000000000000"] {
+        let err = evaluate(literal).unwrap_err();
+
+        assert!(err.contains("Numbers are whole, within 2^53 either way"), "{literal}: {err}");
+    }
+
+    // Text that reads as a fraction, or past 2^53, is not a number.
+    assert_eq!(evaluate("tonumber('1.5'), tonumber('9007199254740992'), tonumber('20000000000000', 16)"), Ok(vec![Nil, Nil, Nil]));
+
+    // What scripts do not get of math is not folded when compiling either, so no bytecode depends
+    // on how a platform's C library rounds.
+    assert_eq!(evaluate("math.pi, math.huge"), Ok(vec![Nil, Nil]));
+    for expression in ["math.sqrt(4)", "math.log(8, 2)"] {
+        let err = evaluate(expression).unwrap_err();
+
+        assert!(err.contains("attempt to call a nil value"), "{expression}: {err}");
+    }
 }
 
 #[test]

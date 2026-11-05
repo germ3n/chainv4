@@ -933,7 +933,7 @@ function M.decimals() return 6 end"#,
         ("function M.name() return string.rep(\"n\", 65) end", "name() must give 1 to 64 bytes, not 65"),
         ("function M.name() return \"two\\nlines\" end", "name() gave control characters"),
         ("function M.decimals() return 78 end", "decimals() must return one whole number from 0 to 77"),
-        ("function M.decimals() return 1.5 end", "decimals() failed: 1.5: numbers leave a contract whole"),
+        ("function M.decimals() return 3 / 2 end", "decimals() failed"),
         ("function M.name() error(\"no\") end", "name() failed"),
     ] {
         world.nonce += 1;

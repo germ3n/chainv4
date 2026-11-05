@@ -332,7 +332,7 @@ fn is_whole_number(text: &str) -> bool {
     let digits = text.strip_prefix('-').unwrap_or(text);
     let canonical = !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) && (digits == "0" || !digits.starts_with('0'));
 
-    canonical && text != "-0" && text.parse::<i64>().is_ok_and(|number| number.unsigned_abs() <= 1 << 53)
+    canonical && text != "-0" && text.parse::<i64>().is_ok_and(|number| number.unsigned_abs() < 1 << 53)
 }
 
 #[document(
@@ -773,7 +773,7 @@ mod tests {
         let cases: &[Case] = &[
             (Kind::Bytes, &[b"", b"\xff"], &[]),
             (Kind::Text, &["héllo".as_bytes()], &[b"\xff"]),
-            (Kind::Number, &[b"5", b"0", b"-42", b"9007199254740992", b"-9007199254740992"], &[b"", b"-2.5", b"1e+20", b"inf", b"nan", b"05", b"-0", b"+5", b"0x10", b"9007199254740993"]),
+            (Kind::Number, &[b"5", b"0", b"-42", b"9007199254740991", b"-9007199254740991"], &[b"", b"-2.5", b"1e+20", b"inf", b"nan", b"05", b"-0", b"+5", b"0x10", b"9007199254740992", b"-9007199254740992"]),
             (Kind::Decimal, &[b"0", b"1000000000000000000000000"], &[b"", b"-1", b"1.5", b"0x10", &[b'9'; 79]]),
             (Kind::Bool, &[b"\x00", b"\x01"], &[b"\x02", b"", b"true"]),
             (Kind::I64, &[&[0; 8]], &[&[0; 7]]),

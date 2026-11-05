@@ -41,7 +41,7 @@ local M = {}
 
 function M.score(sender, kind, target, bytes, fuel, gas, failed)
     if kind == "transfer" then
-        return gas / 2
+        return gas // 2
     end
     if kind == "burn" then
         return gas * 1000000000

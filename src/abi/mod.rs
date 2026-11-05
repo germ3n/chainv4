@@ -81,7 +81,7 @@ pub(crate) fn native_signed(value: &crate::structs::tx::TxCallArgumentType) -> O
         TxCallArgumentType::I64(number) => i256::from(*number),
         TxCallArgumentType::I128(number) => i256::from(*number),
         TxCallArgumentType::I256(number) => *number,
-        TxCallArgumentType::Number(number) if number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_992.0 => i256::from(*number as i64),
+        TxCallArgumentType::Number(number) if number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_991.0 => i256::from(*number as i64),
         _ => return None,
     })
 }

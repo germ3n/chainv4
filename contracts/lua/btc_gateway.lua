@@ -115,7 +115,7 @@ local function le(number, size)
 
     for _ = 1, size do
         table.insert(out, string.char(number % 256))
-        number = math.floor(number / 256)
+        number = number // 256
     end
 
     return table.concat(out)
@@ -574,7 +574,7 @@ function M.withdraw(script, sats, most_fee)
         error("a withdrawal pays at least " .. least_withdrawal() .. " satoshis")
     end
 
-    most_fee = fee_limit(most_fee or math.floor(sats / fee_part()), sats)
+    most_fee = fee_limit(most_fee or sats // fee_part(), sats)
 
     if not relayed(script) then
         error("an output script Bitcoin's nodes relay: P2PKH, P2SH or a witness program")
@@ -660,7 +660,7 @@ end
 -- What a withdrawal's share of a fee is: all of it evenly, the first in a release taking what will
 -- not divide. Each output costs about the same to carry, whatever it pays.
 local function fee_share(fee, count, at)
-    return math.floor(fee / count) + (at == 1 and fee % count or 0)
+    return fee // count + (at == 1 and fee % count or 0)
 end
 
 -- What a signer of the federation in force signs to propose a release, posted by anyone: this chain,
@@ -787,7 +787,7 @@ local function sized(raw, tx)
         weight = weight + witness_weight(fed_at(version), witness_script(version, utxos:get(key .. ":recipient")))
     end
 
-    local vbytes = math.ceil(weight / 4)
+    local vbytes = (weight + 3) // 4
 
     if vbytes > MOST_VBYTES then
         error("a release larger than Bitcoin's nodes relay: pay fewer, from fewer")
@@ -838,7 +838,7 @@ end
 -- past its share of the fee, so one at its limit repays nothing and waits for nothing. Worked out
 -- from the gateway's state alone, as the planner and the gateway must agree on it.
 local function repays_for(ids, cost, fee)
-    local budget = math.min(owed(), math.floor(fee * repay_pct() / 100))
+    local budget = math.min(owed(), fee * repay_pct() // 100)
     local repays, total = {}, 0
 
     for at, id in ipairs(ids) do

@@ -85,8 +85,8 @@ fn values_are_made_from_numbers_text_and_other_integers() {
     assert_eq!(show(&lua, "u64('0xff')"), "255");
     assert_eq!(show(&lua, "i64('-0x10')"), "-16");
     assert_eq!(show(&lua, "i128('-42')"), "-42");
-    assert_eq!(show(&lua, "i256(-9007199254740992)"), "-9007199254740992");
-    assert_eq!(show(&lua, "u64(9007199254740992)"), "9007199254740992");
+    assert_eq!(show(&lua, "i256(-9007199254740991)"), "-9007199254740991");
+    assert_eq!(show(&lua, "u64(9007199254740991)"), "9007199254740991");
     assert_eq!(show(&lua, "u128('007')"), "7");
     // from another integer, when the type holds it
     assert_eq!(show(&lua, "typeof(u64(u256(5)))"), "U64");
@@ -102,11 +102,13 @@ fn bad_values_are_refused() {
 
     for (code, expected) in [
         ("local _ = u256(-1)", "non-negative whole number"),
-        ("local _ = u256(1.5)", "non-negative whole number"),
-        ("local _ = u256(2 ^ 60)", "non-negative whole number"),
-        ("local _ = u256(0 / 0)", "non-negative whole number"),
-        ("local _ = i64(2 ^ 60)", "whole number within 2^53 either way"),
-        ("local _ = i64(-0.5)", "whole number within 2^53 either way"),
+        // Numbers are whole: a fraction does not compile, and a number past 2^53 or a division by
+        // zero is refused where it is made, before any type sees it.
+        ("local _ = u256(1.5)", "Numbers are whole, within 2^53 either way: 1.5 is not"),
+        ("local _ = u256(2 ^ 60)", "numbers are whole"),
+        ("local _ = u256(0 / 0)", "numbers are whole"),
+        ("local _ = i64(2 ^ 60)", "numbers are whole"),
+        ("local _ = i64(-0.5)", "Numbers are whole"),
         ("local _ = u256('12abc')", "not a u256: 12abc"),
         ("local _ = u256('')", "not a u256"),
         ("local _ = u256('0x')", "not a u256"),
@@ -266,22 +268,29 @@ fn plain_numbers_take_the_integer_s_type() {
     assert_eq!(show(&lua, "i64(5) + -1"), "4");
     assert_eq!(show(&lua, "-1 + i256(5)"), "4");
     assert_eq!(show(&lua, "u64(5) - 5"), "0");
-    assert_eq!(show(&lua, "u64(1) + 9007199254740992"), "9007199254740993");
+    assert_eq!(show(&lua, "u64(1) + 9007199254740991"), "9007199254740992");
+
+    // Fractions, numbers past 2^53 and NaN, as only the host can make them now.
+    let globals = lua.globals();
+    for (name, value) in [("f15", 1.5), ("f05", 0.5), ("p60", 2f64.powi(60)), ("nan", f64::NAN)] {
+        globals.set(name, value).unwrap();
+    }
 
     for (code, expected) in [
+        ("local _ = u256(1) + 1.5", "Numbers are whole"),
         ("local _ = u64(5) + -1", "u64 arithmetic needs a U64 or a non-negative whole number up to 2^53"),
-        ("local _ = u256(1) + 1.5", "u256 arithmetic needs a U256 or a non-negative whole number"),
-        ("local _ = u256(1) + 2 ^ 60", "non-negative whole number"),
-        ("local _ = i64(1) + 2 ^ 60", "i64 arithmetic needs an I64 or a whole number within 2^53 either way"),
-        ("local _ = i64(1) * 0.5", "whole number within 2^53"),
+        ("local _ = u256(1) + f15", "u256 arithmetic needs a U256 or a non-negative whole number"),
+        ("local _ = u256(1) + p60", "non-negative whole number"),
+        ("local _ = i64(1) + p60", "i64 arithmetic needs an I64 or a whole number within 2^53 either way"),
+        ("local _ = i64(1) * f05", "whole number within 2^53"),
         ("local _ = u256(1) + 'x'", "non-negative whole number"),
         ("local _ = u256(1) + '5'", "non-negative whole number"),
         ("local _ = u256(1) + {}", "non-negative whole number"),
         ("local _ = u256(1) + nil", "non-negative whole number"),
-        ("local _ = u256(1) + (0 / 0)", "non-negative whole number"),
+        ("local _ = u256(1) + nan", "non-negative whole number"),
         ("local _ = u64(2) ^ -1", "a negative exponent would make a fraction"),
         ("local _ = u64(2) ^ 4294967296", "an exponent is at most 2^32 - 1"),
-        ("local _ = u64(2) ^ 0.5", "an exponent is a whole number"),
+        ("local _ = u64(2) ^ f05", "an exponent is a whole number"),
         ("local _ = u64(2) ^ i64(-1)", "a negative exponent would make a fraction"),
     ] {
         fails(&lua, code, expected);
@@ -398,7 +407,7 @@ fn min_max_abs_tonumber_and_hex() {
             "u64(1).abs == nil",
             "u256(42):tonumber() == 42",
             "i64(-42):tonumber() == -42",
-            "u64(9007199254740992):tonumber() == 9007199254740992",
+            "u64(9007199254740991):tonumber() == 9007199254740991",
             "type(u64(1):tonumber()) == 'number'",
         ],
     );
@@ -421,7 +430,7 @@ fn min_max_abs_tonumber_and_hex() {
     );
     fails(&lua, "local _ = i64.min:abs()", "i64 overflow");
     fails(&lua, "local _ = u64(1):abs()", "attempt to call");
-    fails(&lua, "local _ = u64('9007199254740993'):tonumber()", "is past 2^53, where numbers round");
+    fails(&lua, "local _ = u64('9007199254740992'):tonumber()", "is past 2^53, where numbers round");
     fails(&lua, "local _ = i64('-9007199254740993'):tonumber()", "is past 2^53");
 
     assert_eq!(show(&lua, "u64.max:hex()"), "0xffffffffffffffff");
@@ -485,43 +494,65 @@ fn comparisons_with_numbers_go_by_the_true_value() {
 fn comparisons_are_exact_past_2_to_the_53_and_with_fractions() {
     let lua = setup();
 
+    // Scripts cannot make a fraction, a number past 2^53, an infinity or NaN any more, but the
+    // host can hand them one, so they arrive here as globals the host set.
+    let globals = lua.globals();
+    for (name, value) in [
+        ("p60", 2f64.powi(60)),
+        ("p200", 2f64.powi(200)),
+        ("p255", 2f64.powi(255)),
+        ("p256", 2f64.powi(256)),
+        ("n200", -(2f64.powi(200))),
+        ("n255", -(2f64.powi(255))),
+        ("n256", -(2f64.powi(256))),
+        ("f25", 2.5),
+        ("fm05", -0.5),
+        ("fm15", -1.5),
+        ("mzero", -0.0),
+        ("inf", f64::INFINITY),
+        ("ninf", f64::NEG_INFINITY),
+        ("nan", f64::NAN),
+    ] {
+        globals.set(name, value).unwrap();
+    }
+
     holds(
         &lua,
         &[
-            "u256(2) ^ 60 == 2 ^ 60",
-            "u256(2) ^ 60 + 1 > 2 ^ 60",
-            "u256(2) ^ 60 - 1 < 2 ^ 60",
-            "2 ^ 60 < u256(2) ^ 60 + 1",
-            "u256(2) ^ 255 == 2 ^ 255",
-            "u256.max < 2 ^ 256",
-            "u256.max > 2 ^ 255",
-            "i256(2) ^ 200 * -1 == -(2 ^ 200)",
-            "i256.min == -(2 ^ 255)",
-            "i256.min > -(2 ^ 256)",
-            "i256.max < 2 ^ 255",
-            "u256(2) < 2.5",
-            "u256(3) > 2.5",
-            "u256(2) ~= 2.5",
-            "u256(2) <= 2.5",
-            "not (u256(2) >= 2.5)",
+            "u256(2) ^ 60 == p60",
+            "u256(2) ^ 60 + 1 > p60",
+            "u256(2) ^ 60 - 1 < p60",
+            "p60 < u256(2) ^ 60 + 1",
+            "u256(2) ^ 255 == p255",
+            "u256.max < p256",
+            "u256.max > p255",
+            "i256(2) ^ 200 * -1 == n200",
+            "i256.min == n255",
+            "i256.min > n256",
+            "i256.max < p255",
+            "u256(2) < f25",
+            "u256(3) > f25",
+            "u256(2) ~= f25",
+            "u256(2) <= f25",
+            "not (u256(2) >= f25)",
             "u256(0) > -1",
-            "u256(0) > -0.5",
-            "u64(0) >= -0",
-            "u64(0) == -0",
-            "i64(-1) < -0.5",
-            "i64(-1) > -1.5",
-            "i64(-2) < -1.5",
-            "i64(0) > -0.5",
-            "-0.5 < i64(0)",
-            "u256.max < 1 / 0",
-            "i256.min > -1 / 0",
-            "u64(0) > -1 / 0",
-            "not (u64(0) == 0 / 0)",
-            "u64(0) ~= 0 / 0",
-            "not (u64(0) < 0 / 0)",
-            "not (u64(0) > 0 / 0)",
-            "not (u64(0) <= 0 / 0)",
-            "not (0 / 0 >= u64(0))",
+            "u256(0) > fm05",
+            "u64(0) >= mzero",
+            "u64(0) == mzero",
+            "i64(-1) < fm05",
+            "i64(-1) > fm15",
+            "i64(-2) < fm15",
+            "i64(0) > fm05",
+            "fm05 < i64(0)",
+            "u256.max < inf",
+            "i256.min > ninf",
+            "u64(0) > ninf",
+            "not (u64(0) == nan)",
+            "u64(0) ~= nan",
+            "not (u64(0) < nan)",
+            "not (u64(0) > nan)",
+            "not (u64(0) <= nan)",
+            "not (nan >= u64(0))",
         ],
     );
 }
@@ -598,8 +629,10 @@ fn the_table_library_compares_them_too() {
         ],
     );
 
+    // a fraction, as only the host can make one
+    lua.globals().set("f25", 2.5).unwrap();
     let sorted = lua
-        .load("local t = { u256(3), 1, i64(-2), u64(2), 2.5, i256(-7) } table.sort(t) local out = {} for _, v in t do table.insert(out, tostring(v)) end return table.concat(out, ' ')");
+        .load("local t = { u256(3), 1, i64(-2), u64(2), f25, i256(-7) } table.sort(t) local out = {} for _, v in t do table.insert(out, tostring(v)) end return table.concat(out, ' ')");
 
     assert_eq!(sorted.eval::<String>().unwrap(), "-7 -2 1 2 2.5 3");
 }

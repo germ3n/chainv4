@@ -19,6 +19,20 @@ pub const TYPE_INFO_LEVEL: u8 = 0;
 /// say otherwise. Compiling is not metered by fuel, so this bounds the work one deploy can cause.
 pub const MAX_SOURCE_LEN: usize = crate::params::vm::ContractLimits::DEFAULT.source_len as usize;
 
+/// The math functions Luau's compiler knows as builtins: it folds a call to one whose arguments
+/// are constants, through the C library, and calls one directly where it can. Those scripts do not
+/// get (see `MATH`) are turned off, so a call to one compiles to a lookup that finds nothing, as it
+/// does at run time, and no bytecode depends on how a platform's C library rounds.
+const MATH_BUILTINS: &[&str] = &[
+    "abs", "acos", "asin", "atan2", "atan", "ceil", "cosh", "cos", "deg", "exp", "floor", "fmod",
+    "frexp", "ldexp", "log10", "log", "max", "min", "modf", "pow", "rad", "sinh", "sin", "sqrt",
+    "tanh", "tan", "clamp", "sign", "round", "lerp", "isnan", "isinf", "isfinite",
+];
+
+fn disabled_builtins() -> impl Iterator<Item = String> {
+    MATH_BUILTINS.iter().filter(|name| !super::MATH.contains(name)).map(|name| format!("math.{name}"))
+}
+
 #[document(
     summary = "Compiles contract source with the chain's fixed settings. The same source always gives the same bytecode.",
     category = "Lua VM",
@@ -49,6 +63,7 @@ pub fn compile_within(source: &str, longest: usize) -> Result<Vec<u8>, VmError> 
         .set_optimization_level(OPTIMIZATION_LEVEL)
         .set_debug_level(DEBUG_LEVEL)
         .set_type_info_level(TYPE_INFO_LEVEL)
+        .set_disabled_builtins(disabled_builtins())
         .compile(source)
         .map_err(|err| VmError::Compile(err.to_string()))
 }

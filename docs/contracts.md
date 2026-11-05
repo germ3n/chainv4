@@ -411,10 +411,28 @@ one call do a great deal for nothing. Each is the same on every platform:
   `create`, `find`, `clear`, `clone` and `maxn` 1 per 8 elements they go over.
 - **utf8:** `utf8.len` 1 per 64 bytes, `codepoint` 1 per 8 values.
 
+**Numbers are whole.** A Lua number is a whole number within 2^53 − 1 either way. A double holds
+every one of those exactly, so nothing a contract computes is ever rounded:
+- a literal with a fraction, such as `1.5` or `1e-3`, fails to compile, and so does one past the
+  bound, such as `9007199254740992`;
+- `+`, `-`, `*` and `^` fail when the result would be past the bound;
+- `/` gives the quotient when it divides evenly, so `6 / 3` is `2`, and fails otherwise, as `7 / 2`
+  does. `//` floors and `%` takes the divisor's sign, as in Lua: `7 // 2` is `3`, `-7 // 2` is `-4`
+  and `-7 % 3` is `2`;
+- all three are worked out in integers, so `(2^53 - 1) / (2^53 - 2)` fails where a double would
+  round it to `1`;
+- dividing by zero fails, where a double would give an infinity or NaN;
+- `tonumber` gives `nil` for text that reads as a fraction or as a number past the bound.
+
+Past 2^53, use the [integer types](#integers), which are exact to 2^256. The compiler folds
+constants by the same rules, and leaves whatever would fail for the VM to refuse. Nor does it fold
+the math functions scripts lack, so `math.sqrt(4)` fails as it would when the script runs, and no
+bytecode depends on how a platform's C library rounds.
+
 **Powers take a whole exponent.** `^` and `math.pow` compute by repeated squaring, which every
-platform rounds alike, where the C library's `pow()` need not: so `x ^ 2` and `2 ^ -3` work, and a
-fractional exponent such as `2 ^ 0.5` fails, as no node may answer it differently. The compiler
-folds a constant power the same way, and leaves a fractional one for the VM to refuse.
+platform rounds alike, where the C library's `pow()` need not. So `x ^ 2` works, and a negative
+exponent such as `2 ^ -3` fails like any fraction would. The compiler folds a constant power the
+same way.
 
 A call that runs out of fuel fails with `OutOfFuel`. On a chain with fees, fuel costs gas, and the
 gas limit bounds the fuel too (see [Fees](fees.md)).
@@ -535,8 +553,9 @@ decide: a root it was given by its owner, by a federation, or proven some other 
 
 ### Integers
 
-A Lua number is a float: exact to 2^53, then it rounds. Six integer types hold the rest, each its
-own type with its own width, as in Rust: `U64`, `U128`, `U256`, `I64`, `I128` and `I256`.
+A Lua number is a whole number within 2^53 either way (see [numbers are whole](#fuel)). Six
+integer types hold the rest, each its own type with its own width, as in Rust: `U64`, `U128`,
+`U256`, `I64`, `I128` and `I256`.
 
 ```lua
 local supply = u256("21000000000000000000000000")   -- text past 2^53, which a number cannot hold

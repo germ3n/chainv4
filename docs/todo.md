@@ -786,9 +786,25 @@ with.
 - [x] **Tables keyed by tables iterate alike on every node.** The Luau fork hashes tables and
   functions by the order they were made, and refuses userdata keys, where an Address is a new
   value each time and two equal ones never meet.
-- [ ] **Lua still computes with floats inside a script.** A plain number is a float, so `/` makes
-  fractions, which only fail once they would leave. The integer types do exact math for whoever
-  uses them, but a number type of the fork's own would close it for everyone.
+- [x] **Lua still computes with floats inside a script.** Done 2026-11-05 in the Luau fork (the
+  owner's pick, whole numbers rather than int64 or an opt-in integer type): a number is whole
+  within 2^53 − 1 either way, a fractional literal does not compile, `/` fails unless it divides
+  evenly, `//` and `%` are exact in integers, and a result past the bound fails. The compiler folds
+  by the same rules and folds none of the math functions scripts lack. Was: A plain number is a
+  float, so `/` makes fractions, which only fail once they would leave.
+- [ ] **Ship the forks' upstream merge.** On 2026-11-05 germ3n/luau-src-rs and germ3n/mlua were
+  merged with upstream on their `upstream-merge` branches: Luau 0.653 to 0.745, mlua 0.10.2 to
+  0.12.2. The whole-number rule above is on the Luau one. chainv4's `lua-upstream` branch builds on
+  them through a temporary `[patch]` of local paths. To ship it:
+  - push both branches, after the owner says so;
+  - point Cargo.lock at the pushed commits and drop the `[patch]`;
+  - merge into master;
+  - regenesis, as contract results and fuel change.
+
+  Known on the forks: upstream's new `require`, `loadstring`, integer library, classes and
+  coroutine `close` are left out or off. mlua's user values, `take` and `destroy` keep a table keyed
+  by userdata, which the fork refuses. mlua's own tests that use fractions, coroutines or `require`
+  fail by design.
 - [x] **Integer types in Lua.** `U64`, `U128`, `U256`, `I64`, `I128` and `I256`, each overflowing
   at its own width, with Rust's `checked_`, `saturating_` and `wrapping_` methods; arguments and
   the integer kinds arrive as their type. The SDK's `U256` and a new `I256` have the same

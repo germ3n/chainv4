@@ -714,7 +714,7 @@ local M = {}
 -- Transfers at half price; everything else as weighed.
 function M.score(sender, kind, target, bytes, fuel, gas, failed)
     if kind == "transfer" then
-        return gas / 2
+        return gas // 2
     end
     return gas
 end
