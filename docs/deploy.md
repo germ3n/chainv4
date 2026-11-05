@@ -309,6 +309,8 @@ SHA-256s with the link.
 | --- | --- |
 | Genesis | `0xb04eef3aff841df3…`, 2026-11-05 (the seventh), named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; on the old keys, their rotation still to come |
 | Machines | Public node `150.40.117.239` (`chain.homepage.gs`), others `150.40.117.247` (builds the images) and `150.40.117.196`: Debian forky, 2 cores, 4 GB and 46 GB each, with 4 GB of swap and the [firewall](docker.md#firewall); `ssh -i ~/.ssh/id_kyun2` |
+| A fourth node | `65.87.7.198`, following and not voting (`VALIDATE=off`, no voting key), its images copied from `.247` and started with `up --no-build` |
+| A worker | `150.40.117.62`, no chain: `chainv4-worker` mining on 2 threads for the public node's open pool, paid to `ed25519:0x190b911b…fbea` (`worker.key`'s address; the key stays here) |
 | Swap contract, `swap.cv4` | `contract:0xc4ad35b6…68fb7` |
 | Native DEX, `dex.cv4` | `contract:0x6c1df38c…90a4` |
 | EVM DEX router | `0xfd9524e58c1a904b439e9a3292a95cf6562aa458` |
@@ -324,4 +326,4 @@ SHA-256s with the link.
 | Sample multisig | `multisig:0xa4ab52e9…1531`, 2 of 3, its contract `0xf790c606…89d2` |
 | Onion | `l4vxo57pjimu7gowftwrcnvytb4b3vrywo34cxi3etc56vqpvams4iid.onion` |
 | Mining | An open pool that takes workers mining alone too (`POOL_OPEN=1`, `MINING_SOLO=1`, `MINING_PUBLIC`): `chainv4 worker --node https://chain.homepage.gs --payout ADDRESS`, over `/mining/ws` |
-| Apps | https://gofile.io/d/QkxlLYsI |
+| Apps | https://gofile.io/d/AR4cjdwl (arm64 APKs of the wallet and the explorer, 2026-11-05, debug-signed as before) |
