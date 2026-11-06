@@ -502,6 +502,12 @@ return M
   `sign`, and none of its float functions, such as `sqrt` or `pi`;
 - the chain's libraries.
 
+**Constants.** Luau's `const` binds a name once: `const LIMIT = 100`, or `const function
+fee(amount) … end`. Assigning it again is refused when the contract compiles, so a deploy with one
+fails, as any other syntax error does. It fixes the name, not what a table holds: `const T = {}`
+can still have `T.x = 1`. It is not a function the compiler runs ahead of time: Luau folds
+constant expressions such as `60 * 60` by itself, `const` or not.
+
 Nothing reads the clock, the platform or the garbage collector, and nothing gives random
 numbers. Nor does anything show a memory address, which differs from node to node: `tostring` of
 a table, function or userdata without `__tostring` gives its type's name, `table`, and a failure

@@ -415,7 +415,7 @@ impl Pool {
         },
         returns = "The pool, or why the port did not open.",
     )]
-    pub fn new(address: Address, hash: HashType, port: MiningPort, found: Found) -> Result<Pool, String> {
+    pub fn new(address: Address, hash: HashType, port: MiningPort, found: Found, db: Option<std::sync::Arc<dyn crate::db::Database>>) -> Result<Pool, String> {
         let listen = port.listen;
         let listener = TcpListener::bind(listen).map_err(|err| format!("the mining port {listen} did not open: {err}"))?;
         let listening = listener.local_addr().map_err(|err| err.to_string())?;
@@ -436,7 +436,7 @@ impl Pool {
             #[cfg(feature = "updates")]
             releases: port.releases,
             #[cfg(feature = "pool")]
-            books: port.pool.map(|config| Books { address, ledger: Mutex::new(super::shares::Ledger::open(config, hash)), workers: Mutex::new(BTreeMap::new()) }),
+            books: port.pool.map(|config| Books { address, ledger: Mutex::new(super::shares::Ledger::open(config, hash, db.clone())), workers: Mutex::new(BTreeMap::new()) }),
         });
         let accepting = {
             let state = state.clone();

@@ -138,15 +138,20 @@ pub struct Ledger {
     earned: BTreeMap<Address, u256>,
     /// The claim trees, newest first.
     trees: VecDeque<Arc<ClaimTree>>,
+    /// The node's database, where the claim trees are kept: in memory alone without one.
+    db: Option<Arc<dyn crate::db::Database>>,
 }
 
 impl Ledger {
     #[document(
         parent = "Ledger",
         summary = "The books, read from the config's file when it has one and it reads; empty otherwise.",
-        params = { hash = "The chain's hash, which the claim trees are built with." },
+        params = {
+            hash = "The chain's hash, which the claim trees are built with.",
+            db = "The node's database, to keep the claim trees in; None keeps them in memory alone.",
+        },
     )]
-    pub fn open(config: PoolConfig, hash: HashType) -> Ledger {
+    pub fn open(config: PoolConfig, hash: HashType, db: Option<Arc<dyn crate::db::Database>>) -> Ledger {
         let mut ledger = Ledger {
             config,
             hash,
@@ -156,6 +161,7 @@ impl Ledger {
             blocks: VecDeque::new(),
             earned: BTreeMap::new(),
             trees: VecDeque::from([Arc::new(ClaimTree::new(hash, Vec::new()))]),
+            db,
         };
 
         if let Some(file) = ledger.config.file.clone() {
@@ -169,7 +175,51 @@ impl Ledger {
             }
         }
 
+        ledger.keep_trees_found();
+
         ledger
+    }
+
+    /// With a database: the trees it keeps when the newest is the earnings read, so their paths and
+    /// the blocks that committed to them come back; or else the earnings' tree written there.
+    fn keep_trees_found(&mut self) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+        let read = self.trees.front().cloned().expect("the books always hold a tree");
+
+        match ClaimTree::kept(db.clone(), self.hash) {
+            Ok(kept) if kept.first().is_some_and(|newest| newest.root == read.root) => {
+                self.trees = kept.into_iter().map(Arc::new).collect();
+            }
+            Ok(_) => {
+                let leaves: Vec<(Address, u256)> = self.earned.iter().map(|(to, earned)| (*to, *earned)).collect();
+
+                match ClaimTree::keep(db.clone(), self.hash, &leaves) {
+                    Ok(mut tree) => {
+                        tree.committed = read.committed.clone();
+                        let _ = tree.keep_committed();
+                        self.trees = VecDeque::from([Arc::new(tree)]);
+                        self.forget_trees();
+                    }
+                    Err(err) => log::warn!("[pool] the claim tree did not go to the database, kept in memory: {err}"),
+                }
+            }
+            Err(err) => log::warn!("[pool] the claim trees in the database do not read, kept in memory: {err}"),
+        }
+    }
+
+    /// Keeps the newest trees, and has the database keep those alone.
+    fn forget_trees(&mut self) {
+        self.trees.truncate(KEPT_TREES);
+
+        if let Some(db) = &self.db {
+            let trees: Vec<Arc<ClaimTree>> = self.trees.iter().cloned().collect();
+
+            if let Err(err) = ClaimTree::kept_trees(db, &trees) {
+                log::warn!("[pool] the database did not take which claim trees are kept: {err}");
+            }
+        }
     }
 
     #[document(parent = "Ledger", summary = "How the pool runs.")]
@@ -278,9 +328,17 @@ impl Ledger {
         }
 
         if credited {
-            let leaves = self.earned.iter().map(|(to, earned)| (*to, *earned)).collect();
-            self.trees.push_front(Arc::new(ClaimTree::new(self.hash, leaves)));
-            self.trees.truncate(KEPT_TREES);
+            let leaves: Vec<(Address, u256)> = self.earned.iter().map(|(to, earned)| (*to, *earned)).collect();
+            let tree = match &self.db {
+                Some(db) => ClaimTree::keep(db.clone(), self.hash, &leaves).unwrap_or_else(|err| {
+                    log::warn!("[pool] the claim tree did not go to the database, kept in memory: {err}");
+
+                    ClaimTree::new(self.hash, leaves)
+                }),
+                None => ClaimTree::new(self.hash, leaves),
+            };
+            self.trees.push_front(Arc::new(tree));
+            self.forget_trees();
         }
 
         self.forget();
@@ -301,13 +359,13 @@ impl Ledger {
         let split = self.split();
         let tree = self.trees.front().expect("the books always hold a tree");
 
-        if split.is_empty() && tree.leaves.is_empty() {
+        if split.is_empty() && tree.count == 0 {
             return (None, split);
         }
 
         let parts = split.iter().map(|payout| payout.parts).sum();
 
-        (Some(PoolCommitment { parts, root: tree.root, count: tree.leaves.len() as u64 }), split)
+        (Some(PoolCommitment { parts, root: tree.root, count: tree.count }), split)
     }
 
     #[document(
@@ -321,6 +379,10 @@ impl Ledger {
             && let Some(tree) = self.trees.iter_mut().find(|tree| tree.root == root)
         {
             Arc::make_mut(tree).committed.push((height, id));
+
+            if let Err(err) = tree.keep_committed() {
+                log::warn!("[pool] the database did not take the block that committed to a claim tree: {err}");
+            }
         }
 
         self.forget();
@@ -554,7 +616,7 @@ mod tests {
     }
 
     fn open(config: PoolConfig) -> Ledger {
-        Ledger::open(config, HashType::default_chain())
+        Ledger::open(config, HashType::default_chain(), None)
     }
 
     fn block(byte: u8) -> Hash {
@@ -628,6 +690,70 @@ mod tests {
         // Crediting again credits nothing twice.
         ledger.credit(&settled);
         assert_eq!(ledger.report().earned, u256::new(1_000));
+    }
+
+    #[test]
+    fn a_claim_tree_kept_in_the_database_proves_as_one_in_memory_and_comes_back_after_a_restart() {
+        use crate::db::{Column, Committed, Database, MemoryDb};
+
+        let hash = HashType::default_chain();
+        let db: Arc<dyn Database> = Arc::new(MemoryDb::default());
+
+        // Every size around the splits: each miner's path the same, from a few reads.
+        for count in [1u64, 2, 3, 5, 8, 13, 33] {
+            let leaves: Vec<(Address, u256)> = (0..count).map(|n| (miner(n as u8 + 1), u256::new(u128::from(n) * 7 + 1))).collect();
+            let memory = ClaimTree::new(hash, leaves.clone());
+            let kept = ClaimTree::keep(db.clone(), hash, &leaves).unwrap();
+
+            assert!(kept.is_kept() && !memory.is_kept());
+            assert_eq!((kept.root, kept.count), (memory.root, count));
+
+            for (to, earned) in &leaves {
+                let proof = kept.proof(hash, to).unwrap();
+                assert_eq!(proof, memory.proof(hash, to).unwrap(), "{count} leaves");
+                assert!(crate::crypto::merkle::verify(&kept.root, &crate::registry::pools::claim_leaf(hash, to, *earned), proof.0 as usize, count as usize, &proof.2));
+            }
+
+            assert!(kept.proof(hash, &miner(200)).is_none());
+            let mut seen = Vec::new();
+            kept.each_leaf(&mut |index, to, earned| {
+                seen.push((index, *to, earned));
+                true
+            });
+            assert_eq!(seen, leaves.iter().enumerate().map(|(index, (to, earned))| (index as u64, *to, *earned)).collect::<Vec<_>>());
+        }
+
+        // A pool's books, written to a file, the trees to the database.
+        let file = std::env::temp_dir().join(format!("chainv4-pool-trees-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let fresh = Arc::new(MemoryDb::default());
+        let config = PoolConfig { file: Some(file.clone()), ..PoolConfig::default() };
+        let mut ledger = Ledger::open(config.clone(), hash, Some(fresh.clone()));
+
+        for round in 0..6u8 {
+            ledger.add(miner(1), 300, 0, 1_000);
+            ledger.add(miner(round + 2), 100, 0, 1_000);
+            let (commitment, split) = ledger.commitment();
+            ledger.sealed(u64::from(round) + 1, block(round + 1), 0, split, commitment.map(|commitment| commitment.root));
+            ledger.credit(&|_, _| PoolSettled::Final(u256::new(1_000)));
+        }
+
+        let report = ledger.report();
+        assert_eq!(report.claims.len(), KEPT_TREES);
+        assert!(report.claims.iter().all(|tree| tree.is_kept()));
+        let mut roots_in_db = std::collections::BTreeSet::new();
+        fresh.scan(Column::PoolTrees, b"t", b"t", &mut |key, _| {
+            roots_in_db.insert(key[1..33].to_vec());
+            true
+        }).unwrap();
+        assert_eq!(roots_in_db.len(), KEPT_TREES, "the older trees are gone from the database");
+        ledger.save();
+
+        // Opened again on the same file and database: the same trees, the blocks that committed to them, the same paths.
+        let again = Ledger::open(config, hash, Some(fresh));
+        assert_eq!(again.report().claims, report.claims);
+        assert_eq!(again.report().claims[1].proof(hash, &miner(1)), report.claims[1].proof(hash, &miner(1)));
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

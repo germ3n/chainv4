@@ -29,6 +29,15 @@ pub fn leaf(hash: HashType, data: &[u8]) -> Hash {
     hasher.finalize()
 }
 
+#[document(
+    summary = "The node over two: their hashes joined with a 1 byte in front, as an inner node of the tree root builds.",
+    category = "Crypto",
+    see_also = "root",
+)]
+pub fn join(left: &Hash, right: &Hash) -> Hash {
+    node(left, right)
+}
+
 fn node(left: &Hash, right: &Hash) -> Hash {
     let mut hasher = Hasher::new(left.algorithm());
     hasher.update(&[NODE]);

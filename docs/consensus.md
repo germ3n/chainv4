@@ -372,7 +372,12 @@ reward and fees. The producer must still hold the fees it sends as the block end
 leaves its own transactions out of the blocks it builds.
 
 **The books** are kept in `pool.json` beside the database, saved every minute and with each block,
-so a restart loses no miner's work in the window or its earnings.
+so a restart loses no miner's work in the window or its earnings. The claim trees are kept in the
+node's database, `Column::PoolTrees`, not chain state: the newest four, each with its leaves, its
+leaves by miner and every inner node, and the blocks that committed to it. A miner's path is a few
+reads however many miners the pool has, memory holds one copy of the earnings rather than four
+trees, and a restart takes the trees back, their committed blocks with them. A tree that does not
+go to the database stays in memory, with a warning.
 
 **What miners see:** `chainv4 worker` logs its share difficulty, and every 30 seconds its shares in
 the window, its part of the next block and all it has earned, and each new claim it keeps. `GET /pool` lists the pool's fee,

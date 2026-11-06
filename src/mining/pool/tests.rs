@@ -41,7 +41,7 @@ fn pool() -> (Pool, mpsc::Receiver<(Hash, Seal)>) {
         let _ = State::lock(&sender).send((id, seal));
     });
 
-    (Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), port(), found).unwrap(), seals)
+    (Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), port(), found, None).unwrap(), seals)
 }
 
 /// A worker's side of a connection, past the handshake.
@@ -283,7 +283,7 @@ fn books(fee: u32) -> (Pool, mpsc::Receiver<(Hash, Seal)>) {
     });
     let port = MiningPort { pool: Some(super::super::shares::PoolConfig { fee, min_share: 16, ..Default::default() }), ..port() };
 
-    (Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), port, found).unwrap(), seals)
+    (Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), port, found, None).unwrap(), seals)
 }
 
 /// A pool worker's side of a connection, past the handshake and the pool's terms.
@@ -447,7 +447,7 @@ fn a_solo_worker_mines_its_own_block_and_its_seal_ends_the_job_for_everyone() {
     let found: Found = Arc::new(move |id, seal| {
         let _ = State::lock(&sender).send((id, seal));
     });
-    let mut pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, ..port() }, found).unwrap();
+    let mut pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, ..port() }, found, None).unwrap();
     let payout = Address::Ed25519([4; 32]);
     let (mut solo_sender, mut solo, first) = alone(&pool, Some(payout));
     let (_, mut other) = raw(&pool, "for the node");
@@ -488,7 +488,7 @@ fn a_solo_worker_is_turned_away_by_a_port_that_takes_none_or_without_a_payout() 
     assert!(refused["why"].as_str().unwrap().contains("--mining-solo"), "{refused}");
 
     let found: Found = Arc::new(|_, _| {});
-    let solo = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, ..port() }, found).unwrap();
+    let solo = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, ..port() }, found, None).unwrap();
     let (_, _, refused) = alone(&solo, None);
 
     assert!(refused["why"].as_str().unwrap().contains("--payout"), "{refused}");
@@ -499,7 +499,7 @@ fn a_solo_worker_is_turned_away_by_a_port_that_takes_none_or_without_a_payout() 
 fn a_port_tuned_to_one_payout_mining_alone_refuses_a_second() {
     let found: Found = Arc::new(|_, _| {});
     let limits = PortLimits { solo: 1, ..PortLimits::DEFAULT };
-    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, limits, ..port() }, found).unwrap();
+    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { solo: true, limits, ..port() }, found, None).unwrap();
     let (_first_sender, _first, first) = alone(&pool, Some(Address::Ed25519([4; 32])));
     let (_again_sender, _again, again) = alone(&pool, Some(Address::Ed25519([4; 32])));
     let (_, _, second) = alone(&pool, Some(Address::Ed25519([5; 32])));
@@ -513,7 +513,7 @@ fn a_port_tuned_to_one_payout_mining_alone_refuses_a_second() {
 fn a_port_tuned_to_few_connections_turns_the_next_away() {
     let found: Found = Arc::new(|_, _| {});
     let limits = PortLimits { connections: 2, ..PortLimits::DEFAULT };
-    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { limits, ..port() }, found).unwrap();
+    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { limits, ..port() }, found, None).unwrap();
     let _one = raw(&pool, "one");
     let _two = raw(&pool, "two");
     until(&pool, |report| report.workers.len() == 2);

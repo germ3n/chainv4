@@ -266,12 +266,12 @@ pub struct Mining {
 impl Mining {
     /// The producer for proof of work: the node's own miner, a pool for workers, or a pool with
     /// the node's own miner in it.
-    fn producer(&self, hash: crate::structs::hash::HashType, found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static) -> Result<Box<dyn Producer>, NodeError> {
+    fn producer(&self, hash: crate::structs::hash::HashType, found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static, db: Arc<dyn crate::db::Database>) -> Result<Box<dyn Producer>, NodeError> {
         use crate::mining::pool::{Found, Pool};
 
         let found: Found = Arc::new(found);
         let pool = match &self.port {
-            Some(port) => Some(Pool::new(self.reward_to, hash, port.clone(), found.clone()).map_err(NodeError::Thread)?),
+            Some(port) => Some(Pool::new(self.reward_to, hash, port.clone(), found.clone(), Some(db)).map_err(NodeError::Thread)?),
             None => None,
         };
         // The node's own miner, its seals going through the pool when there is one.
@@ -330,12 +330,13 @@ impl Producing {
         checkpoint_interval: u64,
         signer_account: Option<Address>,
         found: impl Fn(Hash, crate::structs::block::Seal) + Send + Sync + 'static,
+        db: Arc<dyn crate::db::Database>,
     ) -> Result<Option<Box<dyn Producer>>, NodeError> {
         use crate::consensus::{AuthorityProducer, RotatingProducer, Staked, StakedProducer};
 
         Ok(match config {
             ConsensusConfig::ProofOfWork(_) => match &self.mine {
-                Some(mining) => Some(mining.producer(hash, found)?),
+                Some(mining) => Some(mining.producer(hash, found, db)?),
                 None => {
                     log::info!("[node] the chain runs proof of work, which this node has no --mine for: following only");
 
@@ -719,7 +720,7 @@ impl Node {
             Some(keypair) => self.chain.signer_account(&keypair.public())?,
             None => None,
         };
-        self.producer = setup.build(&config, self.chain.hash(), interval, signer_account, found)?;
+        self.producer = setup.build(&config, self.chain.hash(), interval, signer_account, found, self.chain.db().clone())?;
         self.producer_for = Some(config);
         self.template = None;
         self.solo.clear();

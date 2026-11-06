@@ -121,6 +121,9 @@ pub enum Column {
     #[document(summary = "The faucet's limits, on a node that runs one: when each address and each IP last had a drip, by \"to:…\" and \"ip:…\", kept until its period ends so a restart lets no one ask again early. Not chain state.")]
     #[wincode(tag = 27)]
     Faucet,
+    #[document(summary = "A mining pool's claim trees, on a node that runs a pool: each tree's leaves, its leaves by miner, its inner nodes, and the blocks that committed to it, by its root, and which trees are kept. A miner's path is a few reads, however many miners the pool has. Not chain state: the pool's own books.")]
+    #[wincode(tag = 28)]
+    PoolTrees,
 }
 
 impl Hashable for Column {
@@ -128,7 +131,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 28] = [
+    pub const ALL: [Column; 29] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -157,6 +160,7 @@ impl Column {
         Column::Members,
         Column::Bans,
         Column::Faucet,
+        Column::PoolTrees,
     ];
 
     #[document(
@@ -193,6 +197,7 @@ impl Column {
             Column::Members => "members",
             Column::Bans => "bans",
             Column::Faucet => "faucet",
+            Column::PoolTrees => "pool_trees",
         }
     }
 }

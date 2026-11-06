@@ -214,8 +214,8 @@ offline; these would make that hold up as a treasury.
   Workers, phones only in the foreground and on the charger. See [Mining alone](consensus.md#mining-alone).
 - [ ] **Mining pools: next.** Done 2026-11-06: the wallet's Mining page and the explorer's Pool
   page prove a claim's root and what was claimed through the light client (`PoolClaim::pays`),
-  leaving only which claim is newest to the pool's word. A pool's node keeps four claim trees in memory, which a
-  pool of millions of miners would want on disk. A share chain among the pool's own nodes, as
+  leaving only which claim is newest to the pool's word; the claim trees in the node's database
+  (`Column::PoolTrees`), paths a few reads each, kept across restarts. A share chain among the pool's own nodes, as
   P2Pool keeps, would take the split out of one node's hands altogether.
 - [x] **A decoded transaction as the tx page shows one.** The node's JSON for a transaction is
   `structs::json`, apart from the node, so the explorer's Decode tool writes a decoded one as the
@@ -589,6 +589,13 @@ with.
   finality, the federation and the directory may be given in part, laid over what stands; the
   deciding receipt says `Decided { decision, kind, version }`, the chain's count kept gap-free for
   light clients.
+- [ ] **Read-only parameters in Lua contracts (owner, 2026-11-06).** Luau has none: `const` binds
+  locals and local functions (`const LIMIT = 5`, `const function f() end`), while a parameter is a
+  plain local the body may assign, and `function f(const x)` is a syntax error. In the Luau fork,
+  let `const` stand before a parameter, `function transfer(const to, const amount)`, compiled as a
+  const local is, so assigning it fails the deploy; and perhaps `@const_params` on a function, or a
+  contract-wide `--!const_params`, for all of them at once. As it changes which contracts deploy,
+  with the consensus batches and the fork's pin moved, tested in both engines' contract tests.
 - [ ] **`_` as a digit separator everywhere a number is read from text (owner, 2026-11-06).** In
   contracts, a consensus change for the next regenesis or fork: `u64()` to `i256()` and each
   `.new`, decimal and `0x` hex, and `tonumber` in the Luau fork, as Luau's own literals take
@@ -1719,6 +1726,12 @@ with.
   - **Docker:** `pow.sh init`, `up`, `push` and `join` on throwaway machines.
 - [ ] **Fuzzing,** with cargo-fuzz, run in CI for a while on every change and for longer
   overnight: everything a peer or a user can hand the node or the apps.
+  - **Overnight, unattended (owner, 2026-11-06):** a script that runs every target side by side,
+    one a core, for a set time (`-max_total_time`), here or on the idle worker VPS, keeping each
+    target's corpus between nights so each starts where the last stopped, and leaving one summary
+    in the morning: which targets crashed, each crash's input file, the panic and its stack, and
+    how far coverage grew. A crash's input becomes a regression test, and the WalletConnect
+    envelopes, PSBTs and Lua's whole-number arithmetic are targets beside these.
   - **Decoding:** blocks, transactions, votes and justifications, gossip and sync messages, light
     updates and proofs, from their wincode bytes; Ethereum's RLP transactions; JSON-RPC and the
     HTTP API's bodies.

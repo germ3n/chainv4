@@ -88,3 +88,17 @@ mod tests {
         assert!(matches!(compile(&huge), Err(VmError::Compile(text)) if text.contains("allowed")));
     }
 }
+
+#[cfg(test)]
+mod const_tests {
+    #[test]
+    fn luau_s_const_bindings_compile_and_cannot_be_assigned_again() {
+        let source = "const LIMIT = 5\nconst function double(n) return n * 2 end\nreturn { f = function() return double(LIMIT) end }";
+        assert!(super::compile(source).is_ok(), "{:?}", super::compile(source).err());
+        assert!(super::compile("const LIMIT = 5\nLIMIT = 6\nreturn {}").is_err(), "a const is not assigned again");
+        assert!(super::compile("const function f() end\nf = nil\nreturn {}").is_err(), "nor a const function");
+        // Parameters have no const yet (docs/todo.md): one is a syntax error, and a body may assign its own.
+        assert!(super::compile("local function f(const x) return x end\nreturn {}").is_err());
+        assert!(super::compile("local function f(x) x = 1 return x end\nreturn {}").is_ok());
+    }
+}
