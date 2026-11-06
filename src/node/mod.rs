@@ -863,6 +863,21 @@ impl Node {
 
     #[document(
         parent = "Node",
+        summary = "How many blocks below the finalized checkpoint the node keeps the bodies of, or None for every one: what --prune-blocks sets. Its loop then prunes a step at a time, in between everything else.",
+        see_also = "Chain::keep_blocks",
+    )]
+    pub fn keep_blocks(mut self, keep: Option<u64>) -> Node {
+        self.chain.keep_blocks(keep);
+
+        if let Some(keep) = keep {
+            log::info!("[node] pruning: keeping the bodies of {keep} blocks below the finalized checkpoint, from height {} now", self.chain.bodies_from());
+        }
+
+        self
+    }
+
+    #[document(
+        parent = "Node",
         summary = "Makes the node keep one of the indexes. Its loop then catches the index up a step at a time, in between everything else. Once on, the database keeps it on.",
         params = {
             kind = "Which index.",
@@ -999,6 +1014,7 @@ impl Node {
             self.produce_if_due(now)?;
             self.vote_if_due()?;
             self.catch_up_indexes()?;
+            self.chain.prune_step()?;
             #[cfg(feature = "pool")]
             self.push_if_due(now);
         }

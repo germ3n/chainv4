@@ -3553,3 +3553,43 @@ fn rpc_limits_hold_a_batch_to_the_operators_size() {
     assert!(two["error"]["message"].as_str().unwrap().contains("at most 1 requests"), "{two}");
     assert!(one[0]["result"].is_string(), "{one}");
 }
+
+#[test]
+fn a_pruned_block_answers_its_header_and_a_pruned_transaction_says_where_bodies_begin() {
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis { finality: None, max_reorg_depth: 1, ..free() };
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let mut first = None;
+
+    for nonce in 0..6 {
+        let now = chain.tip().timestamp + SLOT;
+        let signed = SignedTx::sign(Tx::Burn { from: authority.public().address(), amount: Amount::U128(1) }, nonce, FeeOffer::NONE, &authority, &chain.genesis());
+        first.get_or_insert(signed.id(chain.hash()));
+        let mut block = chain.build(vec![signed], Vec::new(), producer.address(&[]), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    chain.keep_blocks(Some(2));
+    while chain.prune_step().unwrap() {}
+    assert_eq!(chain.bodies_from(), 3);
+
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let (status, _, status_json) = get(address, "/status");
+    assert_eq!((status, status_json["bodies_from"].as_u64()), (200, Some(3)));
+
+    let (status, _, block) = get(address, "/blocks/1");
+    assert_eq!(status, 200, "{block}");
+    assert_eq!((block["height"].as_u64(), block["bodies_from"].as_u64(), block["pruned"].as_bool()), (Some(1), Some(3), Some(true)));
+    assert_eq!(block["txs"].as_array().map(Vec::len), Some(0), "the header alone: {block}");
+
+    let (status, _, said) = get(address, &format!("/txs/{}", first.unwrap()));
+    assert_eq!(status, 404);
+    assert!(said["error"].as_str().is_some_and(|why| why.contains("below 3")), "{said}");
+
+    let (status, _, block) = get(address, "/blocks/4");
+    assert_eq!(status, 200, "{block}");
+    assert_eq!(block["txs"].as_array().map(Vec::len), Some(1), "{block}");
+}

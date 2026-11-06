@@ -115,6 +115,10 @@ const TIPS_KEY: &[u8] = b"tips";
 const FORMAT_KEY: &[u8] = b"format";
 /// Where a node that synced from a snapshot keeps which block it took state at.
 const SNAPSHOT_KEY: &[u8] = b"snapshot";
+/// Where a pruning node keeps the lowest height whose block body it still holds.
+const BODIES_FROM_KEY: &[u8] = b"bodies_from";
+/// How many blocks one step of pruning goes through, at most, in one commit.
+const PRUNE_STEP: u64 = 256;
 /// Where the chain keeps the blocks that failed to run, so a restart refuses them again.
 const BAD_KEY: &[u8] = b"bad";
 /// Where the chain keeps the lowest height whose state its history still holds.
@@ -1201,6 +1205,11 @@ pub struct Chain {
     snapshot: Option<u64>,
     /// How many blocks back state is kept to read at, or None to keep every height.
     state_history: Option<u64>,
+    /// The lowest height whose body this node still holds, once it pruned: 0 for one that never did.
+    bodies_from: u64,
+    /// How many blocks below the settled height a pruning node keeps the bodies of, or None for one
+    /// that keeps every body: what --prune-blocks sets.
+    prune_blocks: Option<u64>,
     /// What the block on the tip runs with, as the tip's state decides: what the node charges
     /// and admits by, and builds the next block with.
     next: BlockParams,
@@ -1246,6 +1255,14 @@ pub(crate) struct BlockParams {
 struct HistoryFrom {
     height: u64,
 }
+
+/// The lowest height a pruning node still holds the body of: those below it it pruned.
+#[derive(Clone, Copy, Debug, SchemaWrite, SchemaRead)]
+struct BodiesFrom {
+    height: u64,
+}
+
+impl Hashable for BodiesFrom {}
 
 impl Hashable for HistoryFrom {}
 
@@ -1368,6 +1385,7 @@ impl Chain {
         let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
         let members = members::stored_member_index(&*db)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
+        let bodies_from = read_value::<BodiesFrom>(&*db, Column::Meta, BODIES_FROM_KEY)?.map_or(0, |from| from.height);
         let bad_order: VecDeque<Hash> = read_value::<BadBlocks>(&*db, Column::Meta, BAD_KEY)?.unwrap_or_default().blocks.into();
         // A database from before history begins it at its tip.
         if read_value::<HistoryFrom>(&*db, Column::Meta, HISTORY_FROM_KEY)?.is_none() {
@@ -1409,6 +1427,8 @@ impl Chain {
             members,
             snapshot,
             state_history: Some(DEFAULT_STATE_HISTORY),
+            bodies_from,
+            prune_blocks: None,
             next: BlockParams { rules: genesis.rules(), reward: (genesis.reward, 0), max_block_bytes: genesis.max_block_bytes },
             built_fees: BuiltFees::default(),
         };
@@ -1426,6 +1446,77 @@ impl Chain {
     )]
     pub fn keep_state_history(&mut self, window: Option<u64>) {
         self.state_history = window.map(|window| window.max(1));
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "How many blocks below the settled height to keep the bodies of, or None to keep every one: what --prune-blocks sets. Below that, a block's transactions, its receipts and the transaction index go a step at a time (Chain::prune_step), and the event and address indexes follow; headers, seals, justifications and light updates stay. The settled height is the finalized checkpoint's, and never above max_reorg_depth below the tip.",
+        params = { keep = "Blocks to keep below the settled height, at least 1; None to stop pruning, which keeps what is left and brings back nothing pruned." },
+        see_also = "Chain::prune_step, Chain::bodies_from",
+    )]
+    pub fn keep_blocks(&mut self, keep: Option<u64>) {
+        self.prune_blocks = keep.map(|keep| keep.max(1));
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "The lowest height whose block body this node holds: 0 for one that holds every one, the block after its pivot for one that synced from a snapshot, or where pruning reached. Below it, it has headers alone.",
+        see_also = "stored_bodies_from",
+    )]
+    pub fn bodies_from(&self) -> u64 {
+        self.snapshot.map_or(0, |pivot| pivot + 1).max(self.bodies_from)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Prunes a step toward what keep_blocks keeps: up to 256 main-chain blocks' bodies, their receipts and the transaction index's entries for them, in one commit, from the lowest held on. Genesis's body is never pruned. Nothing at or above the settled height less what is kept goes, so no block a reorg or the finalized checkpoint could need goes either.",
+        returns = "Whether there is more to prune.",
+        see_also = "Chain::keep_blocks",
+    )]
+    pub fn prune_step(&mut self) -> Result<bool, DbError> {
+        let Some(keep) = self.prune_blocks else {
+            return Ok(false);
+        };
+
+        let settled = match &self.finality {
+            Some(_) => self.finalized_height().unwrap_or(0),
+            None => self.tip.height,
+        }
+        .min(self.tip.height.saturating_sub(self.max_reorg_depth));
+        let below = settled.saturating_sub(keep);
+        let from = self.bodies_from().max(1);
+
+        if from >= below {
+            return Ok(false);
+        }
+
+        let to = below.min(from.saturating_add(PRUNE_STEP));
+        let state = State::new(self.db.clone());
+
+        for height in from..to {
+            let Some(id) = read_value::<Hash>(&*self.db, Column::Heights, &height.to_be_bytes())? else {
+                continue;
+            };
+
+            if let Some(block) = stored_block(&*self.db, &id)? {
+                for tx in &block.txs {
+                    state.delete(Column::Receipts, id_key(&tx.id(self.hash)));
+
+                    #[cfg(feature = "ethereum")]
+                    if let crate::structs::tx::Tx::Ethereum { raw } = &tx.tx {
+                        state.delete(Column::Ethereum, crate::crypto::ethereum::tx_hash(raw).to_vec());
+                    }
+                }
+
+                state.delete(Column::Blocks, id_key(&id));
+            }
+        }
+
+        state.put_value(Column::Meta, BODIES_FROM_KEY.to_vec(), &BodiesFrom { height: to });
+        self.db.commit(state.take_changes())?;
+        self.bodies_from = to;
+
+        Ok(to < below)
     }
 
     #[document(parent = "Chain", summary = "The lowest height whose state this node can read and prove at: genesis's for one that ran every block and keeps every height, else where history began or the window starts.")]
@@ -1538,7 +1629,7 @@ impl Chain {
             return Ok(false);
         };
 
-        let floor = self.snapshot.map_or(0, |pivot| pivot + 1);
+        let floor = self.bodies_from();
         let lowest = window.keep.lowest(self.tip.height).max(floor);
 
         if window.from == lowest {
@@ -3139,6 +3230,17 @@ impl fmt::Display for ChainError {
 }
 
 impl std::error::Error for ChainError {}
+
+#[document(
+    summary = "The lowest height whose block body a database holds, as Chain::bodies_from says: for readers outside the node, such as the HTTP API, to tell a pruned block from one never stored.",
+    category = "Chain",
+)]
+pub fn stored_bodies_from(db: &dyn Read) -> Result<u64, DbError> {
+    let snapshot = read_value::<SnapshotRecord>(db, Column::Meta, SNAPSHOT_KEY)?.map_or(0, |record| record.height + 1);
+    let pruned = read_value::<BodiesFrom>(db, Column::Meta, BODIES_FROM_KEY)?.map_or(0, |from| from.height);
+
+    Ok(snapshot.max(pruned))
+}
 
 #[document(
     summary = "A block by id, read straight from a database. For readers outside the node, such as the HTTP API.",

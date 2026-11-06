@@ -237,6 +237,12 @@ struct NodeArgs {
     /// Keep the state of every height from now on, never pruning it: an archive node.
     #[arg(long, conflicts_with = "state_history")]
     archive: bool,
+    /// Prune old blocks: keep the bodies of only this many blocks below the finalized checkpoint
+    /// (and never within the reorg depth of the tip), in blocks or as a time such as 7d. Older
+    /// blocks' transactions, receipts and index entries go; headers, seals and justifications stay.
+    /// Off by default: every block is kept.
+    #[arg(long, conflicts_with = "archive")]
+    prune_blocks: Option<chainv4::node::Span>,
     /// The most transactions a block this node produces may hold. Without it, blocks fill to the
     /// chain's max_block_bytes and gas limit, which every node checks; on a chain that bounds
     /// neither, 1,000. This only caps this node's own blocks.
@@ -943,6 +949,16 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     node = node.keep_state_history((!args.archive).then_some(state_history));
 
+    if let Some(prune) = args.prune_blocks {
+        let keep = prune.blocks(block_ms);
+
+        if keep == 0 {
+            return Err("--prune-blocks keeps at least one block".into());
+        }
+
+        node = node.keep_blocks(Some(keep));
+    }
+
     for (kind, asked) in [(IndexKind::Events, args.index_events), (IndexKind::Addresses, args.index_addresses)] {
         match asked {
             Some(Indexing::Off) => node = node.drop_index(kind)?,
@@ -1091,6 +1107,7 @@ mod tests {
         assert_eq!((args.lua_states, args.lua_builders, args.wasm_cache_mb, args.wasm_cache_modules), (16, 2, 32, 1_024));
         assert_eq!((args.max_peers_in, args.api_max_page, args.snapshot_depth, args.underpriced_for), (None, None, None, None));
         assert_eq!(args.state_history, chainv4::node::Span::Blocks(chainv4::chain::DEFAULT_STATE_HISTORY));
+        assert_eq!((args.prune_blocks, args.key_passphrase_file), (None, None), "every block kept, as before");
         #[cfg(feature = "updates")]
         assert_eq!(args.update_every, chainv4::node::CHECK_EVERY_MS);
         assert!(args.tune.is_empty());
@@ -1103,6 +1120,10 @@ mod tests {
         assert_eq!((args.max_peers_in, args.ban_score, args.ban_window, args.max_strikes, args.strike_window), (Some(40), 300, 1_800_000, 50, 300_000));
         assert_eq!((args.tor_timeout, args.lua_states, args.wasm_cache_mb), (180_000, 64, 256));
         assert_eq!((args.state_history, args.underpriced_for), (chainv4::node::Span::Ms(14 * 3_600_000), Some(chainv4::node::Span::Ms(180_000))));
+
+        assert_eq!(parse(&["--prune-blocks", "7d"]).unwrap().prune_blocks, Some(chainv4::node::Span::Ms(7 * 86_400_000)));
+        assert_eq!(parse(&["--prune-blocks", "50000"]).unwrap().prune_blocks, Some(chainv4::node::Span::Blocks(50_000)));
+        assert!(parse(&["--prune-blocks", "50000", "--archive"]).is_err(), "an archive keeps every block");
 
         let http = parse(&["--http", "127.0.0.1:0", "--http-rate", "20", "--api-max-page", "50", "--suggest-multiplier", "3"]).unwrap();
         assert_eq!((http.http_rate, http.api_max_page, http.suggest_multiplier), (20, Some(50), 3));

@@ -2389,3 +2389,57 @@ fn a_chain_without_an_admin_or_with_governance_lets_nobody_set_the_directory_by_
 
     assert!(contract.problem().is_some_and(|why| why.contains("signs")));
 }
+
+#[test]
+fn pruning_drops_old_bodies_and_receipts_and_keeps_headers_and_where_it_reached() {
+    // No finality, so what is settled is the reorg depth below the tip.
+    let genesis = Genesis { finality: None, max_reorg_depth: 2, ..genesis() };
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let to = stranger().public().address();
+    let mut sent = Vec::new();
+
+    for _ in 0..12 {
+        let tx = transfer(&chain, &authority(), &to, 1);
+        sent.push(tx.id(chain.hash()));
+        advance(&mut chain, vec![tx]);
+    }
+
+    assert!(!chain.prune_step().unwrap(), "nothing goes while pruning is off");
+    assert_eq!(chain.bodies_from(), 0);
+
+    chain.keep_blocks(Some(3));
+    while chain.prune_step().unwrap() {}
+
+    // Settled at 12 - 2 = 10, keeping 3 below it: 1 to 6 go, 7 on stay, and genesis stays whole.
+    assert_eq!(chain.bodies_from(), 7);
+    assert_eq!(stored_bodies_from(&*db).unwrap(), 7);
+    assert!(chain.block_at(0).unwrap().is_some());
+
+    for height in 1..=12u64 {
+        let receipt = stored_receipt(&*db, &sent[height as usize - 1]).unwrap();
+
+        assert!(stored_header_at(&*db, height).unwrap().is_some(), "every header stays: {height}");
+        assert_eq!(chain.block_at(height).unwrap().is_some(), height >= 7, "the body at {height}");
+        assert_eq!(receipt.is_some(), height >= 7, "the receipt at {height}");
+    }
+
+    // A reopened node knows where it reached, and goes on from there as the chain grows.
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    assert_eq!(chain.bodies_from(), 7);
+    chain.keep_blocks(Some(3));
+    advance(&mut chain, Vec::new());
+    assert!(!chain.prune_step().unwrap());
+    assert_eq!(chain.bodies_from(), 8);
+
+    // An index never reaches below what is held whole.
+    chain.keep_index(IndexKind::Addresses, Some(KeepFrom::Height(0))).unwrap();
+    while chain.catch_up_index(IndexKind::Addresses).unwrap() {}
+    assert_eq!(chain.index_window(IndexKind::Addresses).unwrap().from, 8);
+
+    // Stopping keeps what is left and brings back nothing.
+    chain.keep_blocks(None);
+    advance(&mut chain, Vec::new());
+    assert!(!chain.prune_step().unwrap());
+    assert_eq!(chain.bodies_from(), 8);
+}

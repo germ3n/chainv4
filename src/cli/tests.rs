@@ -677,13 +677,30 @@ mod send {
             Light::try_parse_from(args).unwrap().args
         };
         let to_text = to.to_string();
-        light(light_args(&["history", &to_text, "--limit", "5"])).unwrap();
+        let dir = TempDir::new("light-state");
+        let state = dir.0.join("light.bin");
+        let state_text = state.display().to_string();
+        let kept = |query: &[&str]| light_args(&[&["--state", state_text.as_str()][..], query].concat());
+
+        // Kept between runs, the next carries on from it, and --fresh starts over in its place.
+        light(kept(&["status"])).unwrap();
+        let first = std::fs::read(&state).unwrap();
+        assert!(light::restore(&state, running.genesis).is_some(), "what it kept restores for its genesis");
+        assert!(light::restore(&state, crate::crypto::hasher::Hasher::digest(running.genesis.algorithm(), b"another chain")).is_none());
+        light(kept(&["status"])).unwrap();
+        light(kept(&["--fresh", "status"])).unwrap();
+        assert!(!first.is_empty() && light::restore(&state, running.genesis).is_some());
+        std::fs::write(&state, b"not a client").unwrap();
+        light(kept(&["status"])).unwrap();
+        assert!(light::restore(&state, running.genesis).is_some(), "a damaged one is replaced");
+
+        light(kept(&["history", &to_text, "--limit", "5"])).unwrap();
         assert!(Light::try_parse_from(["chainv4", "history", &to_text, "--limit", "0"]).is_err(), "at least one");
 
         let unindexed = Running::start(true);
         let node = format!("http://{}", unindexed.api);
         let genesis = unindexed.genesis.to_string();
-        let refused = light(Light::try_parse_from(["chainv4", "--node", &node, "--genesis-id", &genesis, "history", &to_text]).unwrap().args);
+        let refused = light(Light::try_parse_from(["chainv4", "--node", &node, "--genesis-id", &genesis, "--state", &state_text, "--fresh", "history", &to_text]).unwrap().args);
 
         assert!(refused.unwrap_err().to_string().contains("--index-addresses"));
         running.stop();

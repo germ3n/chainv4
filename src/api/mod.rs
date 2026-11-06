@@ -1068,6 +1068,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "version": crate::structs::version::Version::ours().to_string(),
         "name": crate::registry::changes::Changes::new(&State::new(db.clone())).name()?,
         "names_suffix": names_suffix(&api),
+        "bodies_from": crate::chain::stored_bodies_from(&*db)?,
         "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,
@@ -1208,7 +1209,7 @@ fn faucet_json(api: &Api) -> Value {
 /// A checkpoint with its block's height.
 fn checkpoint_at(db: &dyn Read, checkpoint: &Checkpoint) -> Result<Value, ApiError> {
     let mut value = json::checkpoint(checkpoint);
-    value["height"] = stored_block(db, &checkpoint.block)?.map(|block| block.header.height).into();
+    value["height"] = stored_header(db, &checkpoint.block)?.map(|sealed| sealed.header.height).into();
 
     Ok(value)
 }
@@ -1220,7 +1221,7 @@ fn finalized_height(db: &dyn Read) -> Result<u64, ApiError> {
         return Ok(0);
     };
 
-    Ok(stored_block(db, &finalized.block)?.map_or(0, |block| block.header.height))
+    Ok(stored_header(db, &finalized.block)?.map_or(0, |sealed| sealed.header.height))
 }
 
 /// Every bonded validator, and who votes in the tip's epoch: the bonded set under FFG, the fixed
@@ -1833,12 +1834,24 @@ async fn evidence(Shared(api): Shared<Api>) -> Answer {
     })))
 }
 
+/// Why a transaction has no receipt here: not on the main chain yet, or, on a node that holds no
+/// bodies below some height, perhaps in a block it pruned or never had.
+fn unknown_tx(db: &dyn Read, id: &Hash) -> Result<String, ApiError> {
+    let said = format!("transaction {id} is not on the main chain, or not yet");
+
+    Ok(match crate::chain::stored_bodies_from(db)? {
+        0 => said,
+        from => format!("{said}; or in a block below {from}, whose bodies this node no longer holds"),
+    })
+}
+
 /// A transaction's receipt, once it is on the main chain.
 async fn transaction(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answer {
     let db = api.db.clone();
     let id = block_id(&id, api.hash)?;
-    let receipt = stored_receipt(&*db, &id)?
-        .ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
+    let Some(receipt) = stored_receipt(&*db, &id)? else {
+        return Err(ApiError::NotFound(unknown_tx(&*db, &id)?));
+    };
     let block = stored_block(&*db, &receipt.block)?
         .ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
     let tip = tip(&*db)?.header.height;
@@ -1928,8 +1941,13 @@ async fn block(Shared(api): Shared<Api>, Path(block): Path<String>) -> Answer {
     };
     let found = match (found, header) {
         (Some(found), _) => found,
-        // Before the snapshot this node synced from, it keeps headers alone.
-        (None, Some(sealed)) => return Ok(Json(json::pruned(&sealed, &api.reward))),
+        // Before the snapshot this node synced from, or below where it pruned, it keeps headers alone.
+        (None, Some(sealed)) => {
+            let mut pruned = json::pruned(&sealed, &api.reward);
+            pruned["bodies_from"] = crate::chain::stored_bodies_from(&*db)?.into();
+
+            return Ok(Json(pruned));
+        }
         (None, None) => return Err(ApiError::NotFound(format!("no block {block}"))),
     };
 
@@ -2742,7 +2760,9 @@ async fn receipt_proof(Shared(api): Shared<Api>, Path(id): Path<String>) -> Answ
     let id = block_id(&id, api.hash)?;
     // One snapshot: the receipt and its block's others are from one commit, so a reorg never
     // lands between them.
-    let receipt = stored_receipt(&*db, &id)?.ok_or_else(|| ApiError::NotFound(format!("transaction {id} is not on the main chain, or not yet")))?;
+    let Some(receipt) = stored_receipt(&*db, &id)? else {
+        return Err(ApiError::NotFound(unknown_tx(&*db, &id)?));
+    };
     let block = stored_block(&*db, &receipt.block)?.ok_or_else(|| ApiError::Db(DbError::Corrupt(format!("block {} is not stored", receipt.block))))?;
     let mut committed: Vec<CommittedReceipt> = Vec::with_capacity(block.txs.len());
 

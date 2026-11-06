@@ -309,6 +309,8 @@ and keep in step for what a line of flags holds.
 | `--snapshot-depth N` | 16 | 1 to half `max_reorg_depth` | How far below the best tip `--snapshot` takes its state; see [Syncing from a snapshot](#syncing-from-a-snapshot). |
 | `--underpriced-for N` or `T` | 32 blocks | 1 to 100,000 blocks | How long an offer under the base price waits before the mempool drops it. A time is turned into blocks at the chain's block time as the node starts. |
 | `--state-history N` or `T` | 10,000 blocks | at least 1 | As before, now also as a time, such as `14h`, turned into blocks the same way. |
+| `--prune-blocks N` or `T` | off: every block kept | at least 1; not with `--archive` | Keeps the bodies of only this many blocks below the finalized checkpoint, never within `max_reorg_depth` of the tip, in blocks or as a time such as `7d`. See [Pruning](storage.md#pruning). |
+| `--key-passphrase-file PATH` | none | a readable file | The passphrase of the node's [sealed key files](crypto.md#sealed-key-files); else `CHAINV4_KEY_PASSPHRASE_FILE`, else asked on a terminal. |
 | `--max-block-txs N` | none; 1,000 on a chain bounded by neither bytes nor gas (`UNBOUNDED_CHAIN_TXS`) | 1 and up | As before. |
 | `--lua-states N` | 16 | 1 to 1,024 | Pristine Lua states kept ready for calls. |
 | `--lua-builders N` | 2 | 1 to 64 | Threads building them. |

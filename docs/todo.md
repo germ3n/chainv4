@@ -871,8 +871,9 @@ with.
   it kept still checks.
 - [x] **Light clients start at a checkpoint.** A finalized checkpoint's block id, given, or a
   node's own the first time an app meets it, starts a light client there in one request.
-- [ ] **`chainv4 light` still keeps nothing between runs.** It follows from genesis, or from
-  `--checkpoint`, each time; it could keep its state in a file the way the wallet does.
+- [x] **`chainv4 light` still keeps nothing between runs.** Done 2026-11-06: `.chainv4/light/<genesis
+  id>.bin`, or `--state FILE`, and `--fresh`. Was: it followed from genesis, or from
+  `--checkpoint`, each time.
 - [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
   `max_reorg_depth` blocks. Asking several peers at once, and frozen snapshots kept by serving
   nodes, would suit large states.
@@ -912,12 +913,14 @@ with.
   `storage_scan` and `namespace_scan` host calls go through a contract's keys in order, a page at
   a time, and a transaction that scanned runs again when one before it wrote into the range. See
   [Contracts](contracts.md#iterating-storage).
-- [ ] **No pruning.** Every block and all history are kept forever.
+- [x] **No pruning.** Done 2026-11-06: `--prune-blocks N` drops old bodies, receipts and index
+  entries below the finalized checkpoint, keeping headers. See [Pruning](storage.md#pruning).
 - [x] **Receipts and a transaction index.** Each transaction's block, index, fuel, result and
   events are stored by transaction id, and reorgs move them along with everything else.
 - [x] **A storage format version.** `Meta` records `STORAGE_FORMAT`, and a node refuses a
   database kept in another (`OldFormat`) rather than misread it.
-- [ ] **No migrations.** A database in an old format has to be deleted; nothing upgrades it.
+- [x] **No migrations.** Stale: `chain::migrate` and `chainv4 db migrate` move a database up and
+  down from format 8 on. See [Migrations](storage.md#migrations).
 - [x] **Leaves are stored.** The chain's leaf blocks go into `Meta` with each block, so side
   branches outlast a restart and the API can list them (`/forks`).
 - [x] **Leaves are pruned.** A side branch, its blocks and its leaf go once the chain can never
@@ -1692,7 +1695,7 @@ with.
 - [x] **Database migrations:** a `Migration` per format from 8 on, up and down in crash-safe chunks;
   a node migrates up as it starts after a checkpoint backup, and `chainv4 db migrate --to N` goes
   back down once confirmed.
-- [ ] **No migration exists yet.** The next format change is the first; formats before 8 stay
+- [x] **No migration exists yet.** Stale: format 9 came with the first; formats before 8 stay
   unmigratable.
 - [ ] **Errors a call raises name the bundle's lines.** Only deploys are placed back in their files;
   `chainv4 send call` could do the same when given the contract's files.
@@ -1890,7 +1893,6 @@ From a review of the Lua layer in `~/engine` (`game/base/src/script`), not chain
 - [ ] **Stale `.luac` beats fresh `.lua`.** `pick_scripts` prefers compiled files at equal mount
   priority, so an old compiled file wins over source just edited.
 
-add db migration system (upgrade/downgrade calls maybe?)
 maybe have to check the event log not indexing properly in explorer? maybe settings werent properly changed
 add fuzzing
 make consensus switchable (pow -> pos, etc)

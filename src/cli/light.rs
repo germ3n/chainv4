@@ -7,7 +7,7 @@ use {
     super::genesis::DevChain,
     super::send::{agent, fetch, ok},
     crate::db::{Column, STATE_COLUMNS, StateProof, address_key},
-    crate::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightParams, LightRequest},
+    crate::light::{Assurance, CheckpointStart, FinalityStep, LightClient, LightParams, LightRequest, LightState},
     crate::structs::account::Account,
     crate::structs::address::Address,
     crate::structs::block::SealedHeader,
@@ -41,6 +41,14 @@ pub struct LightArgs {
     /// from genesis: the client trusts it, and checks everything from there on.
     #[arg(long)]
     checkpoint: Option<String>,
+    /// Where the client keeps what it checked between runs, to carry on from there: by default
+    /// .chainv4/light/<genesis id>.bin in the home directory.
+    #[arg(long)]
+    state: Option<PathBuf>,
+    /// Start again from genesis, or --checkpoint, ignoring what was kept; what this run checks is
+    /// kept in its place.
+    #[arg(long)]
+    fresh: bool,
     #[command(subcommand)]
     query: LightQuery,
 }
@@ -74,8 +82,16 @@ pub fn light(args: LightArgs) -> CliResult<()> {
     let params: LightParams = decode(&started["params"])?;
     let genesis: SealedHeader = decode(&started["header"])?;
     let trusted = trusted(&args, &params)?;
-    let mut client = match &args.checkpoint {
-        Some(text) => {
+    let kept = args.state.clone().or_else(|| kept_path(&trusted));
+    // What an earlier run kept, unless told to start again or where: only for the genesis
+    // trusted, and only once its headers link up.
+    let restored = match (&kept, args.fresh || args.checkpoint.is_some()) {
+        (Some(path), false) => restore(path, trusted),
+        _ => None,
+    };
+    let mut client = match (&args.checkpoint, restored) {
+        (_, Some(client)) => client,
+        (Some(text), None) => {
             let bytes = from_hex(text).ok_or("--checkpoint is not hex")?;
             let checkpoint = Hash::from_bytes(params.hash, &bytes).ok_or("--checkpoint is not as long as the chain's ids")?;
             let answer = ok(agent.get(format!("{node}/light/checkpoint/{checkpoint}")).call())?;
@@ -83,11 +99,17 @@ pub fn light(args: LightArgs) -> CliResult<()> {
 
             LightClient::from_checkpoint(params, genesis, trusted, checkpoint, start)?
         }
-        None => LightClient::new(params, genesis, trusted)?,
+        (None, None) => LightClient::new(params, genesis, trusted)?,
     };
-    // Genesis, or the checkpoint: where following starts.
+    // Genesis, the checkpoint, or where the last run got to: where following starts.
     let start = client.tip().height;
     follow(&agent, &node, &mut client)?;
+
+    if let Some(path) = &kept
+        && let Err(why) = keep(path, &client)
+    {
+        eprintln!("could not keep the client's state in {}: {why}; the next run starts over", path.display());
+    }
 
     let tip = client.tip();
     let followed = tip.height - start;
@@ -275,6 +297,45 @@ fn trusted(args: &LightArgs, params: &LightParams) -> CliResult<Hash> {
     };
 
     Ok(genesis.block().id())
+}
+
+/// Where a client of this genesis keeps its state by default: .chainv4/light/<genesis id>.bin in
+/// the home directory, or nowhere without one.
+fn kept_path(genesis: &Hash) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let id = genesis.to_string();
+
+    Some(PathBuf::from(home).join(".chainv4").join("light").join(format!("{}.bin", id.trim_start_matches("0x"))))
+}
+
+/// The client an earlier run kept at path, for this genesis; None when there is none, or it does
+/// not restore, which a run starting over replaces.
+pub(crate) fn restore(path: &std::path::Path, trusted: Hash) -> Option<LightClient> {
+    let bytes = std::fs::read(path).ok()?;
+    let state = wincode::deserialize::<LightState>(&bytes).ok()?;
+
+    match LightClient::restore(state, trusted) {
+        Ok(client) => Some(client),
+        Err(why) => {
+            eprintln!("what {} kept does not restore ({why}): starting over", path.display());
+
+            None
+        }
+    }
+}
+
+/// Keeps the client's state at path: written beside it first, then renamed over, so a run cut short
+/// leaves the last one whole.
+fn keep(path: &std::path::Path, client: &LightClient) -> CliResult<()> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+
+    let beside = path.with_extension("bin.new");
+    std::fs::write(&beside, wincode::serialize(&client.save())?)?;
+    std::fs::rename(&beside, path)?;
+
+    Ok(())
 }
 
 /// Asks the node for everything the client wants until it is caught up.

@@ -25,6 +25,9 @@ other pages explain each part in full; this one is the short list to keep in min
 
 ## Running a chain
 
+- **A pruning node cannot sync others from genesis.** With `--prune-blocks`, blocks below
+  `bodies_from` keep their headers alone: peers sync their bodies from another node, or start from
+  a snapshot, and their transactions are not found there. Pruning never comes undone.
 - **A sealed key file needs its passphrase wherever it is read.** On a server, give the node
   `--key-passphrase-file PATH`, or set `CHAINV4_KEY_PASSPHRASE_FILE` for any command: a node with
   neither, and no terminal to ask on, stops. Lose the passphrase and the key is gone; nothing gets it

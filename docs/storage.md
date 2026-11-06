@@ -297,6 +297,29 @@ deleted, since nothing can roll back that far.
 **What they hold:** a block's state tree nodes too, so undoing a block puts its tree back. That
 adds about ten nodes to the record for every entry the block changed.
 
+## Pruning
+
+A node started with `--prune-blocks N` keeps the bodies of only the last `N` blocks below what is
+settled: the finalized checkpoint, and never within `max_reorg_depth` of the tip (the tip less
+that, on a chain without finality). Off by default, so a node keeps every block.
+
+**What goes,** a step of up to 256 blocks at a time, in one commit, between everything else the
+node does: each main-chain block's body (its transactions, proofs and pool data), the receipts and
+transaction index entries of its transactions, and the Ethereum index's. The event and address
+indexes follow, as they never reach below what is held whole.
+
+**What stays:** every header with its seal, justifications and light updates, so the node still
+checks and serves the header chain, light clients and snapshots; genesis's body; and the state
+itself, whose own window is `--state-history`.
+
+**Where it reached** is kept in `Meta` as `bodies_from`, and `GET /status` says it. Below it:
+- `GET /blocks/{block}` answers the header alone, `"pruned": true`, with `bodies_from`, as a node
+  synced from a snapshot does below its pivot;
+- a transaction there is not found, and the 404 says bodies begin at `bodies_from`;
+- a peer syncing from it gets no blocks there, and asks another peer.
+
+Pruning is not undone: dropping the flag keeps what is left, and brings nothing back.
+
 ## History
 
 The `history` column keeps recent state as it was, to read and prove at a past block

@@ -487,7 +487,7 @@ fn tagged(api: &Api, tag: &str) -> Result<Option<u64>, RpcError> {
             match checkpoint {
                 // Before anything past genesis is.
                 None => Ok(Some(0)),
-                Some(checkpoint) => Ok(Some(super::stored_block(&*api.db, &checkpoint.block)?.map_or(0, |block| block.header.height))),
+                Some(checkpoint) => Ok(Some(crate::chain::stored_header(&*api.db, &checkpoint.block)?.map_or(0, |sealed| sealed.header.height))),
             }
         }
         _ => Ok(Some(tip)),

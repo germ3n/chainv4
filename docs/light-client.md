@@ -255,6 +255,10 @@ chainv4 light entry tokens 0x…            # any chain-state entry, by column a
 
 `--node` names the node, which it does not trust. Without `--genesis` or `--genesis-id`, it
 trusts the development chain `--consensus` names, `pow` by default, as a node does.
+Each run keeps what it checked in `.chainv4/light/<genesis id>.bin` in the home directory, or
+the file `--state` names, written beside it and renamed over, and the next run carries on from
+there, checked against the genesis it trusts and its headers linking up; one that does not restore
+is replaced. `--fresh` starts again from genesis, or `--checkpoint`, as does `--checkpoint` itself.
 `--checkpoint 0x…` starts at a finalized checkpoint you trust rather than at genesis:
 
 ```sh
