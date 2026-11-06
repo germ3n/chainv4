@@ -511,6 +511,8 @@ pub struct MiningReport {
     pub open: bool,
     #[document(summary = "The protocol name its mining port speaks, as --protocol gave it; empty for a node without one.")]
     pub protocol: String,
+    #[document(summary = "Whether its mining port serves TLS to workers that open with it, tls://host:port: --mining-cert.")]
+    pub tls: bool,
 }
 
 impl MiningReport {

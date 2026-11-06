@@ -159,23 +159,26 @@ fn pauses(phone: bool, on_battery: bool, charging: Option<bool>) -> bool {
 /// Where the mining port is reached: on a node reached at its onion, the onion's port if GET /mining
 /// names one, as a wallet that came through Tor should not be sent to the node's public address.
 /// Otherwise the address it says the node publishes the port at, else the node's own host with the
-/// port; None for an answer without a port or a URL without a host.
+/// port; None for an answer without a port or a URL without a host. Over TLS, tls://host:port,
+/// when the port serves it (--mining-cert); an onion is Tor's to protect, and is reached plain.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(super) fn port_address(mining: &Value, node: &str) -> Option<String> {
     let said = |name: &str| mining[name].as_str().map(str::trim).filter(|said| !said.is_empty()).map(str::to_string);
     let host = node_host(node);
+    let onion = host.as_deref().is_some_and(|host| host.to_ascii_lowercase().ends_with(".onion"));
+    let tls = |at: String| if mining["tls"].as_bool() == Some(true) && !onion { format!("tls://{at}") } else { at };
 
     if let Some(onion) = said("onion").filter(|_| host.as_deref().is_some_and(|host| host.to_ascii_lowercase().ends_with(".onion"))) {
         return Some(onion);
     }
 
     if let Some(public) = said("public") {
-        return Some(public);
+        return Some(tls(public));
     }
 
     let port = mining["port"].as_u64().filter(|port| (1..=u64::from(u16::MAX)).contains(port))?;
 
-    host.map(|host| format!("{host}:{port}"))
+    host.map(|host| tls(format!("{host}:{port}")))
 }
 
 /// The host of a node's URL; None for one without.
@@ -663,6 +666,12 @@ mod tests {
         let both = json!({ "port": 4002, "public": "203.0.113.7:4002", "onion": "abcdef.onion:4100" });
         assert_eq!(port_address(&both, "http://abcdef.onion").as_deref(), Some("abcdef.onion:4100"));
         assert_eq!(port_address(&both, "http://ABCDEF.ONION:8080/").as_deref(), Some("abcdef.onion:4100"));
+
+        // A port serving TLS is reached over it, but for an onion, which Tor protects already.
+        let tls = json!({ "port": 4002, "tls": true });
+        assert_eq!(port_address(&tls, "https://node.example").as_deref(), Some("tls://node.example:4002"));
+        assert_eq!(port_address(&json!({ "port": 4002, "tls": true, "public": "miner.example:4100" }), "https://node.example").as_deref(), Some("tls://miner.example:4100"));
+        assert_eq!(port_address(&tls, "http://abcdef.onion").as_deref(), Some("abcdef.onion:4002"));
         assert_eq!(port_address(&both, "https://node.example").as_deref(), Some("203.0.113.7:4002"), "not over Tor");
         assert_eq!(port_address(&json!({ "port": 4002, "onion": "abcdef.onion:4100" }), "http://203.0.113.7:8080").as_deref(), Some("203.0.113.7:4002"));
         // An older node says no onion: as before.

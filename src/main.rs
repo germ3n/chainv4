@@ -327,6 +327,14 @@ struct NodeArgs {
     /// openssl rand -hex 32 makes. An open pool, --mining-open, takes none.
     #[arg(long, requires = "mining")]
     mining_token: Option<std::path::PathBuf>,
+    /// A PEM certificate chain to serve the mining port's TLS with, for workers that give
+    /// tls://host:port, such as Let's Encrypt's fullchain.pem for the node's name. Workers that do
+    /// not open with TLS are served plain as before. Needs --mining-key.
+    #[arg(long, requires_all = ["mining", "mining_key"])]
+    mining_cert: Option<std::path::PathBuf>,
+    /// The PEM private key of --mining-cert's certificate.
+    #[arg(long, requires = "mining_cert")]
+    mining_key: Option<std::path::PathBuf>,
     /// Run a mining pool on the mining port: workers send shares at a difficulty set for each,
     /// and every block splits its reward among the last --pool-window blocks' worth of them,
     /// each worker's to the --payout address it gives. Their books are kept in pool.json beside
@@ -823,6 +831,14 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             releases: Some(releases.clone()),
             solo: args.mining_solo,
             limits: tuned.port(),
+            tls: match (&args.mining_cert, &args.mining_key) {
+                (Some(cert), Some(key)) => {
+                    let read = |path: &std::path::PathBuf| std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()));
+
+                    Some(chainv4::mining::wss::server_config(&read(cert)?, &read(key)?)?)
+                }
+                _ => None,
+            },
         }),
         _ => None,
     };

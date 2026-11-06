@@ -239,6 +239,181 @@ fn pump<S: Read + Write>(mut socket: WebSocket<S>, to_send: &mpsc::Receiver<Stri
     }
 }
 
+/// The mining port's protocol over TLS alone, tls://host:port: its lines over a connection already
+/// made to the port, the certificate checked as wss:// checks it, on a thread of its own.
+pub fn open_tls(stream: TcpStream, host: &str, ca_cert: Option<&[u8]>) -> Result<Lines, String> {
+    let tls = tls_over(stream, host, ca_cert)?;
+    tls.sock.set_read_timeout(Some(POLL)).map_err(|err| err.to_string())?;
+    tls.sock.set_write_timeout(None).map_err(|err| err.to_string())?;
+    let (out, to_send) = mpsc::sync_channel(QUEUED);
+    let (to_take, came) = mpsc::sync_channel(QUEUED);
+
+    std::thread::Builder::new().name("worker tls".to_string()).spawn(move || pump_lines(tls, &to_send, &to_take)).map_err(|err| format!("the worker's connection did not start: {err}"))?;
+
+    Ok(Lines { out, came })
+}
+
+/// Between a TLS connection carrying lines and the worker, as pump is for a WebSocket: what waits
+/// goes out, then a short wait for what comes in, cut into lines.
+fn pump_lines<S: Read + Write>(mut stream: S, to_send: &mpsc::Receiver<String>, to_take: &mpsc::SyncSender<Result<String, String>>) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 16 * 1024];
+
+    loop {
+        loop {
+            match to_send.try_recv() {
+                Ok(line) => {
+                    if let Err(err) = stream.write_all(format!("{line}\n").as_bytes()).and_then(|()| stream.flush()) {
+                        let _ = to_take.send(Err(format!("the connection broke: {err}")));
+
+                        return;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                let _ = to_take.send(Err("the connection closed".to_string()));
+
+                return;
+            }
+            Ok(read) => {
+                buffer.extend_from_slice(&chunk[..read]);
+
+                while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = buffer.drain(..=end).collect();
+
+                    if to_take.send(Ok(String::from_utf8_lossy(&line[..end]).trim_end_matches('\r').to_string())).is_err() {
+                        return;
+                    }
+                }
+
+                if buffer.len() as u64 > MOST_LINE {
+                    let _ = to_take.send(Err("a line longer than the protocol takes".to_string()));
+
+                    return;
+                }
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(err) => {
+                let _ = to_take.send(Err(format!("the connection broke: {err}")));
+
+                return;
+            }
+        }
+    }
+}
+
+/// What a mining port serves TLS with: the certificate chain and its key, from PEM files, as
+/// --mining-cert and --mining-key give them. rustls on ring, as the clients are.
+pub fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::ServerConfig>, String> {
+    use rustls::pki_types::PrivateKeyDer;
+
+    let certs = CertificateDer::pem_slice_iter(cert_pem).collect::<Result<Vec<_>, _>>().map_err(|err| format!("the certificate file does not read: {err}"))?;
+
+    if certs.is_empty() {
+        return Err("the certificate file holds no certificate".to_string());
+    }
+
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|err| format!("the key file does not read: {err}"))?;
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .map_err(|err| err.to_string())?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|err| format!("the certificate and key do not go together: {err}"))?;
+
+    Ok(Arc::new(config))
+}
+
+/// How long a connection is given to open with TLS before it is taken for plain: a TLS client sends
+/// its hello at once, while the mining port speaks first to a plain one, which waits for it.
+pub const TLS_HELLO_WAIT: Duration = Duration::from_millis(1_500);
+
+/// Whether a connection opens with TLS: its first byte, within TLS_HELLO_WAIT, is a handshake
+/// record's, 0x16, which no line of the mining protocol starts with. Silence is a plain worker.
+pub fn opens_with_tls(stream: &TcpStream, wait: Duration) -> Result<bool, String> {
+    let mut first = [0u8; 1];
+    stream.set_read_timeout(Some(wait.min(TLS_HELLO_WAIT))).map_err(|err| err.to_string())?;
+
+    let opens = match stream.peek(&mut first) {
+        Ok(0) => return Err("it closed before saying anything".to_string()),
+        Ok(_) => first[0] == 0x16,
+        Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => false,
+        Err(err) => return Err(err.to_string()),
+    };
+    stream.set_read_timeout(None).map_err(|err| err.to_string())?;
+
+    Ok(opens)
+}
+
+/// Ends TLS from a worker here: the handshake, then a thread carrying the bytes between it and the
+/// stream returned, one end of a loopback pair, which the port then serves as any plain connection.
+pub fn terminate(stream: TcpStream, config: &Arc<rustls::ServerConfig>, handshake: Duration) -> Result<TcpStream, String> {
+    let connection = rustls::ServerConnection::new(config.clone()).map_err(|err| err.to_string())?;
+    let mut tls = StreamOwned::new(connection, stream);
+    tls.sock.set_read_timeout(Some(handshake)).map_err(|err| err.to_string())?;
+    tls.sock.set_write_timeout(Some(handshake)).map_err(|err| err.to_string())?;
+
+    while tls.conn.is_handshaking() {
+        tls.conn.complete_io(&mut tls.sock).map_err(|err| format!("its TLS did not come up: {err}"))?;
+    }
+
+    // A pair on loopback, the far end checked to be the one dialed here.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
+    let near = TcpStream::connect(listener.local_addr().map_err(|err| err.to_string())?).map_err(|err| err.to_string())?;
+    let (far, from) = listener.accept().map_err(|err| err.to_string())?;
+
+    if Some(from) != near.local_addr().ok() {
+        return Err("another connection took the loopback pair".to_string());
+    }
+
+    tls.sock.set_read_timeout(Some(POLL)).map_err(|err| err.to_string())?;
+    tls.sock.set_write_timeout(None).map_err(|err| err.to_string())?;
+    near.set_read_timeout(Some(POLL)).map_err(|err| err.to_string())?;
+    std::thread::Builder::new().name("mining tls".to_string()).spawn(move || carry(tls, near)).map_err(|err| err.to_string())?;
+
+    Ok(far)
+}
+
+/// Carries bytes both ways between a TLS connection and a plain one until either closes, on one
+/// thread, as a TLS session is read and written from one.
+fn carry(mut tls: StreamOwned<rustls::ServerConnection, TcpStream>, mut plain: TcpStream) {
+    let mut chunk = [0u8; 16 * 1024];
+    let idle = |err: &std::io::Error| matches!(err.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut);
+
+    loop {
+        match tls.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                if plain.write_all(&chunk[..read]).is_err() {
+                    break;
+                }
+            }
+            Err(err) if idle(&err) => {}
+            Err(_) => break,
+        }
+
+        match plain.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                if tls.write_all(&chunk[..read]).and_then(|()| tls.flush()).is_err() {
+                    break;
+                }
+            }
+            Err(err) if idle(&err) => {}
+            Err(_) => break,
+        }
+    }
+
+    tls.conn.send_close_notify();
+    let _ = tls.flush();
+    let _ = plain.shutdown(std::net::Shutdown::Both);
+}
+
 /// What a node says of its mining port, GET /mining, asked over a connection already made to it: over
 /// TLS for an https:// node, whose certificate is checked as the WebSocket's is.
 pub fn ask_mining(stream: TcpStream, host: &str, port: u16, tls: bool, ca_cert: Option<&[u8]>) -> Result<Value, String> {

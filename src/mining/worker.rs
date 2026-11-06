@@ -50,7 +50,7 @@ pub enum Devices {
 )]
 #[derive(Clone)]
 pub struct WorkerConfig {
-    #[document(summary = "The node's mining port, as host:port; or its WebSocket, as wss://host/mining/ws, which carries the same protocol over TLS.")]
+    #[document(summary = "The node's mining port, as host:port; the same over TLS, tls://host:port, on a node with --mining-cert; or its WebSocket, as wss://host/mining/ws, which carries the same protocol over TLS.")]
     pub node: String,
     #[document(summary = "The secret the node was given, which proves this worker may mine for it.")]
     pub token: Vec<u8>,
@@ -245,12 +245,26 @@ fn run(config: &WorkerConfig, stop: &AtomicBool, current: &Mutex<Option<TcpStrea
 enum Route {
     Tcp,
     Wss(Target),
+    /// The port itself over TLS, tls://host:port: the host its certificate must name, and where to connect.
+    Tls { host: String, at: String },
 }
 
 /// How a worker goes as told, or why it may not. Everything that mines comes through here, so nothing
 /// can start over plain TCP to an open port someone could read on the way: its token is public, so
 /// they could make its MACs too, and rewrite where its work pays both ways, unseen.
 fn route(config: &WorkerConfig) -> Result<Route, String> {
+    if let Some(rest) = config.node.strip_prefix("tls://") {
+        let at = rest.trim_end_matches('/').to_string();
+        let host = match at.strip_prefix('[') {
+            Some(inside) => inside.split_once(']').map(|(host, _)| host.to_string()),
+            None => at.rsplit_once(':').map(|(host, _)| host.to_string()),
+        }
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| format!("{} is not tls://host:port", config.node))?;
+
+        return Ok(Route::Tls { host, at });
+    }
+
     if config.node.contains("://") {
         return Target::parse(&config.node).map(Route::Wss);
     }
@@ -274,6 +288,7 @@ fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
     let at = match route(config)? {
         Route::Tcp => config.node.clone(),
         Route::Wss(target) => target.address(),
+        Route::Tls { at, .. } => at,
     };
 
     connect_to(&at, config.proxy.as_deref())
@@ -389,6 +404,10 @@ fn session(
         // The thread keeping the WebSocket ends once this connection is shut, or its lines dropped.
         Route::Wss(target) => {
             let lines = wss::open(held, &target, config.ca_cert.as_deref())?;
+            protocol::connect_over(lines.out, lines.came, &config.token, &config.protocol, &me)?
+        }
+        Route::Tls { host, .. } => {
+            let lines = wss::open_tls(held, &host, config.ca_cert.as_deref())?;
             protocol::connect_over(lines.out, lines.came, &config.token, &config.protocol, &me)?
         }
     };

@@ -30,7 +30,7 @@ fn header(height: u64, timestamp: u64, difficulty: u128) -> BlockHeader {
 }
 
 fn port() -> MiningPort {
-    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false, limits: PortLimits::DEFAULT }
+    MiningPort { listen: "127.0.0.1:0".parse().unwrap(), token: TOKEN.to_vec(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false, limits: PortLimits::DEFAULT, tls: None }
 }
 
 /// A pool on a port of its own, its seals coming out of the channel.
@@ -522,4 +522,72 @@ fn a_port_tuned_to_few_connections_turns_the_next_away() {
     let stream = TcpStream::connect(pool.listening()).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     assert!(protocol::connect(stream, TOKEN, "chainv4", "three", None).is_err());
+}
+
+#[test]
+fn a_port_with_tls_serves_a_worker_over_tls_and_a_plain_one_beside_it() {
+    let (sender, seals) = mpsc::channel();
+    let sender = Mutex::new(sender);
+    let found: Found = Arc::new(move |id, seal| {
+        let _ = State::lock(&sender).send((id, seal));
+    });
+    let (_, tls) = crate::mining::wss::tests::tls_listener();
+    let mut pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { tls: Some(tls), ..port() }, found, None).unwrap();
+    let worker = Worker::start(WorkerConfig {
+        node: format!("tls://localhost:{}", pool.listening().port()),
+        token: TOKEN.to_vec(),
+        name: "over tls".to_string(),
+        protocol: "chainv4".to_string(),
+        devices: Devices::Cpu(1),
+        proxy: None,
+        payout: None,
+        claims: None,
+        solo: false,
+        insecure_open_port: false,
+        ca_cert: Some(crate::mining::wss::tests::CERT.to_vec()),
+    })
+    .unwrap();
+
+    // A plain worker on the same port, as a private token's and the node's own relay are.
+    let (_plain, _) = raw(&pool, "plain");
+    let report = until(&pool, |report| report.workers.len() == 2);
+    assert!(report.tls, "the report says the port serves TLS");
+
+    // The worker over TLS mines as any does.
+    let parent = header(5, 10_000, 500);
+    let child = child(&parent, 10_100);
+    pool.start_at(&parent, &[]);
+    assert_eq!(pool.seal(&child), None);
+    let (id, seal) = seals.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(id, child.id());
+    assert_eq!(rules().check(&child, &seal, std::slice::from_ref(&parent), &[], 10_100), Ok(()));
+    assert!(until(&pool, |report| report.workers.iter().any(|worker| worker.name == "over tls" && worker.found == 1)).workers.len() == 2);
+
+    drop(worker);
+}
+
+#[test]
+fn a_worker_over_tls_checks_the_ports_certificate() {
+    let (_, tls) = crate::mining::wss::tests::tls_listener();
+    let found: Found = Arc::new(|_, _| {});
+    let pool = Pool::new(Address::Ed25519([1; 32]), HashType::default_chain(), MiningPort { tls: Some(tls), ..port() }, found, None).unwrap();
+    let worker = Worker::start(WorkerConfig {
+        node: format!("tls://localhost:{}", pool.listening().port()),
+        token: TOKEN.to_vec(),
+        name: "trusting the built-in roots".to_string(),
+        protocol: "chainv4".to_string(),
+        devices: Devices::Cpu(1),
+        proxy: None,
+        payout: None,
+        claims: None,
+        solo: false,
+        insecure_open_port: false,
+        ca_cert: None,
+    })
+    .unwrap();
+
+    // The test certificate is no public root's: the worker never gets past TLS.
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(pool.mining().unwrap().workers.is_empty());
+    assert!(worker.status().trouble.is_some_and(|why| why.contains("certificate")), "{:?}", worker.status());
 }

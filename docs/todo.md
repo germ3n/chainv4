@@ -422,7 +422,9 @@ offline; these would make that hold up as a treasury.
   and worker's hashrate on `GET /node` and the explorer.
 - [x] **Workers find no shares.** Under `--pool` they do: every nonce at the worker's share
   difficulty, which measures the work each did, and the pool pays by it.
-- [ ] **The mining port is not encrypted.** Its messages are authenticated with the token; TLS
+- [x] **The mining port is not encrypted.** Done 2026-11-06: `--mining-cert`/`--mining-key` serve
+  TLS on the port itself to workers giving `tls://host:port`, the rest plain as before (see
+  [Consensus](consensus.md#mining-with-workers)). Was: its messages are authenticated with the token; TLS
   on it would hide the work and nonces too, which matter only until the block is out.
 - [ ] **No CUDA kernels.** NVIDIA cards mine through Vulkan. Kernels in CUDA C, behind a `cuda`
   feature, would need a machine with nvcc and a card to write and test on.

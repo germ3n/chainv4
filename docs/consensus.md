@@ -199,6 +199,7 @@ hashrate, measured by a `Meter` over the last three seconds.
 | `--gpus 0,2` | every one | The GPUs `--mine-gpu` mines on. |
 | `--mining ADDR` | none | Take workers on this TCP address, such as `0.0.0.0:4002`. |
 | `--mining-token FILE` | none | The token workers must know, for `--mining`: at least 32 characters. |
+| `--mining-cert FILE`, `--mining-key FILE` | none | Serve the mining port's TLS with this PEM certificate chain and key, such as Let's Encrypt's for the node's name: workers giving `tls://host:port` get it, the rest are served plain, as before. `GET /mining` says `"tls": true`. |
 | `--pool` | off | Run a mining pool on the mining port (see [Mining pools](#mining-pools)). The `pool` feature, on by default. |
 | `--pool-fee PERCENT` | 0 | What the pool keeps of each block, such as `1.5`, for its `--reward-to`. |
 | `--pool-window N` | 2 | How many blocks' worth of the latest shares each block shares out by, 1 to 1000. |
@@ -224,6 +225,16 @@ chainv4 worker --node 203.0.113.7:4002 --token mining.token --gpu --gpus 1 # one
 chainv4 worker --node 203.0.113.7:4002 --token mining.token --threads 8    # CPU threads
 chainv4 worker --node ADDRESS.onion:4002 --token mining.token --proxy socks5h://127.0.0.1:9050 # over Tor
 ```
+
+**Over TLS:** on a node started with `--mining-cert` and `--mining-key`, `chainv4 worker --node
+tls://node.example:4002` speaks to the port over TLS, its certificate checked against the roots
+built in, or `--ca-cert FILE` for a node's own, its name always. That hides the work and the
+nonces, which matter until the block is out, and makes an open port's public token safe to mine
+with, as `wss://` is. The port tells a TLS worker by its first byte, the TLS handshake's, sent at
+once; one that says nothing for 1.5 seconds is served plain, so a private token's workers, an
+onion's and the node's own WebSocket relay go on as they did. The wallet's Mining page uses
+`tls://` when `GET /mining` says the port serves it, and stays plain to an onion, which Tor
+protects already.
 
 **Through a proxy:** `--proxy socks5h://host:port` reaches the node through a SOCKS5 proxy, which
 resolves its name: Tor's, for a node's onion (see [An onion service](docker.md#an-onion-service)).

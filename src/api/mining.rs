@@ -59,6 +59,7 @@ pub(super) async fn about(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectIn
         "public": api.mining_public.as_deref(),
         "onion": api.mining_onion.as_ref().and_then(|onion| onion.address()),
         "protocol": mining.protocol,
+        "tls": mining.tls,
         "pool": pool.is_some(),
         "solo": mining.solo,
         "open": mining.open,

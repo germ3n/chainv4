@@ -101,11 +101,13 @@ pub struct MiningPort {
     pub solo: bool,
     #[document(summary = "How many connections it takes at once and from one address, how long a handshake may take, how many devices a worker may name and how many payouts may mine alone.")]
     pub limits: PortLimits,
+    #[document(summary = "TLS for the port, from --mining-cert and --mining-key: a worker that opens with TLS gets it, tls://host:port, and one that does not is served plain, as a private token's workers and the node's own WebSocket relay are.")]
+    pub tls: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl std::fmt::Debug for MiningPort {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("MiningPort").field("listen", &self.listen).field("protocol", &self.protocol).finish_non_exhaustive()
+        formatter.debug_struct("MiningPort").field("listen", &self.listen).field("protocol", &self.protocol).field("tls", &self.tls.is_some()).finish_non_exhaustive()
     }
 }
 
@@ -155,6 +157,8 @@ struct State {
     solos: Mutex<BTreeMap<u64, Address>>,
     /// What the port takes at once, and from whom.
     limits: PortLimits,
+    /// TLS for workers that open with it.
+    tls: Option<Arc<rustls::ServerConfig>>,
     #[cfg(feature = "pool")]
     books: Option<Books>,
     /// The releases the node fetches, told to workers as they connect.
@@ -433,6 +437,7 @@ impl Pool {
             solo: port.solo,
             solos: Mutex::new(BTreeMap::new()),
             limits: port.limits,
+            tls: port.tls,
             #[cfg(feature = "updates")]
             releases: port.releases,
             #[cfg(feature = "pool")]
@@ -580,6 +585,7 @@ impl Producer for Pool {
             solo: self.state.solo,
             open: self.state.token == OPEN_TOKEN,
             protocol: self.state.protocol.clone(),
+            tls: self.state.tls.is_some(),
         })
     }
 }
@@ -684,6 +690,13 @@ fn accept(listener: &TcpListener, state: &Arc<State>) {
 /// this one, until either side goes or the pool stops.
 fn serve(state: &Arc<State>, stream: TcpStream, peer: SocketAddr, number: u64) -> Result<(), String> {
     stream.set_nonblocking(false).map_err(|err| err.to_string())?;
+
+    // A worker that opens with TLS has it ended here, and is served plain from then on, its
+    // address the same; any other is served plain as it came.
+    let stream = match &state.tls {
+        Some(tls) if super::wss::opens_with_tls(&stream, state.limits.handshake)? => super::wss::terminate(stream, tls, state.limits.handshake)?,
+        _ => stream,
+    };
     stream.set_nodelay(true).map_err(|err| err.to_string())?;
 
     {

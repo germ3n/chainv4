@@ -759,7 +759,7 @@ fn a_node_with_no_threads_of_its_own_seals_what_its_workers_find() {
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false, limits: crate::mining::pool::PortLimits::DEFAULT }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: false, limits: crate::mining::pool::PortLimits::DEFAULT, tls: None }),
         }),
         sign: None,
     });
@@ -795,7 +795,7 @@ fn a_worker_mining_alone_is_handed_a_block_of_its_own_whose_reward_pays_it_in_fu
             threads: 0,
             gpu: false,
             gpus: None,
-            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true, limits: crate::mining::pool::PortLimits::DEFAULT }),
+            port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), #[cfg(feature = "pool")] pool: None, #[cfg(feature = "updates")] releases: None, solo: true, limits: crate::mining::pool::PortLimits::DEFAULT, tls: None }),
         }),
         sign: None,
     });
@@ -847,7 +847,7 @@ fn a_pools_blocks_fund_its_escrow_and_its_node_claims_for_the_miner_once_they_ar
                 threads: 0,
                 gpu: false,
                 gpus: None,
-                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None, solo: false, limits: crate::mining::pool::PortLimits::DEFAULT }),
+                port: Some(MiningPort { listen, token: token.clone(), protocol: "chainv4".to_string(), pool: Some(PoolConfig { min_share: 1, ..PoolConfig::default() }), #[cfg(feature = "updates")] releases: None, solo: false, limits: crate::mining::pool::PortLimits::DEFAULT, tls: None }),
             }),
             sign: None,
         })
