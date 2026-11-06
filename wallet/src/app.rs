@@ -1218,7 +1218,7 @@ impl Wallet {
             });
         });
 
-        if let Some(Opened { vault, book }) = opened {
+        if let Some(Opened { vault, book, reseal }) = opened {
             // Opening checked the book already. Should it still not read, it stays locked with
             // nothing written: opened without an account, the next save would delete that account.
             match keys::open(&book) {
@@ -1234,6 +1234,12 @@ impl Wallet {
                     self.book = book;
                     self.vault = Some(vault);
                     self.lock = Lock::Open;
+
+                    // Keyed again at the stronger stretch as it opened: sealed so at once, or the
+                    // old seal stays and opens as before.
+                    if reseal && let Err(why) = self.store() {
+                        self.storage_trouble.push(format!("the wallet could not be sealed with the stronger password stretch: {why}"));
+                    }
                     self.page = views::home(self.settings.role());
 
                     if let Some(first) = self.holders.first().map(Holder::id)
@@ -1864,7 +1870,7 @@ mod tests {
                 salt: "0x00".to_string(),
                 nonce: "0x01".to_string(),
                 sealed: "0x02".to_string(),
-            },
+                },
             current: String::new(),
             biometric: None,
             unprotected: false,

@@ -8,6 +8,8 @@ pub mod hashable;
 pub mod hasher;
 pub mod keypair;
 pub mod merkle;
+#[cfg(feature = "sealed-keys")]
+pub mod sealed;
 #[cfg(feature = "mnemonic")]
 pub mod mnemonic;
 #[cfg(feature = "secp256k1")]

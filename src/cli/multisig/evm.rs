@@ -154,9 +154,9 @@ fn deploy(rpc: &Rpc, account: &Address, side: &EvmSide, secret: &[u8; 32]) -> Cl
     }
 }
 
-pub(crate) fn evm_secret(keypair: &Keypair) -> CliResult<[u8; 32]> {
+pub(crate) fn evm_secret(keypair: &Keypair) -> CliResult<zeroize::Zeroizing<[u8; 32]>> {
     match keypair.private() {
-        PrivateKey::Secp256k1(secret) => Ok(*secret),
+        PrivateKey::Secp256k1(secret) => Ok(zeroize::Zeroizing::new(*secret)),
         _ => Err("an EVM chain takes a secp256k1 key: give --key a member's EVM key file".into()),
     }
 }
@@ -302,7 +302,7 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
         }
         EvmAction::Deploy { eth_rpc } => {
             let side = evm_side(agent, node, account)?;
-            deploy(&rpc(&eth_rpc), account, &side, &evm_secret(keypair)?)?;
+            deploy(&rpc(&eth_rpc), account, &side, &*evm_secret(keypair)?)?;
             println!("deployed at {}", show_address(&side.contract));
         }
         EvmAction::Propose { eth_rpc, to, value, data, nonce, out } => {
@@ -313,7 +313,7 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
                 None => Vec::new(),
             };
             let call = Call { to: parse_address(&to)?, value, input: data, what: "Execute" };
-            propose_calls(&rpc(&eth_rpc), account, &side, &[call], &evm_secret(keypair)?, nonce, Some(&out))?;
+            propose_calls(&rpc(&eth_rpc), account, &side, &[call], &*evm_secret(keypair)?, nonce, Some(&out))?;
         }
         EvmAction::Sync { eth_rpc, out } => {
             let (side, rpc) = (evm_side(agent, node, account)?, rpc(&eth_rpc));
@@ -327,7 +327,7 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
 
             println!("from {} to {}", show_owners(&owners), show_owners(&now));
             let call = Call { to: side.contract, value: u256::ZERO, input: change_owners_input(&now), what: "Execute" };
-            propose_calls(&rpc, account, &side, &[call], &evm_secret(keypair)?, None, Some(&out))?;
+            propose_calls(&rpc, account, &side, &[call], &*evm_secret(keypair)?, None, Some(&out))?;
         }
         EvmAction::Sign { bundle: path, yes } => {
             let secret = evm_secret(keypair)?;
@@ -340,7 +340,7 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
         }
         EvmAction::Submit { bundle: path, eth_rpc } => {
             let side = evm_side(agent, node, account)?;
-            submit(&rpc(&eth_rpc), account, &side, &read(&path)?, &evm_secret(keypair)?)?;
+            submit(&rpc(&eth_rpc), account, &side, &read(&path)?, &*evm_secret(keypair)?)?;
         }
     }
 

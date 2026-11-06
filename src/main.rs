@@ -404,6 +404,12 @@ struct NodeArgs {
     /// The voting key file named in the validator's bond, for --validate.
     #[arg(long, requires = "validate")]
     validator_key: Option<std::path::PathBuf>,
+    /// A file holding the passphrase of the node's key files sealed with keygen --seal: the
+    /// producer's, the validator's, the pool's push key and the faucet's. Without one, a sealed key
+    /// is read from the file CHAINV4_KEY_PASSPHRASE_FILE names, else asked for on a terminal, and a
+    /// node with none to ask stops.
+    #[arg(long)]
+    key_passphrase_file: Option<std::path::PathBuf>,
     /// Serve the JSON HTTP API on this address, such as 127.0.0.1:8080.
     #[cfg(feature = "http")]
     #[arg(long)]
@@ -814,7 +820,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         port,
     });
     let sign = match args.produce {
-        true => Some(cli::signer(args.producer_key.as_deref())?),
+        true => Some(cli::signer_with(args.producer_key.as_deref(), args.key_passphrase_file.as_deref())?),
         false => None,
     };
     let pow = matches!(genesis.consensus, ConsensusConfig::ProofOfWork(_));
@@ -872,7 +878,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "pool")]
     if let (Some(least), Some(key)) = (&args.pool_push, &args.pool_push_key) {
         let least = chainv4::structs::u256::u256::from_str_radix(least, 10).map_err(|_| format!("--pool-push {least} is not a whole number of the coin's smallest unit"))?;
-        node = node.pushing(chainv4::node::PoolPush { key: cli::signer(Some(key))?, least });
+        node = node.pushing(chainv4::node::PoolPush { key: cli::signer_with(Some(key), args.key_passphrase_file.as_deref())?, least });
     }
 
     if args.snapshot {
@@ -925,7 +931,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             return Err("--validate needs a chain whose finality takes votes".into());
         }
 
-        let voter = cli::signer(args.validator_key.as_deref())?;
+        let voter = cli::signer_with(args.validator_key.as_deref(), args.key_passphrase_file.as_deref())?;
         log::info!("[node] validating with voting key {}", voter.public());
         node = node.validate(voter);
     }
@@ -958,8 +964,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "faucet")]
         let faucet = match &args.faucet_key {
             Some(path) => {
-                let text = std::fs::read_to_string(path).map_err(|err| format!("could not read the faucet's key {}: {err}", path.display()))?;
-                let key = chainv4::crypto::keypair::Keypair::from_key_file(&text).map_err(|err| format!("the faucet's key {}: {err}", path.display()))?;
+                let key = cli::signer_with(Some(path), args.key_passphrase_file.as_deref()).map_err(|err| format!("the faucet's key: {err}"))?;
                 let amount = cli::parse_coins(&args.faucet_amount, genesis.coin.decimals)?;
                 log::info!("[faucet] {} {} a drip, from {}, every {} ms", args.faucet_amount, genesis.coin.symbol, key.public().address(), args.faucet_every);
 

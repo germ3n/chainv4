@@ -254,7 +254,7 @@ impl Bridge {
         let evm_gateway = self.evm_gateway(&gateway, chain)?;
         let identity = self.identity(&gateway)?;
         let evm_secret = self.evm_secret()?;
-        let secret = self.is_signer(&evm_secret)?.then_some(evm_secret);
+        let secret = self.is_signer(&evm_secret)?.then(|| evm_secret.clone());
         let standing = match from_evm {
             false => self.standing_here(&gateway, &evm_gateway, &rpc, &identity, here, chain, nonce)?,
             true => self.standing_there(&gateway, &evm_gateway, &rpc, &identity, here, chain, nonce)?,
@@ -276,10 +276,10 @@ impl Bridge {
                 Ok(())
             }
             RefundStep::Void => {
-                let refused = self.why_refused(&gateway, &evm_gateway, &rpc, transfer, from_evm, secret.as_ref())?;
+                let refused = self.why_refused(&gateway, &evm_gateway, &rpc, transfer, from_evm, secret.as_deref())?;
                 self.preview(&path, "void it at its destination, so it can never arrive", transfer, &standing.pays, why, &refused);
                 typed_yes("Void this?", yes, input, "nothing is signed")?;
-                let enough = self.post_step(&gateway, &transfer.void_digest(), secret.as_ref(), "attest_void", |signature| transfer.attest_void_args(signature))?;
+                let enough = self.post_step(&gateway, &transfer.void_digest(), secret.as_deref(), "attest_void", |signature| transfer.attest_void_args(signature))?;
 
                 match (from_evm, enough) {
                     (false, Some(signatures)) => {
@@ -297,7 +297,7 @@ impl Bridge {
                 self.preview(&path, "refund it where it left, as it is voided where it was going", transfer, &standing.pays, why, "it was voided");
                 typed_yes("Refund this?", yes, input, "nothing is signed")?;
                 let digest = transfer.refund_digest(&standing.sender);
-                let enough = self.post_step(&gateway, &digest, secret.as_ref(), "attest_refund", |signature| transfer.attest_refund_args(&standing.sender, signature))?;
+                let enough = self.post_step(&gateway, &digest, secret.as_deref(), "attest_refund", |signature| transfer.attest_refund_args(&standing.sender, signature))?;
 
                 if from_evm && let Some(signatures) = enough {
                     rpc.send(&Call { to: evm_gateway, value: u256::ZERO, input: refund_input(nonce, &signatures), what: "Refund a transfer" }, false, &evm_secret)?;

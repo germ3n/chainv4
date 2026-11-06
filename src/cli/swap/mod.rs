@@ -400,7 +400,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
                     let contract = evm_side(&agent(&action.tls)?, action.node.trim_end_matches('/'), &multisig)?;
                     let calls = leg.lock_calls(&terms.hash, terms.deadline(side))?;
-                    propose_calls(&evm_rpc(&action, leg)?, &multisig, &contract, &calls, &evm_secret(&keypair)?, None, action.out.as_deref())?;
+                    propose_calls(&evm_rpc(&action, leg)?, &multisig, &contract, &calls, &*evm_secret(&keypair)?, None, action.out.as_deref())?;
                 }
                 Leg::Evm(leg) => {
                     let (rpc, secret) = (evm_rpc(&action, leg)?, evm_secret(&keypair)?);
@@ -440,7 +440,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
             match terms.leg(side) {
                 Leg::Chain(leg) => call(&action, leg.contract, "claim", u256::ZERO, vec![text(to_hex(&id)), text(to_hex(&secret))])?,
-                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.claim_call(&id, &secret), false, &evm_secret(&keypair)?)?,
+                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.claim_call(&id, &secret), false, &*evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
             }
 
@@ -461,7 +461,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
             match terms.leg(side) {
                 Leg::Chain(leg) => call(&action, leg.contract, "withdraw", u256::ZERO, vec![text(to_hex(&id))])?,
-                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.withdraw_call(&id), false, &evm_secret(&keypair)?)?,
+                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.withdraw_call(&id), false, &*evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
             }
         }
@@ -475,7 +475,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
             match terms.leg(side) {
                 Leg::Chain(leg) => call(&action, leg.contract, "refund", u256::ZERO, vec![text(to_hex(&id))])?,
-                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.refund_call(&id), false, &evm_secret(&keypair)?)?,
+                Leg::Evm(leg) => _ = evm_rpc(&action, leg)?.send(&leg.refund_call(&id), false, &*evm_secret(&keypair)?)?,
                 Leg::Bitcoin(_) => unreachable!("pick leaves Bitcoin's legs out"),
             }
         }
@@ -675,8 +675,8 @@ impl PartyArgs {
 
 /// An EVM address, as text or a secp256k1 key file's.
 fn evm_party(given: &str) -> CliResult<[u8; 20]> {
-    match std::fs::read_to_string(given) {
-        Ok(file) => evm_secret(&Keypair::from_key_file(&file)?).and_then(|secret| rpc::from_key(&secret)),
+    match crate::cli::read_secret(std::path::Path::new(given), "the key file") {
+        Ok(file) => evm_secret(&crate::cli::key_from_text(&file, std::path::Path::new(given), None)?).and_then(|secret| rpc::from_key(&secret)),
         Err(_) => Ok(parse_address(given)?),
     }
 }
@@ -798,9 +798,9 @@ fn evm_rpc(action: &LegAction, leg: &EvmLeg) -> CliResult<Rpc> {
     Rpc::for_chain_at(&action.proxy.http()?, &action.eth_auth.endpoints(&action.eth_rpc)?, leg.chain_id)
 }
 
-fn evm_secret(keypair: &Keypair) -> CliResult<[u8; 32]> {
+fn evm_secret(keypair: &Keypair) -> CliResult<zeroize::Zeroizing<[u8; 32]>> {
     match keypair.private() {
-        PrivateKey::Secp256k1(secret) => Ok(*secret),
+        PrivateKey::Secp256k1(secret) => Ok(zeroize::Zeroizing::new(*secret)),
         _ => Err("an EVM chain takes a secp256k1 key: make one with keygen --scheme secp256k1".into()),
     }
 }
@@ -927,7 +927,7 @@ pub(super) fn bitcoin(spend: &BitcoinSpend, how: Spend) -> CliResult<String> {
         return Ok(format!("a PSBT for the multisig's members in {}: each signs it, chainv4 multisig bitcoin {multisig} sign, then swap bitcoin-finish", out.display()));
     }
 
-    let key = Keypair::from_key_file(&std::fs::read_to_string(spend.key.as_ref().ok_or("give --key, or --multisig")?)?)?;
+    let key = crate::cli::read_key_with(spend.key.as_ref().ok_or("give --key, or --multisig")?, None)?;
     let PrivateKey::Bitcoin(secret) = key.private() else {
         return Err("--key is not a bitcoin key file: make one with keygen --scheme bitcoin".into());
     };
@@ -1002,8 +1002,8 @@ fn output_script(address: &str, network: Network) -> CliResult<Vec<u8>> {
 
 /// A Bitcoin public key, as text or from a key file.
 fn bitcoin_public(given: &str) -> CliResult<[u8; 33]> {
-    let key = match std::fs::read_to_string(given) {
-        Ok(file) => Keypair::from_key_file(&file)?.public(),
+    let key = match crate::cli::read_secret(std::path::Path::new(given), "the key file") {
+        Ok(file) => crate::cli::key_from_text(&file, std::path::Path::new(given), None)?.public(),
         Err(_) => given.parse::<PublicKey>().map_err(|_| format!("{given} is neither a bitcoin public key nor a key file"))?,
     };
 

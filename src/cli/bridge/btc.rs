@@ -568,7 +568,7 @@ impl Bridge {
         let status = self.status()?;
         let signers = status["federation"]["signers"].as_array().cloned().unwrap_or_default();
         let key = match self.args.evm_key {
-            Some(_) => Some(to_hex(&crate::crypto::secp256k1::public_key(&self.evm_secret()?).ok_or("--evm-key is no key")?)),
+            Some(_) => Some(to_hex(&crate::crypto::secp256k1::public_key(&*self.evm_secret()?).ok_or("--evm-key is no key")?)),
             None => None,
         };
 
@@ -658,7 +658,7 @@ impl Bridge {
     }
 
     /// The federation signer's key, for what only it may propose.
-    fn proposer(&self) -> CliResult<[u8; 32]> {
+    fn proposer(&self) -> CliResult<zeroize::Zeroizing<[u8; 32]>> {
         let secret = self.evm_secret().map_err(|why| format!("only a signer of the federation in force proposes: {why}"))?;
 
         match self.is_signer(&secret)? {
@@ -699,7 +699,7 @@ impl Bridge {
 
         // Without Esplora nothing can be broadcast or proven, and each try would wait to be asked again.
         if rates.is_ok()
-            && let Err(why) = self.carry_on_releases(&gateway, &rates, signer.as_ref())
+            && let Err(why) = self.carry_on_releases(&gateway, &rates, signer.as_deref())
         {
             eprintln!("finishing releases: {why}");
         }

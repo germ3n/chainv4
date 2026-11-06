@@ -120,7 +120,7 @@ impl Bridge {
         #[cfg(feature = "anchoring-btc")]
         let btc_secret = match &args.btc_key {
             Some(path) => match crate::cli::signer(Some(path))?.private() {
-                crate::crypto::keypair::PrivateKey::Secp256k1(secret) => Some(*secret),
+                crate::crypto::keypair::PrivateKey::Secp256k1(secret) => Some(zeroize::Zeroizing::new(*secret)),
                 _ => return Err("--btc-key is a secp256k1 key: make one with keygen --scheme secp256k1".into()),
             },
             None => self.evm_secret().ok(),
@@ -129,7 +129,7 @@ impl Bridge {
 
         loop {
             #[cfg(feature = "anchoring-btc")]
-            let pass = self.anchor_pass(btc_secret.as_ref(), &mut pending, args.fee_rate);
+            let pass = self.anchor_pass(btc_secret.as_deref(), &mut pending, args.fee_rate);
             #[cfg(not(feature = "anchoring-btc"))]
             let pass = self.anchor_pass(None, &mut pending, args.fee_rate);
 

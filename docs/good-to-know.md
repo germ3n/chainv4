@@ -25,6 +25,14 @@ other pages explain each part in full; this one is the short list to keep in min
 
 ## Running a chain
 
+- **A sealed key file needs its passphrase wherever it is read.** On a server, give the node
+  `--key-passphrase-file PATH`, or set `CHAINV4_KEY_PASSPHRASE_FILE` for any command: a node with
+  neither, and no terminal to ask on, stops. Lose the passphrase and the key is gone; nothing gets it
+  back but the words it came from, if it came from words. See
+  [Sealed key files](crypto.md#sealed-key-files).
+- **A wallet vault moves to the stronger stretch as its password opens it.** Once it has, an older
+  wallet build says the vault is damaged rather than open it, and leaves it as it was; a reading
+  index sealed under the old key is rebuilt once.
 - **Old `chain.db` files are migrated from format 8 on.** A node moves an older database up to its
   own format as it starts, after copying it aside as `chain.db.format-N`; going back is
   `chainv4 db migrate --to N`, which asks first (see [Migrations](storage.md#migrations)).

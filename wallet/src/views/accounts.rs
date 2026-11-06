@@ -34,6 +34,8 @@ pub struct AccountsState {
     scheme: Option<KeyType>,
     /// A key's text, pasted, and a key file picked, once it is read: wiped as it drops.
     pasted: crate::lock::Typed,
+    /// The passphrase of a sealed key file pasted or picked: wiped as it drops, and once used.
+    key_passphrase: crate::lock::Typed,
     picked: Picked,
     error: Option<String>,
     renaming: Option<(usize, String)>,
@@ -259,18 +261,29 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AccountsState) {
         });
 
         ui.add_space(10.0);
-        ui.label(RichText::new("Or paste a key, as chainv4 keygen writes it:").small().color(palette.muted));
+        ui.label(RichText::new("Or paste a key, as chainv4 keygen writes it, sealed or not:").small().color(palette.muted));
         let import = super::beside(
             ui,
             |ui| theme::quiet(ui, &palette, "Import").clicked(),
             |ui, width| {
-                ui.add(egui::TextEdit::singleline(&mut *state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…, bitcoin:0x…").desired_width(width));
+                crate::lock::secret(ui, egui::TextEdit::singleline(&mut *state.pasted).password(true).hint_text("ed25519:0x…, secp256k1:0x…, bitcoin:0x…").desired_width(width));
             },
         );
+        let sealed = chainv4::crypto::sealed::is_sealed_key_file(&state.pasted);
+
+        // A sealed key file opens with the passphrase keygen --seal was given.
+        if sealed {
+            crate::lock::secret(ui, egui::TextEdit::singleline(&mut *state.key_passphrase).password(true).hint_text("the key file's passphrase").desired_width(f32::INFINITY));
+        }
 
         if import {
-            let read = Keypair::from_key_file(state.pasted.trim()).map(brought_in);
+            let read = chainv4::crypto::sealed::open_key_file(&state.pasted, &state.key_passphrase).map(brought_in);
+            let opened = read.is_ok();
             add(ctx, state, read);
+
+            if opened {
+                zeroize::Zeroize::zeroize(&mut *state.key_passphrase);
+            }
         }
 
         ui.add_space(10.0);
@@ -811,7 +824,7 @@ fn add(ctx: &mut Ctx, state: &mut AccountsState, made: Result<Holder, String>) {
     ctx.holders.push(made);
     *ctx.changed = true;
     state.name.clear();
-    state.pasted.clear();
+    zeroize::Zeroize::zeroize(&mut *state.pasted);
 }
 
 /// On a watch-only sender: an account read off the offline signer's Pair page.
@@ -869,16 +882,29 @@ fn take_picked(ctx: &mut Ctx, state: &mut AccountsState) {
     }
 
     if let Some(Ok((name, bytes))) = picked {
-        let read = String::from_utf8(bytes)
-            .map_err(|_| "it is not text".to_string())
-            .and_then(|text| Keypair::from_key_file(text.trim()))
-            .map(brought_in)
-            .map_err(|why| format!("{name}: {why}"));
+        // The file's bytes hold the key: wiped as they drop, whatever comes of them.
+        let bytes = zeroize::Zeroizing::new(bytes);
 
         if state.name.trim().is_empty() {
             state.name = name.trim_end_matches(".key").to_string();
         }
 
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            state.error = Some(format!("{name}: it is not text"));
+
+            return;
+        };
+
+        // A sealed one waits in the field for its passphrase.
+        if chainv4::crypto::sealed::is_sealed_key_file(text) {
+            // The Typed it replaces is wiped as it drops.
+            state.pasted = crate::lock::Typed::new(text.trim().to_string());
+            state.error = Some(format!("{name} is sealed: type its passphrase, then Import"));
+
+            return;
+        }
+
+        let read = Keypair::from_key_file(text.trim()).map(brought_in).map_err(|why| format!("{name}: {why}"));
         add(ctx, state, read);
     }
 }

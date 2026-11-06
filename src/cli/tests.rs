@@ -191,6 +191,57 @@ fn renouncing_the_directory_asks_for_yes_unless_told() {
     assert!(crate::cli::send::renouncing(false, &mut "".as_bytes()).is_err());
 }
 
+#[cfg(all(feature = "sealed-keys", feature = "mnemonic"))]
+#[test]
+fn a_sealed_key_file_is_written_by_keygen_and_opens_with_its_passphrase_file() {
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Keygen {
+        #[command(flatten)]
+        args: KeygenArgs,
+    }
+
+    let dir = TempDir::new("sealed");
+    let out = dir.0.join("sealed.key");
+    let out_text = out.display().to_string();
+    let pass = dir.0.join("pass");
+    fs::write(&pass, "correct horse\n").unwrap();
+    let wrong = dir.0.join("wrong");
+    fs::write(&wrong, "correct horsf").unwrap();
+    let args = || Keygen::try_parse_from(["keygen", "--seal", "--out", out_text.as_str()]).unwrap().args;
+
+    // Asked twice, they must agree, and nothing is written otherwise.
+    assert!(keygen_reading(args(), &mut "correct horse\nbattery staple\n".as_bytes()).is_err());
+    assert!(!out.exists());
+    assert!(keygen_reading(args(), &mut "\n\n".as_bytes()).is_err(), "no passphrase: leave it plain");
+    keygen_reading(args(), &mut "correct horse\r\ncorrect horse\n".as_bytes()).unwrap();
+
+    let text = fs::read_to_string(&out).unwrap();
+    assert!(sealed(&text) && text.starts_with("chainv4-sealed-key:1:"), "{text}");
+    let opened = read_key_with(&out, Some(&pass)).unwrap();
+    assert!(read_key_with(&out, Some(&wrong)).err().unwrap().to_string().contains("wrong passphrase"));
+    assert!(read_key_with(&out, Some(&dir.0.join("missing"))).is_err());
+    fs::write(dir.0.join("empty"), "\n").unwrap();
+    assert!(read_key_with(&out, Some(&dir.0.join("empty"))).err().unwrap().to_string().contains("empty"));
+
+    // Written back plain in place, and sealed again, it is the same key throughout.
+    replace_key(&out, &zeroize::Zeroizing::new(opened.to_key_file())).unwrap();
+    assert!(!sealed(&fs::read_to_string(&out).unwrap()));
+    assert_eq!(read_key(&out).unwrap().public(), opened.public());
+    replace_key(&out, &crate::crypto::sealed::seal_key_file(&opened, "battery staple").unwrap()).unwrap();
+    fs::write(&pass, "battery staple").unwrap();
+    assert_eq!(read_key_with(&out, Some(&pass)).unwrap().public(), opened.public());
+    assert!(!dir.0.join("sealed.key.new").exists(), "nothing left beside it");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600, "still the owner's alone");
+    }
+}
+
 #[test]
 fn key_files_round_trip_and_are_never_overwritten() {
     let dir = TempDir::new("keys");
@@ -626,7 +677,6 @@ mod send {
             Light::try_parse_from(args).unwrap().args
         };
         let to_text = to.to_string();
-
         light(light_args(&["history", &to_text, "--limit", "5"])).unwrap();
         assert!(Light::try_parse_from(["chainv4", "history", &to_text, "--limit", "0"]).is_err(), "at least one");
 

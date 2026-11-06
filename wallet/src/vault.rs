@@ -36,12 +36,38 @@ use {
 /// Accounts as app storage keeps them: sealed, with what opening them takes besides the password.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sealed {
-    /// The salt the password is stretched with, hex.
+    /// The salt the password is stretched with, hex; after `stronger:` when the password was
+    /// stretched at chainv4's STRONG, 64 MiB and 3 passes, rather than the 19 MiB and 2 passes
+    /// every vault before had. Kept in the salt, which an older build keeps as it found it and then
+    /// cannot read, so it fails closed rather than drop how the vault was stretched.
     pub salt: String,
     /// The nonce the accounts were sealed under, hex.
     pub nonce: String,
     /// The sealed accounts, hex.
     pub sealed: String,
+}
+
+/// Argon2id at 19 MiB and 2 passes, argon2 0.5's defaults: every vault before STRONGER, and the
+/// salt is plain hex. One of them opens as it always did, and is sealed again at STRONGER the next
+/// time its password alone opens it.
+const ORIGINAL: u8 = 0;
+
+/// chainv4's STRONG, 64 MiB and 3 passes: what vaults with a password are sealed with now, their
+/// salt after `stronger:`.
+pub const STRONGER: u8 = 1;
+
+/// What a salt stretched at STRONGER starts with.
+const STRONGER_SALT: &str = "stronger:";
+
+impl Sealed {
+    /// How its password was stretched, and the salt: ORIGINAL for a plain salt, STRONGER after
+    /// `stronger:`.
+    fn salt(&self) -> Result<(u8, [u8; 16]), String> {
+        match self.salt.strip_prefix(STRONGER_SALT) {
+            Some(salt) => Ok((STRONGER, bytes(salt)?)),
+            None => Ok((ORIGINAL, bytes(&self.salt)?)),
+        }
+    }
 }
 
 /// What names a seed phrase across runs: the fingerprint of its master key, BIP32's. Never its
@@ -570,6 +596,8 @@ pub fn fresh_name() -> Result<String, String> {
 pub struct Vault {
     salt: [u8; 16],
     key: Zeroizing<[u8; 32]>,
+    /// How its password was stretched: ORIGINAL or STRONGER, as its sealed salt says.
+    stretch: u8,
     /// Whether it was sealed with no password at all, as known when it was made or opened by one.
     bare: bool,
 }
@@ -581,8 +609,9 @@ impl Vault {
         getrandom::fill(&mut salt).map_err(|err| format!("no randomness for a salt: {err}"))?;
 
         Ok(Vault {
-            key: stretch(password, &salt)?,
+            key: stretch(password, &salt, STRONGER)?,
             salt,
+            stretch: STRONGER,
             bare: password.is_empty(),
         })
     }
@@ -597,6 +626,7 @@ impl Vault {
         Ok(Vault {
             key: Zeroizing::new(*secret),
             salt,
+            stretch: ORIGINAL,
             bare: false,
         })
     }
@@ -609,17 +639,18 @@ impl Vault {
         getrandom::fill(&mut salt).map_err(|err| format!("no randomness for a salt: {err}"))?;
 
         Ok(Vault {
-            key: joined(password, secret, &salt)?,
+            key: joined(password, secret, &salt, STRONGER)?,
             salt,
+            stretch: STRONGER,
             bare: false,
         })
     }
 
     /// Opens sealed accounts that need both a password and the secret hardware keeps.
     pub fn open_both(sealed: &Sealed, password: &str, secret: &[u8; 32]) -> Result<(Vault, Book), String> {
-        let salt: [u8; 16] = bytes(&sealed.salt)?;
+        let (how, salt) = sealed.salt()?;
 
-        Vault::open_with_key(sealed, &*joined(password, secret, &salt)?)
+        Vault::open_with_key(sealed, &*joined(password, secret, &salt, how)?)
     }
 
     /// Whether it is sealed with no password: anyone who reads app storage opens it.
@@ -629,12 +660,32 @@ impl Vault {
 
     /// Opens sealed accounts with a password.
     pub fn open(sealed: &Sealed, password: &str) -> Result<(Vault, Book), String> {
-        let salt: [u8; 16] = bytes(&sealed.salt)?;
+        let (how, salt) = sealed.salt()?;
 
-        let (mut vault, book) = Vault::open_with_key(sealed, &*stretch(password, &salt)?)?;
+        let (mut vault, book) = Vault::open_with_key(sealed, &*stretch(password, &salt, how)?)?;
         vault.bare = password.is_empty();
 
         Ok((vault, book))
+    }
+
+    /// How its password was stretched: ORIGINAL or STRONGER.
+    #[cfg(test)]
+    pub fn stretch(&self) -> u8 {
+        self.stretch
+    }
+
+    /// The same vault keyed again from its password at STRONGER, under a fresh salt, when it was
+    /// stretched more weakly: what a vault its password alone opens is sealed with from then on.
+    /// None when it is at STRONGER already.
+    pub fn strengthened(&self, password: &str) -> Result<Option<Vault>, String> {
+        if self.stretch >= STRONGER {
+            return Ok(None);
+        }
+
+        let mut stronger = Vault::create(password)?;
+        stronger.bare = self.bare;
+
+        Ok(Some(stronger))
     }
 
     /// The key that seals it. A wallet whose biometrics are an alternative to its password keeps the
@@ -645,7 +696,7 @@ impl Vault {
 
     /// Opens sealed accounts with their key, as biometrics keep it.
     pub fn open_with_key(sealed: &Sealed, key: &[u8; 32]) -> Result<(Vault, Book), String> {
-        let salt: [u8; 16] = bytes(&sealed.salt)?;
+        let (how, salt) = sealed.salt()?;
         let nonce: [u8; 12] = bytes(&sealed.nonce)?;
         let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
         let plain = Zeroizing::new(
@@ -674,6 +725,7 @@ impl Vault {
             Vault {
                 salt,
                 key: Zeroizing::new(*key),
+                stretch: how,
                 bare: false,
             },
             book,
@@ -691,7 +743,10 @@ impl Vault {
         let sealed = cipher.encrypt(Nonce::from_slice(&nonce), plain.as_slice()).map_err(|_| "sealing failed".to_string())?;
 
         Ok(Sealed {
-            salt: to_hex(&self.salt),
+            salt: match self.stretch {
+                STRONGER => format!("{STRONGER_SALT}{}", to_hex(&self.salt)),
+                _ => to_hex(&self.salt),
+            },
             nonce: to_hex(&nonce),
             sealed: to_hex(&sealed),
         })
@@ -738,23 +793,34 @@ fn argon2() -> Argon2<'static> {
     Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
 }
 
-fn stretch(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
-    let mut key = Zeroizing::new([0; 32]);
-    argon2()
-        .hash_password_into(password.as_bytes(), salt, &mut *key)
-        .map_err(|err| format!("could not stretch the password: {err}"))?;
+/// The key a password stretches to under a salt, as a vault of that stretch was sealed: Argon2id's
+/// working memory is this function's, wiped once it is done, as the crate's own would be dropped
+/// unwiped.
+fn stretch(password: &str, salt: &[u8], stretch: u8) -> Result<Zeroizing<[u8; 32]>, String> {
+    match stretch {
+        ORIGINAL => {
+            let argon2 = argon2();
+            let mut key = Zeroizing::new([0; 32]);
+            let mut memory = vec![argon2::Block::default(); argon2.params().block_count()];
+            let stretched = argon2.hash_password_into_with_memory(password.as_bytes(), salt, &mut *key, &mut memory);
+            memory.zeroize();
+            stretched.map_err(|err| format!("could not stretch the password: {err}"))?;
 
-    Ok(key)
+            Ok(key)
+        }
+        STRONGER => chainv4::crypto::sealed::strong_stretch(password.as_bytes(), salt).map_err(|err| err.replace("passphrase", "password")),
+        other => Err(format!("a vault stretched in a way this build does not know ({other}): update the wallet")),
+    }
 }
 
 /// The key a password and a secret make together: the stretched password and the secret, as HKDF's
 /// input, under the vault's salt and `BOTH_INFO`.
-fn joined(password: &str, secret: &[u8; 32], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>, String> {
+fn joined(password: &str, secret: &[u8; 32], salt: &[u8; 16], how: u8) -> Result<Zeroizing<[u8; 32]>, String> {
     if password.is_empty() {
         return Err("this wallet needs its password as well".to_string());
     }
 
-    let stretched = stretch(password, salt)?;
+    let stretched = stretch(password, salt, how)?;
     let mut input = Zeroizing::new([0; 64]);
     input[..32].copy_from_slice(&*stretched);
     input[32..].copy_from_slice(secret);
@@ -894,7 +960,10 @@ mod tests {
             .encrypt(Nonce::from_slice(&nonce), plain.as_slice())
             .unwrap();
         let old = Sealed {
-            salt: to_hex(&vault.salt),
+            salt: match vault.stretch {
+                STRONGER => format!("{STRONGER_SALT}{}", to_hex(&vault.salt)),
+                _ => to_hex(&vault.salt),
+            },
             nonce: to_hex(&nonce),
             sealed: to_hex(&sealed),
         };
@@ -996,7 +1065,10 @@ mod tests {
         let sealed = ChaCha20Poly1305::new(Key::from_slice(&*vault.key)).encrypt(Nonce::from_slice(&nonce), plain).unwrap();
 
         Sealed {
-            salt: to_hex(&vault.salt),
+            salt: match vault.stretch {
+                STRONGER => format!("{STRONGER_SALT}{}", to_hex(&vault.salt)),
+                _ => to_hex(&vault.salt),
+            },
             nonce: to_hex(&nonce),
             sealed: to_hex(&sealed),
         }
@@ -1470,8 +1542,8 @@ mod tests {
         assert_eq!(Vault::open(&sealed, "").err(), Some("wrong password".to_string()));
         assert_eq!(Vault::open(&sealed, "correct horse").err(), Some("wrong password".to_string()));
         assert!(Vault::open_with_key(&sealed, &[0; 32]).is_err());
-        assert!(Vault::open_with_key(&sealed, &stretch("", &bytes::<16>(&sealed.salt).unwrap()).unwrap()).is_err());
-        assert_ne!(*vault.key(), *stretch("", &vault.salt).unwrap(), "no key from an empty password");
+        assert!(Vault::open_with_key(&sealed, &stretch("", &sealed.salt().unwrap().1, sealed.salt().unwrap().0).unwrap()).is_err());
+        assert_ne!(*vault.key(), *stretch("", &vault.salt, vault.stretch).unwrap(), "no key from an empty password");
         assert_eq!(*vault.key(), *secret, "the fresh secret is the key, and nothing else goes into it");
     }
 
@@ -1491,7 +1563,7 @@ mod tests {
         assert!(Vault::open_both(&sealed, "wrong", &secret).is_err());
         assert!(Vault::open_both(&sealed, "", &secret).is_err());
         // The stretched password as the key, a copy of storage alone, and the empty password.
-        assert!(Vault::open_with_key(&sealed, &stretch("correct horse", &vault.salt).unwrap()).is_err());
+        assert!(Vault::open_with_key(&sealed, &stretch("correct horse", &vault.salt, vault.stretch).unwrap()).is_err());
         assert_eq!(Vault::open(&sealed, "").err(), Some("wrong password".to_string()));
 
         // It seals again as it opened, under the same two.
@@ -1510,19 +1582,23 @@ mod tests {
     #[test]
     fn the_key_of_both_required_stays_what_it_was_written_as() {
         // Changing how the two are joined shuts every such wallet for good, so its output is pinned.
-        let key = joined("correct horse", &[7; 32], &[9; 16]).unwrap();
+        let key = joined("correct horse", &[7; 32], &[9; 16], ORIGINAL).unwrap();
 
         assert_eq!(to_hex(&*key), PINNED_BOTH_KEY);
 
         // And each input, and only HKDF's own domain, moves it.
-        assert_ne!(*joined("correct horsf", &[7; 32], &[9; 16]).unwrap(), *key);
-        assert_ne!(*joined("correct horse", &[8; 32], &[9; 16]).unwrap(), *key);
-        assert_ne!(*joined("correct horse", &[7; 32], &[8; 16]).unwrap(), *key);
-        assert_ne!(*key, *stretch("correct horse", &[9; 16]).unwrap());
+        assert_ne!(*joined("correct horsf", &[7; 32], &[9; 16], ORIGINAL).unwrap(), *key);
+        assert_ne!(*joined("correct horse", &[8; 32], &[9; 16], ORIGINAL).unwrap(), *key);
+        assert_ne!(*joined("correct horse", &[7; 32], &[8; 16], ORIGINAL).unwrap(), *key);
+        assert_ne!(*key, *stretch("correct horse", &[9; 16], ORIGINAL).unwrap());
         assert_ne!(*key, [7; 32]);
+
+        // Joined from the stronger stretch, as new wallets are, it is pinned as well.
+        assert_eq!(to_hex(&*joined("correct horse", &[7; 32], &[9; 16], STRONGER).unwrap()), PINNED_BOTH_KEY_STRONGER);
     }
 
     const PINNED_BOTH_KEY: &str = "0x7c02c9a9326fa8064f722f671c377e3642381de6d85ffc3814ad3c408d4955e5";
+    const PINNED_BOTH_KEY_STRONGER: &str = "0x99402c120cdee5a84a1b2fd0f0fdfa44e2cad9034559f7caedb0075b0066b1dd";
 
     #[test]
     fn every_vault_made_takes_a_salt_and_key_of_its_own() {
@@ -1534,6 +1610,39 @@ mod tests {
         assert_ne!(Vault::keyed(&secret).unwrap().salt, Vault::keyed(&secret).unwrap().salt);
         assert_ne!(*fresh_secret().unwrap(), *fresh_secret().unwrap());
         assert_ne!(first.seal(&book).unwrap().sealed, second.seal(&book).unwrap().sealed);
+    }
+
+    #[test]
+    fn a_vault_of_the_original_stretch_opens_and_is_keyed_again_at_the_stronger_one() {
+        // Sealed as every vault before the stronger stretch: 19 MiB, 2 passes, no stretch written.
+        let salt = [3; 16];
+        let mut key = [0; 32];
+        argon2().hash_password_into(b"correct horse", &salt, &mut key).unwrap();
+        let plain = br#"{"phrase":null,"accounts":[],"watch":false,"swaps":[]}"#;
+        let nonce = [5; 12];
+        let old = Sealed {
+            salt: to_hex(&salt),
+            nonce: to_hex(&nonce),
+            sealed: to_hex(&ChaCha20Poly1305::new(Key::from_slice(&key)).encrypt(Nonce::from_slice(&nonce), plain.as_slice()).unwrap()),
+        };
+        assert!(!old.salt.starts_with(STRONGER_SALT), "written as an older build reads it");
+
+        let (opened, book) = Vault::open(&old, "correct horse").unwrap();
+        assert_eq!(opened.stretch(), 0);
+        let stronger = opened.strengthened("correct horse").unwrap().expect("a weaker stretch is redone");
+        assert_eq!(stronger.stretch(), STRONGER);
+        assert_ne!(*stronger.key(), *opened.key());
+        assert!(stronger.strengthened("correct horse").unwrap().is_none(), "once is enough");
+
+        let resealed = stronger.seal(&book).unwrap();
+        assert!(resealed.salt.starts_with(STRONGER_SALT), "{}", resealed.salt);
+        let (again, kept) = Vault::open(&serde_json::from_str(&serde_json::to_string(&resealed).unwrap()).unwrap(), "correct horse").unwrap();
+        assert_eq!((again.stretch(), kept), (STRONGER, book));
+        assert!(Vault::open(&resealed, "correct horsf").is_err());
+
+        // A new vault is at the stronger stretch from the start, and an unknown one is refused.
+        assert_eq!(Vault::create("battery staple").unwrap().stretch(), STRONGER);
+        assert!(Vault::open(&Sealed { salt: resealed.salt.replace(STRONGER_SALT, "strongest:"), ..resealed }, "correct horse").err().unwrap().contains("damaged"));
     }
 
     #[test]

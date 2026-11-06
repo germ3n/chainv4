@@ -548,11 +548,11 @@ impl Bridge {
         }
     }
 
-    fn evm_secret(&self) -> CliResult<[u8; 32]> {
+    fn evm_secret(&self) -> CliResult<zeroize::Zeroizing<[u8; 32]>> {
         let path = self.args.evm_key.as_deref().ok_or("give --evm-key: a secp256k1 key file")?;
 
         match signer(Some(path))?.private() {
-            PrivateKey::Secp256k1(secret) => Ok(*secret),
+            PrivateKey::Secp256k1(secret) => Ok(zeroize::Zeroizing::new(*secret)),
             _ => Err("--evm-key is a secp256k1 key: make one with keygen --scheme secp256k1".into()),
         }
     }

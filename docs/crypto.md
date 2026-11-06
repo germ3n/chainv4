@@ -129,8 +129,38 @@ evm 0x0594…53ef             # the same 20 bytes, on every EVM chain
 A bitcoin key adds `testnet`, its `tb1q…` address on Bitcoin's test networks; an Edwards key's
 public key is its address.
 - It is created readable by its owner only, and never overwritten.
-- It is not encrypted, so guard it.
-- `--key`, `--producer-key` and `--validator-key` read this format.
+- It is plain unless sealed, so guard it; `key show` says `sealed yes` for one that is.
+- `--key`, `--producer-key`, `--validator-key`, `--faucet-key` and `--pool-push-key` read this
+  format, sealed or not.
+
+### Sealed key files
+
+`chainv4 keygen --seal` writes the key sealed under a passphrase, asked twice and not shown as it
+is typed. `chainv4 key encrypt FILE` seals a plain one in place, and `chainv4 key decrypt FILE`
+writes a sealed one back plain; each writes beside the file first and renames it over, so a
+failure leaves the old one whole. (`--passphrase` is BIP39's, other words for a phrase, and seals
+nothing.) A sealed file is one line too:
+
+```
+chainv4-sealed-key:1:ed25519:<salt>:<nonce>:<sealed seed>
+```
+
+- **Stretching:** Argon2id at 64 MiB, 3 passes and 1 lane, pinned in `crypto::sealed::STRONG`,
+  with a random 16-byte salt. Its working memory is wiped once it is done.
+- **Sealing:** XChaCha20-Poly1305 seals the 32-byte seed under a random 24-byte nonce, with the
+  version and the scheme as associated data, so neither can be changed without it failing.
+- **What it shows without the passphrase:** the scheme, the salt and the nonce.
+
+**Opening one.** Whatever reads a key file asks for a sealed one's passphrase on a terminal, not
+shown, or reads it from a file:
+- `--key-passphrase-file PATH` on the node, for its producer, validator, faucet and pool push keys;
+- `CHAINV4_KEY_PASSPHRASE_FILE=PATH` for every command, and for the node without the flag. It names
+  the file, never the passphrase, which would show among the process's environment. The file's first
+  line is the passphrase; keep it readable by its owner only.
+
+A node with neither, and no terminal, stops with what to give it. The wallet and the explorer take a
+sealed key file pasted or picked, and ask for its passphrase. The passphrase, the stretched key, the
+seed and its hex are wiped as they drop.
 
 The development key's seed is in the source. Anyone can sign with it, so it must never hold
 anything of value.

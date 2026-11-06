@@ -111,6 +111,11 @@ pub struct KeygenArgs {
     #[cfg(feature = "mnemonic")]
     #[arg(long)]
     passphrase: bool,
+    /// Seal the key file under a passphrase, asked twice and not shown, or read from the file
+    /// CHAINV4_KEY_PASSPHRASE_FILE names: everything that reads the key then asks for it.
+    #[cfg(feature = "sealed-keys")]
+    #[arg(long)]
+    seal: bool,
 }
 
 /// Makes a key and writes it, readable only by its owner: a fresh one, or one from a seed phrase.
@@ -156,8 +161,16 @@ fn keygen_reading(args: KeygenArgs, input: &mut dyn std::io::BufRead) -> CliResu
     #[cfg(not(feature = "mnemonic"))]
     let keypair = Keypair::generate(args.scheme)?;
 
-    write_key(&args.out, &keypair)?;
-    println!("wrote {}", args.out.display());
+    #[cfg(feature = "sealed-keys")]
+    let line = match args.seal {
+        true => zeroize::Zeroizing::new(crate::crypto::sealed::seal_key_file(&keypair, &new_passphrase(&args.out, input)?)?),
+        false => zeroize::Zeroizing::new(keypair.to_key_file()),
+    };
+    #[cfg(not(feature = "sealed-keys"))]
+    let line = zeroize::Zeroizing::new(keypair.to_key_file());
+
+    write_key_line(&args.out, &line)?;
+    println!("wrote {}{}", args.out.display(), if crate::cli::sealed(&line) { ", sealed" } else { "" });
 
     for (label, value) in described(&keypair) {
         println!("{label} {value}");
@@ -181,6 +194,19 @@ enum KeyCommand {
         #[arg(required = true)]
         files: Vec<PathBuf>,
     },
+    /// Seals a plain key file under a passphrase, in place: asked twice and not shown, or read from
+    /// the file CHAINV4_KEY_PASSPHRASE_FILE names.
+    #[cfg(feature = "sealed-keys")]
+    Encrypt {
+        /// The key file.
+        file: PathBuf,
+    },
+    /// Opens a sealed key file with its passphrase and writes it back plain, in place.
+    #[cfg(feature = "sealed-keys")]
+    Decrypt {
+        /// The key file.
+        file: PathBuf,
+    },
 }
 
 /// What a key file holds, shown without its secret.
@@ -198,7 +224,40 @@ pub fn key(args: KeyArgs) -> CliResult<()> {
                 for (label, value) in described(&read_key(path)?) {
                     println!("{label} {value}");
                 }
+
+                if sealed(&read_secret(path, "the key file")?) {
+                    println!("sealed yes");
+                }
             }
+
+            Ok(())
+        }
+        #[cfg(feature = "sealed-keys")]
+        KeyCommand::Encrypt { file } => {
+            let text = read_secret(&file, "the key file")?;
+
+            if sealed(&text) {
+                return Err(format!("{} is sealed already", file.display()).into());
+            }
+
+            let keypair = Keypair::from_key_file(&text).map_err(|err| format!("{}: {err}", file.display()))?;
+            let line = zeroize::Zeroizing::new(crate::crypto::sealed::seal_key_file(&keypair, &new_passphrase(&file, &mut std::io::stdin().lock())?)?);
+            replace_key(&file, &line)?;
+            println!("sealed {}", file.display());
+
+            Ok(())
+        }
+        #[cfg(feature = "sealed-keys")]
+        KeyCommand::Decrypt { file } => {
+            let text = read_secret(&file, "the key file")?;
+
+            if !sealed(&text) {
+                return Err(format!("{} is not sealed", file.display()).into());
+            }
+
+            let keypair = read_key(&file)?;
+            replace_key(&file, &zeroize::Zeroizing::new(keypair.to_key_file()))?;
+            println!("wrote {} plain", file.display());
 
             Ok(())
         }
@@ -228,16 +287,196 @@ fn described(keypair: &Keypair) -> Vec<(&'static str, String)> {
     lines
 }
 
-/// The key to sign with: a key file, or the development key when there is none.
+/// The key to sign with: a key file, or the development key when there is none. A sealed one
+/// opens with the passphrase in the file CHAINV4_KEY_PASSPHRASE_FILE names, or asked for.
 pub fn signer(key: Option<&Path>) -> CliResult<Keypair> {
+    signer_with(key, None)
+}
+
+/// signer, with a sealed key's passphrase in passphrase_file before the environment's: what a
+/// node's --key-passphrase-file names.
+pub fn signer_with(key: Option<&Path>, passphrase_file: Option<&Path>) -> CliResult<Keypair> {
     match key {
-        Some(path) => read_key(path),
+        Some(path) => read_key_with(path, passphrase_file),
         None => Ok(DevAuthority::dev_keypair()),
     }
 }
 
-/// A key file holds one line: the scheme, a colon and the 32-byte seed in hex, like an address.
-fn write_key(path: &Path, keypair: &Keypair) -> CliResult<()> {
+#[doc = "The environment variable naming a file that holds the passphrase sealed key files open with, for a node, a service or a script: the file alone, never the passphrase itself, which would show among the process's environment."]
+pub const PASSPHRASE_FILE_ENV: &str = "CHAINV4_KEY_PASSPHRASE_FILE";
+
+/// A file holding a secret, read into room made to its size first, so the string never grows and
+/// leaves an unwiped copy behind; wiped as it drops.
+pub(crate) fn read_secret(path: &Path, what: &str) -> CliResult<zeroize::Zeroizing<String>> {
+    use std::io::Read;
+
+    let mut file = fs::File::open(path).map_err(|err| format!("cannot read {what} {}: {err}", path.display()))?;
+    let size = file.metadata().map_or(0, |meta| meta.len() as usize);
+    let mut text = zeroize::Zeroizing::new(String::with_capacity(size + 1));
+    file.read_to_string(&mut text).map_err(|err| format!("cannot read {what} {}: {err}", path.display()))?;
+
+    Ok(text)
+}
+
+/// Whether a key file's text is sealed under a passphrase.
+pub(crate) fn sealed(text: &str) -> bool {
+    text.trim_start().starts_with("chainv4-sealed-key:")
+}
+
+/// A key from a key file's text, read from path: a sealed one opened with its passphrase.
+pub(crate) fn key_from_text(text: &str, path: &Path, passphrase_file: Option<&Path>) -> CliResult<Keypair> {
+    #[cfg(feature = "sealed-keys")]
+    if sealed(text) {
+        let passphrase = passphrase_for(path, passphrase_file, &mut std::io::stdin().lock())?;
+
+        return Ok(crate::crypto::sealed::open_key_file(text, &passphrase).map_err(|err| format!("{}: {err}", path.display()))?);
+    }
+
+    #[cfg(not(feature = "sealed-keys"))]
+    if sealed(text) {
+        let _ = passphrase_file;
+
+        return Err(format!("{} is sealed, and this build was made without sealed-keys", path.display()).into());
+    }
+
+    Ok(Keypair::from_key_file(text).map_err(|err| format!("{}: {err}", path.display()))?)
+}
+
+/// The passphrase a sealed key file at path opens with: from passphrase_file, else the file the
+/// environment names, else asked on a terminal, not shown.
+#[cfg(feature = "sealed-keys")]
+fn passphrase_for(path: &Path, passphrase_file: Option<&Path>, input: &mut dyn std::io::BufRead) -> CliResult<zeroize::Zeroizing<String>> {
+    let named = passphrase_file.map(Path::to_path_buf).or_else(|| std::env::var_os(PASSPHRASE_FILE_ENV).map(PathBuf::from));
+
+    match named {
+        Some(file) => passphrase_in(&file),
+        None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => secret_line(&format!("the passphrase for {}", path.display()), input),
+        None => Err(format!("{} is sealed: name a file holding its passphrase with --key-passphrase-file or {PASSPHRASE_FILE_ENV}, or run it on a terminal to be asked", path.display()).into()),
+    }
+}
+
+/// A passphrase kept in a file: its first line, without the line's end.
+#[cfg(feature = "sealed-keys")]
+fn passphrase_in(file: &Path) -> CliResult<zeroize::Zeroizing<String>> {
+    let text = read_secret(file, "the passphrase file")?;
+    let line = text.lines().next().unwrap_or_default();
+
+    if line.is_empty() {
+        return Err(format!("the passphrase file {} is empty", file.display()).into());
+    }
+
+    Ok(zeroize::Zeroizing::new(line.to_string()))
+}
+
+/// A new passphrase to seal a key file at path with: from the file the environment names, else
+/// asked twice, not shown, the two the same and not empty.
+#[cfg(feature = "sealed-keys")]
+fn new_passphrase(path: &Path, input: &mut dyn std::io::BufRead) -> CliResult<zeroize::Zeroizing<String>> {
+    if let Some(file) = std::env::var_os(PASSPHRASE_FILE_ENV) {
+        return passphrase_in(Path::new(&file));
+    }
+
+    let first = secret_line(&format!("a passphrase to seal {} with", path.display()), input)?;
+    let again = secret_line("the same again", input)?;
+
+    if first.is_empty() {
+        return Err("no passphrase: leave the key file plain instead".into());
+    }
+
+    if *first != *again {
+        return Err("the two passphrases differ: nothing was written".into());
+    }
+
+    Ok(first)
+}
+
+/// A line of input, asked for on standard error and, on a terminal, not shown as it is typed.
+#[cfg(feature = "sealed-keys")]
+fn secret_line(what: &str, input: &mut dyn std::io::BufRead) -> CliResult<zeroize::Zeroizing<String>> {
+    eprint!("{what}: ");
+    std::io::stderr().flush()?;
+    let hidden = Hidden::start();
+    // Room for any passphrase made up front, so reading one never grows the string and leaves a
+    // copy of it behind.
+    let mut line = zeroize::Zeroizing::new(String::with_capacity(4096));
+    input.read_line(&mut line)?;
+    drop(hidden);
+
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!();
+    }
+
+    let kept = line.trim_end_matches(['\n', '\r']).len();
+    line.truncate(kept);
+
+    Ok(line)
+}
+
+/// The terminal's echo, off while it lives, on a Unix terminal; nothing elsewhere.
+#[cfg(feature = "sealed-keys")]
+struct Hidden {
+    #[cfg(unix)]
+    was: Option<libc::termios>,
+}
+
+#[cfg(feature = "sealed-keys")]
+impl Hidden {
+    fn start() -> Hidden {
+        #[cfg(unix)]
+        {
+            let mut was = std::mem::MaybeUninit::<libc::termios>::uninit();
+
+            // SAFETY: tcgetattr fills the struct when it returns 0, and is only asked of a
+            // terminal; tcsetattr takes the copy it gave, with echo off.
+            unsafe {
+                if libc::isatty(libc::STDIN_FILENO) == 1 && libc::tcgetattr(libc::STDIN_FILENO, was.as_mut_ptr()) == 0 {
+                    let was = was.assume_init();
+                    let mut quiet = was;
+                    quiet.c_lflag &= !libc::ECHO;
+                    quiet.c_lflag |= libc::ECHONL;
+
+                    if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &quiet) == 0 {
+                        return Hidden { was: Some(was) };
+                    }
+                }
+            }
+
+            Hidden { was: None }
+        }
+
+        #[cfg(not(unix))]
+        Hidden {}
+    }
+}
+
+#[cfg(feature = "sealed-keys")]
+impl Drop for Hidden {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(was) = &self.was {
+            // SAFETY: puts back the settings tcgetattr gave.
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, was);
+            }
+        }
+    }
+}
+
+/// Writes a key file's line where one stands, readable by its owner only: beside it first, then
+/// renamed over, so a failure leaves the old one whole.
+#[cfg(feature = "sealed-keys")]
+fn replace_key(path: &Path, line: &str) -> CliResult<()> {
+    let beside = path.with_extension("key.new");
+    let _ = fs::remove_file(&beside);
+    write_key_line(&beside, line)?;
+    fs::rename(&beside, path).map_err(|err| format!("cannot put {} in place: {err}", path.display()))?;
+
+    Ok(())
+}
+
+/// A key file holds one line: the scheme, a colon and the 32-byte seed in hex, like an address;
+/// or, sealed, chainv4-sealed-key and what opens it (crate::crypto::sealed).
+fn write_key_line(path: &Path, line: &str) -> CliResult<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
 
@@ -247,15 +486,25 @@ fn write_key(path: &Path, keypair: &Keypair) -> CliResult<()> {
     let mut file = options
         .open(path)
         .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
-    writeln!(file, "{}", keypair.to_key_file())?;
+    writeln!(file, "{line}")?;
 
     Ok(())
 }
 
-fn read_key(path: &Path) -> CliResult<Keypair> {
-    let text = fs::read_to_string(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+/// A plain key file for this key, as write_key_line writes one.
+#[cfg_attr(not(test), allow(dead_code))]
+fn write_key(path: &Path, keypair: &Keypair) -> CliResult<()> {
+    write_key_line(path, &zeroize::Zeroizing::new(keypair.to_key_file()))
+}
 
-    Ok(Keypair::from_key_file(&text).map_err(|err| format!("{}: {err}", path.display()))?)
+fn read_key(path: &Path) -> CliResult<Keypair> {
+    read_key_with(path, None)
+}
+
+pub(crate) fn read_key_with(path: &Path, passphrase_file: Option<&Path>) -> CliResult<Keypair> {
+    let text = read_secret(path, "the key file")?;
+
+    key_from_text(&text, path, passphrase_file)
 }
 
 /// A Lua contract's files put together, from its entry file on disk: each `--@include` read from

@@ -1598,8 +1598,10 @@ with.
 - [x] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
   `send` at a node across the internet. Stale: ureq is built with rustls, and the devnet's
   scripts send to https://chain.homepage.gs.
-- [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold
-  the seed in plain hex.
+- [x] **Key files are not encrypted.** Done 2026-11-06: `keygen --seal`, `key encrypt` and `key
+  decrypt`, Argon2id at 64 MiB and 3 passes with XChaCha20-Poly1305, opened by the node, the CLI,
+  the wallet and the explorer, and the wallet's vault stretched the same way. See
+  [Sealed key files](crypto.md#sealed-key-files).
 - [x] **Genesis files.** `chainv4 genesis` writes the dev defaults as JSON; `--genesis FILE`
   runs any chain one describes. `--producer-key` names an authority other than the dev key.
 - [x] **Finality in the API and CLI.** `/status` shows the kind and the justified and finalized
@@ -1888,7 +1890,6 @@ From a review of the Lua layer in `~/engine` (`game/base/src/script`), not chain
 - [ ] **Stale `.luac` beats fresh `.lua`.** `pick_scripts` prefers compiled files at equal mount
   priority, so an old compiled file wins over source just edited.
 
-add encryption to wallets/keypairs when stored to disk (if passphrase was set/selected)
 add db migration system (upgrade/downgrade calls maybe?)
 maybe have to check the event log not indexing properly in explorer? maybe settings werent properly changed
 add fuzzing

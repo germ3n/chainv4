@@ -680,8 +680,11 @@ mod tests {
             // Not marked as having no password, so it asks for one, and no password opens it.
             assert!(!entry.unprotected, "{guard:?} is never bare to an older build");
 
+            // Nothing opens it: a vault at the stronger stretch, as Both is now, reads to it as
+            // damaged, its salt being past what it reads, and is kept as it was.
             for password in ["", "correct horse", "a guess"] {
-                assert_eq!(older::open(&entry.vault, password).err(), Some("wrong password".to_string()), "{guard:?} with {password:?}");
+                let refused = older::open(&entry.vault, password).err();
+                assert!(matches!(refused.as_deref(), Some("wrong password" | "the vault is damaged")), "{guard:?} with {password:?}: {refused:?}");
             }
 
             // Its biometrics are a record from elsewhere to it, and that is not what turns them off.

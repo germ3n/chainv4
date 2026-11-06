@@ -179,7 +179,12 @@ signer and an online wallet alike; a watch-only wallet holds no words, so it has
 **The vault.** Each wallet's words and accounts are kept in app storage, sealed with its password,
 at least 8 characters, or none (`wallet/src/vault.rs`):
 - **Stretching:** Argon2id stretches the password into a key, with a random salt of the vault's
-  own.
+  own: at 64 MiB, 3 passes, as sealed key files are (`crypto::sealed::STRONG`), its salt written
+  after `stronger:`. Vaults made before, at 19 MiB and 2 passes with a plain salt, open as they
+  did, and one that opens with its password alone (or none) is sealed again at the stronger stretch
+  as it unlocks. One whose biometrics keep its key stays as it is until its password or what guards
+  it changes. An older build cannot read a stronger salt, so it says the vault is damaged and
+  leaves it as it was. Argon2's working memory is wiped once it is done.
 - **Sealing:** ChaCha20-Poly1305 seals the accounts with that key, under a fresh nonce each time
   they are saved.
 - **What storage shows:** without the password, the salt, the nonce, and how long the sealed
@@ -227,7 +232,9 @@ off.
   one random key instead, in the scheme picked.
 - **Open key file / paste a key:** a key file as `chainv4 keygen` writes it, `ed25519:0x…`,
   `edblake:0x…`, `secp256k1:0x…` or `bitcoin:0x…`, picked or pasted. An account brought in has that one key, and
-  one address, named after the file when no name is typed.
+  one address, named after the file when no name is typed. A [sealed](crypto.md#sealed-key-files)
+  one, `chainv4-sealed-key:…`, waits in the field for its passphrase, then **Import**. The file's
+  bytes, the key's text and the passphrase are wiped as they go.
 - **Development key:** the dev chains' well-known key, which holds their genesis coin. Anyone can
   spend from it.
 - **Use, rename, export and remove.** Export asks first, then shows each key's text to copy;

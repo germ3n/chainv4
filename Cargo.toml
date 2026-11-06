@@ -15,7 +15,7 @@ members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
 exclude = ["contracts", "explorer"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -66,6 +66,8 @@ nft = ["json"]
 bridge = ["abi", "secp256k1", "keccak256"]
 # Seed phrases: BIP39 words, SLIP-0010 for the Edwards schemes and BIP32 for secp256k1.
 mnemonic = ["dep:bip39", "dep:hmac", "dep:sha2", "dep:ripemd"]
+# Key files sealed under a passphrase (src/crypto/sealed.rs): Argon2id and XChaCha20-Poly1305.
+sealed-keys = ["dep:argon2", "dep:chacha20poly1305", "dep:libc"]
 vm = ["xxh3"]
 lvm = ["vm", "dep:mlua"]
 wasm = ["vm", "dep:wasmi"]
@@ -158,6 +160,8 @@ digest = { version = "0.11.3", optional = true }
 getrandom = "0.4.3"
 ur = { version = "0.5.2", optional = true }
 zeroize = "1.9.1"
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"], optional = true }
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"], optional = true }
 ethnum = "1.5.3"
 # Bitcoin's header rules, shared with contracts/examples/btc_relay.
 btclight = { path = "btclight", optional = true }
@@ -191,6 +195,10 @@ signal-hook = { version = "0.3.18", optional = true }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "1.0.11", optional = true }
 tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"], optional = true }
+
+# Turning a terminal's echo off while a sealed key's passphrase is typed (src/cli/mod.rs).
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.191", optional = true }
 
 [dev-dependencies]
 wat = "1.262.0"

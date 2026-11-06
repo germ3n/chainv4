@@ -87,6 +87,8 @@ pub struct SendState {
     key_name: String,
     /// A key's text, pasted, as chainv4 keygen writes it: wiped as it goes.
     pasted: chainv4_ui::secret::Typed,
+    /// The passphrase of a sealed key file, pasted or picked: wiped as it goes, and once used.
+    key_passphrase: chainv4_ui::secret::Typed,
     picked: Arc<Mutex<Option<Picked>>>,
     kind: Kind,
     to: String,
@@ -116,6 +118,7 @@ impl Default for SendState {
             key: None,
             key_name: String::new(),
             pasted: chainv4_ui::secret::Typed::default(),
+            key_passphrase: chainv4_ui::secret::Typed::default(),
             picked: Arc::default(),
             kind: Kind::Transfer,
             to: String::new(),
@@ -585,12 +588,18 @@ fn key(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
                 },
             );
 
+            // A sealed key file opens with the passphrase keygen --seal was given.
+            if chainv4::crypto::sealed::is_sealed_key_file(&state.pasted) {
+                chainv4_ui::secret::secret(ui, egui::TextEdit::singleline(&mut *state.key_passphrase).password(true).hint_text("the key file's passphrase").desired_width(f32::INFINITY));
+            }
+
             if pasted {
-                match Keypair::from_key_file(state.pasted.trim()) {
+                match chainv4::crypto::sealed::open_key_file(&state.pasted, &state.key_passphrase) {
                     Ok(key) => {
                         state.key = Some(key);
                         state.key_name = "the key pasted".to_string();
-                        state.pasted.clear();
+                        zeroize::Zeroize::zeroize(&mut *state.pasted);
+                        zeroize::Zeroize::zeroize(&mut *state.key_passphrase);
                     }
                     Err(err) => state.step = Step::Failed(err),
                 }
@@ -857,13 +866,26 @@ fn take_picked(state: &mut SendState) {
 
     match picked {
         // The file's bytes, and its text, are wiped once read.
-        Some(Picked::Key { name, bytes }) => match String::from_utf8(bytes).map(zeroize::Zeroizing::new).map_err(|err| err.to_string()).and_then(|text| Keypair::from_key_file(&text)) {
-            Ok(key) => {
-                state.key = Some(key);
-                state.key_name = name;
+        Some(Picked::Key { name, bytes }) => {
+            let bytes = zeroize::Zeroizing::new(bytes);
+
+            match std::str::from_utf8(&bytes) {
+                // A sealed one waits in the paste field for its passphrase; the Typed it replaces
+                // is wiped as it drops.
+                Ok(text) if chainv4::crypto::sealed::is_sealed_key_file(text) => {
+                    state.pasted = chainv4_ui::secret::Typed::new(text.trim().to_string());
+                    state.step = Step::Failed(format!("{name} is sealed: type its passphrase, then Use it"));
+                }
+                Ok(text) => match Keypair::from_key_file(text) {
+                    Ok(key) => {
+                        state.key = Some(key);
+                        state.key_name = name;
+                    }
+                    Err(err) => state.step = Step::Failed(format!("{name}: {err}")),
+                },
+                Err(err) => state.step = Step::Failed(format!("{name}: {err}")),
             }
-            Err(err) => state.step = Step::Failed(format!("{name}: {err}")),
-        },
+        }
         Some(Picked::Wasm { name, bytes }) => state.wasm = Some((name, bytes)),
         Some(Picked::Lua(files)) => {
             let read: Result<Vec<(String, String)>, String> = files
@@ -897,6 +919,26 @@ mod tests {
         crate::store::Store,
         chainv4::db::{Column, address_key},
     };
+
+    #[test]
+    fn a_sealed_key_file_picked_waits_for_its_passphrase_and_a_plain_one_is_taken() {
+        let key = Keypair::from_seed([4; 32]);
+        let sealed = chainv4::crypto::sealed::seal_key_file(&key, "correct horse").unwrap();
+        let mut state = SendState::default();
+
+        *state.picked.lock().unwrap() = Some(Picked::Key { name: "cold.key".to_string(), bytes: format!("{sealed}\n").into_bytes() });
+        take_picked(&mut state);
+        assert!(state.key.is_none(), "not opened without its passphrase");
+        assert_eq!(state.pasted.as_str(), sealed);
+        assert!(matches!(&state.step, Step::Failed(why) if why.contains("sealed")));
+        assert!(chainv4::crypto::sealed::open_key_file(&state.pasted, "correct horsf").is_err());
+        assert_eq!(chainv4::crypto::sealed::open_key_file(&state.pasted, "correct horse").unwrap().public(), key.public());
+
+        let mut state = SendState::default();
+        *state.picked.lock().unwrap() = Some(Picked::Key { name: "hot.key".to_string(), bytes: key.to_key_file().into_bytes() });
+        take_picked(&mut state);
+        assert_eq!(state.key.as_ref().map(Keypair::public), Some(key.public()));
+    }
 
     /// A state with a key, about to send a transfer, as Sign and send left it with the proof asked for.
     fn proving(key: &Keypair) -> SendState {

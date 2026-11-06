@@ -25,7 +25,7 @@ required-features = ["mining"]
 [dependencies]
 # Only the parts that build for the browser too: transactions, keys, hashes and the light client,
 # and checking releases against the keys built in.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "abi", "release"] }
+chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "sealed-keys", "abi", "release"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
@@ -37,7 +37,7 @@ serde_json = "1.0.154"
 web-time = "1.1.0"
 wincode = "0.6.3"
 # Sealing keys with a password: Argon2id to stretch it, ChaCha20-Poly1305 to seal.
-argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 # Joining a stretched password and a secret held in hardware into one key, for a wallet that needs
 # both to open: HKDF over SHA-256.

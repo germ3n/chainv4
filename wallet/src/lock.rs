@@ -67,6 +67,9 @@ pub struct Made {
 pub struct Opened {
     pub vault: Vault,
     pub book: Book,
+    /// Whether it was keyed again as it opened, from a weaker stretch to the vault's STRONGER, and
+    /// must be sealed again at once to keep it.
+    pub reseal: bool,
 }
 
 /// How far new words are from being written down: shown, or three of them asked back.
@@ -161,7 +164,7 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
 
                 match came {
                     Ok(secret) => match settings.wallets.get(settings.wallet).map(|entry| biometrics::open_entry(entry, password, &secret)) {
-                        Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
+                        Some(Ok((vault, book))) => opened = Some(Opened { vault, book, reseal: false }),
                         Some(Err(why)) => *error = Some(why),
                         None => *error = Some("there is no such wallet".to_string()),
                     },
@@ -256,7 +259,19 @@ pub fn show(ui: &mut Ui, palette: &Palette, settings: &mut Settings, lock: &mut 
                             }
 
                             match settings.wallets.get(settings.wallet).map(|entry| Vault::open(&entry.vault, password)) {
-                                Some(Ok((vault, book))) => opened = Some(Opened { vault, book }),
+                                // Its password alone opens it, so a weaker stretch is redone at
+                                // STRONGER now; one whose biometrics keep the key keeps it.
+                                Some(Ok((vault, book))) => {
+                                    let stronger = match guard {
+                                        Guard::Bare | Guard::Password => vault.strengthened(password).ok().flatten(),
+                                        _ => None,
+                                    };
+
+                                    opened = Some(match stronger {
+                                        Some(stronger) => Opened { vault: stronger, book, reseal: true },
+                                        None => Opened { vault, book, reseal: false },
+                                    });
+                                }
                                 Some(Err(why)) => *error = Some(why),
                                 None => *error = Some("there is no such wallet".to_string()),
                             }
@@ -676,7 +691,7 @@ fn keep_sealed(settings: &mut Settings, name: String, vault: Vault, book: Book) 
     });
     settings.wallet = settings.wallets.len() - 1;
 
-    Ok(Opened { vault, book })
+    Ok(Opened { vault, book, reseal: false })
 }
 
 /// A phrase's words, numbered, down columns: two on a narrow screen, three otherwise.

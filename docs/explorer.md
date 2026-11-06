@@ -654,6 +654,9 @@ The send page needs a key, as `chainv4 keygen` writes it, or the development key
 - **Typed or pasted:** its text, such as `ed25519:0x…`, into the key field, then **Use it**.
 - **A key file:** the file picked: from the desktop's dialog, the browser's, or on Android,
   Android's document picker, when the APK carries it (see [Android](#android)).
+- **A sealed key file** (`keygen --seal`, see [Sealed key files](crypto.md#sealed-key-files)),
+  pasted or picked: it waits in the key field for its passphrase, then **Use it**. The passphrase
+  and the key's text are wiped once used.
 
 **Where the key stays:**
 - **The key itself:** it stays in the window, and is never saved.

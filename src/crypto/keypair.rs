@@ -563,9 +563,14 @@ impl Keypair {
     )]
     pub fn from_key_file(text: &str) -> Result<Keypair, String> {
         let (scheme, seed) = text.trim().split_once(':').ok_or("not a key file")?;
-        let mut seed: [u8; 32] = from_hex(seed)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or("it does not hold a 32-byte seed")?;
+        // The bytes as decoded are wiped as they drop; the seed is copied out of them, never moved.
+        let decoded = zeroize::Zeroizing::new(from_hex(seed).unwrap_or_default());
+        let mut seed = [0u8; 32];
+
+        match decoded.len() {
+            32 => seed.copy_from_slice(&decoded),
+            _ => return Err("it does not hold a 32-byte seed".to_string()),
+        }
         let private = match scheme {
             #[cfg(feature = "ed25519")]
             "ed25519" => Ok(PrivateKey::Ed25519(seed)),
@@ -588,7 +593,7 @@ impl Keypair {
 
     #[document(
         parent = "Keypair",
-        summary = "The key file's line for this key, without its newline.",
+        summary = "The key file's line for this key, without its newline. It holds the seed: wrap it in zeroize::Zeroizing, or wipe it, once written.",
         see_also = "Keypair::from_key_file",
     )]
     pub fn to_key_file(&self) -> String {
@@ -603,7 +608,15 @@ impl Keypair {
             PrivateKey::Bitcoin(secret) => ("bitcoin", secret),
         };
 
-        format!("{scheme}:{}", to_hex(seed))
+        // The hex is a copy of the seed too, wiped as it drops; the line is made to its size, so
+        // it never grows and leaves one behind. The caller wipes the line.
+        let hex = zeroize::Zeroizing::new(to_hex(seed));
+        let mut line = String::with_capacity(scheme.len() + 1 + hex.len());
+        line.push_str(scheme);
+        line.push(':');
+        line.push_str(&hex);
+
+        line
     }
 
     #[document(
