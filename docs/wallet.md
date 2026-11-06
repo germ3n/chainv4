@@ -421,6 +421,11 @@ finalized block:
   block N, comparing each member whole, key, Bitcoin xpub and EVM address, with what the node
   listed; where they differ, or the chain holds no multisig there, it says to trust nothing the
   node listed. Which multisigs a key is in still comes from the node's member index.
+- **Contract reads:** on the desktop and Android, every read, a token's balance, a DEX quote, a
+  swap's terms, is run by the wallet itself over the state the node proves at the block its light
+  client checked last, and its own outcome is what the pages show; the Contracts page says
+  `Run here over state proven at block N`, or why it is the node's answer. See
+  [Proven contract reads](light-client.md#proven-contract-reads).
 - **Governance's locks:** `change:locks` in `Column::Validators`, at the tip. The Governance page
   and its forms go by the proven locks once they come, and say when the node listed others.
 

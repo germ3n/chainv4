@@ -33,6 +33,11 @@ pub struct Status {
     /// 0.3%.
     #[serde(default)]
     pub dex_fee_bps: Option<u32>,
+    /// The EVM's spec for the next block, such as prague; none from older nodes. What contract
+    /// reads run here go by, off the browser.
+    #[serde(default)]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub evm_spec: Option<String>,
     pub finality: Option<Finality>,
     /// The fee settings as genesis files write them, with base_price and tx_fuel.
     pub fees: Option<Value>,

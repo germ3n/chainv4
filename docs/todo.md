@@ -724,8 +724,10 @@ with.
   EVM's run, of the native calls that stand, and an EVM transaction refreshes them as a native one does.
 - [x] **The wallet's Contracts page calling across engines.** Done 2026-11-04. Each native function has
   **EVM calldata**: the precompile and `callNative`'s calldata, from `chainv4::abi::call_native_input`.
-- [ ] **Proven contract reads.** The apps' reads are dry runs on the node; a light client could
-  prove the storage a read touches.
+- [x] **Proven contract reads.** Done 2026-11-06: the desktop and Android apps run every read
+  themselves over the state the node proves (`POST /call` with `"prove"`, `vm::run_proven`). Left
+  open: reads that scan storage, the rules besides state, and the browser. See
+  [Proven contract reads](light-client.md#proven-contract-reads).
 - [x] **Old state over JSON-RPC.** Balances, nonces, code, storage and calls at an older block,
   by number, tag or hash, from the node's history. See [Ethereum's tools](ethereum.md).
 - [ ] **Blob and EIP-7702 transactions.**

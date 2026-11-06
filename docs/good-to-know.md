@@ -1357,6 +1357,10 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Bridges in the apps
 
+- **On the desktop and Android, contract reads are the app's own.** It runs each over the state
+  the node proves; one that lists storage, or anything in the browser, is the node's word, and the
+  Contracts page says which. A node answering otherwise than its own proofs shows up as `differed`,
+  and in the explorer's feed.
 - **A Bitcoin deposit can be for any address.** The deposit address is made for one recipient, of
   any scheme, and anyone may mint it: the wallet's **Deposit to** picks another of the account's
   addresses or takes one typed, and the CLI's `bridge btc address RECIPIENT` and `deposit … RECIPIENT`

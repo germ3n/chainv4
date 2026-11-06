@@ -19,12 +19,14 @@ mod memory;
 mod rocksdb;
 mod snapshot;
 mod tree;
+mod witness;
 
 pub use self::history::{Historic, history_key, history_list_key, kept_in_history, replaced};
 pub use self::memory::MemoryDb;
 #[cfg(feature = "rocksdb")]
 pub use self::rocksdb::{DEFAULT_CACHE_MB, RocksDb};
 pub use self::snapshot::{SnapshotWalk, WalkError};
+pub use self::witness::{ProvenEntries, Recording};
 pub use self::tree::{PartContents, Path, STATE_COLUMNS, StateEntry, StatePart, StateProof, StateTree, root_of, state_path, stored_root};
 
 #[document(

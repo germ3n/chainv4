@@ -2934,7 +2934,9 @@ async fn dry_run_off_loop(api: &Api, probe: SignedTx, gas_limit: u64, base: u256
 
 /// Runs a contract function as a transaction would call it, but on a throwaway copy of the
 /// committed state: whatever it writes, sends or emits is dropped. For reading contracts, such as
-/// a token's decimals or someone's balance.
+/// a token's decimals or someone's balance. With "prove": true, the answer carries every state
+/// entry the call read, each with its proof at the block it ran at, for an app to run the call
+/// itself over them (db::ProvenEntries).
 async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let body = json_body(&body)?;
     let field = |name: &str| body.get(name).and_then(Value::as_str);
@@ -2955,7 +2957,8 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         Some(Value::String(block)) => Some(block.clone()),
         Some(_) => return Err(ApiError::BadRequest("block is a height or a 0x block id".to_string())),
     };
-    let (vm, limits, function) = (api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)));
+    let prove = body.get("prove").and_then(Value::as_bool).unwrap_or(false);
+    let (vm, limits, function, hash) = (api.vm.clone(), api.limits, Hash::Xxh3_64(selector(function)), api.hash);
     let (at, header) = state_at(&api, at.as_deref())?;
     let block = BlockAt {
         height: header.height,
@@ -2965,8 +2968,10 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         vm: api.rules.vm,
     };
     // On a blocking thread, since the API answers everything on one.
+    let id = header.id();
     let outcome = tokio::task::spawn_blocking(move || {
-        let state = Arc::new(State::new(at));
+        let recording = Arc::new(crate::db::Recording::new(at.clone()));
+        let state = Arc::new(State::new(recording.clone()));
         let record = Contracts::new(&state)
             .get(&contract)?
             .ok_or_else(|| ApiError::NotFound(format!("no contract at {contract}")))?;
@@ -2976,17 +2981,61 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
             value: u256::ZERO,
             block,
         };
+        let outcome = vm.call(&state, &record, context, &function, &args, limits);
 
-        Ok::<_, ApiError>(vm.call(&state, &record, context, &function, &args, limits))
+        // What it read, each proven against the state root of the block it ran at.
+        let proven = match prove {
+            false => None,
+            true => {
+                let tree = crate::db::StateTree::new(&at, hash);
+                let mut entries = Vec::new();
+                let mut unprovable = Vec::new();
+
+                for (column, key) in recording.reads() {
+                    if !crate::db::STATE_COLUMNS.contains(&column) {
+                        unprovable.push(column.name());
+
+                        continue;
+                    }
+
+                    let value = at.get(column, &key)?;
+                    let proof = tree.prove(column, &key)?;
+                    entries.push(json!({
+                        "column": column.name(),
+                        "key": to_hex(&key),
+                        "value": value.as_deref().map(to_hex),
+                        "proof": to_hex(&wincode::serialize(&proof).expect("proofs always encode")),
+                    }));
+                }
+
+                unprovable.dedup();
+                Some(json!({
+                    "block": id.to_string(),
+                    "height": header.height,
+                    "entries": entries,
+                    "scanned": recording.scanned(),
+                    "unprovable": unprovable,
+                }))
+            }
+        };
+
+        Ok::<_, ApiError>((outcome, proven))
     })
     .await
     .map_err(|err| ApiError::Unavailable(format!("the call stopped: {err}")))??;
+    let (outcome, proven) = outcome;
 
     if let Err(VmError::Storage(err)) = &outcome.result {
         return Err(ApiError::Db(err.clone()));
     }
 
-    Ok(Json(json::call(&outcome)))
+    let mut answer = json::call(&outcome);
+
+    if let Some(proven) = proven {
+        answer["proven"] = proven;
+    }
+
+    Ok(Json(answer))
 }
 
 /// What the node does, as server-sent events, for a node started with --stream. A client that

@@ -108,6 +108,9 @@ pub struct Explorer {
     keys: ReleaseKeys,
     /// A newer explorer, if one is out, and putting it in place.
     update: UpdateState,
+    /// The engines contract reads run on here, over the state the node proves.
+    #[cfg(not(target_arch = "wasm32"))]
+    engines: chainv4_ui::rerun::Engines,
     /// The frame's time last seen, for when the light client was saved.
     light_time: f64,
     /// Something to tell the person, and whether it is bad news.
@@ -186,6 +189,8 @@ impl Explorer {
                 ReleaseKeys::default()
             }),
             update: UpdateState::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            engines: chainv4_ui::rerun::Engines::default(),
             light_time: 0.0,
             notice: None,
             palette,
@@ -292,6 +297,29 @@ impl Explorer {
                     }
 
                     self.send.answered(&ask, &result, &mut self.api, self.light.genesis());
+
+                    // A read the node proved is run again here, and its outcome is this explorer's own.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let result = match (&ask, result) {
+                        (Ask::Call { .. }, Ok(value)) => {
+                            let status = self.store.status.as_ref();
+                            let rules = chainv4_ui::rerun::Rules {
+                                dex_fee_bps: status.and_then(|status| status.dex_fee_bps).unwrap_or(chainv4::params::vm::DexSettings::DEFAULT.fee_bps),
+                                evm_spec: status.and_then(|status| status.evm_spec.as_deref()).and_then(|spec| spec.parse().ok()),
+                            };
+                            let body = ask.body().unwrap_or_default();
+                            let checked = chainv4_ui::rerun::checked(&mut self.engines, &body, value, self.light.client(), rules);
+
+                            // A node that answers a read otherwise than the chain's state says is told of.
+                            if checked["checked"]["differed"].as_bool() == Some(true) {
+                                let read = serde_json::from_str::<Value>(&body).ok().and_then(|body| body["function"].as_str().map(str::to_string)).unwrap_or_default();
+                                self.store.live(now, "node", format!("answered {read} otherwise than the proven state: the explorer's own run is shown"));
+                            }
+
+                            Ok(checked)
+                        }
+                        (_, result) => result,
+                    };
 
                     match result {
                         Ok(value) => {
@@ -1255,6 +1283,8 @@ impl eframe::App for Explorer {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let time = ui.input(|input| input.time);
         let now = now_ms();
+        // Contract reads go at the block the light client checked last, to be proven there.
+        self.api.proving = self.light.client().map(|client| client.tip().id().to_string());
         self.take(now, time);
         self.light_time = time;
         self.keep_light(false);

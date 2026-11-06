@@ -498,6 +498,14 @@ committed state, under the chain's fuel cap. Whatever it writes, sends or emits 
 404 for an address that holds no contract. For reading contracts, such as a token's
 `decimals()` or someone's `balance_of`.
 
+**`"prove": true`** adds `proven`: what the call read, so an app runs it itself rather than take
+this answer (see [Proven reads](light-client.md#proven-contract-reads)):
+- `block` and `height`: where it ran, the `block` asked for or the tip;
+- `entries`: every chain-state entry it read, each once, absent ones too, each as `column`, `key`,
+  `value` (`null` for none) and `proof`, a `StateProof` in hex against that block's state root;
+- `scanned`: whether it listed a range of storage, which proofs of single entries do not cover;
+- `unprovable`: any column it read that is not chain state.
+
 ### `GET /anchors?from=N&limit=M`
 
 What the chain anchored in Bitcoin (see [Anchoring](anchoring.md)):

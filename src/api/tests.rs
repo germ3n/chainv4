@@ -3609,3 +3609,48 @@ fn a_transaction_leaving_the_mempool_streams_as_left_with_why() {
     assert_eq!(name, "left");
     assert_eq!(value, serde_json::json!({ "id": tx.id(hash).to_string(), "sender": key.public().address().to_string(), "nonce": 7, "why": "underpriced too long" }));
 }
+
+#[test]
+fn a_call_asked_to_prove_sends_every_entry_it_read_proven_and_running_over_them_answers_the_same() {
+    use crate::db::{STATE_COLUMNS, StateProof};
+    use crate::vm::{BlockAt, CallContext, ProvenRead, Vm, run_proven};
+
+    let fixture = serve();
+    let authority = DevAuthority::dev_keypair();
+    let counter = contract_address(&authority.public().address(), 1, HashType::default_chain());
+    let tip = fixture.chain.tip().clone();
+    let body = json!({ "contract": counter.to_string(), "function": "increment", "args": [{ "type": "i64", "value": "7" }], "prove": true, "block": tip.id().to_string() });
+    let (status, _, answer) = request(fixture.address, "POST", "/call", &body.to_string());
+
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(answer["values"], json!([{ "type": "i64", "value": "7" }]));
+    let proven = &answer["proven"];
+    assert_eq!((proven["block"].as_str(), proven["height"].as_u64()), (Some(tip.id().to_string().as_str()), Some(tip.height)));
+    assert_eq!((proven["scanned"].as_bool(), proven["unprovable"].as_array().map(Vec::len)), (Some(false), Some(0)));
+
+    let reads: Vec<ProvenRead> = proven["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| ProvenRead {
+            column: STATE_COLUMNS.into_iter().find(|column| Some(column.name()) == entry["column"].as_str()).unwrap(),
+            key: from_hex(entry["key"].as_str().unwrap()).unwrap(),
+            value: entry["value"].as_str().map(|value| from_hex(value).unwrap()),
+            proof: wincode::deserialize::<StateProof>(&from_hex(entry["proof"].as_str().unwrap()).unwrap()).unwrap(),
+        })
+        .collect();
+    assert!(!reads.is_empty(), "the contract's record at least");
+
+    for read in &reads {
+        assert!(read.proof.verify(&tip.state_root, read.column, &read.key, read.value.as_deref()), "{} proven", read.column.name());
+    }
+
+    let vm = Arc::new(Vm::new(&[crate::structs::code::Engine::Lua], HashType::default_chain()).unwrap());
+    let context = CallContext { sender: Address::Ed25519([0; 32]), contract: counter, value: u256::ZERO, block: BlockAt::at(tip.timestamp) };
+    let ours = run_proven(&vm, &tip.state_root, &reads, &counter, &Hash::Xxh3_64(crate::vm::selector("increment")), &[TxCallArgumentType::I64(7)], context, crate::vm::Limits { fuel: 1 << 30, memory: 64 << 20 }).unwrap();
+    assert_eq!(ours.result, Ok(vec![TxCallArgumentType::I64(7)]));
+
+    // Not asked to prove, an answer is as it ever was.
+    let (_, _, plain) = request(fixture.address, "POST", "/call", &json!({ "contract": counter.to_string(), "function": "increment", "args": [{ "type": "i64", "value": "7" }] }).to_string());
+    assert!(plain.get("proven").is_none());
+}

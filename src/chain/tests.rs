@@ -2443,3 +2443,55 @@ fn pruning_drops_old_bodies_and_receipts_and_keeps_headers_and_where_it_reached(
     assert!(!chain.prune_step().unwrap());
     assert_eq!(chain.bodies_from(), 8);
 }
+
+#[test]
+fn a_read_runs_again_over_the_state_it_read_proven_and_answers_the_same() {
+    use crate::db::{Recording, StateTree};
+    use crate::vm::{BlockAt, CallContext, ProvenRead, ProvenRunError, Vm, run_proven};
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let deployer = authority();
+    let deploy = SignedTx::sign(Tx::Deploy { code: Code::Lua(COUNTER.to_string()) }, nonce(&chain, &deployer), FeeOffer::NONE, &deployer, &chain.genesis());
+    advance(&mut chain, vec![deploy]);
+    let counter = contract_address(&deployer.public().address(), 0, HashType::default_chain());
+    let bump = |by: i64| Tx::ContractCall { to: counter, func: Hash::Xxh3_64(selector("increment")), amount: Amount::U128(0), data: vec![TxCallArgumentType::I64(by)] };
+    let call = SignedTx::sign(bump(5), nonce(&chain, &deployer), FeeOffer::NONE, &deployer, &chain.genesis());
+    advance(&mut chain, vec![call]);
+
+    // The node's side: the read run over a recording of the committed state, each entry proven.
+    let vm = Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm, Engine::Evm], HashType::default_chain()).unwrap());
+    let function = Hash::Xxh3_64(selector("increment"));
+    let args = [TxCallArgumentType::I64(1)];
+    let context = || CallContext { sender: deployer.public().address(), contract: counter, value: u256::ZERO, block: BlockAt::at(chain.tip().timestamp) };
+    let limits = chain.rules.limits;
+    let committed: Arc<dyn Committed> = db.clone();
+    let recording = Arc::new(Recording::new(committed.clone()));
+    let state = Arc::new(State::new(recording.clone()));
+    let record = crate::registry::Contracts::new(&state).get(&counter).unwrap().unwrap();
+    let theirs = vm.call(&state, &record, context(), &function, &args, limits);
+    assert_eq!(theirs.result, Ok(vec![TxCallArgumentType::I64(6)]));
+
+    let base = State::new(committed);
+    let tree = StateTree::new(&base, chain.hash());
+    let reads: Vec<ProvenRead> = recording
+        .reads()
+        .into_iter()
+        .map(|(column, key)| ProvenRead { value: base.get(column, &key).unwrap(), proof: tree.prove(column, &key).unwrap(), column, key })
+        .collect();
+    assert!(!reads.is_empty() && !recording.scanned());
+
+    // The app's side: its own engines, over those entries alone, give its own answer.
+    let root = chain.tip().state_root;
+    let mine = Arc::new(Vm::new(&[Engine::Lua, Engine::Wasm, Engine::Evm], HashType::default_chain()).unwrap());
+    let ours = run_proven(&mine, &root, &reads, &counter, &function, &args, context(), limits).unwrap();
+    assert_eq!(ours.result, theirs.result);
+
+    // An entry left out is named, to ask for; one changed fails its proof.
+    let fewer = &reads[..reads.len() - 1];
+    assert!(matches!(run_proven(&mine, &root, fewer, &counter, &function, &args, context(), limits), Err(ProvenRunError::Missing { .. })));
+    let mut forged = reads.clone();
+    let last = forged.len() - 1;
+    forged[last].value = Some(b"\x01forged".to_vec());
+    assert!(matches!(run_proven(&mine, &root, &forged, &counter, &function, &args, context(), limits), Err(ProvenRunError::Invalid { .. })));
+}

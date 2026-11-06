@@ -61,3 +61,8 @@ eframe = { version = "0.37.0", default-features = false, features = ["android-na
 
 # A workspace of its own: egui and the browser crates never meet the node's lockfile.
 [workspace]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Contract reads run here over the state the node proves (chainv4_ui::rerun), with the chain's own
+# engines. The browser has no Lua engine, and takes the node's answer.
+chainv4-ui = { path = "../ui", features = ["rerun"] }

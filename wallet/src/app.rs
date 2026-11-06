@@ -511,6 +511,12 @@ pub struct Wallet {
     dex: (Option<String>, Option<String>),
     /// The DEX's fee in force, in hundredths of a percent, as the node's status says.
     dex_fee_bps: u32,
+    /// The EVM's spec /status names, which reads run here go by.
+    #[cfg(not(target_arch = "wasm32"))]
+    evm_spec: Option<chainv4::params::vm::EvmSpec>,
+    /// The engines reads run on here, over the state the node proves.
+    #[cfg(not(target_arch = "wasm32"))]
+    engines: chainv4_ui::rerun::Engines,
     /// Where this wallet stands against the newest release the node relays, and whether the node
     /// stops at an upgrade.
     updates: Updates,
@@ -619,6 +625,10 @@ impl Wallet {
             swap_contract: None,
             dex: (None, None),
             dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
+            #[cfg(not(target_arch = "wasm32"))]
+            evm_spec: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            engines: chainv4_ui::rerun::Engines::default(),
             updates: Updates::default(),
             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
             lights: crate::light::Lights {
@@ -795,6 +805,10 @@ impl Wallet {
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
                     self.dex_fee_bps = value["dex_fee_bps"].as_u64().and_then(|bps| u32::try_from(bps).ok()).unwrap_or(chainv4::params::vm::DexSettings::DEFAULT.fee_bps);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.evm_spec = value["evm_spec"].as_str().and_then(|spec| spec.parse().ok());
+                    }
                     self.updates.status(value);
                     self.name = status_name(value);
 
@@ -806,7 +820,19 @@ impl Wallet {
                         self.status_coin = true;
                     }
                 }
-                (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => self.views.answered(&ask, &result, &self.settings.contracts),
+                (Ask::Contract(_) | Ask::Call(_) | Ask::Read(_), _) => {
+                    // A read the node proved is run again here, and its outcome is this wallet's own.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let result = match (&ask, result) {
+                        (Ask::Call(body), Ok(value)) => {
+                            let rules = chainv4_ui::rerun::Rules { dex_fee_bps: self.dex_fee_bps, evm_spec: self.evm_spec };
+                            Ok(chainv4_ui::rerun::checked(&mut self.engines, body, value, self.chain.client.as_ref(), rules))
+                        }
+                        (_, result) => result,
+                    };
+
+                    self.views.answered(&ask, &result, &self.settings.contracts)
+                }
                 (Ask::Rpc(body), _) if self.views.unlisted_answered(body, &result, now) => {}
                 #[cfg(feature = "dex")]
                 (Ask::Rpc(body), _) if self.views.trade.answered_rpc(body, &result) => {}
@@ -983,6 +1009,9 @@ impl Wallet {
 
         // The multisig the Multisig page shows, for its policy to be proven too.
         self.chain.wanted_policies = self.views.multisig.selected().map(str::to_string).into_iter().collect();
+
+        // Contract reads go at the block the light client checked last, to be proven there.
+        self.node.proving = self.chain.client.as_ref().map(|client| client.tip().id().to_string());
 
         // A slow way to the node, as Tor, leaves a round waiting: a new one on top would only grow.
         if !self.node.proofs_waiting() {

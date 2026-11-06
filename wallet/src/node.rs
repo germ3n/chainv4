@@ -325,6 +325,9 @@ type Fetched = Arc<Mutex<Vec<(String, Result<Vec<u8>, String>)>>>;
 
 pub struct Node {
     base: String,
+    /// The block the light client checked last, by its id: what contract reads are run at and
+    /// proven at, to be run again here.
+    pub proving: Option<String>,
     /// Proofs out, and those waiting for room: see PROOFS_AT_ONCE.
     proofs_out: usize,
     proofs_held: VecDeque<Ask>,
@@ -356,6 +359,7 @@ impl Node {
         let woken = wake.clone();
 
         Node {
+            proving: None,
             line: RangeLine::new(base, client.clone(), Arc::new(move || woken.request_repaint())),
             reading: false,
             told: HashMap::new(),
@@ -543,7 +547,13 @@ impl Node {
     fn send_now(&mut self, ask: Ask) {
         debug_assert!(!(self.reading && ask.needs_asking()), "kept in before it got here");
         let url = format!("{}{}", self.base, ask.path());
-        let body = ask.body().map(|body| body.as_bytes().to_vec());
+        let body = match (&ask, &self.proving) {
+            // A contract's read, run at the block the light client checked last, with the state it
+            // reads proven, to be run again here (crate::rerun).
+            #[cfg(not(target_arch = "wasm32"))]
+            (Ask::Call(body), Some(block)) => chainv4_ui::rerun::proving(body, block).map(String::into_bytes),
+            _ => ask.body().map(|body| body.as_bytes().to_vec()),
+        };
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
         let done = move |answer: Result<Answer, String>| {
             let result = match answer {

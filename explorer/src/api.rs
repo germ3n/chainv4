@@ -235,7 +235,7 @@ impl Ask {
         }
     }
 
-    fn body(&self) -> Option<String> {
+    pub fn body(&self) -> Option<String> {
         match self {
             Ask::Call { contract, function, args } => Some(format!(
                 "{{\"contract\":{},\"function\":{},\"args\":{args}}}",
@@ -383,6 +383,9 @@ pub enum Reply {
 
 pub struct Api {
     base: String,
+    /// The block the light client checked last, by its id: what contract reads are run and proven
+    /// at, to be run again here.
+    pub proving: Option<String>,
     /// What every request goes out through, or why none can: a proxy set that does not build
     /// sends nothing rather than go direct.
     client: Result<Client, String>,
@@ -432,6 +435,7 @@ impl Api {
         let woken = wake.clone();
 
         Api {
+            proving: None,
             line: RangeLine::new(base, client.clone(), Arc::new(move || woken.request_repaint())),
             reading: false,
             told: HashMap::new(),
@@ -576,7 +580,13 @@ impl Api {
 
     fn send(&mut self, ask: Ask) {
         let url = format!("{}{}", self.base, ask.path());
-        let body = ask.body().map(String::into_bytes);
+        let body = match (&ask, &self.proving) {
+            // A contract's read, run at the block the light client checked last, with the state it
+            // reads proven, to be run again here (chainv4_ui::rerun).
+            #[cfg(not(target_arch = "wasm32"))]
+            (Ask::Call { .. }, Some(block)) => ask.body().and_then(|body| chainv4_ui::rerun::proving(&body, block)).map(String::into_bytes),
+            _ => ask.body().map(String::into_bytes),
+        };
         let token = self.report_token.clone().filter(|_| ask == Ask::Node);
         let (inbox, wake) = (self.inbox.clone(), self.wake.clone());
         let done = move |answer: Result<Answer, String>| {

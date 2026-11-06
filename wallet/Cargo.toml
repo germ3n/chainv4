@@ -80,6 +80,10 @@ bridge = ["swap", "chainv4/bridge", "chainv4-ui/bridge"]
 bitcoin-light = ["dep:bip157", "dep:bitcoin"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Contract reads run here over the state the node proves (chainv4_ui::rerun), with the chain's own
+# engines. The browser has no Lua engine, and takes the node's answer.
+chainv4-ui = { path = "../ui", features = ["rerun"] }
+
 # The form the wallet store writes its files in, as eframe writes its own.
 ron = "0.12.2"
 # The GPUs there are, by name, for the Mining page to pick from, and mining on them as well as on

@@ -374,3 +374,28 @@ fails, visibly, and it follows the chain's headers as before.
 - **Trust on first use, in the explorer and the wallet.** They trust whatever genesis they first
   see at a node; the wallet remembers it, and takes a pasted one instead. To trust a chain from
   the start, give the CLI a genesis file or id.
+
+## Proven contract reads
+
+A contract read, a token's `balance_of`, a DEX's quote, a swap's terms, is a dry run on the node,
+and on its own the node's word. The desktop and Android apps run it themselves instead:
+1. **Asked to prove.** Each `POST /call` goes at the block the light client checked last, with
+   `"prove": true`: the node runs it there, noting every state entry the call reads
+   (`db::Recording`), and sends each with its proof.
+2. **Checked.** Each proof must hold against that block's state root, from a header the light
+   client checked; one that does not means the node sent state that is not the chain's.
+3. **Run here.** The app runs the call with its own engines, Lua, WebAssembly and the EVM, over
+   those entries alone (`db::ProvenEntries`, `vm::run_proven`). Reading anything the node left out
+   fails the run, naming what is missing.
+4. **Its own answer.** The app's outcome takes the place of the node's in what the pages read; the
+   answer says `checked`: run here at block N, and whether the node had answered otherwise, or why
+   it could not be run here.
+
+**What it does not cover yet:**
+- a read that lists a range of storage (`storage.keys`), which proofs of single entries do not
+  cover: the node's answer stands, and says so;
+- the rules a call runs under besides state: the EVM's spec and the DEX's fee come from `/status`,
+  host costs and contract limits are the defaults, and a run here may use more fuel than a node
+  gives one. These shape what a call may use, rarely what it answers; proving genesis's settings
+  would close it;
+- the browser, which has no Lua engine: there the node's answer stands, and says so.

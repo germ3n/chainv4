@@ -26,6 +26,9 @@ wincode = { version = "0.6.3", optional = true }
 ureq = { version = "3.5.0", default-features = false, features = ["gzip", "socks-proxy"] }
 
 [features]
+# Contract reads run here over the state a node proves (src/rerun.rs), with the chain's own
+# engines: for the desktop and Android builds, as the browser has no Lua engine.
+rerun = ["dep:chainv4", "dep:wincode", "chainv4/lvm", "chainv4/wasm", "chainv4/evm", "chainv4/json"]
 default = ["tls"]
 # Nodes at https://, through rustls, whose ring is C: the ui workflow lints Android without it, as
 # it has no Android sysroot, and the apps, built with one, always have it.

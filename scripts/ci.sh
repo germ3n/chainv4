@@ -70,7 +70,7 @@ if [ -z "${CI_MATRIX_ONLY:-}" ]; then
     step "contracts clippy" "cargo clippy --manifest-path contracts/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings"
     step "sdk tests" "cargo test --manifest-path contracts/Cargo.toml -p chainv4-sdk --locked --target $host"
 
-    step "ui clippy" "cargo clippy --manifest-path ui/Cargo.toml --all-targets --features blocks --locked -- -D warnings"
+    step "ui clippy" "cargo clippy --manifest-path ui/Cargo.toml --all-targets --features blocks,rerun --locked -- -D warnings"
     step "ui tests" "cargo test --manifest-path ui/Cargo.toml --features camera,blocks --locked"
     step "ui clippy, web" "cargo clippy --manifest-path ui/Cargo.toml --target wasm32-unknown-unknown --features blocks --locked -- -D warnings"
     step "ui clippy, android" "cargo clippy --manifest-path ui/Cargo.toml --target aarch64-linux-android --no-default-features --features camera --locked -- -D warnings"

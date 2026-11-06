@@ -50,3 +50,6 @@ mod edit;
 pub const PUBLIC_NODE: &str = "https://chain.homepage.gs";
 
 pub use theme::{DARK, DISPLAY, Density, LIGHT, Palette, SEMIBOLD, apply, install_fonts};
+
+#[cfg(feature = "rerun")]
+pub mod rerun;

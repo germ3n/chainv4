@@ -252,6 +252,10 @@ The explorer does not have to take the node's word for balances. It runs the lib
 - **What it trusts:** the genesis it saw the first time it met the node, which it pins; or one
   given under Settings → Light client before it meets the node, **Trust it**, as someone you trust
   shows the genesis id, after which a node on any other chain is refused from the start.
+- **Contract reads:** on the desktop and Android, every read it makes, a balance, a pool, a bridge's
+  transfer, is run by the explorer itself over the state the node proves, and its outcome is what
+  the pages show; a node that answered otherwise shows in the live feed. See
+  [Proven contract reads](light-client.md#proven-contract-reads).
 - **What it keeps:** what the client checked, saved by genesis id with the settings at most every
   10 seconds while it moves, so the next launch carries on from there rather than walk every
   header again, Read from checked blocks on or off. A checkpoint pasted still comes first; a saved

@@ -103,13 +103,26 @@ impl ContractsState {
         let shown = match (ask, result) {
             (_, Err(failure)) => Err(failure.message.clone()),
             (Ask::Call(_), Ok(value)) => match value["status"].as_str() {
-                Some("returned") => Ok(native_values(&value["values"])),
-                _ => Err(value["error"].as_str().unwrap_or("it failed").to_string()),
+                Some("returned") => Ok(format!("{}\n{}", native_values(&value["values"]), checked_words(value))),
+                _ => Err(format!("{}\n{}", value["error"].as_str().unwrap_or("it failed"), checked_words(value))),
             },
             (Ask::Read(_), Ok(value)) => evm_result(&key, &value["estimate"], abis),
             _ => return,
         };
         self.results.insert(key, shown);
+    }
+}
+
+/// Whose answer a read's is: run here over state the node proved, at which block; or the node's,
+/// and why.
+pub fn checked_words(value: &Value) -> String {
+    let checked = &value["checked"];
+
+    match (checked["here"].as_bool(), checked["differed"].as_bool()) {
+        (Some(true), Some(true)) => format!("Run here over state proven at block {}: the node answered otherwise, and is not to be trusted.", checked["height"]),
+        (Some(true), _) => format!("Run here over state proven at block {}.", checked["height"]),
+        (Some(false), _) => format!("The node's answer: {}.", checked["why"].as_str().unwrap_or("it could not be run here")),
+        _ => "The node's answer: the browser runs no contracts of its own.".to_string(),
     }
 }
 
@@ -695,6 +708,14 @@ fn deploy_tx(ctx: &mut Ctx, state: &ContractsState, from: &Address, abi: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_says_whether_it_ran_here_over_proven_state_or_is_the_nodes_word() {
+        assert!(checked_words(&json!({ "checked": { "here": true, "height": 12, "differed": false } })).contains("proven at block 12"));
+        assert!(checked_words(&json!({ "checked": { "here": true, "height": 12, "differed": true } })).contains("not to be trusted"));
+        assert!(checked_words(&json!({ "checked": { "here": false, "why": "an older node" } })).contains("an older node"));
+        assert!(checked_words(&json!({})).contains("browser"));
+    }
 
     const COUNTER_ABI: &str = include_str!("../../../contracts/evm/Counter.abi");
 
