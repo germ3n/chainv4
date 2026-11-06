@@ -43,6 +43,27 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   and `contracts/`, with the components and targets the builds use (wasm32, Android, iOS). Pin clang
   for the C/C++ deps in the Docker image and the CI, and say which in `docs/development.md`. A
   release then names the toolchains it was built with.
+- [ ] **An optimization pass (owner, 2026-11-06), after the consensus batches, before SurrealKV.**
+  Go through the node, the engines, the database layer, the light client and the apps, hottest
+  paths first, measured rather than guessed (criterion benches and flamegraphs of block import,
+  sync, the mempool, state proofs and the apps' frames):
+  - **containers:** the best fit at each place: `Vec` or `SmallVec` over maps for small sets,
+    `HashMap` with a fast hasher (`ahash`/`foldhash`) where keys are not attacker-chosen and the
+    default SipHash where they are, `BTreeMap` only where order is needed, `IndexMap` where
+    insertion order matters, arenas and slabs over many small allocations;
+  - **locks:** `parking_lot` over std where it measures faster, `RwLock` where reads dominate,
+    narrower critical sections, no lock held across I/O or `.await`, fewer `Arc<Mutex<…>>`
+    passed around;
+  - **lock-free where it pays:** atomics for counters and flags, `ArcSwap` for read-mostly shared
+    state (the tip, settings, rules in force), `crossbeam` channels and queues over mutex-guarded
+    `Vec`s, sharded maps (`DashMap`, or per-shard locks) for the mempool and peer tables, epoch
+    reclamation only where a benchmark shows contention;
+  - **the fastest way to do things:** fewer clones and allocations on hot paths (`Bytes`, `Cow`,
+    borrowing), batch database writes and reads, parallel verification with `rayon` where work
+    splits, caches with bounds where the same thing is computed again, SIMD-friendly hashing, and
+    `release` profile settings (LTO, codegen units, `panic`) measured.
+  Each change kept only with a benchmark that shows it, consensus results unchanged (the
+  determinism tests and a full resync agree), a commit per area.
 - [ ] **Go through every test there is (owner, 2026-11-06), last of all.** Each test in the node, the
   CLI, the contracts, the wallet, the explorer and the ui crate, read for what it still checks:
   tests made stale by what changed since (to adjust or delete), ones that pass without checking what
@@ -1756,15 +1777,19 @@ with.
   genesis id, is a signature nodes take: MetaMask and the hardware wallets it drives sign for the
   browser wallet, and `chainv4 send --eip712` signs it with a key of its own.
 - [ ] **Contract calls show as bytes in MetaMask.** Only transfers and token transfers have typed
-  fields; a call's arguments have no clean EIP-712 form, as it has no unions.
+  fields; a call's arguments have no clean EIP-712 form, as it has no unions. For the consensus
+  batches (owner, 2026-11-06): a typed form for calls with each argument as its type's name and its
+  value written out, which nodes take from the next regenesis.
 - [x] **Sites reach the wallet through window.ethereum.** The browser extension gives dApps an
   EIP-1193 provider, announced by EIP-6963, once Settings let sites ask: reads go to the node,
   connecting, sending as an Ethereum transaction, `personal_sign` and `eth_signTypedData_v4` are
   approved in the wallet. See [Wallet](wallet.md#sites).
 - [ ] **Sites on the desktop and Android apps,** which have no extension: WalletConnect would bring
   them.
-- [ ] **wallet_watchAsset and several chains for sites.** The wallet follows one node's chain, and
-  shows tokens as the registry lists them.
+- [x] **wallet_watchAsset and several chains for sites.** Done 2026-11-06: a switch to a chain the
+  wallet followed before connects to its node once you say so, any other is 4902; watched ERC-20s,
+  ERC-721s and ERC-1155 ids on this chain's EVM show on Overview, read over proven state by the
+  wallet's own EVM (`POST /call` with calldata, `vm::run_proven_evm`). See [Wallet](wallet.md#sites).
 - [x] **The offline signer as MetaMask's QR hardware wallet,** ERC-4527: pairing by
   `ur:crypto-hdkey` at m/44'/60'/0', signing `ur:eth-sign-request`s read off MetaMask's animated,
   fountain-coded codes, for any chain, and showing `ur:eth-signature` back. See

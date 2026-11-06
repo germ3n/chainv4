@@ -35,6 +35,93 @@ pub enum Asked {
     Message { address: [u8; 20], message: Vec<u8> },
     /// To sign typed data: eth_signTypedData_v4, as EIP-712 has it.
     Typed { address: [u8; 20], data: Box<TypedData>, json: Value },
+    /// To follow another chain: wallet_switchEthereumChain, or wallet_addEthereumChain, by its
+    /// chain id. The wallet switches only to one it has followed before, at its node.
+    SwitchChain { chain_id: u64 },
+    /// To show a token: wallet_watchAsset, as EIP-747 has it.
+    WatchAsset(Box<Watched>),
+}
+
+/// A token a site asks the wallet to show, on this chain's EVM.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Watched {
+    pub kind: AssetKind,
+    /// The contract, as 0x and 40 hex digits.
+    pub address: String,
+    pub symbol: String,
+    pub decimals: u8,
+    /// An NFT's or multi-token's id, in decimal.
+    #[serde(default)]
+    pub token_id: Option<String>,
+    /// The picture the site names. Only ever fetched when Settings lets the wallet fetch pictures.
+    #[serde(default)]
+    pub image: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AssetKind {
+    Erc20,
+    Erc721,
+    Erc1155,
+}
+
+impl AssetKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            AssetKind::Erc20 => "ERC-20",
+            AssetKind::Erc721 => "ERC-721",
+            AssetKind::Erc1155 => "ERC-1155",
+        }
+    }
+}
+
+/// A watchAsset's params, as EIP-747 writes them: { type, options }, or that in a list as a few
+/// sites send it.
+fn watched(params: &Value) -> Result<Watched, String> {
+    let params = if params.is_array() { &params[0] } else { params };
+    let options = &params["options"];
+    let kind = match params["type"].as_str().unwrap_or_default().to_ascii_uppercase().as_str() {
+        "ERC20" => AssetKind::Erc20,
+        "ERC721" => AssetKind::Erc721,
+        "ERC1155" => AssetKind::Erc1155,
+        other => return Err(format!("{other} is not a kind of token the wallet shows: ERC20, ERC721 or ERC1155")),
+    };
+    let contract = address(&options["address"]).ok_or("the token's address is 0x and 40 hex digits")?;
+    let symbol = options["symbol"].as_str().unwrap_or_default().trim().to_string();
+
+    if symbol.chars().count() > 11 || symbol.chars().any(char::is_control) {
+        return Err("a symbol is at most 11 characters".to_string());
+    }
+
+    let decimals = match &options["decimals"] {
+        Value::Null => if kind == AssetKind::Erc20 { 18 } else { 0 },
+        Value::Number(number) => number.as_u64().filter(|decimals| *decimals <= 36).ok_or("decimals are 0 to 36")? as u8,
+        Value::String(text) => text.parse().ok().filter(|decimals| *decimals <= 36).ok_or("decimals are 0 to 36")?,
+        _ => return Err("decimals are 0 to 36".to_string()),
+    };
+    let token_id = match (&options["tokenId"], kind) {
+        (Value::Null, AssetKind::Erc20) => None,
+        (Value::Null, _) => return Err("an NFT is named by its tokenId".to_string()),
+        (Value::String(text), _) if text.starts_with("0x") => Some(u256::from_str_radix(&text[2..], 16).map_err(|_| "a tokenId that is no number")?.to_string()),
+        (Value::String(text), _) => Some(text.parse::<u256>().map_err(|_| "a tokenId that is no number")?.to_string()),
+        (Value::Number(number), _) => Some(number.as_u64().ok_or("a tokenId that is no whole number")?.to_string()),
+        _ => return Err("a tokenId that is no number".to_string()),
+    };
+    let image = options["image"].as_str().filter(|image| image.len() <= 2048).map(str::to_string);
+
+    Ok(Watched { kind, address: to_hex(&contract), symbol, decimals, token_id, image })
+}
+
+/// A chain id as a site writes it: 0x and hex digits, or decimal.
+fn chain_of(value: &Value) -> Option<u64> {
+    match value {
+        Value::String(text) => match text.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16).ok(),
+            None => text.parse().ok(),
+        },
+        Value::Number(number) => number.as_u64(),
+        _ => None,
+    }
 }
 
 /// A transaction as a site asks for it: whatever it left out, the wallet works out.
@@ -94,6 +181,10 @@ impl Request {
 
                 Asked::Typed { address, data: Box::new(data), json }
             }
+            "wallet_switchEthereumChain" | "wallet_addEthereumChain" => {
+                Asked::SwitchChain { chain_id: chain_of(&params[0]["chainId"]).ok_or_else(|| bad("a chain is named by its chainId"))? }
+            }
+            "wallet_watchAsset" => Asked::WatchAsset(Box::new(watched(params).map_err(|why| bad(&why))?)),
             other => return Err(bad(&format!("the wallet is not asked {other}"))),
         };
 
@@ -103,7 +194,7 @@ impl Request {
     /// The account it names, for one that signs.
     pub fn signer(&self) -> Option<[u8; 20]> {
         match &self.asked {
-            Asked::Connect => None,
+            Asked::Connect | Asked::SwitchChain { .. } | Asked::WatchAsset(_) => None,
             Asked::Send(wanted) => Some(wanted.from),
             Asked::Message { address, .. } | Asked::Typed { address, .. } => Some(*address),
         }

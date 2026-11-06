@@ -198,6 +198,9 @@ pub struct Settings {
     /// Whether the NFTs page fetches what a token's URI names, its metadata and picture: off by
     /// default, as each fetch tells whoever serves it that this wallet looks at that token.
     pub nft_media: bool,
+    /// Tokens sites asked the wallet to show (wallet_watchAsset), each by the genesis id of the
+    /// chain whose EVM it lives on.
+    pub watched: Vec<(String, crate::dapp::Watched)>,
     /// The IPFS gateway ipfs:// URIs are fetched through, ending in a slash.
     pub ipfs_gateway: String,
     /// The multisigs the Multisig page follows, by address: those made here, and those added.
@@ -332,6 +335,7 @@ impl Default for Settings {
             bitcoin_peer: String::new(),
             bitcoin_depth: 3,
             nft_media: false,
+            watched: Vec::new(),
             // chainv4::nft::DEFAULT_GATEWAY, which a build without NFTs has no copy of.
             ipfs_gateway: "https://ipfs.io/ipfs/".to_string(),
             multisigs: Vec::new(),

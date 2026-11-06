@@ -3654,3 +3654,24 @@ fn a_call_asked_to_prove_sends_every_entry_it_read_proven_and_running_over_them_
     let (_, _, plain) = request(fixture.address, "POST", "/call", &json!({ "contract": counter.to_string(), "function": "increment", "args": [{ "type": "i64", "value": "7" }] }).to_string());
     assert!(plain.get("proven").is_none());
 }
+
+#[test]
+fn a_call_with_calldata_is_an_evm_read_and_proves_what_it_read() {
+    let fixture = serve();
+    let tip = fixture.chain.tip().clone();
+    let empty = format!("evm:0x{}", "07".repeat(20));
+    let body = json!({ "contract": empty, "input": "0x70a08231", "from": format!("0x{}", "01".repeat(20)), "prove": true, "block": tip.id().to_string() });
+    let (status, _, answer) = request(fixture.address, "POST", "/call", &body.to_string());
+
+    // Nothing lives there: the read returns nothing, and says which block it ran at.
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!((answer["status"].as_str(), answer["output"].as_str()), (Some("returned"), Some("0x")));
+    assert_eq!(answer["proven"]["height"].as_u64(), Some(tip.height));
+    assert!(!answer["proven"]["entries"].as_array().unwrap().is_empty(), "the code looked up, at least");
+
+    // Calldata goes to an EVM contract alone, as hex.
+    let native = json!({ "contract": fixture.bob.to_string(), "input": "0x00" });
+    assert_eq!(request(fixture.address, "POST", "/call", &native.to_string()).0, 400);
+    let bad = json!({ "contract": empty, "input": "zz" });
+    assert_eq!(request(fixture.address, "POST", "/call", &bad.to_string()).0, 400);
+}

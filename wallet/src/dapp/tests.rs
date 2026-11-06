@@ -84,3 +84,28 @@ fn the_wallet_says_its_accounts_only_while_unlocked() {
     assert_eq!(open, json!({ "node": "http://node", "chainId": "0x22cc", "accounts": [format!("0x{}", "ab".repeat(20))], "unlocked": true }));
     assert_eq!(state("http://node", None, &[], false), json!({ "node": "http://node", "unlocked": false }), "a locked wallet leaves the ones it said");
 }
+
+#[test]
+fn a_chain_switch_and_a_token_to_show_read_as_sites_send_them() {
+    for (method, chain) in [("wallet_switchEthereumChain", json!("0x22cc")), ("wallet_addEthereumChain", json!("8908"))] {
+        let asked = read(method, json!([{ "chainId": chain, "rpcUrls": ["https://ignored"] }])).unwrap().asked;
+        assert!(matches!(asked, Asked::SwitchChain { chain_id: 0x22cc }), "{method}");
+    }
+    assert!(read("wallet_switchEthereumChain", json!([{}])).is_err());
+
+    // EIP-747's object, or that in a list.
+    let erc20 = json!({ "type": "ERC20", "options": { "address": format!("0x{}", "AB".repeat(20)), "symbol": "TKN", "decimals": 6, "image": "https://x/t.png" } });
+    for params in [erc20.clone(), json!([erc20])] {
+        let Asked::WatchAsset(watched) = read("wallet_watchAsset", params).unwrap().asked else { panic!("a token") };
+        assert_eq!(*watched, Watched { kind: AssetKind::Erc20, address: format!("0x{}", "ab".repeat(20)), symbol: "TKN".to_string(), decimals: 6, token_id: None, image: Some("https://x/t.png".to_string()) });
+    }
+
+    let nft = json!({ "type": "ERC721", "options": { "address": format!("0x{}", "ab".repeat(20)), "tokenId": "0x10" } });
+    let Asked::WatchAsset(watched) = read("wallet_watchAsset", nft).unwrap().asked else { panic!("an NFT") };
+    assert_eq!((watched.token_id.as_deref(), watched.decimals), (Some("16"), 0));
+    assert!(read("wallet_watchAsset", json!({ "type": "ERC721", "options": { "address": format!("0x{}", "ab".repeat(20)) } })).is_err(), "an NFT names its id");
+    assert!(read("wallet_watchAsset", json!({ "type": "BEP2", "options": { "address": format!("0x{}", "ab".repeat(20)) } })).is_err());
+    assert!(read("wallet_watchAsset", json!({ "type": "ERC20", "options": { "address": "0x12", "symbol": "TKN" } })).is_err());
+    assert!(read("wallet_watchAsset", json!({ "type": "ERC20", "options": { "address": format!("0x{}", "ab".repeat(20)), "symbol": "A_VERY_LONG_ONE" } })).is_err());
+    assert!(read("wallet_watchAsset", json!({ "type": "ERC20", "options": { "address": format!("0x{}", "ab".repeat(20)), "decimals": 99 } })).is_err());
+}

@@ -13,9 +13,10 @@ use {
     chainv4::structs::address::Address,
     chainv4::structs::code::Engine,
     chainv4::structs::hash::{Hash, HashType},
-    chainv4::structs::hex::from_hex,
+    chainv4::structs::hex::{from_hex, to_hex},
     chainv4::structs::u256::u256,
-    chainv4::vm::{BlockAt, CallContext, Limits, ProvenRead, Vm, run_proven},
+    chainv4::vm::evm::{EvmBlock, EvmReturned},
+    chainv4::vm::{BlockAt, CallContext, EvmRead, Limits, ProvenRead, Vm, run_proven, run_proven_evm},
     serde_json::{Value, json},
     std::sync::Arc,
 };
@@ -62,11 +63,12 @@ pub fn proving(body: &str, block: &str) -> Option<String> {
 pub fn checked(engines: &mut Engines, body: &str, answer: Value, client: Option<&LightClient>, rules: Rules) -> Value {
     match run_here(engines, body, &answer, client, rules) {
         Ok(mine) => {
-            let differs = mine["status"] != answer["status"] || mine["values"] != answer["values"] || mine["error"] != answer["error"];
+            let differs = ["status", "values", "output", "error"].iter().any(|field| mine[*field] != answer[*field]);
             let mut ours = answer;
-            ours["status"] = mine["status"].clone();
-            ours["values"] = mine["values"].clone();
-            ours["error"] = mine["error"].clone();
+
+            for field in ["status", "values", "output", "error", "reverted"] {
+                ours[field] = mine[field].clone();
+            }
             ours["checked"] = json!({ "here": true, "height": mine["height"], "differed": differs });
 
             ours
@@ -101,17 +103,52 @@ fn run_here(engines: &mut Engines, body: &str, answer: &Value, client: Option<&L
     }
 
     let reads = proven["entries"].as_array().into_iter().flatten().map(read).collect::<Result<Vec<_>, _>>()?;
-    let contract: Address = body["contract"].as_str().and_then(|text| text.parse().ok()).ok_or("a read of no contract")?;
-    let function = Hash::Xxh3_64(chainv4::vm::selector(body["function"].as_str().ok_or("a read of no function")?));
-    let args = body["args"].as_array().into_iter().flatten().map(chainv4::structs::json::parse_argument).collect::<Result<Vec<_>, _>>()?;
-    let sender = body["sender"].as_str().and_then(|text| text.parse().ok()).unwrap_or(Address::Ed25519([0; 32]));
-    let vm = engines.get(hash).ok_or("this build runs no contracts")?;
     let mut vm_rules = VmRules { dex: DexSettings { fee_bps: rules.dex_fee_bps }, ..VmRules::default() };
 
     if let Some(spec) = rules.evm_spec {
         vm_rules.evm_spec = spec;
     }
 
+    // Calldata: an EVM read, at the block's own height and time, as the node ran it.
+    if let Some(input) = body.get("input") {
+        let hex = |value: &Value| value.as_str().and_then(from_hex);
+        let to = match body["contract"].as_str().and_then(|text| text.parse::<Address>().ok()) {
+            Some(Address::Evm(to)) => to,
+            _ => return Err("calldata to no EVM contract".to_string()),
+        };
+        let from: [u8; 20] = match body.get("from") {
+            None | Some(Value::Null) => [0; 20],
+            Some(from) => hex(from).and_then(|bytes| bytes.try_into().ok()).ok_or("a sender that is no EVM address")?,
+        };
+        let read = EvmRead { from, to, input: hex(input).ok_or("calldata that is not hex")? };
+        let block = EvmBlock {
+            height,
+            timestamp: header.timestamp,
+            producer: header.producer,
+            chain_id: chainv4::crypto::ethereum::chain_id(&client.genesis()),
+            // The names precompile goes by the chain's names, which nothing proven here says: a
+            // read that resolves a name shows as differing from the node.
+            names: None,
+            hash,
+            vm: vm_rules,
+        };
+        let vm = engines.get(hash).ok_or("this build runs no contracts")?;
+        let ran = run_proven_evm(&vm, &header.state_root, &reads, &read, block, LIMITS.memory as u64).map_err(|why| why.to_string())?;
+        let mut mine = match &ran.result {
+            Ok(EvmReturned::Output(output)) => json!({ "status": "returned", "output": to_hex(output), "error": Value::Null }),
+            Ok(EvmReturned::Created(_)) => json!({ "status": "returned", "output": "0x", "error": Value::Null }),
+            Err(err) => json!({ "status": "failed", "output": Value::Null, "error": err.to_string(), "reverted": to_hex(&ran.reverted) }),
+        };
+        mine["height"] = height.into();
+
+        return Ok(mine);
+    }
+
+    let contract: Address = body["contract"].as_str().and_then(|text| text.parse().ok()).ok_or("a read of no contract")?;
+    let function = Hash::Xxh3_64(chainv4::vm::selector(body["function"].as_str().ok_or("a read of no function")?));
+    let args = body["args"].as_array().into_iter().flatten().map(chainv4::structs::json::parse_argument).collect::<Result<Vec<_>, _>>()?;
+    let sender = body["sender"].as_str().and_then(|text| text.parse().ok()).unwrap_or(Address::Ed25519([0; 32]));
+    let vm = engines.get(hash).ok_or("this build runs no contracts")?;
     let context = CallContext {
         sender,
         contract,

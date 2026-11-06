@@ -506,6 +506,15 @@ this answer (see [Proven reads](light-client.md#proven-contract-reads)):
 - `scanned`: whether it listed a range of storage, which proofs of single entries do not cover;
 - `unprovable`: any column it read that is not chain state.
 
+**With calldata,** `input` in hex in place of `function` and `args`, it is an EVM read, as
+`eth_call` takes one: `contract` is the EVM contract, `evm:0x…`, and `from` an optional EVM
+address, 0x and 20 bytes. It runs at the block's own height and time (not the next block's, as
+`eth_call` does) with a gas limit of 30,000,000, so an app running it over the proven entries
+(`vm::run_proven_evm`) gets the same answer; native contracts it calls run at one fuel a gas. It
+answers `status`, `output` in hex or `error` with what a revert returned as `reverted`, and
+`gas_used`; `"prove": true` adds `proven` as above. The apps read ERC-20 balances and NFT owners
+this way. 400 for a `contract` that is not `evm:` or `input` that is not hex.
+
 ### `GET /anchors?from=N&limit=M`
 
 What the chain anchored in Bitcoin (see [Anchoring](anchoring.md)):

@@ -186,8 +186,20 @@ test("a rejection reaches the site with its code, and the rest is refused or kep
     await assert.rejects(asked, { code: 4001 });
 
     await assert.rejects(provider.request({ method: "eth_sign", params: [] }), { code: 4200 });
-    await assert.rejects(provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] }), { code: 4902 });
+    // A switch to the chain followed already is answered here; any other, and a token to show,
+    // go to the wallet, which says what came of them.
     assert.equal(await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x22CC" }] }), null);
+    const switching = provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] });
+    await settle();
+    const asked_switch = open.requests().find((request) => request.method === "wallet_switchEthereumChain");
+    assert.deepEqual(asked_switch.params, [{ chainId: "0x1" }]);
+    open.answer(asked_switch.id, undefined, { code: 4902, message: "This wallet has not followed chain 1." });
+    await assert.rejects(switching, { code: 4902 });
+    const watching = provider.request({ method: "wallet_watchAsset", params: { type: "ERC20", options: { address: "0x" + "12".repeat(20), symbol: "TKN", decimals: 18 } } });
+    await settle();
+    const asked_watch = open.requests().find((request) => request.method === "wallet_watchAsset");
+    open.answer(asked_watch.id, true);
+    assert.equal(await watching, true);
     await assert.rejects(provider.request({ method: "wallet_nonsense" }), { code: 4200 });
     await assert.rejects(provider.request("not an object"), { code: -32602 });
 });

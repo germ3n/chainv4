@@ -31,7 +31,7 @@ pub mod wasm;
 #[cfg(feature = "evm")]
 pub mod evm;
 
-pub use proven::{ProvenRead, ProvenRunError, run_proven};
+pub use proven::{EVM_READ_GAS, EvmRead, ProvenRead, ProvenRunError, evm_read, run_proven, run_proven_evm};
 pub use crate::params::Limits;
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_SCAN, MAX_VALUE_LEN, Space};
 pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape, Typed, TypedField};

@@ -12,7 +12,7 @@ use {
     super::Ctx,
     crate::biometrics::{self, Check},
     crate::airgap::{Message, Origin},
-    crate::dapp::{self, Asked, Request, Wanted},
+    crate::dapp::{self, AssetKind, Asked, Request, Wanted},
     crate::hardware::{self, DataKind, SignRequest},
     crate::format,
     crate::node::Ask,
@@ -205,9 +205,34 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
         return false;
     }
 
+    let chain = ctx.chain.genesis.map(|genesis| chain_id(&genesis));
+
+    // A switch to the chain followed already needs no asking, and one to a chain never followed
+    // cannot be done: either is answered at once, as EIP-3326 has it.
+    let settled: Vec<(u64, dapp::Answer)> = state
+        .shown
+        .iter()
+        .filter_map(|shown| match shown.request.asked {
+            Asked::SwitchChain { chain_id } if Some(chain_id) == chain => Some((shown.request.id, Ok(Value::Null))),
+            Asked::SwitchChain { chain_id } if known_node(ctx, chain_id).is_none() => {
+                Some((shown.request.id, Err((4902, format!("This wallet has not followed chain {chain_id}: connect to its node under Settings first.")))))
+            }
+            _ => None,
+        })
+        .collect();
+
+    for (id, answer) in settled {
+        state.answered.insert(id);
+        state.shown.retain(|shown| shown.request.id != id);
+        dapp::answer(id, answer);
+    }
+
+    if state.shown.is_empty() {
+        return false;
+    }
+
     let count = state.shown.len();
     let accounts = accounts(ctx);
-    let chain = ctx.chain.genesis.map(|genesis| chain_id(&genesis));
     let mut done: Option<(u64, dapp::Answer)> = None;
     let mut ask = Vec::new();
     let confirmed = take_check(ctx, state);
@@ -258,6 +283,43 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             }
         }
         Asked::Send(wanted) => send(ui, ctx, &palette, wanted, shown, chain, &mut ask),
+        Asked::SwitchChain { chain_id } => {
+            theme::caps(ui, &palette, "Switch chains");
+
+            match known_node(ctx, *chain_id) {
+                Some(node) => {
+                    ui.label(RichText::new(format!("It asks the wallet to follow chain {chain_id}, which it followed before at {node}. Switching starts afresh with that node, its light client checking from the genesis pinned there, for every page, not just this site.")).color(palette.soft));
+                }
+                None => shown.trouble = Some(format!("This wallet has not followed chain {chain_id}: connect to its node under Settings first.")),
+            }
+        }
+        Asked::WatchAsset(watched) => {
+            theme::caps(ui, &palette, &format!("Show {}", if watched.symbol.is_empty() { "a token" } else { watched.symbol.as_str() }));
+            ui.label(RichText::new("The wallet would show it beside the chain's listed tokens, its balance read on its own EVM from state the node proves. A site names a token as it likes: the symbol is its word alone.").color(palette.soft));
+            ui.add_space(8.0);
+            super::row(ui, &palette, "kind", |ui| {
+                ui.label(RichText::new(watched.kind.name()).color(palette.ink));
+            });
+            super::row(ui, &palette, "contract", |ui| {
+                ui.label(theme::mono(format!("evm:{}", watched.address)).color(palette.ink));
+            });
+
+            if let Some(id) = &watched.token_id {
+                super::row(ui, &palette, "token", |ui| {
+                    ui.label(theme::mono(id).color(palette.ink));
+                });
+            }
+
+            if watched.kind == AssetKind::Erc20 {
+                super::row(ui, &palette, "decimals", |ui| {
+                    ui.label(RichText::new(watched.decimals.to_string()).color(palette.ink));
+                });
+            }
+
+            if chain.is_none() {
+                shown.trouble = Some("The wallet follows no chain yet.".to_string());
+            }
+        }
         Asked::Message { message, .. } => {
             theme::caps(ui, &palette, "Sign a message");
             ui.label(RichText::new("Signing a message moves nothing, but a site may take it as you saying so: sign only what you mean.").color(palette.soft));
@@ -333,6 +395,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             };
             let label = match &asked {
                 Asked::Connect => "Connect",
+                Asked::SwitchChain { .. } => "Switch",
+                Asked::WatchAsset(_) => "Show it",
                 _ if away.is_some() && shown.offline.is_none() => "Ask the signer",
                 Asked::Send(_) if shown.sending => "Sending…",
                 Asked::Send(_) => "Send",
@@ -345,7 +409,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
 
     // A connect gives addresses alone; anything signed here waits for biometrics, when they are
     // on. The offline signer checks its own.
-    let signs = !matches!(asked, Asked::Connect) && away.is_none();
+    let signs = !matches!(asked, Asked::Connect | Asked::SwitchChain { .. } | Asked::WatchAsset(_)) && away.is_none();
 
     if approve && let (Some(origin), Some(from)) = (away, signer) {
         match ask_offline(&asked, shown, origin, from, chain) {
@@ -373,6 +437,24 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
             Asked::Connect => {
                 let chosen = accounts.iter().filter(|(_, account)| shown.chosen.contains(account)).map(|(_, account)| json!(to_hex(account))).collect();
                 done = Some((id, Ok(Value::Array(chosen))));
+            }
+            Asked::SwitchChain { chain_id } => match known_node(ctx, *chain_id) {
+                Some(node) => {
+                    *ctx.connect = Some(node);
+                    done = Some((id, Ok(Value::Null)));
+                }
+                None => done = Some((id, Err((4902, format!("This wallet has not followed chain {chain_id}."))))),
+            },
+            Asked::WatchAsset(watched) => {
+                if let Some(genesis) = ctx.chain.genesis.map(|genesis| genesis.to_string()) {
+                    let kept = (genesis, (**watched).clone());
+
+                    if !ctx.settings.watched.iter().any(|(on, token)| *on == kept.0 && token.address == kept.1.address && token.token_id == kept.1.token_id) {
+                        ctx.settings.watched.push(kept);
+                    }
+                }
+
+                done = Some((id, Ok(json!(true))));
             }
             Asked::Send(wanted) => match (transaction(wanted, shown, chain), secret(ctx, &wanted.from)) {
                 (Some(tx), Some(secret)) => {
@@ -410,6 +492,31 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
     }
 
     true
+}
+
+/// The node the wallet followed a chain at before, by the chain's Ethereum id: the first, by name,
+/// of those whose pinned genesis gives it.
+pub fn known_node(ctx: &Ctx, chain: u64) -> Option<String> {
+    let mut nodes: Vec<&String> = ctx
+        .settings
+        .pinned
+        .iter()
+        .filter(|(_, genesis)| chain_of_genesis(genesis) == Some(chain))
+        .map(|(node, _)| node)
+        .collect();
+    nodes.sort();
+
+    nodes.first().map(|node| node.to_string())
+}
+
+/// The Ethereum chain id of a genesis id as the wallet keeps it, 0x and hex: chain_id's, from its
+/// first six bytes.
+pub fn chain_of_genesis(genesis: &str) -> Option<u64> {
+    let bytes = chainv4::structs::hex::from_hex(genesis)?;
+    let mut id = [0; 8];
+    id[2..].copy_from_slice(bytes.get(..6)?);
+
+    Some(u64::from_be_bytes(id).max(1))
 }
 
 /// What the biometric check came to, for the request it was started for.
@@ -480,7 +587,7 @@ fn ask_offline(asked: &Asked, shown: &Shown, origin: Origin, from: [u8; 20], cha
 
             (SignRequest::asking(json.to_string().into_bytes(), DataKind::TypedData, chain, origin, from, site), None, digest)
         }
-        Asked::Connect => return Err("nothing to sign".to_string()),
+        Asked::Connect | Asked::SwitchChain { .. } | Asked::WatchAsset(_) => return Err("nothing to sign".to_string()),
     };
 
     Ok(Offline { request, tx, digest, scan: super::scan::Scan::default() })

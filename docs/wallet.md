@@ -1611,8 +1611,18 @@ offline signer.
 - **Reads** a site makes, `eth_call`, `eth_getBalance`, blocks, receipts and logs, go to the wallet's
   node, at `POST /rpc`, from the extension's background, whether the wallet is open or not. They
   are the node's word, as any dApp's reads are.
-- **One chain:** the wallet's node's. `eth_chainId` says it, and `wallet_switchEthereumChain` to
-  any other fails with 4902: switch the node under Settings instead.
+- **Chains:** the wallet's node's. `eth_chainId` says it. `wallet_switchEthereumChain` (and
+  `wallet_addEthereumChain`, whose RPC URLs are not used) to another asks you, when the wallet has
+  followed that chain before: switching connects to the node it followed it at, for every page,
+  and sites hear `chainChanged`. A chain it never followed fails with 4902: connect to its node
+  under Settings first. The wallet never takes a node from a site.
+- **Tokens a site adds:** `wallet_watchAsset`, EIP-747's ERC20, ERC721 (with its `tokenId`) or
+  ERC1155 on this chain's EVM, asks you, then shows on Overview under **Tokens sites added**, kept
+  on this device by chain. An ERC-20's balance and an ERC-1155 id's amount at each of the account's
+  EVM forms, or an ERC-721's owner, are read at the block the light client checked last and run
+  again here over the state the node proves (`POST /call` with calldata), so what shows is the
+  wallet's own reading; the card says when it is only the node's, as in the browser. The symbol
+  is the site's word alone. **Stop showing** takes one off.
 - **Approving:** a site's connect, send or signature waits for the wallet. An unlocked wallet that
   is open, in the side panel or a tab, shows it over its page; otherwise a small window of the
   wallet opens, unlocks, shows it, and closes once nothing is left. Closing it rejects what waits.

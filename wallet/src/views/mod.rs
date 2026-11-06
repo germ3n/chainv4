@@ -35,6 +35,7 @@ mod sign;
 mod swaps;
 #[cfg(feature = "dex")]
 mod trade;
+mod watched;
 
 use {
     crate::app::{Coin, Role, Settings},
@@ -275,6 +276,7 @@ pub struct States {
     sign: sign::SignState,
     pub dapp: dapp::DappState,
     pub faucet: faucet::FaucetState,
+    watched: watched::WatchedState,
     pub mining: mining::MiningState,
     pub governance: governance::GovernanceState,
     #[cfg(feature = "swap")]
@@ -328,6 +330,10 @@ impl States {
 
         #[cfg(feature = "bridge")]
         if self.bridge.answered(ask, result) {
+            return;
+        }
+
+        if self.watched.answered(ask, result) {
             return;
         }
 
@@ -389,6 +395,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         Page::Overview => {
             reading::note(ui, ctx, &mut states.reading);
             overview::show(ui, ctx, &mut states.send);
+            watched::card(ui, ctx, &mut states.watched);
             faucet::card(ui, ctx, &mut states.faucet);
         }
         Page::Send => send::show(ui, ctx, &mut states.send),

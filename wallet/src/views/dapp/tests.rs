@@ -144,3 +144,11 @@ fn sites_are_offered_the_signers_accounts_that_say_where_it_derives_them() {
 
     assert_eq!(offered(&holders), vec![("Cold".to_string(), account())], "a pairing that said nothing of where, and MetaMask's, are not");
 }
+
+#[test]
+fn a_genesis_id_kept_as_hex_gives_the_chain_id_its_chain_has() {
+    let genesis = chainv4::structs::hash::Hash::Sha256([0x12; 32]);
+    assert_eq!(chain_of_genesis(&genesis.to_string()), Some(chain_id(&genesis)));
+    assert_eq!(chain_of_genesis("0x1234"), None, "too short");
+    assert_eq!(chain_of_genesis("not hex"), None);
+}

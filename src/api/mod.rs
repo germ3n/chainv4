@@ -2939,6 +2939,12 @@ async fn dry_run_off_loop(api: &Api, probe: SignedTx, gas_limit: u64, base: u256
 /// itself over them (db::ProvenEntries).
 async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let body = json_body(&body)?;
+
+    // Calldata, as eth_call takes it: an EVM read.
+    if body.get("input").is_some() {
+        return call_evm(api, body).await;
+    }
+
     let field = |name: &str| body.get(name).and_then(Value::as_str);
     let contract = parse_address(field("contract").ok_or_else(|| ApiError::BadRequest("contract is missing".to_string()))?)?;
     let function = field("function").ok_or_else(|| ApiError::BadRequest("function is missing".to_string()))?;
@@ -2986,37 +2992,7 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
         // What it read, each proven against the state root of the block it ran at.
         let proven = match prove {
             false => None,
-            true => {
-                let tree = crate::db::StateTree::new(&at, hash);
-                let mut entries = Vec::new();
-                let mut unprovable = Vec::new();
-
-                for (column, key) in recording.reads() {
-                    if !crate::db::STATE_COLUMNS.contains(&column) {
-                        unprovable.push(column.name());
-
-                        continue;
-                    }
-
-                    let value = at.get(column, &key)?;
-                    let proof = tree.prove(column, &key)?;
-                    entries.push(json!({
-                        "column": column.name(),
-                        "key": to_hex(&key),
-                        "value": value.as_deref().map(to_hex),
-                        "proof": to_hex(&wincode::serialize(&proof).expect("proofs always encode")),
-                    }));
-                }
-
-                unprovable.dedup();
-                Some(json!({
-                    "block": id.to_string(),
-                    "height": header.height,
-                    "entries": entries,
-                    "scanned": recording.scanned(),
-                    "unprovable": unprovable,
-                }))
-            }
+            true => Some(prove_reads(&at, hash, &recording, &id, header.height)?),
         };
 
         Ok::<_, ApiError>((outcome, proven))
@@ -3115,6 +3091,108 @@ fn number(query: &HashMap<String, String>, name: &str) -> Result<Option<u64>, Ap
 /// A block or transaction id, in the chain's hash.
 /// The state at the block a request names, and that block's header: the tip's as it is, for none
 /// or latest; an older main-chain block's, by its height or 0x id, through history.
+/// Each entry a read read, proven against the state root of the block it ran at: what POST /call
+/// sends with "prove", for an app to run the read itself (vm::run_proven, vm::run_proven_evm).
+fn prove_reads(at: &Arc<State>, hash: HashType, recording: &crate::db::Recording, id: &Hash, height: u64) -> Result<Value, ApiError> {
+    let tree = crate::db::StateTree::new(at, hash);
+    let mut entries = Vec::new();
+    let mut unprovable = Vec::new();
+
+    for (column, key) in recording.reads() {
+        if !crate::db::STATE_COLUMNS.contains(&column) {
+            unprovable.push(column.name());
+
+            continue;
+        }
+
+        let value = at.get(column, &key)?;
+        let proof = tree.prove(column, &key)?;
+        entries.push(json!({
+            "column": column.name(),
+            "key": to_hex(&key),
+            "value": value.as_deref().map(to_hex),
+            "proof": to_hex(&wincode::serialize(&proof).expect("proofs always encode")),
+        }));
+    }
+
+    unprovable.dedup();
+
+    Ok(json!({
+        "block": id.to_string(),
+        "height": height,
+        "entries": entries,
+        "scanned": recording.scanned(),
+        "unprovable": unprovable,
+    }))
+}
+
+/// POST /call with calldata: an EVM read, as eth_call runs one but at a block's own height and
+/// time and with a fixed gas limit, so an app runs it alike over what the node proves.
+async fn call_evm(api: Api, body: Value) -> Answer {
+    let field = |name: &str| body.get(name).and_then(Value::as_str);
+    let to = match parse_address(field("contract").ok_or_else(|| ApiError::BadRequest("contract is missing".to_string()))?)? {
+        Address::Evm(to) => to,
+        other => return Err(ApiError::BadRequest(format!("calldata goes to an EVM contract, evm:0x…, not {other}"))),
+    };
+    let hex = |name: &str| -> Result<Option<Vec<u8>>, ApiError> {
+        field(name).map(|text| crate::structs::hex::from_hex(text).ok_or_else(|| ApiError::BadRequest(format!("{name} is not hex")))).transpose()
+    };
+    let input = hex("input")?.unwrap_or_default();
+    let from = match hex("from")? {
+        None => [0; 20],
+        Some(bytes) => bytes.try_into().map_err(|_| ApiError::BadRequest("from is an EVM address of 20 bytes".to_string()))?,
+    };
+    let at = match body.get("block") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(height)) => Some(height.to_string()),
+        Some(Value::String(block)) => Some(block.clone()),
+        Some(_) => return Err(ApiError::BadRequest("block is a height or a 0x block id".to_string())),
+    };
+    let prove = body.get("prove").and_then(Value::as_bool).unwrap_or(false);
+    let (at, header) = state_at(&api, at.as_deref())?;
+    let genesis = crate::chain::stored_header_at(&*api.db, 0)?.ok_or_else(|| ApiError::Unavailable("the chain has no genesis yet".to_string()))?;
+    let block = crate::vm::evm::EvmBlock {
+        height: header.height,
+        timestamp: header.timestamp,
+        producer: header.producer,
+        chain_id: crate::crypto::ethereum::chain_id(&genesis.id()),
+        names: api.rules.names.as_deref().cloned(),
+        hash: api.rules.hash,
+        vm: api.rules.vm,
+    };
+    let (vm, hash, memory, id) = (api.vm.clone(), api.hash, api.limits.memory as u64, header.id());
+    let read = crate::vm::EvmRead { from, to, input };
+    let (ran, proven) = tokio::task::spawn_blocking(move || {
+        let recording = Arc::new(crate::db::Recording::new(at.clone()));
+        let ran = crate::vm::evm_read(&vm, recording.clone(), &read, block, memory)?;
+        let proven = match prove {
+            false => None,
+            true => Some(prove_reads(&at, hash, &recording, &id, header.height)?),
+        };
+
+        Ok::<_, ApiError>((ran, proven))
+    })
+    .await
+    .map_err(|err| ApiError::Unavailable(format!("the call stopped: {err}")))??;
+    let mut answer = evm_answer(&ran);
+
+    if let Some(proven) = proven {
+        answer["proven"] = proven;
+    }
+
+    Ok(Json(answer))
+}
+
+/// An EVM read's outcome as POST /call answers it: what it returned, or why it failed and what a
+/// revert returned.
+pub fn evm_answer(ran: &crate::vm::evm::EvmRan) -> Value {
+    match &ran.result {
+        Ok(crate::vm::evm::EvmReturned::Output(output)) => json!({ "status": "returned", "output": to_hex(output), "error": Value::Null, "gas_used": ran.gas_used }),
+        Ok(crate::vm::evm::EvmReturned::Created(_)) => json!({ "status": "returned", "output": "0x", "error": Value::Null, "gas_used": ran.gas_used }),
+        Err(err) => json!({ "status": "failed", "output": Value::Null, "error": err.to_string(), "reverted": to_hex(&ran.reverted), "gas_used": ran.gas_used }),
+    }
+}
+
 fn state_at(api: &Api, block: Option<&str>) -> Result<(Arc<State>, crate::structs::block::BlockHeader), ApiError> {
     let id = match block {
         None | Some("latest") => return Ok((Arc::new(State::new(api.db.clone())), tip(&*api.db)?.header)),

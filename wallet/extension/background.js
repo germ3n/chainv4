@@ -289,10 +289,13 @@ async function answer(origin, method, params, port) {
                 return null;
             }
 
-            throw error(4902, `The chainv4 wallet follows the chain of its node, ${current}, alone; switch its node under Settings.`);
+            // The wallet switches to a chain it followed before, at its node, once you say so;
+            // one it never followed it answers 4902.
+            return approve(origin, method, params, port);
         }
         case "wallet_watchAsset":
-            throw error(4200, "Tokens show in the chainv4 wallet as the chain's token registry lists them.");
+            // Shown beside the registry's tokens once you say so, its balance proven.
+            return approve(origin, method, params, port);
     }
 
     if (method === "eth_requestAccounts" || method === "wallet_requestPermissions") {

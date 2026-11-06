@@ -2152,3 +2152,51 @@ fn many_native_calls_from_the_evm_keep_no_more_hops_than_a_trace_holds() {
     assert_eq!(receipt.trace.hops[1].to, Address::Evm(crate::vm::evm::NATIVE_PRECOMPILE));
     assert_eq!((receipt.trace.hops[2].to, receipt.trace.hops[2].function.as_str()), (counter, "total"));
 }
+
+#[test]
+fn an_evm_read_over_proven_entries_alone_answers_as_the_node_did() {
+    use crate::db::{Recording, STATE_COLUMNS, StateTree};
+    use crate::vm::{EvmRead, ProvenRead, ProvenRunError, Vm, evm_read, run_proven_evm};
+
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let token = deploy_token(&mut chain);
+    let alice = stranger().public().address();
+    let sent = send_token(&chain, token, &alice, 5);
+    advance(&mut chain, vec![sent]);
+
+    let tip = chain.tip().clone();
+    let at: Arc<dyn crate::db::Committed> = db.clone();
+    let rules = chain.rules.clone();
+    let hash = rules.hash;
+    let block = evm::EvmBlock { height: tip.height, timestamp: tip.timestamp, producer: tip.producer, chain_id: crate::crypto::ethereum::chain_id(&chain.genesis()), names: None, hash, vm: rules.vm };
+    let Address::Evm(to) = token else { unreachable!("an EVM contract") };
+    let read = EvmRead { from: [0; 20], to, input: calldata("balanceOf(address)", &[address_word(&alice)]) };
+    let vm = Arc::new(Vm::new(&[crate::structs::code::Engine::Evm, crate::structs::code::Engine::Lua], hash).unwrap());
+
+    // The node's run, over what it records.
+    let recording = Arc::new(Recording::new(at.clone()));
+    let ran = evm_read(&vm, recording.clone(), &read, block.clone(), 64 << 20).unwrap();
+    assert_eq!(ran.result, Ok(evm::EvmReturned::Output(word(5))));
+    assert!(!recording.scanned());
+
+    // Every entry it read, proven at the tip, and the app's run over those alone.
+    let state = Arc::new(State::new(at.clone()));
+    let tree = StateTree::new(&state, hash);
+    let reads: Vec<ProvenRead> = recording
+        .reads()
+        .into_iter()
+        .filter(|(column, _)| STATE_COLUMNS.contains(column))
+        .map(|(column, key)| ProvenRead { value: state.get(column, &key).unwrap(), proof: tree.prove(column, &key).unwrap(), column, key })
+        .collect();
+    assert_eq!(reads.len(), recording.reads().len(), "an EVM read reads nothing but the chain's state");
+    let ours = run_proven_evm(&vm, &tip.state_root, &reads, &read, block.clone(), 64 << 20).unwrap();
+    assert_eq!(ours.result, ran.result);
+
+    // An entry left out is named; a value changed fails its proof.
+    assert!(matches!(run_proven_evm(&vm, &tip.state_root, &reads[1..], &read, block.clone(), 64 << 20), Err(ProvenRunError::Missing { .. })));
+    let mut forged = reads.clone();
+    let last = forged.len() - 1;
+    forged[last].value = Some(word(1_000_000));
+    assert!(matches!(run_proven_evm(&vm, &tip.state_root, &forged, &read, block, 64 << 20), Err(ProvenRunError::Invalid { .. })));
+}
