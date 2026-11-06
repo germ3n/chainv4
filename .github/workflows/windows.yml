@@ -1,0 +1,68 @@
+name: windows
+
+# The node built and its library tests run on Windows, and the desktop wallet and explorer built
+# there: what no other workflow tries. A workflow of its own, run by hand, as Windows runners cost
+# twice the minutes.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  node:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # As rust-toolchain.toml pins it; tests/toolchains.rs checks they agree.
+          toolchain: "1.98.1"
+      # RocksDB's bindings are made by bindgen, from the runner's own LLVM. Luau's and RocksDB's
+      # C++ is MSVC's: it cannot be pinned as clang is on Linux, so say which, as macOS does.
+      - name: compilers
+        shell: pwsh
+        run: |
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & "C:\Program Files\LLVM\bin\clang.exe" --version | Select-Object -First 1
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release --locked
+      - name: library tests
+        run: cargo test --release --locked --lib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: chainv4-windows-x86_64
+          path: target/release/chainv4.exe
+          if-no-files-found: error
+
+  apps:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      - name: compilers
+        shell: pwsh
+        run: '"LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wallet -> target
+            explorer -> target
+      - name: wallet
+        run: cargo build --release --locked --manifest-path wallet/Cargo.toml --bin wallet
+      - name: explorer
+        run: cargo build --release --locked --manifest-path explorer/Cargo.toml --bin explorer
+      - uses: actions/upload-artifact@v7
+        with:
+          name: apps-windows-x86_64
+          path: |
+            wallet/target/release/wallet.exe
+            explorer/target/release/explorer.exe
+          if-no-files-found: error

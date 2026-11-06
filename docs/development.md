@@ -216,7 +216,13 @@ matrix's `gpu` row is linted and compiled but not run, as its tests skip only wh
 **Builds** (`.github/workflows/build.yml`, `android.yml`, `extension.yml`), started by hand as well:
 the node's release binaries with the wiki, the example contracts, the wallet's and the
 explorer's APKs, and the wallet's Chrome and Firefox extensions, which a run started on a `v*` tag
-also attaches to its release.
+also attaches to its release. Beside them, also by hand:
+- **image** (`image.yml`): the node's and nginx's Docker images, pushed to GHCR (see
+  [Docker](docker.md#pulling-what-ci-built));
+- **release** (`release.yml`): a tag's binaries for Linux and macOS and its unsigned manifest, as a
+  draft release (see [Updates](updates.md#publishing-a-release));
+- **windows** (`windows.yml`): the node built and its library tests on Windows, and the desktop
+  wallet and explorer built there.
 
 The matrix:
 - covers each hash and key scheme on its own;

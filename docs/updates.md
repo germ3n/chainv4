@@ -95,6 +95,16 @@ chainv4 release verify site/releases/manifest.json
 
 Then upload the directory to the host. Nothing else is needed: nodes find it within the hour.
 
+**Built by CI:** the **release** workflow (Actions, run by hand) takes a tag that exists, the
+URL the directory will be served at, and a line of notes. It builds the node and CLI, the desktop
+wallet and the explorer from that tag, for Linux x86-64 and macOS arm64, runs `release new` for
+each product, writes `SHA256SUMS`, and leaves it all as a draft GitHub release: the directory as a
+tarball, and the manifest and sums beside it. The manifest is unsigned: download it, sign it with
+each release key on its holder's machine as above, verify it, and serve the directory. No release
+key is ever in CI. The binaries trust the release keys of the repository's `RELEASE_KEYS` variable
+(the JSON `release/keys.json` holds), or of that file; with none, or a threshold of 0, the
+workflow refuses to build, as binaries trusting no key could never be updated.
+
 ## What keeps a host honest
 
 A host can only serve what the keys signed, but it could serve an old manifest to hide a newer one.

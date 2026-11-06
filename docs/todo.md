@@ -1627,8 +1627,9 @@ with.
 - [ ] **Updates: next.** Release keys are the build's, so replacing a stolen one needs a new
   build; a rotation signed by the threshold, in the manifest, would let a running binary follow.
   The apps' Update replaces a desktop binary but not a macOS app bundle's signature, nor an APK or
-  the iOS app, which update from where they were installed. A release's binaries are built by hand
-  today; the build workflow could publish them and the manifest on a `v*` tag.
+  the iOS app, which update from where they were installed. Done 2026-11-06: the release
+  workflow, run by hand on a tag, builds the binaries and an unsigned manifest as a draft release,
+  signed by hand after (see [Updates](updates.md#publishing-a-release)).
 - [x] **A faucet for dev chains.** `--faucet-key` serves `POST /faucet`: a drip per address and
   per IP each period, each request with a moment's proof of work; the wallet, the explorer and
   `chainv4 faucet` ask it, and `docker/pow.sh faucet` sets one up on the VPS. See
@@ -1653,8 +1654,9 @@ with.
 - [x] **Docker.** `docker/compose.yaml` runs a node with every feature, its chain made from
   presets or a genesis of your own, behind nginx with HTTPS from your certificate, Let's Encrypt
   through certbot, or a self-signed one.
-- [ ] **No published image.** CI does not build or push the Docker image; it is built where it
-  runs.
+- [x] **No published image.** Done 2026-11-06: the image workflow (by hand) pushes the node's and
+  nginx's images to GHCR, private, by commit, `latest` and a version; `docker/pow.sh login` and
+  `up --pull TAG` take them on a server. See [Docker](docker.md#pulling-what-ci-built).
 - [ ] **A deploy compiles on every server.** Step 1 done 2026-11-05: `docker/pow.sh images` copies
   one server's images to the others and `up --no-build` starts them (see [Docker](docker.md#building-once-for-several-servers));
   the registry and CI building stay open. `docker/pow.sh up` builds the image on each VPS, so a
@@ -1947,7 +1949,10 @@ with.
   but never runs `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when
   someone builds them. Done 2026-11-06: the explorer and wallet jobs, and
   scripts/ci.sh, run `trunk build --release --locked`, with trunk pinned as the image pins it.
-- [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
+- [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup. Done 2026-11-06,
+  not yet run: the windows workflow (by hand) builds the node and runs its library tests, and
+  builds the desktop wallet and explorer, LLVM's libclang for RocksDB's bindings and MSVC for the
+  C++. Tick it once a run passes; what fails there is the next step.
 
 ### Engine script layer
 

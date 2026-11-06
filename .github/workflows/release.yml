@@ -1,0 +1,129 @@
+name: release
+
+# A release's binaries and its manifest, from a tag, as a draft GitHub release: the node and CLI,
+# the desktop wallet and the explorer, for Linux x86-64 and macOS arm64, each product written by
+# `chainv4 release new` into the directory a static host serves, with SHA-256 sums. The manifest
+# is unsigned: the release keys sign it by hand (`chainv4 release sign`), never here, and only the
+# signed one is published. Run by hand, as every workflow here is.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to release, such as v0.2.0: it must exist, and is what is built"
+        required: true
+      base_url:
+        description: "Where the release directory will be served, such as https://example.org/releases"
+        required: true
+      notes:
+        description: "What changed, in a line"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # As rust-toolchain.toml pins it; tests/toolchains.rs checks they agree.
+          toolchain: "1.98.1"
+      - name: clang
+        if: runner.os == 'Linux'
+        run: |
+          sudo sh docker/llvm.sh /opt/llvm
+          echo "CC=/opt/llvm/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/opt/llvm/bin/clang++" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/opt/llvm/lib" >> "$GITHUB_ENV"
+          echo "/opt/llvm/bin" >> "$GITHUB_PATH"
+      - name: the apps' system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      # The release keys the binaries trust for their updates: the repository's RELEASE_KEYS
+      # variable, as release/keys.json writes them, or that file. Public keys alone; a release
+      # whose binaries trust none could never be updated, so it is not built.
+      - name: release keys
+        env:
+          RELEASE_KEYS: ${{ vars.RELEASE_KEYS }}
+        run: |
+          if [ -n "$RELEASE_KEYS" ]; then printf '%s' "$RELEASE_KEYS" > "$RUNNER_TEMP/keys.json"; else cp release/keys.json "$RUNNER_TEMP/keys.json"; fi
+          threshold=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["threshold"] if d["keys"] else 0)' "$RUNNER_TEMP/keys.json")
+          if [ "$threshold" -lt 1 ]; then
+            echo "no release keys: set the RELEASE_KEYS variable, or commit release/keys.json, with a threshold of 1 or more" >&2
+            exit 1
+          fi
+          echo "CHAINV4_RELEASE_KEYS=$RUNNER_TEMP/keys.json" >> "$GITHUB_ENV"
+      - name: node
+        run: cargo build --release --locked
+      - name: wallet
+        run: cargo build --release --locked --manifest-path wallet/Cargo.toml --bin wallet
+      - name: explorer
+        run: cargo build --release --locked --manifest-path explorer/Cargo.toml --bin explorer
+      - name: gather
+        run: |
+          mkdir -p out
+          cp target/release/chainv4 out/chainv4
+          cp wallet/target/release/wallet out/wallet
+          cp explorer/target/release/explorer out/explorer
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: actions/download-artifact@v7
+        with:
+          path: built
+      - name: manifest
+        env:
+          TAG: ${{ inputs.tag }}
+          BASE_URL: ${{ inputs.base_url }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          version=${TAG#v}
+          case "$version" in
+            *[!0-9A-Za-z.+-]*|"") echo "the tag is v and a version, such as v0.2.0: not $TAG" >&2; exit 1 ;;
+          esac
+          chmod +x built/*/*
+          cli=built/x86_64-unknown-linux-gnu/chainv4
+          for product in chainv4 wallet explorer; do
+            "$cli" release new --out release --base-url "$BASE_URL" --product "$product" --version "$version" --notes "$NOTES" \
+              --file "x86_64-unknown-linux-gnu=built/x86_64-unknown-linux-gnu/$product" \
+              --file "aarch64-apple-darwin=built/aarch64-apple-darwin/$product"
+          done
+          (cd release && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          tar -czf "release-$version.tar.gz" release
+          "$cli" release verify release/manifest.json || true
+      - name: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          version=${TAG#v}
+          gh release create "$TAG" --draft --verify-tag --title "$TAG" \
+            --notes "Unsigned: sign release/manifest.json with the release keys (chainv4 release sign), check it with chainv4 release verify, then serve the directory." \
+            "release-$version.tar.gz" release/manifest.json release/SHA256SUMS

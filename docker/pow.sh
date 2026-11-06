@@ -13,8 +13,12 @@
 #   docker/pow.sh push user@host      here: the repository, the genesis and .env, to the VPS;
 #                  [-i KEY] [-p PORT]  -i the SSH private key to log in with, -p its port
 #   docker/pow.sh up [--no-build]     on the VPS, in that copy: build and start the stack, with
-#                                     Docker or Podman; --no-build starts the images it already
-#                                     has, as images copied them there, compiling nothing
+#        [--pull TAG]                 Docker or Podman; --no-build starts the images it already
+#                                     has, as images copied them there, compiling nothing; --pull
+#                                     takes the images CI pushed (the image workflow), such as
+#                                     sha-1a2b3c4d5e6f or latest, compiling nothing either
+#   docker/pow.sh login USER          on the VPS, once: log in to the registry --pull pulls from,
+#                                     with a token read from stdin (read:packages alone)
 #   docker/pow.sh images from to...   here: copy the stack's images built on one VPS to others,
 #                  [-i KEY] [-p PORT]  through this machine, so a deploy compiles once; then up
 #                                     --no-build on each. Each is user@host
@@ -65,6 +69,8 @@
 #   PROTOCOL       the chain's protocol name, for join and worker, as the VPS's .env has it
 #   EXTRA_ARGS     anything else for join's node, such as --no-mdns
 #   CONTAINER_ENGINE  docker or podman, for up: as docker/compose.sh picks it, unset
+#   IMAGE_REPO     where up --pull pulls from: ghcr.io/welikethestock/chainv4 unless set, its
+#                  nginx image beside it with -nginx
 #   TOR=1          up runs tor too: the node's API, explorer and wallet as an onion service, and
 #                  with TOR_MINING=1 its mining port; the onion's key lives in the tor volume
 set -eu
@@ -525,6 +531,43 @@ node_owns() {
     chmod 644 "$1"
 }
 
+# The engine here: CONTAINER_ENGINE, as .env says, or whichever there is.
+engine_here() {
+    e=${CONTAINER_ENGINE:-$(sed -n 's/^CONTAINER_ENGINE=\([a-z]*\).*/\1/p' "$root/docker/.env" 2>/dev/null | tail -n 1)}
+    echo "${e:-$(command -v docker > /dev/null && echo docker || echo podman)}"
+}
+
+# Where up --pull pulls from: IMAGE_REPO, here or in .env, or the repository's own on GHCR.
+image_repo() {
+    repo=${IMAGE_REPO:-$(sed -n 's/^IMAGE_REPO=\(.*\)$/\1/p' "$root/docker/.env" 2>/dev/null | tail -n 1)}
+    echo "${repo:-ghcr.io/welikethestock/chainv4}"
+}
+
+login() {
+    [ $# -eq 1 ] || fail "login takes the registry's user name: docker/pow.sh login USER, the token on stdin"
+    registry=$(image_repo | cut -d/ -f1)
+    say "logging in to $registry as $1: paste a token that can read packages, then Ctrl-D"
+    "$(engine_here)" login "$registry" -u "$1" --password-stdin
+}
+
+# Pulls the images CI pushed under a tag and names them as a build here would, so up starts them
+# without building. Each is checked to be the very image the tag names now.
+pull() {
+    engine=$(engine_here)
+    repo=$(image_repo)
+
+    case "$1" in
+        *[!0-9A-Za-z._-]*|"") fail "a tag is letters, digits, . _ and -, such as sha-1a2b3c4d5e6f: not $1" ;;
+    esac
+
+    for pair in "$repo:$1 chainv4:latest" "$repo-nginx:$1 chainv4-nginx:latest"; do
+        set -- $pair
+        say "pulling $1"
+        "$engine" pull "$1" > /dev/null || fail "could not pull $1: logged in (docker/pow.sh login USER)? Is the tag there?"
+        "$engine" tag "$1" "$2"
+    done
+}
+
 up() {
     compose="$root/docker/compose.sh"
     build=--build
@@ -532,7 +575,8 @@ up() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-build) build=--no-build; shift ;;
-            *) fail "up takes --no-build, not $1" ;;
+            --pull) [ $# -ge 2 ] || fail "--pull takes the tag to pull, such as latest"; pull "$2"; build=--no-build; shift 2 ;;
+            *) fail "up takes --no-build or --pull TAG, not $1" ;;
         esac
     done
 
@@ -831,6 +875,7 @@ case "$command" in
     regenesis) regenesis "$@" ;;
     push) push "$@" ;;
     up) up "$@" ;;
+    login) login "$@" ;;
     images) images "$@" ;;
     reset) reset "$@" ;;
     join) join "$@" ;;

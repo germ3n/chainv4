@@ -1,0 +1,76 @@
+name: image
+
+# The node's image and nginx's, built once and pushed to the GitHub container registry, private as
+# the repository is: the servers pull them (docker/pow.sh up --pull) rather than each build its
+# own. Run by hand, as every workflow here is.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "A version to tag the images with as well, such as 0.4.0 (optional)"
+        required: false
+        default: ""
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: names
+        run: |
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$owner/chainv4" >> "$GITHUB_ENV"
+          echo "SHORT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+          version='${{ inputs.version }}'
+          case "$version" in
+            "") ;;
+            *[!0-9A-Za-z.+-]*) echo "a version is digits, letters, . + and -: $version" >&2; exit 1 ;;
+          esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: tags
+        id: tags
+        run: |
+          for name in "$IMAGE" "$IMAGE-nginx"; do
+            tags="$name:sha-$SHORT,$name:latest"
+            if [ -n "$VERSION" ]; then tags="$tags,$name:$VERSION"; fi
+            case "$name" in *-nginx) echo "nginx=$tags" >> "$GITHUB_OUTPUT" ;; *) echo "node=$tags" >> "$GITHUB_OUTPUT" ;; esac
+          done
+      # x86_64 alone, as the servers are: an arm64 build under emulation would take hours.
+      - name: node
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.node }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=node
+          cache-to: type=gha,scope=node,mode=max
+      - name: nginx
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/nginx
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.nginx }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: said
+        run: |
+          echo "### Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`$IMAGE:sha-$SHORT\` and \`$IMAGE-nginx:sha-$SHORT\`${VERSION:+, and \`:$VERSION\`}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- on a server: \`docker/pow.sh up --pull sha-$SHORT\`" >> "$GITHUB_STEP_SUMMARY"

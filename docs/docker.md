@@ -435,6 +435,26 @@ docker/pow.sh up --no-build
   only on x86_64.
 - **Building where it runs** stays the default, for a server on its own.
 
+### Pulling what CI built
+
+The **image** workflow (Actions, run by hand) builds the node's image and nginx's once, on
+GitHub's runners, and pushes them to the repository's container registry, private as the
+repository is: `ghcr.io/welikethestock/chainv4` and `…/chainv4-nginx`, tagged `sha-` and the
+commit's first 12 hex digits, `latest`, and a version when the run is given one. A server then
+pulls them and starts them, compiling nothing:
+
+```sh
+docker/pow.sh login welikethestock   # once per server: paste a token, then Ctrl-D
+docker/pow.sh up --pull sha-1a2b3c4d5e6f
+```
+
+- **The token** is a GitHub token with `read:packages` alone, so a server that is taken can pull
+  images and nothing else. It is kept by Docker or Podman's own login, not by `pow.sh`.
+- **What is pulled** is tagged `chainv4:latest` and `chainv4-nginx:latest` here, as a build would,
+  so `up --no-build` and `images` go on working with it.
+- **Another registry:** `IMAGE_REPO` in `docker/.env` or the environment.
+- **x86_64 only,** as the servers are; an arm64 server builds its own.
+
 ## What to keep in mind
 
 - **A preset chain's name** comes from `CHAIN_NAME` in `docker/.env`, written into its genesis on
