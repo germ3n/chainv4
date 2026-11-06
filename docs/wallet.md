@@ -1066,7 +1066,7 @@ first webcam on the desktop:
 | Where | The camera |
 | --- | --- |
 | The browser | `getUserMedia`, which wants https or localhost and asks for leave the first time. A browser extension's side panel cannot ask: open the wallet in a tab once, and allow it there. |
-| Android | Camera2, through `ui/android/Camera.java`, which the APK carries when it was built with a JDK, as the picker is; the app asks for the CAMERA permission the first time. |
+| Android | Camera2, through `ui/android/Camera.java`, which the APK carries in `ui/android/classes.dex`, as the picker; the app asks for the CAMERA permission the first time. |
 | The desktop | [nokhwa](https://github.com/l1npengtul/nokhwa): AVFoundation on macOS, which asks for leave the first time, V4L2 on Linux, Media Foundation on Windows. |
 
 Or read a still: **Open a photo** (**A photo** in the browser, where a phone offers its camera)
@@ -1691,9 +1691,9 @@ wallet/build-android.sh --store            # what an app store takes: see App st
 - Rust's Android targets, which it adds;
 - clang, lld and llvm-ar: `brew install llvm lld`, or `apt install clang lld llvm`. Homebrew keeps
   LLVM off the PATH, and the script looks there;
-- for picking files, a JDK and Android's build-tools, found through `ANDROID_HOME` (or Android
-  Studio's own SDK folder). Without them, or with `--no-picker`, the app is built without
-  **Open key file**, and says so as it builds.
+- nothing more for picking files: the Java is in the committed `ui/android/classes.dex`, added
+  by `ui/android/repack`. With `--no-picker` the app is built without **Open key file**. Changing
+  the Java takes a JDK and build-tools 34.0.0 once, for `ui/android/dex.sh`.
 
 It needs no NDK and no Android SDK: xbuild downloads an Android sysroot and `android.jar` itself,
 and builds the APK without Gradle. `adb` is only for `--install`.

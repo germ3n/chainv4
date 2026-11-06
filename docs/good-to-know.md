@@ -239,9 +239,11 @@ other pages explain each part in full; this one is the short list to keep in min
   The bar goes by the page's own scroll area for where the page ends, as noted by
   `layout::keep_focus_in_view`, as the screen's bottom would be under the tabs.
 - **Picking files on Android takes Java.** Android hands a picked file only to Java code, so the
-  build compiles a small activity, `ui/android/Picker.java`, into the APK with a JDK and Android's
-  build-tools, and signs the APK again with the same key. Without them it builds an app that cannot
-  pick files, and leaves its buttons out; pasting needs no Java and always works.
+  APK carries a small activity, `ui/android/Picker.java` with the camera and biometrics beside it,
+  as `ui/android/classes.dex`, built once by `ui/android/dex.sh` and committed, the same bytes for
+  the same JDK major version, d8 and android.jar. `ui/android/repack` adds it to what xbuild built
+  and signs again with the same key (v2, which Android 7.0 and later check). With `--no-picker` the
+  app cannot pick files, and leaves its buttons out; pasting needs no Java and always works.
 - **The wallet and the explorer share one look, in the `ui` crate.** `ui/` holds the palette, the
   fonts, the widgets, the sidebar, bars and tabs, and the Android glue; each app picks only its
   density, and keeps its own pages. A change to a shared widget shows in both. The explorer's chart

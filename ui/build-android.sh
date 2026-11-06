@@ -3,8 +3,9 @@
 # arm64 phones and emulators, or with --arch x64 for x86-64 emulators. It is signed with xbuild's
 # debug key, or with a release key: --pem FILE, or X_PEM set to the PEM's text (a certificate and
 # its PKCS#8 RSA key, as docs/wallet.md shows how to make). --install puts it on the device adb sees.
-# With a JDK and Android's build-tools, found through ANDROID_HOME, the app can pick files and use
-# biometrics, its Java in ui/android, unless --no-picker leaves that out. --store builds what an app
+# The app can pick files and use biometrics through its Java in ui/android, compiled once into
+# ui/android/classes.dex (ui/android/dex.sh) and added by ui/android/repack, which signs the APK
+# again: no JDK and nothing of Android's SDK is needed. --no-picker leaves it out. --store builds what an app
 # store takes, as APP/target/android/NAME-ARCH-store.apk: the app's `store` feature alone, for an app
 # that has one; an app with none, as the explorer, has nothing a store refuses, and builds as ever.
 #
@@ -82,33 +83,24 @@ fi
 
 rustup target add "$triple" > /dev/null
 
-# The app's Java, ui/android: the file picker, an activity, and biometrics, compiled into the APK
-# after xbuild builds it, which then is signed again. That takes a JDK and Android's build-tools
-# (d8, zipalign and apksigner): without them the app is built without it, and leaves picking files
-# and biometrics out.
-build_tools() {
-    for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do
-        if [ -n "$sdk" ] && [ -d "$sdk/build-tools" ]; then
-            newest=$(ls "$sdk/build-tools" | sort -t . -k1,1n -k2,2n -k3,3n | tail -n 1)
-
-            if [ -n "$newest" ] && [ -x "$sdk/build-tools/$newest/d8" ]; then
-                echo "$sdk/build-tools/$newest"
-
-                return
-            fi
-        fi
-    done
-}
-
-tools=$(build_tools)
+# The app's Java, ui/android: the file picker, an activity, and biometrics, built once into
+# ui/android/classes.dex and added to the APK after xbuild builds it, which then is signed again.
+# The dex must be the Java's as it is now: classes.dex.sources says which it was built from.
 picker=
 
 if [ -n "$no_picker" ]; then
     echo "building without the file picker, as asked" >&2
-elif javac -version > /dev/null 2>&1 && [ -n "$tools" ] && [ -x "$tools/zipalign" ] && [ -x "$tools/apksigner" ]; then
-    picker=1
 else
-    echo "no JDK or no Android build-tools (set ANDROID_HOME): building without the file picker" >&2
+    picker=1
+    built_from=$(head -n 1 "$ui/android/classes.dex.sources")
+    sources=$(cat "$ui"/android/*.java | shasum -a 256 | cut -d' ' -f1)
+
+    if [ "$built_from" != "$sources" ]; then
+        echo "ui/android's Java changed since classes.dex was built: run ui/android/dex.sh (a JDK and build-tools), and commit what it writes" >&2
+        exit 1
+    fi
+
+    cargo build --release --locked --quiet --manifest-path "$ui/android/repack/Cargo.toml"
 fi
 
 work="target/android/work"
@@ -167,53 +159,12 @@ fi
 
 apk="target/android/$package-$arch$suffix.apk"
 
-# xbuild's debug key, which it signs with when given none. An APK with the picker is signed again
-# with it, so it updates one built without, as Android updates an app only with the same key.
-debug_pem() {
-    cargo_home=${CARGO_HOME:-$HOME/.cargo}
-
-    for db in "$cargo_home"/git/db/xbuild-*; do
-        if [ -d "$db" ] && git -C "$db" show "$XBUILD_COMMIT:apk/assets/debug.pem" 2> /dev/null; then
-            return
-        fi
-    done
-
-    curl -fsSL "https://raw.githubusercontent.com/rust-mobile/xbuild/$XBUILD_COMMIT/apk/assets/debug.pem"
-}
-
+# With the picker, the dex goes in and the APK is signed again: with the key given, or xbuild's
+# debug key, which it signed with when given none, so it updates one built without.
 if [ -n "$picker" ]; then
-    # Against the newest android.jar xbuild downloaded, which the SDK may not have.
-    jar=$(ls "${XDG_CACHE_HOME:-$HOME/.cache}"/x/Android.sdk/platforms/android-*/android.jar \
-        "$HOME"/Library/Caches/x/Android.sdk/platforms/android-*/android.jar 2> /dev/null | sort -V | tail -n 1)
-
-    if [ -z "$jar" ]; then
-        echo "xbuild's android.jar is missing" >&2
-        exit 1
-    fi
-
-    mkdir -p "$work/classes" "$work/dex" "$work/apk"
-    javac --release 11 -classpath "$jar" -d "$work/classes" "$ui"/android/*.java
-    "$tools/d8" --release --min-api 24 --lib "$jar" --output "$work/dex" "$work"/classes/org/chainv4/ui/*.class
-
-    # Put together again with classes.dex: resources.arsc and the icons stored, as xbuild stores
-    # them and Android wants resources.arsc, and the rest compressed.
-    unzip -q "$built" -d "$work/apk"
-    cp "$work/dex/classes.dex" "$work/apk/"
-    (cd "$work/apk" && zip -q -X -D -0 -r ../unaligned.apk resources.arsc res && zip -q -X -D -r ../unaligned.apk . -x resources.arsc 'res/*')
-    "$tools/zipalign" -f -p 4 "$work/unaligned.apk" "$work/aligned.apk"
-
-    if [ -n "$pem" ]; then
-        cp "$pem" "$work/signing.pem"
-    elif [ -n "${X_PEM:-}" ]; then
-        printf '%s\n' "$X_PEM" > "$work/signing.pem"
-    else
-        debug_pem > "$work/signing.pem"
-    fi
-
-    openssl pkcs8 -topk8 -nocrypt -in "$work/signing.pem" -outform DER -out "$work/key.pk8"
-    openssl x509 -in "$work/signing.pem" -out "$work/cert.pem"
-    "$tools/apksigner" sign --key "$work/key.pk8" --cert "$work/cert.pem" --v4-signing-enabled false \
-        --out "$apk" "$work/aligned.apk"
+    set --
+    if [ -n "$pem" ]; then set -- --pem "$pem"; fi
+    "$ui/android/repack/target/release/chainv4-apk-repack" "$built" "$ui/android/classes.dex" "$apk" "$@" > /dev/null
 else
     cp "$built" "$apk"
 fi

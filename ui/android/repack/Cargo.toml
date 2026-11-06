@@ -1,0 +1,16 @@
+[package]
+name = "chainv4-apk-repack"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Adds ui/android's classes.dex to an APK xbuild built, and signs it again (APK Signature Scheme v2), with xbuild's own APK library: what d8, zipalign and apksigner did, with nothing of Android's SDK."
+
+# A workspace of its own, as the apps are, on xbuild's library at the very commit the build script
+# pins xbuild to, and on the versions xbuild's own lockfile has, so it builds from what installing
+# xbuild already fetched.
+[workspace]
+
+[dependencies]
+apk = { git = "https://github.com/rust-mobile/xbuild", rev = "e67b501cbe0e9ca5436c223aa7ec0fe5e27544d1" }
+xcommon = { git = "https://github.com/rust-mobile/xbuild", rev = "e67b501cbe0e9ca5436c223aa7ec0fe5e27544d1" }
+anyhow = "1.0.68"

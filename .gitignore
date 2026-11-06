@@ -16,3 +16,4 @@
 
 # Seed phrases of validator accounts: they stay on this machine.
 /validator-mnemonics.txt
+/ui/android/repack/target

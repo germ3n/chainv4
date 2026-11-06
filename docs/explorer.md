@@ -760,8 +760,8 @@ explorer/build-android.sh --debug --install  # a debug build, put on the device 
 - `org.chainv4.explorer`, for Android 7 (API 24) and up, targeting API 33, so it sits beside the
   wallet;
 - a NativeActivity, and the INTERNET permission;
-- `org.chainv4.ui.Picker`, the `ui` crate's Java activity for picking files, compiled in when the
-  build finds a JDK and Android's build-tools (see [Picking files](wallet.md#picking-files));
+- `org.chainv4.ui.Picker`, the `ui` crate's Java activity for picking files, in the committed
+  `ui/android/classes.dex` the build adds (see [Picking files](wallet.md#picking-files));
 - `explorer/assets/icon.png` for its icon.
 
 **CI:** `.github/workflows/android.yml` builds its APKs beside the wallet's, keeps them as

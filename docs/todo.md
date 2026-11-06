@@ -1756,7 +1756,9 @@ with.
   both apps, and WebAssembly and Luau files in the explorer.
 - [x] **Pasting on Android.** Holding a text field, or tapping one already focused, brings a bar with
   Paste, Select all, Copy and Cut, reading Android's clipboard through JNI.
-- [ ] **The APK's Java needs the Android SDK's build-tools.** xbuild cannot add a `classes.dex`, so
+- [x] **The APK's Java needs the Android SDK's build-tools.** Done 2026-11-06: `ui/android/classes.dex`
+  committed, `ui/android/repack` adding it and signing with xbuild's library; apksigner verifies
+  the result. Was: xbuild cannot add a `classes.dex`, so
   the script repacks and signs again with `d8`, `zipalign` and `apksigner`. An xbuild that took a
   dex, or a pure Rust dexer and signer, would make the APK build need a JDK alone, or nothing.
 - [ ] **xbuild is pinned to a commit.** It has had no release since 0.2.0; move to one when it

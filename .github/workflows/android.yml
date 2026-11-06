@@ -4,8 +4,9 @@ name: android
 # hand to ui/build-android.sh): an APK for arm64 phones and one for x86-64 emulators. They are
 # signed with the release key in the ANDROID_SIGNING_PEM secret when there is one (a certificate
 # and its PKCS#8 RSA key, see docs/wallet.md), and with xbuild's debug key otherwise. Every run
-# keeps them as artifacts; a v* tag attaches all four to its release. The runner's JDK and Android
-# build-tools (ANDROID_HOME) compile in the file picker, ui/android/Picker.java.
+# keeps them as artifacts; a v* tag attaches all four to its release. The file picker's Java goes in
+# as the committed ui/android/classes.dex, added by ui/android/repack: neither the JDK nor the
+# Android SDK is used to build them. The dex job checks that dex is what the Java builds.
 on:
   workflow_dispatch:
 
@@ -50,7 +51,7 @@ jobs:
               echo "::notice::no ANDROID_SIGNING_PEM secret: signing with xbuild's debug key"
           fi
           ${{ matrix.app }}/build-android.sh --arch ${{ matrix.arch }}
-      # The script leaves the picker out when it finds no JDK or build-tools; here they are there.
+      # The script refuses a dex older than the Java; this checks the APK carries it.
       - name: picker
         run: |
           if ! unzip -l "${{ matrix.app }}/target/android/chainv4-${{ matrix.app }}-${{ matrix.arch }}.apk" | grep -q classes.dex; then
@@ -62,6 +63,36 @@ jobs:
           name: chainv4-${{ matrix.app }}-android-${{ matrix.arch }}
           path: ${{ matrix.app }}/target/android/chainv4-${{ matrix.app }}-${{ matrix.arch }}.apk
           if-no-files-found: error
+
+  # ui/android/classes.dex is what the Java beside it builds, by the JDK and d8 it names.
+  dex:
+    name: classes.dex is the Java's
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: tools
+        run: |
+          jdk=$(sed -n 's/^built with javac \([0-9]*\).*/\1/p' ui/android/classes.dex.sources)
+          echo "JDK=$jdk" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JDK }}
+      - name: build-tools and platform
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;34.0.0" "platforms;android-33" > /dev/null
+      - name: dex
+        run: |
+          ui/android/dex.sh
+          if ! git diff --exit-code --stat ui/android/classes.dex ui/android/classes.dex.sources; then
+              echo "::error::ui/android/classes.dex is not what its Java builds: run ui/android/dex.sh and commit it (the artifact holds this run's)"
+              exit 1
+          fi
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: classes-dex
+          path: ui/android/classes.dex*
 
   # One job attaches them all, so two never race to make the release.
   release:

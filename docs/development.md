@@ -143,10 +143,14 @@ take by path. They share one look, with the crate holding all of it, so a change
 
 **`ui/build-android.sh APP`** builds either app's APK; `wallet/build-android.sh` and
 `explorer/build-android.sh` call it with their own folder. It reads the package's name from the
-app's `Cargo.toml`, and writes `APP/target/android/PACKAGE-ARCH.apk`. With a JDK and Android's
-build-tools it then compiles the picker into the APK and signs it again (see
-[Picking files](wallet.md#picking-files)); `--no-picker` builds without it. CI's Android runs fail
-if an APK comes out without it.
+app's `Cargo.toml`, and writes `APP/target/android/PACKAGE-ARCH.apk`. It then adds the Java,
+`ui/android/classes.dex`, committed, and signs the APK again, with `ui/android/repack`: a small
+Rust tool on xbuild's own APK library (aligned entries, APK Signature Scheme v2), so no JDK and
+nothing of Android's SDK is needed (see [Picking files](wallet.md#picking-files)); `--no-picker`
+builds without it. After changing the Java, `ui/android/dex.sh` (a JDK and build-tools 34.0.0)
+builds the dex again and `classes.dex.sources` the hash it was built from; the APK build refuses a
+dex older than the Java, and the Android workflow's dex job checks the dex is what the Java
+builds.
 
 Inside `ui/`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, and clippy for
 `wasm32-unknown-unknown` and, with `--no-default-features`, `aarch64-linux-android`: without the
