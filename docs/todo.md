@@ -43,6 +43,11 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   and `contracts/`, with the components and targets the builds use (wasm32, Android, iOS). Pin clang
   for the C/C++ deps in the Docker image and the CI, and say which in `docs/development.md`. A
   release then names the toolchains it was built with.
+- [ ] **Go through every test there is (owner, 2026-11-06), last of all.** Each test in the node, the
+  CLI, the contracts, the wallet, the explorer and the ui crate, read for what it still checks:
+  tests made stale by what changed since (to adjust or delete), ones that pass without checking what
+  their names say, duplicates, and gaps, features and failure paths with no test at all. A list of
+  what changed and why, with the gaps filled.
 - [ ] **Run `cargo fmt` over everything.** The tree is not rustfmt-clean today (`cargo fmt --check`
   shows diffs in `build.rs`, `gpu/` and more), so batches have kept to the style around them by
   hand. Run it once across the node, `wallet/`, `explorer/`, `ui/`, `gpu/`, `macro/`, `wiki/` and
@@ -563,6 +568,14 @@ with.
   finality, the federation and the directory may be given in part, laid over what stands; the
   deciding receipt says `Decided { decision, kind, version }`, the chain's count kept gap-free for
   light clients.
+- [ ] **`_` as a digit separator everywhere a number is read from text (owner, 2026-11-06).** In
+  contracts, a consensus change for the next regenesis or fork: `u64()` to `i256()` and each
+  `.new`, decimal and `0x` hex, and `tonumber` in the Luau fork, as Luau's own literals take
+  `1_000_000`; with them the SDK's `U256::from_decimal` and `I256::from_decimal`, which mirror
+  Lua's `u256(text)` and `i256(text)` and so change with them. Outside consensus, done at once: the
+  CLI's amounts, coins, spans and typed arguments. Only between two digits: `_1`, `1_`, `1__0` and
+  `0x_ff` are refused, stricter than Rust's and Luau's literals, so a slip is not read as some
+  other number.
 - [ ] **Fuel costs measured, not guessed.** `vm::cost` is a table of hand-picked constants
   (a storage write 500, a call 1,000, a hash 20…) compiled into the node. A Rust tool, run at
   build time or as `chainv4 calibrate`, would time each fuel-charged operation on a reference

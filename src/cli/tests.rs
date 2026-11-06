@@ -302,6 +302,8 @@ fn amounts_pick_the_narrowest_width() {
     assert!(matches!(amount(parse_amount(big).unwrap()), Amount::U256(_)));
     assert!(parse_amount("-1").is_err());
     assert!(parse_amount("1.5").is_err());
+    assert_eq!(parse_amount("1_000_000").unwrap(), u256::from(1_000_000u64), "grouped with _");
+    assert!(parse_amount("1__000").is_err() && parse_amount("_1").is_err() && parse_amount("1_").is_err());
 }
 
 #[test]
@@ -4277,11 +4279,14 @@ fn coins_and_spans_read_as_people_write_them() {
     assert_eq!(parse_coins("7", 0).unwrap(), u256::from(7u64));
     assert!(parse_coins("0.001", 2).unwrap_err().contains("decimal places"));
     assert!(parse_coins("-1", 18).is_err() && parse_coins("ten", 18).is_err() && parse_coins(".", 18).is_err());
+    assert_eq!(parse_coins("1_000.25", 2).unwrap(), u256::from(100_025u64), "grouped with _");
+    assert!(parse_coins("1_.5", 2).is_err() && parse_coins("1.2_", 2).is_err());
 
     assert_eq!(parse_duration("24h").unwrap(), 86_400_000);
     assert_eq!(parse_duration("30m").unwrap(), 1_800_000);
     assert_eq!((parse_duration("90s").unwrap(), parse_duration("2d").unwrap()), (90_000, 172_800_000));
     assert!(parse_duration("24").is_err() && parse_duration("h").is_err() && parse_duration("5w").is_err());
+    assert_eq!(parse_duration("1_000s").unwrap(), 1_000_000);
 }
 
 #[cfg(feature = "client")]

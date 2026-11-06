@@ -8,6 +8,7 @@ pub mod bech32;
 pub mod json;
 pub mod bundle;
 pub mod code;
+pub mod digits;
 pub mod event;
 pub mod hash;
 pub mod hex;

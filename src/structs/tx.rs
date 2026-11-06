@@ -955,7 +955,7 @@ impl Tx {
 impl TxCallArgumentType {
     #[document(
         parent = "TxCallArgumentType",
-        summary = "An argument as written for a person: type:value, such as i64:-5, string:hi, u256:1000, bytes:0x00ff or address:ed25519:0x…, or nil alone. What chainv4 send call and the apps take.",
+        summary = "An argument as written for a person: type:value, such as i64:-5, string:hi, u256:1_000, bytes:0x00ff or address:ed25519:0x…, or nil alone, a number's digits grouped with _ if wanted. What chainv4 send call and the apps take.",
         returns = "The argument, or why the text is not one.",
     )]
     pub fn parse_typed(text: &str) -> Result<Self, String> {
@@ -968,7 +968,16 @@ impl TxCallArgumentType {
         let (kind, value) = text
             .split_once(':')
             .ok_or_else(|| format!("{text} needs a type, such as i64:{text}"))?;
-        let bad = |_| format!("{value} is not a valid {kind}");
+        // Numbers may group their digits with `_`, as 1_000_000; strings and bytes keep theirs.
+        let grouped = value;
+        let value = match kind {
+            "amount" | "number" | "i64" | "u64" | "i128" | "u128" | "u256" | "i256" => {
+                crate::structs::digits::ungrouped(grouped).ok_or_else(|| format!("{grouped} is not a valid {kind}: a _ goes between two digits"))?
+            }
+            _ => std::borrow::Cow::Borrowed(grouped),
+        };
+        let value = value.as_ref();
+        let bad = |_| format!("{grouped} is not a valid {kind}");
         let argument = match kind {
             "address" => Self::Address(value.parse().map_err(|err: crate::structs::address::ParseAddressError| err.to_string())?),
             "amount" => {

@@ -2060,6 +2060,17 @@ voting finality it now goes back to the checkpoint and follows the node from the
   rename the new binary over the old one; whatever runs keeps the old one in memory until it
   restarts.
 
+## Digit separators
+
+The CLI reads `1_000_000` wherever it takes a number from text: amounts, coins such as
+`1_000.5`, spans such as `1_000s`, and typed arguments such as `u256:1_000_000` (strings and bytes
+keep their `_`). A `_` must stand between two digits, hex digits after `0x`, so `_1`, `1_`, `1__0`
+and `0x_ff` are refused: stricter than Rust's and Luau's literals, which take some of those, so a
+slip is not quietly read as another number. One rule for all of it, `structs::digits::ungrouped`.
+The apps' amount fields drop `_` and `,` as they always did. Contracts do not take them yet:
+Lua's `u256("1_000")` and `tonumber("1_000")`, and the SDK's `from_decimal`, change what a
+contract computes, so they wait for the next regenesis (see the todo).
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

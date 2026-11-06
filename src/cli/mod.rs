@@ -7,6 +7,7 @@ use {
     crate::structs::address::Address,
     crate::structs::amount::Amount,
     crate::structs::bundle::{Bundle, bundle},
+    crate::structs::digits::ungrouped,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
     std::error::Error,
@@ -530,16 +531,20 @@ fn parse_words(text: &str) -> Result<usize, String> {
     }
 }
 
-/// A whole, non-negative amount in decimal.
+/// A whole, non-negative amount in decimal, its digits grouped with `_` if wanted: 1_000_000.
 pub fn parse_amount(text: &str) -> Result<u256, String> {
-    u256::from_str_radix(text, 10).map_err(|_| format!("{text} is not a whole amount"))
+    let bad = || format!("{text} is not a whole amount");
+
+    u256::from_str_radix(&ungrouped(text).ok_or_else(bad)?, 10).map_err(|_| bad())
 }
 
 /// An amount in whole coins, as people write one, such as 10 or 0.5: in the coin's smallest units,
-/// at its decimals. More decimal places than the coin has are refused rather than rounded.
+/// at its decimals, grouped with `_` if wanted: 1_000.5. More decimal places than the coin has are
+/// refused rather than rounded.
 pub fn parse_coins(text: &str, decimals: u8) -> Result<u256, String> {
     let bad = || format!("{text} is not an amount of coins, such as 10 or 0.5");
-    let (whole, fraction) = text.trim().split_once('.').unwrap_or((text.trim(), ""));
+    let plain = ungrouped(text.trim()).ok_or_else(bad)?;
+    let (whole, fraction) = plain.split_once('.').unwrap_or((&plain, ""));
 
     if whole.is_empty() && fraction.is_empty() || !whole.chars().chain(fraction.chars()).all(|c| c.is_ascii_digit()) {
         return Err(bad());
@@ -557,7 +562,8 @@ pub fn parse_coins(text: &str, decimals: u8) -> Result<u256, String> {
 /// A span of time as people write one, such as 24h, 30m, 90s or 2d: in milliseconds.
 pub fn parse_duration(text: &str) -> Result<u64, String> {
     let bad = || format!("{text} is not a span of time, such as 24h, 30m or 90s");
-    let text = text.trim();
+    let plain = ungrouped(text.trim()).ok_or_else(bad)?;
+    let text = plain.as_ref();
     let split = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
     let (count, unit) = text.split_at(split);
     let count: u64 = count.parse().map_err(|_| bad())?;

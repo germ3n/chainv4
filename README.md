@@ -377,14 +377,18 @@ Arguments are `type:value`:
 
 | Type | Example |
 | --- | --- |
-| `i64`, `u64`, `i128`, `u128`, `i256`, `u256` | `i64:-5`, `i256:-5`, `u256:1000` |
+| `i64`, `u64`, `i128`, `u128`, `i256`, `u256` | `i64:-5`, `i256:-5`, `u256:1_000_000` |
 | `number` | `number:2`: Lua contracts take whole numbers only, and hand them back as `i64` |
-| `amount` | `amount:1000000000000000000` |
+| `amount` | `amount:1_000_000_000_000_000_000` |
 | `bool` | `bool:true` |
 | `string` | `string:hello` |
 | `bytes` | `bytes:0x00ff` |
 | `address` | `address:ed25519:0x…`, `address:secp256k1:0x…`, `address:contract:0x…` |
 | `nil` | `nil`, alone: no value, Lua's `nil` |
+
+A number's digits may be grouped with `_`, as above, and so may every amount the CLI takes,
+`--amount 1_000` and `--faucet-amount 1_000.5` among them. A `_` goes between two digits alone:
+`_1`, `1_`, `1__0` and `1_.5` are refused rather than read as some other number.
 
 ### Names
 
