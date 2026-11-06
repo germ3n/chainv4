@@ -36,6 +36,9 @@ use {
     serde_json::{Value, json},
 };
 
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+mod bitcoin;
+
 /// How long a sent transaction counts as waiting, holding its nonce, before the next one may take
 /// that nonce again, in milliseconds.
 const PENDING_FOR: u64 = super::activity::UNSEEN_AFTER;
@@ -66,6 +69,9 @@ pub struct SendState {
     /// The gas limit and most per gas, in the coin's smallest units, as typed: what a transaction
     /// offers with no node to ask, starting from what checked blocks suggest.
     fee_typed: Option<(String, String, FeeOffer, bool)>,
+    /// Bitcoin sent from the account's own coins, when it is what is picked.
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    bitcoin: bitcoin::BitcoinSend,
 }
 
 /// A transaction another page made, such as registering a name: sent from one of the account's
@@ -124,6 +130,12 @@ impl SendState {
     }
 
     /// Sets a transaction another page made to review and send, in place of the form's.
+    /// Opens the Bitcoin form, on Bitcoin or its test network.
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    pub fn send_bitcoin(&mut self, testnet: bool) {
+        self.bitcoin.pick(testnet);
+    }
+
     pub fn prepare(&mut self, prepared: Prepared) {
         // Signed by the address it was prepared for, not whichever the form had picked.
         self.from = Some(prepared.from);
@@ -196,11 +208,29 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
         return;
     }
 
+    // Bitcoin needs no chain: its own form, while it is what is picked.
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    if state.bitcoin.on.is_some() {
+        if bitcoin::show(ui, ctx, &mut state.bitcoin) {
+            state.bitcoin.on = None;
+        }
+
+        return;
+    }
+
     // A signature holds on one chain alone, so with none known nothing here can be signed: the chain
     // comes from the light client, never from a guess or a genesis pinned but not yet checked.
     let Some(genesis) = ctx.chain.genesis else {
         theme::card(ui, &palette, |ui| {
             ui.colored_label(palette.warn, NO_CHAIN);
+
+            // Bitcoin needs no chain.
+            #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+            for testnet in [false, true] {
+                if ctx.lights.on(testnet).is_some() && theme::quiet(ui, &palette, if testnet { "Send test Bitcoin instead" } else { "Send Bitcoin instead" }).clicked() {
+                    state.bitcoin.pick(testnet);
+                }
+            }
         });
 
         return;
@@ -261,6 +291,16 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
 
                 if held.as_deref().is_some_and(|held| held != "0") {
                     ui.selectable_value(&mut state.token, Some(token.clone()), format!("{symbol} · {}", format::short(token)));
+                }
+            }
+
+            // Bitcoin from the account's own coins, on each network its light client follows.
+            #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+            for testnet in [false, true] {
+                if let Some(light) = ctx.lights.on(testnet)
+                    && ui.selectable_label(false, if testnet { format!("tBTC · Bitcoin's {}", light.net.name()) } else { "BTC · Bitcoin".to_string() }).clicked()
+                {
+                    state.bitcoin.pick(testnet);
                 }
             }
         });

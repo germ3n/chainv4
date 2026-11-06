@@ -12,7 +12,8 @@ use {
     egui::{RichText, Ui},
 };
 
-pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
+#[cfg_attr(not(all(feature = "bitcoin-light", not(target_arch = "wasm32"))), allow(unused_variables))]
+pub fn show(ui: &mut Ui, ctx: &mut Ctx, send: &mut super::send::SendState) {
     let palette = *ctx.palette;
     let Some(holder) = ctx.holder() else {
         return;
@@ -69,7 +70,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx) {
     }
 
     #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
-    bitcoin(ui, ctx);
+    bitcoin(ui, ctx, send);
 
     theme::card(ui, &palette, |ui| {
         ui.horizontal(|ui| {
@@ -179,11 +180,13 @@ fn held(ui: &mut Ui, ctx: &Ctx, symbol: &str, under: &str, token: Option<&str>, 
 /// What this account holds on Bitcoin, as the light client found it, on each network it follows:
 /// its balance, confirmed in blocks, and its latest coins.
 #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
-fn bitcoin(ui: &mut Ui, ctx: &Ctx) {
+fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, send: &mut super::send::SendState) {
     let palette = *ctx.palette;
     let Some(holder) = ctx.holder() else {
         return;
     };
+
+    let mut go = None;
 
     for testnet in [false, true] {
         let Some(light) = ctx.lights.on(testnet) else {
@@ -210,6 +213,19 @@ fn bitcoin(ui: &mut Ui, ctx: &Ctx) {
                 false => format!("so far: syncing, at block {} of {}", light.seen().height, status.headers),
             }).small().color(palette.muted));
 
+            // What the peers gossiped, not yet in a block: shown, never counted.
+            for pending in light.pending(&scripts) {
+                let paid: u64 = pending.pays.iter().map(|(_, value, _)| value).sum();
+                let line = match (paid, pending.spends.len()) {
+                    (0, spends) => format!("a spend of {spends} coin{} · pending, not in a block yet", if spends == 1 { "" } else { "s" }),
+                    (paid, _) => format!("+{} {symbol} · pending, not in a block yet", format::units(&paid.to_string(), 8)),
+                };
+                ui.label(RichText::new(line).color(palette.muted)).on_hover_text(format!(
+                    "{}: heard from a peer's mempool. It can still be replaced or never mined, so it counts once it is in a block.",
+                    pending.txid
+                ));
+            }
+
             for coin in coins.iter().take(5) {
                 let depth = light.confirmations(coin.height);
                 let line = format!(
@@ -221,7 +237,17 @@ fn bitcoin(ui: &mut Ui, ctx: &Ctx) {
                 );
                 ui.label(RichText::new(line).color(if coin.spent.is_some() { palette.muted } else { palette.ink }));
             }
+
+            ui.add_space(8.0);
+            if theme::quiet(ui, &palette, &format!("Send {symbol}")).clicked() {
+                go = Some(testnet);
+            }
         });
+    }
+
+    if let Some(testnet) = go {
+        send.send_bitcoin(testnet);
+        *ctx.page = Page::Send;
     }
 }
 

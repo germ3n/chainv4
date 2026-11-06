@@ -521,5 +521,9 @@ fn text(err: impl std::fmt::Display) -> String {
     format!("a code that does not write: {err}")
 }
 
+// Used where the wallet follows Bitcoin itself, its light client finding the coins.
+#[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+pub mod pay;
+
 #[cfg(test)]
 mod tests;

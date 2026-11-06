@@ -1262,13 +1262,36 @@ test network (testnet4 or signet), or both. It runs Kyoto (the `bip157` crate):
 - **what it fetches:** only the blocks whose filters match the scripts it watches, so no server
   learns which addresses are yours;
 - **what it watches:**
-  - each account's own Bitcoin addresses, its further ones included; on the test networks, its
-    words' first testnet key;
+  - each account's own Bitcoin addresses, its further ones included, on the test networks too (the
+    same paths under the test coin type);
   - every swap's HTLC on that network.
 
 What it finds shows on **Overview**, a Bitcoin card with the account's balance, confirmed in
-blocks, and its latest coins. On **Swaps**, an HTLC's funding is found with its confirmations, a
+blocks, and its latest coins.
+
+**Pending:** it also listens to what the peers gossip of their mempools, through a connection of
+its own, for payments to those scripts and spends of their coins not yet in a block. They show on
+the card as pending, never in the balance: a peer need not pass a transaction on, and one in a
+mempool can still be replaced or never mined. A block settles each, as mined or replaced (a fee
+bump heard first replaces the one it bumps), and one never mined goes after two weeks, as Bitcoin
+Core drops it. They are kept in memory alone, so a restart hears them again, or not. Listening
+asks nothing of the peer, which sends every transaction's id to any listener. On **Swaps**, an HTLC's funding is found with its confirmations, a
 claim's secret is read, and spends go out to Bitcoin's peers.
+
+**Sending Bitcoin:** **Send**, What, **BTC · Bitcoin** (or the test network's), or **Send BTC**
+on the Overview card, pays from the account's own coins:
+- **the coins:** confirmed ones alone, largest first, as few as cover it; none a pending spend or
+  an earlier send this run already takes;
+- **the fee rate:** typed, in sat/vB, suggested from Esplora's estimate for the next two blocks
+  when Settings names an Esplora, otherwise from the tip block's average fee rate, which the light
+  client reads from Bitcoin's peers. An average is skewed by a few rich transactions, so look
+  at it before sending. Every send is replaceable (BIP125), so a stuck one can be bumped;
+- **the change:** to a new further Bitcoin key of the account each time, kept with its keys and
+  watched from then, so the change is found from the words alone; change below dust goes to the
+  fee. An account of one Bitcoin key brought in takes its change back to that key;
+- **sending:** the review shows what is paid, the fee and the change; with biometrics on, a check
+  first. It is signed here (BIP143, each coin by its own key) and goes to Bitcoin's peers through
+  the light client, then shows as pending on Overview until a block has it.
 
 **Syncing:**
 - a first sync starts from a checkpoint built into the app, a block a week or so before its

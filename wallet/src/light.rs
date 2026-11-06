@@ -10,6 +10,11 @@
 //! week or so before the build, then from where it last got to, which the wallet keeps between
 //! runs: a first sync takes some minutes and a few tens of megabytes, later ones the blocks since.
 //! Its connections go through the wallet's proxy when one is set: SOCKS5 alone, as Tor's is.
+//!
+//! It also listens to what the peers gossip of their mempools, through a connection of its own,
+//! for payments to the watched scripts and spends of their coins not yet in a block: shown as
+//! pending, never counted, and kept in memory alone. A peer need not pass them on, and one in a
+//! mempool can still be replaced or never mined, so a block alone settles them.
 
 // Broadcasting, and reading a claim's secret, are the Swaps page's.
 #![cfg_attr(not(feature = "swap"), allow(dead_code))]
@@ -17,7 +22,7 @@
 use {
     bip157::chain::BlockHeaderChanges,
     bip157::tokio,
-    bip157::{Block, BlockHash, Builder, ChainState, Client, Event, HashCheckpoint, Info, Network, ScriptBuf, Socks5Proxy, Transaction, TrustedPeer},
+    bip157::{Block, BlockHash, Builder, ChainState, Client, Event, GossipMonitorRequestBuilder, HashCheckpoint, Info, Network, ScriptBuf, Socks5Proxy, Transaction, TrustedPeer},
     chainv4::crypto::bitcoin::sha256,
     serde::{Deserialize, Serialize},
     std::collections::BTreeSet,
@@ -134,6 +139,25 @@ pub struct Spent {
     pub witness: Vec<String>,
 }
 
+/// A transaction a peer gossiped from its mempool that pays a watched script or spends one of
+/// its coins, not yet in a block: what the wallet shows as pending, and never counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub txid: String,
+    /// Its outputs paying a watched script: index, satoshis and the script, in hex.
+    pub pays: Vec<(u32, u64, String)>,
+    /// The coins of watched scripts it spends, by txid and index.
+    pub spends: Vec<(String, u32)>,
+    /// Every coin it spends, any script's: a block spending one of them settles it, as mined or
+    /// replaced.
+    inputs: Vec<(String, u32)>,
+    /// When it was heard, so one never mined goes after Bitcoin Core's two weeks in a mempool.
+    heard: std::time::Instant,
+}
+
+/// How long a pending transaction is kept, as Bitcoin Core keeps one in its mempool.
+const PENDING_FOR: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 3_600);
+
 /// How a light client is doing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
@@ -155,12 +179,16 @@ struct Shared {
     seen: Seen,
     status: Status,
     watched: BTreeSet<Vec<u8>>,
+    pending: Vec<Pending>,
+    /// The tip block's average fee rate, in satoshis a virtual byte, once asked for and read.
+    fee_rate: Option<Result<u64, String>>,
     /// What came of broadcasts, by the number each was asked under.
     broadcast: Vec<(u64, Result<String, String>)>,
 }
 
 enum Command {
     Broadcast(u64, Vec<u8>),
+    FeeRate,
 }
 
 /// A light client running on a thread of its own, until dropped.
@@ -230,6 +258,24 @@ impl Light {
         lock(&self.shared).seen.coins.iter().filter(|coin| coin.script == script).cloned().collect()
     }
 
+    /// What the peers gossiped paying the scripts, or spending their coins, not yet in a block.
+    pub fn pending(&self, scripts: &BTreeSet<Vec<u8>>) -> Vec<Pending> {
+        let scripts: BTreeSet<String> = scripts.iter().map(|script| hex(script)).collect();
+        let shared = lock(&self.shared);
+        let ours = |txid: &String, vout: &u32| shared.seen.coins.iter().any(|coin| coin.txid == *txid && coin.vout == *vout && scripts.contains(&coin.script));
+
+        shared
+            .pending
+            .iter()
+            .filter_map(|pending| {
+                let pays: Vec<_> = pending.pays.iter().filter(|(_, _, script)| scripts.contains(script)).cloned().collect();
+                let spends: Vec<_> = pending.spends.iter().filter(|(txid, vout)| ours(txid, vout)).cloned().collect();
+
+                (!pays.is_empty() || !spends.is_empty()).then(|| Pending { pays, spends, ..pending.clone() })
+            })
+            .collect()
+    }
+
     /// The secret a claim of an HTLC showed: a witness item of 32 bytes whose SHA-256 is the hash.
     pub fn secret(&self, script: &[u8], hash: &[u8; 32]) -> Option<[u8; 32]> {
         secret_in(&lock(&self.shared).seen, script, hash)
@@ -245,6 +291,17 @@ impl Light {
         }
 
         id
+    }
+
+    /// Asks for the tip block's average fee rate, from the peers: a block fetched, no server asked.
+    pub fn ask_fee_rate(&self) {
+        lock(&self.shared).fee_rate = None;
+        let _ = self.commands.send(Command::FeeRate);
+    }
+
+    /// The tip block's average fee rate, in satoshis a virtual byte, once read.
+    pub fn fee_rate(&self) -> Option<Result<u64, String>> {
+        lock(&self.shared).fee_rate.clone()
     }
 
     /// What came of a broadcast: its txid, or why it failed, once known.
@@ -372,11 +429,17 @@ pub fn account_scripts(holders: &[crate::keys::Holder], book: &crate::vault::Boo
                 PublicKey::Bitcoin(key) => Some(p2wpkh(&hash160(key))),
                 _ => None,
             })),
+            // On a test network, the account's key and each further Bitcoin key at its index, as
+            // main's: the same paths under the test coin type, which the publics do not hold.
             true => {
-                if let (Some(seed), Some(number)) = (crate::keys::seed_of(book, holder), holder.number())
-                    && let PublicKey::Bitcoin(key) = seed.bitcoin_key(network.coin(), 0, number).public()
-                {
-                    scripts.insert(p2wpkh(&hash160(&key)));
+                if let (Some(seed), Some(number)) = (crate::keys::seed_of(book, holder), holder.number()) {
+                    let further = holder.extras().into_iter().filter(|(scheme, _)| *scheme == chainv4::crypto::keypair::KeyType::Bitcoin);
+
+                    for index in std::iter::once(number).chain(further.map(|(_, index)| index)) {
+                        if let PublicKey::Bitcoin(key) = seed.bitcoin_key(network.coin(), 0, index).public() {
+                            scripts.insert(p2wpkh(&hash160(&key)));
+                        }
+                    }
                 }
             }
         }
@@ -503,6 +566,49 @@ pub fn undo(seen: &mut Seen, from: u32) {
     }
 }
 
+/// Takes a gossiped transaction in: pending when it pays a watched script or spends one of their
+/// unspent coins, and not already in a block or heard. One spending a coin a pending one spends
+/// replaces it, as a fee bump does. Whether it was taken.
+pub fn hear(pending: &mut Vec<Pending>, seen: &Seen, tx: &Transaction, watched: &BTreeSet<Vec<u8>>, now: std::time::Instant) -> bool {
+    let txid = tx.compute_txid().to_string();
+
+    if pending.iter().any(|pending| pending.txid == txid) || seen.coins.iter().any(|coin| coin.txid == txid || coin.spent.as_ref().is_some_and(|spent| spent.txid == txid)) {
+        return false;
+    }
+
+    let pays: Vec<(u32, u64, String)> = tx
+        .output
+        .iter()
+        .enumerate()
+        .filter(|(_, output)| watched.contains(output.script_pubkey.as_bytes()))
+        .map(|(vout, output)| (vout as u32, output.value.to_sat(), hex(output.script_pubkey.as_bytes())))
+        .collect();
+    let inputs: Vec<(String, u32)> = tx.input.iter().map(|input| (input.previous_output.txid.to_string(), input.previous_output.vout)).collect();
+    let spends: Vec<(String, u32)> = inputs
+        .iter()
+        .filter(|(txid, vout)| seen.coins.iter().any(|coin| coin.txid == *txid && coin.vout == *vout && coin.spent.is_none()))
+        .cloned()
+        .collect();
+
+    if pays.is_empty() && spends.is_empty() {
+        return false;
+    }
+
+    pending.retain(|other| !other.inputs.iter().any(|input| inputs.contains(input)));
+    pending.push(Pending { txid, pays, spends, inputs, heard: now });
+
+    true
+}
+
+/// Settles pending transactions by a block: each it holds, or that spends a coin one of its
+/// transactions spends, as mined or replaced; and each older than a mempool keeps one.
+pub fn settle(pending: &mut Vec<Pending>, block: &Block, now: std::time::Instant) {
+    let mined: BTreeSet<String> = block.txdata.iter().map(|tx| tx.compute_txid().to_string()).collect();
+    let spent: BTreeSet<(String, u32)> = block.txdata.iter().flat_map(|tx| &tx.input).map(|input| (input.previous_output.txid.to_string(), input.previous_output.vout)).collect();
+
+    pending.retain(|pending| !mined.contains(&pending.txid) && !pending.inputs.iter().any(|input| spent.contains(input)) && now.duration_since(pending.heard) < PENDING_FOR);
+}
+
 /// The secret an HTLC's claim showed, among the spends of its coins.
 pub fn secret_in(seen: &Seen, script: &[u8], hash: &[u8; 32]) -> Option<[u8; 32]> {
     let script = hex(script);
@@ -541,7 +647,13 @@ async fn run(
         builder = builder.add_peer(peer);
     }
 
+    // A private chain has its one peer alone; Kyoto takes each peer named once, so it is named
+    // again for the gossip monitor's connection of its own.
     if net == Net::Regtest {
+        if let Some(peer) = trusted.as_deref().and_then(|text| peer(text, net)) {
+            builder = builder.add_peer(peer);
+        }
+
         builder = builder.whitelist_only();
     }
 
@@ -559,9 +671,51 @@ async fn run(
     let Client { requester, mut info_rx, mut warn_rx, mut event_rx } = client;
     // Once a block could not be fetched, where the next run begins stays before it.
     let mut held = false;
+    // What the gossip monitor was asked for so far; it is only ever added to.
+    let (mut listened, mut spendable) = (BTreeSet::<Vec<u8>>::new(), BTreeSet::<(String, u32)>::new());
+    let mut gossip: Option<bip157::Receiver<Transaction>> = None;
 
     loop {
+        // New scripts to listen for, and the coins found since: the account's, and those a pending
+        // payment spends, so a replacement of it is heard too.
+        let (scripts, coins) = {
+            let shared = lock(&shared);
+            let scripts: BTreeSet<Vec<u8>> = shared.watched.difference(&listened).cloned().collect();
+            let unspent = shared.seen.coins.iter().filter(|coin| coin.spent.is_none()).map(|coin| (coin.txid.clone(), coin.vout));
+            let replaceable = shared.pending.iter().flat_map(|pending| pending.inputs.iter().cloned());
+            let coins: BTreeSet<(String, u32)> = unspent.chain(replaceable).filter(|coin| !spendable.contains(coin)).collect();
+
+            (scripts, coins)
+        };
+
+        if !scripts.is_empty() || !coins.is_empty() {
+            let outpoints = coins.iter().filter_map(|(txid, vout)| Some(bitcoin::OutPoint::new(txid.parse().ok()?, *vout)));
+            let request = GossipMonitorRequestBuilder::from_expected_output_scripts(scripts.iter().map(|script| ScriptBuf::from_bytes(script.clone()))).add_outpoints(outpoints).build();
+
+            if let Ok(receiver) = requester.subscribe_to_gossip(request).await {
+                gossip = gossip.or(receiver);
+                listened.extend(scripts);
+                spendable.extend(coins);
+            }
+        }
+
+        let heard = async {
+            match gossip.as_mut() {
+                Some(receiver) => receiver.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
+            heard = heard => match heard {
+                Some(tx) => {
+                    let mut shared = lock(&shared);
+                    let Shared { pending, seen, watched, .. } = &mut *shared;
+                    hear(pending, seen, &tx, watched, std::time::Instant::now());
+                }
+                // Its connection closed: asked for again, all of it, on the next turn.
+                None => (gossip, listened, spendable) = (None, BTreeSet::new(), BTreeSet::new()),
+            },
             _ = &mut stop => {
                 let _ = requester.shutdown();
                 return;
@@ -582,6 +736,7 @@ async fn run(
                                 let mut shared = lock(&shared);
                                 let watched = shared.watched.clone();
                                 scan(&mut shared.seen, &indexed.block, indexed.height, &watched);
+                                settle(&mut shared.pending, &indexed.block, std::time::Instant::now());
                             }
                             None => {
                                 // Without the block, what it holds is not known: the next run
@@ -645,6 +800,14 @@ async fn run(
                         Err(err) => Err(format!("not a transaction: {err}")),
                     };
                     lock(&shared).broadcast.push((id, result));
+                }
+                Some(Command::FeeRate) => {
+                    // An average, so a block of a few rich transactions skews it; at least 1.
+                    let rate = match requester.chain_tip().await {
+                        Ok(tip) => requester.average_fee_rate(tip.hash).await.map(|rate| rate.to_sat_per_vb_ceil().max(1)).map_err(|err| err.to_string()),
+                        Err(err) => Err(err.to_string()),
+                    };
+                    lock(&shared).fee_rate = Some(rate);
                 }
                 None => return,
             },

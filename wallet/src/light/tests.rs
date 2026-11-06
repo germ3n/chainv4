@@ -84,6 +84,47 @@ fn blocks_add_the_coins_paying_watched_scripts_and_mark_what_spends_them() {
 }
 
 #[test]
+fn gossip_is_pending_until_a_block_mines_or_replaces_it() {
+    let (ours, other) = (vec![0x00, 0x14, 1, 2, 3], vec![0x51]);
+    let watched: BTreeSet<Vec<u8>> = [ours.clone()].into();
+    let (mut seen, mut pending) = (Seen::default(), Vec::new());
+    let now = std::time::Instant::now();
+    let theirs = |n: u8| (Txid::from_byte_array([n; 32]), 0, vec![]);
+
+    // A payment heard, once; one paying someone else alone is not ours.
+    let payment = tx(vec![theirs(1)], vec![(ours.clone(), 5_000), (other.clone(), 9)]);
+    assert!(hear(&mut pending, &seen, &payment, &watched, now));
+    assert!(!hear(&mut pending, &seen, &payment, &watched, now), "heard twice, kept once");
+    assert!(!hear(&mut pending, &seen, &tx(vec![theirs(2)], vec![(other.clone(), 1)]), &watched, now));
+    assert_eq!(pending.len(), 1);
+    assert_eq!((pending[0].pays.clone(), pending[0].spends.clone()), (vec![(0, 5_000, hex(&ours))], vec![]));
+
+    // A fee bump of it, spending the same coin, replaces it.
+    let bumped = tx(vec![theirs(1)], vec![(ours.clone(), 4_900)]);
+    assert!(hear(&mut pending, &seen, &bumped, &watched, now));
+    assert_eq!((pending.len(), pending[0].txid.clone()), (1, bumped.compute_txid().to_string()));
+
+    // A block that mines it settles it, and it is a coin from then; heard again, it is not pending.
+    scan(&mut seen, &block(vec![bumped.clone()]), 100, &watched);
+    settle(&mut pending, &block(vec![bumped.clone()]), now);
+    assert!(pending.is_empty() && seen.coins.len() == 1);
+    assert!(!hear(&mut pending, &seen, &bumped, &watched, now), "in a block already");
+
+    // A spend of that coin is pending too, as a spend; one mined in its place settles it.
+    let spend = tx(vec![(bumped.compute_txid(), 0, vec![])], vec![(other.clone(), 4_000)]);
+    assert!(hear(&mut pending, &seen, &spend, &watched, now));
+    assert_eq!((pending[0].pays.clone(), pending[0].spends.clone()), (vec![], vec![(bumped.compute_txid().to_string(), 0)]));
+    let instead = tx(vec![(bumped.compute_txid(), 0, vec![])], vec![(other.clone(), 4_500)]);
+    settle(&mut pending, &block(vec![instead]), now);
+    assert!(pending.is_empty(), "replaced in the block");
+
+    // One never mined goes after a mempool's two weeks.
+    assert!(hear(&mut pending, &seen, &tx(vec![theirs(3)], vec![(ours.clone(), 1)]), &watched, now));
+    settle(&mut pending, &block(vec![]), now + PENDING_FOR);
+    assert!(pending.is_empty());
+}
+
+#[test]
 fn a_coin_keeps_what_proves_it_to_a_contract_following_bitcoin() {
     let deposit = vec![0x00, 0x20, 4, 4];
     let watched: BTreeSet<Vec<u8>> = [deposit.clone()].into();
@@ -145,7 +186,8 @@ fn only_a_socks5_proxy_is_used_and_peers_read_as_written() {
 
 #[test]
 fn the_checkpoints_are_blocks_of_their_own_networks() {
-    assert_eq!(Net::Main.checkpoint().height, 972_410);
+    // scripts/btc-checkpoints.sh moves them on each release, and never back.
+    assert!(Net::Main.checkpoint().height >= 973_809 && Net::Testnet4.checkpoint().height >= 158_428 && Net::Signet.checkpoint().height >= 328_672);
     assert_eq!(Net::Regtest.checkpoint().height, 0);
     // Proof of work alone: a mainnet block hash starts with many zeros.
     assert!(Net::Main.checkpoint().hash.to_string().starts_with("0000000000000000000"));
@@ -226,6 +268,15 @@ fn the_light_client_finds_payments_to_its_scripts_and_broadcasts_to_peers() {
     assert_eq!(light.coins(&script)[0].value, 50_000_000);
     until("synced", || light.status().synced);
 
+    // A payment in Bitcoin Core's mempool is heard from its gossip, pending until a block has it.
+    let scripts: BTreeSet<Vec<u8>> = [script.clone()].into();
+    let gossiped = core.cli(&["sendtoaddress", &ours, "0.1"]);
+    until("the payment heard pending", || light.pending(&scripts).iter().any(|pending| pending.txid == gossiped));
+    assert_eq!(light.pending(&scripts)[0].pays[0].1, 10_000_000);
+    assert_eq!(light.coins(&script).len(), 1, "not a coin until mined");
+    core.mine(1);
+    until("mined and settled", || light.coins(&script).len() == 2 && light.pending(&scripts).is_empty());
+
     // A transaction the light client broadcasts, paying us again: mined from its peer's mempool.
     let raw = core.cli(&["createrawtransaction", "[]", &format!("{{\"{ours}\":0.25}}")]);
     let funded: serde_json::Value = serde_json::from_str(&core.cli(&["fundrawtransaction", &raw])).unwrap();
@@ -237,16 +288,45 @@ fn the_light_client_finds_payments_to_its_scripts_and_broadcasts_to_peers() {
     let txid = light.broadcasted(id).unwrap().unwrap();
     until("Bitcoin Core has it", || core.cli(&["getrawmempool"]).contains(&txid));
     core.mine(2);
-    until("the second payment found", || light.coins(&script).len() == 2);
+    until("the third payment found", || light.coins(&script).len() == 3);
     let second = light.coins(&script).into_iter().find(|coin| coin.txid == txid).unwrap();
     assert_eq!((second.value, light.confirmations(second.height)), (25_000_000, 2));
 
     // Where it got to is kept: a second run from there finds nothing new, and nothing lost.
     let seen = light.seen();
-    assert_eq!(seen.coins.len(), 2);
+    assert_eq!(seen.coins.len(), 3);
     drop(light);
-    let again = Light::start(Net::Regtest, seen.clone(), None, Some(format!("127.0.0.1:{}", Regtest::P2P)), [script.clone()].into(), egui::Context::default());
+    let mut again = Light::start(Net::Regtest, seen.clone(), None, Some(format!("127.0.0.1:{}", Regtest::P2P)), [script.clone()].into(), egui::Context::default());
     core.mine(1);
     until("synced again", || again.status().synced && again.seen().height > seen.height);
-    assert_eq!(again.coins(&script).len(), 2);
+    assert_eq!(again.coins(&script).len(), 3);
+
+    // A key the wallet holds, paid by Bitcoin Core, pays it back as the Send page does: Core takes
+    // the signatures, mines it, and the light client finds the spend and the change.
+    use crate::bitcoin::pay::{Amount, Spendable, pay};
+    use chainv4::crypto::keypair::{Keypair, PrivateKey, PublicKey};
+    let key = Keypair::from_private(PrivateKey::Bitcoin([7; 32]));
+    let PublicKey::Bitcoin(public) = key.public() else { unreachable!("a bitcoin key") };
+    let (mine, change) = (chainv4::crypto::bitcoin::tx::p2wpkh(&chainv4::crypto::bitcoin::hash160(&public)), Keypair::from_private(PrivateKey::Bitcoin([8; 32])));
+    let PublicKey::Bitcoin(change_public) = change.public() else { unreachable!("a bitcoin key") };
+    let change = chainv4::crypto::bitcoin::tx::p2wpkh(&chainv4::crypto::bitcoin::hash160(&change_public));
+    let mine_address = chainv4::structs::bech32::encode_segwit("bcrt", &chainv4::crypto::bitcoin::hash160(&public));
+    again.watch([script.clone(), mine.clone(), change.clone()].into());
+    core.cli(&["sendtoaddress", &mine_address, "0.3"]);
+    core.mine(1);
+    until("the wallet's coin found", || again.coins(&mine).len() == 1);
+    let coin = again.coins(&mine).remove(0);
+
+    let back = core.cli(&["getnewaddress", "", "bech32"]);
+    let info: serde_json::Value = serde_json::from_str(&core.cli(&["getaddressinfo", &back])).unwrap();
+    let back_script = chainv4::structs::hex::from_hex(&format!("0x{}", info["scriptPubKey"].as_str().unwrap())).unwrap();
+    let built = pay(vec![Spendable { txid: coin.txid.clone(), vout: coin.vout, value: coin.value, key }], &back_script, Amount::Exactly(10_000_000), 2, &change).unwrap();
+    let id = again.broadcast(built.raw.clone());
+    until("the payment sent", || again.broadcasted(id).is_some());
+    assert_eq!(again.broadcasted(id).unwrap(), Ok(built.txid.clone()));
+    until("Bitcoin Core took it", || core.cli(&["getrawmempool"]).contains(&built.txid));
+    core.mine(1);
+    until("the spend and the change found", || again.coins(&mine)[0].spent.is_some() && again.coins(&change).len() == 1);
+    assert_eq!(again.coins(&change)[0].value, built.change.unwrap());
+    assert_eq!(again.coins(&change)[0].value + built.fee + 10_000_000, 30_000_000);
 }

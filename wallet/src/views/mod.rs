@@ -388,7 +388,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
     match *ctx.page {
         Page::Overview => {
             reading::note(ui, ctx, &mut states.reading);
-            overview::show(ui, ctx);
+            overview::show(ui, ctx, &mut states.send);
             faucet::card(ui, ctx, &mut states.faucet);
         }
         Page::Send => send::show(ui, ctx, &mut states.send),

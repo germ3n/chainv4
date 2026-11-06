@@ -752,7 +752,11 @@ with.
   showing pictures once Settings lets it fetch them; the explorer's NFTs pages; `chainv4 nft`; and
   NFTs in atomic swaps, on chainv4 and EVM chains. See [NFT standards](nft-standard.md).
 - [ ] **NFTs: next.** A marketplace contract, which would pay royalties; EVM collections in the
-  apps. Done 2026-11-06: batch transfers and royalties on the reference collections
+  apps, for the consensus batches (owner, 2026-11-06): ERC-721 and ERC-1155 contracts on the
+  chain's own EVM, listed by the collection registry as native ones are, an ERC-165 check at
+  deploy deciding; the apps prove their ownership by running `ownerOf` and `balanceOf` on their
+  own EVM over proven state, and the NFTs page sends them as an EVM `safeTransferFrom` or
+  `safeBatchTransferFrom` call. Done 2026-11-06: batch transfers and royalties on the reference collections
   (docs/nft-standard.md), SVG and animated GIF pictures, royalties shown and batches sent in the
   wallet.
 - [x] **Containers where they matter.** `eth_getLogs` matches its address and topic filters as
@@ -1801,10 +1805,15 @@ with.
   `bip157` crate), on the desktop and Android apps: swaps' HTLCs (funding, confirmations, the
   claim's secret, broadcasting to peers) and the accounts' Bitcoin balances, from a checkpoint
   built in, through the SOCKS5 proxy. See [Wallet](wallet.md).
-- [ ] **The Bitcoin light client: next.** Unconfirmed payments from the peers' mempools (Kyoto's
+- [x] **The Bitcoin light client: next.** Unconfirmed payments from the peers' mempools (Kyoto's
   gossip monitor), further keys' testnet addresses, checkpoints refreshed each release, and Send
   paying from the accounts' Bitcoin coins.
-  Done 2026-11-06: checkpoints refreshed each release (`scripts/btc-checkpoints.sh`).
+  Done 2026-11-06: checkpoints refreshed each release (`scripts/btc-checkpoints.sh`); further
+  keys' testnet addresses; unconfirmed payments and spends, heard from gossip, shown pending on
+  Overview and settled by a block (`light::hear`, `light::settle`; the regtest test hears one);
+  Send paying from the account's confirmed coins, the fee suggested from Esplora or the tip
+  block, the change to a new further key each time, replaceable (`bitcoin::pay`; Bitcoin Core
+  mines one in the regtest test).
 - [ ] **A Bitcoin SPV light client as a contract,** checking headers and merkle proofs with
   `sha256d` exposed to contracts, for proving Bitcoin deposits on chainv4.
 - [ ] **Swaps with more chains.** The swap contracts know a hash and a deadline alone, so any chain

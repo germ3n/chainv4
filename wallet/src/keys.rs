@@ -560,6 +560,30 @@ mod tests {
         assert!(reopened[2].key(&further).is_some());
     }
 
+    #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
+    #[test]
+    fn a_test_network_watches_further_bitcoin_keys_too() {
+        use chainv4::crypto::{bitcoin::{hash160, tx::p2wpkh}, keypair::PublicKey, mnemonic::BITCOIN_TESTNET_COIN_TYPE};
+
+        let (book, _) = two_phrases(&[(0, false)]);
+        let mut holders = open(&book).unwrap();
+        let seed = book.phrase_of(None).unwrap().seed().unwrap();
+        let script = |index: u32| match seed.bitcoin_key(BITCOIN_TESTNET_COIN_TYPE, 0, index).public() {
+            PublicKey::Bitcoin(key) => p2wpkh(&hash160(&key)),
+            _ => unreachable!("a bitcoin key"),
+        };
+
+        assert_eq!(crate::light::account_scripts(&holders, &book, true), [script(0)].into());
+
+        let at = next_index(&holders, 0, None, KeyType::Bitcoin);
+        holders[0].add_key(seed, KeyType::Bitcoin, at).unwrap();
+        let watched = crate::light::account_scripts(&holders, &book, true);
+
+        assert_eq!(watched, [script(0), script(at)].into(), "the account's key and its further one, under the test coin type");
+        assert_eq!(crate::light::account_scripts(&holders, &book, false).len(), 2, "main's, from the publics");
+        assert!(crate::light::account_scripts(&holders, &book, false).is_disjoint(&watched));
+    }
+
     #[test]
     fn what_comes_from_an_accounts_words_comes_from_its_own() {
         let (book, other) = two_phrases(&[(0, false), (3, true)]);

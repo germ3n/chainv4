@@ -2060,6 +2060,15 @@ voting finality it now goes back to the checkpoint and follows the node from the
   rename the new binary over the old one; whatever runs keeps the old one in memory until it
   restarts.
 
+## Kyoto's gossip monitor
+
+The wallet hears pending Bitcoin payments through Kyoto's `subscribe_to_gossip`, which opens a
+connection of its own to the next peer. Kyoto pops each peer named with `add_peer` once, so on a
+private regtest chain of one peer, the light client names it twice, or the monitor never
+connects. Later subscriptions only add scripts and outpoints, and there is no taking one off:
+`light::run` keeps what it asked for and asks again for all of it when the connection closes.
+Gossip is filtered again on the wallet's side (`light::hear`), and only a block settles it.
+
 ## Digit separators
 
 The CLI reads `1_000_000` wherever it takes a number from text: amounts, coins such as
