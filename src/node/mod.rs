@@ -1070,7 +1070,17 @@ impl Node {
 
         if self.upgrade_at != Some(tip) {
             self.upgrade_at = Some(tip);
-            self.decided_upgrade = crate::registry::changes::Changes::new(&self.chain.state()).upgrade()?.filter(|upgrade| upgrade.stops(ours));
+            let state = self.chain.state();
+            let changes = crate::registry::changes::Changes::new(&state);
+            self.decided_upgrade = changes.upgrade()?.filter(|upgrade| upgrade.stops(ours));
+
+            // The chain turned on an engine this node was built without: it stops before the next
+            // block, which it could not run as every other node does.
+            let compiled = crate::structs::code::Engine::compiled();
+
+            if let Some(missing) = changes.engines()?.unwrap_or_default().into_iter().find(|engine| !compiled.contains(engine)) {
+                return Err(NodeError::Chain(crate::chain::ChainError::MissingEngine(missing)));
+            }
         }
 
         #[cfg(feature = "updates")]

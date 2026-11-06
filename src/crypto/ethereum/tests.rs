@@ -24,6 +24,7 @@ fn unsigned(kind: EthereumKind) -> EthereumTx {
         },
         signature: [0; 64],
         parity: 0,
+        authorizations: Vec::new(),
     }
 }
 
@@ -152,4 +153,36 @@ fn unsigned_transactions_read_as_a_wallet_hands_them_to_a_hardware_wallet() {
 
     assert!(decode_unsigned(&padded).is_err());
     assert!(decode_unsigned(&[]).is_err());
+}
+
+#[test]
+fn an_eip_7702_transaction_reads_back_as_written_and_its_authorizations_recover_their_signers() {
+    let secret = [0x61; 32];
+    let owner = [0x62; 32];
+    let authorization = Authorization { chain_id: u256::from(4_242u64), address: [0xaa; 20], nonce: 3, parity: 0, signature: [0; 64] }.signed(&owner);
+    let tx = EthereumTx { kind: EthereumKind::SetCode, authorizations: vec![authorization.clone()], ..unsigned(EthereumKind::DynamicFee) }.signed(&secret);
+    let raw = tx.encode();
+
+    assert_eq!(raw[0], 4);
+    assert_eq!(decode(&raw).unwrap(), tx);
+    assert_eq!(decode_unsigned(&tx.signing_data()).unwrap(), EthereumTx { signature: [0; 64], parity: 0, ..tx.clone() });
+    let signer = authorization.signer().unwrap();
+    let owner_address = crate::crypto::keypair::Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1(owner)).public().address();
+    assert_eq!(crate::crypto::secp256k1::address(&signer).map(crate::structs::address::Address::Secp256k1), Some(owner_address), "its owner's account");
+    assert_eq!(authorization.signing_data()[0], AUTHORIZATION_MAGIC);
+}
+
+#[test]
+fn an_eip_7702_transaction_without_authorizations_or_a_target_and_a_blob_one_are_refused() {
+    let secret = [0x61; 32];
+    let empty = EthereumTx { kind: EthereumKind::SetCode, ..unsigned(EthereumKind::DynamicFee) }.signed(&secret);
+    assert!(decode(&empty.encode()).unwrap_err().contains("at least one authorization"));
+
+    let authorization = Authorization { chain_id: u256::ZERO, address: [0xaa; 20], nonce: 0, parity: 0, signature: [0; 64] }.signed(&[0x62; 32]);
+    let create = EthereumTx { kind: EthereumKind::SetCode, to: None, authorizations: vec![authorization], ..unsigned(EthereumKind::DynamicFee) }.signed(&secret);
+    assert!(decode(&create.encode()).unwrap_err().contains("cannot create"));
+
+    let mut blob = unsigned(EthereumKind::DynamicFee).signed(&secret).encode();
+    blob[0] = 3;
+    assert!(decode(&blob).unwrap_err().contains("keeps no blob data"));
 }

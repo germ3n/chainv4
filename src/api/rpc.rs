@@ -156,9 +156,15 @@ async fn answer(api: &Arc<Api>, method: &str, params: &[Value]) -> Answer {
         }
         "eth_getCode" => {
             let (state, _) = state_at(api, param(1))?;
-            let record: Option<ContractRecord> = state.get_value(crate::db::Column::Contracts, &crate::db::address_key(&Address::Evm(address(param(0))?)))?;
+            let bytes = address(param(0))?;
+            let record: Option<ContractRecord> = state.get_value(crate::db::Column::Contracts, &crate::db::address_key(&Address::Evm(bytes)))?;
+            let code = match record.filter(|record| record.engine == crate::structs::code::Engine::Evm) {
+                Some(record) => record.code,
+                // An account delegating by EIP-7702 has its delegation for code, as on Ethereum.
+                None => evm::delegation(&state, bytes)?.unwrap_or_default(),
+            };
 
-            Ok(to_hex(&record.filter(|record| record.engine == crate::structs::code::Engine::Evm).map(|record| record.code).unwrap_or_default()).into())
+            Ok(to_hex(&code).into())
         }
         "eth_getStorageAt" => {
             let (state, _) = state_at(api, param(2))?;
@@ -389,7 +395,7 @@ async fn simulate(api: &Arc<Api>, call: Call, (at, header): (Arc<State>, BlockHe
             stack: Vec::new(),
         };
 
-        Ok(evm::run(&state, &sender, nonce, action, &[], call.gas.map_or(cap, |gas| gas.min(cap)), api.rules.limits.memory as u64, block, Some(&bridge))?)
+        Ok(evm::run(&state, &sender, nonce, action, &[], &[], call.gas.map_or(cap, |gas| gas.min(cap)), api.rules.limits.memory as u64, block, Some(&bridge))?)
     })
     .await
     .map_err(|err| RpcError::server(err.to_string()))?
@@ -428,6 +434,7 @@ fn estimate(api: &Api, call: &Call, evm_gas: u64) -> u64 {
         access_list: Vec::new(),
         signature: [0; 64],
         parity: 0,
+        authorizations: Vec::new(),
     }
     .signed(&[1; 32]);
     let probe = SignedTx::from_ethereum(stand_in.encode()).expect("a transaction just signed reads");
@@ -674,8 +681,26 @@ fn ethereum_json(signed: &SignedTx, raw: &[u8], place: Option<(&crate::structs::
                 .collect::<Vec<_>>()
                 .into();
 
+            if kind == EthereumKind::SetCode {
+                value["authorizationList"] = ethereum
+                    .authorizations
+                    .iter()
+                    .map(|authorization| {
+                        json!({
+                            "chainId": quantity(authorization.chain_id),
+                            "address": to_hex(&authorization.address),
+                            "nonce": quantity(u256::from(authorization.nonce)),
+                            "yParity": quantity(u256::from(authorization.parity)),
+                            "r": quantity(u256::from_be_bytes(authorization.signature[..32].try_into().expect("32 bytes"))),
+                            "s": quantity(u256::from_be_bytes(authorization.signature[32..].try_into().expect("32 bytes"))),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+            }
+
             match kind {
-                EthereumKind::DynamicFee => {
+                EthereumKind::DynamicFee | EthereumKind::SetCode => {
                     value["maxFeePerGas"] = quantity(ethereum.max_price);
                     value["maxPriorityFeePerGas"] = quantity(ethereum.tip);
                     // What it pays: its block's base price and its tip, at most its max; waiting, its max.

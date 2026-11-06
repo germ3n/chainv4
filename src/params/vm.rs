@@ -299,6 +299,30 @@ impl Default for DexSettings {
 }
 
 #[document(
+    summary = "Which engines a block's contracts may deploy on and run on: genesis's engines, or those a Change::Engines decided last. A contract of an engine turned off is frozen: nothing calls it and nothing deploys on its engine, but its storage and balance stay, readable, and turning the engine on again brings it back as it was.",
+    category = "VM",
+    see_also = "Change::Engines, Genesis::engines",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct EngineSet(u8);
+
+impl EngineSet {
+    #[document(parent = "EngineSet", summary = "The set of these engines.")]
+    pub fn of(engines: &[crate::structs::code::Engine]) -> EngineSet {
+        EngineSet(engines.iter().fold(0, |bits, engine| bits | EngineSet::bit(*engine)))
+    }
+
+    fn bit(engine: crate::structs::code::Engine) -> u8 {
+        1 << (engine as u8)
+    }
+
+    #[document(parent = "EngineSet", summary = "Whether it holds an engine.")]
+    pub fn contains(&self, engine: crate::structs::code::Engine) -> bool {
+        self.0 & EngineSet::bit(engine) != 0
+    }
+}
+
+#[document(
     summary = "What Lua contracts' fuel costs, slot by slot, as the Luau fork charges it: each opcode's cost at its number, then the library's rates, bytes and elements a unit of fuel pays for, a sort comparison and a pattern-matching step. Genesis's fees, or a Change::Fees, may name any of them as fees.lua_costs, by LUA_FUEL_SLOT_NAMES; the rest are LuaCosts::DEFAULT's, which are the fork's own. chainv4 calibrate measures what each costs on this machine.",
     category = "Fees",
     see_also = "FeeConfig::lua_costs, LUA_FUEL_SLOT_NAMES, HostCosts",
@@ -373,6 +397,8 @@ pub struct VmRules {
     pub lua_costs: LuaCosts,
     #[document(summary = "The limits a contract keeps within.")]
     pub limits: ContractLimits,
+    #[document(summary = "The engines contracts deploy and run on.")]
+    pub engines: EngineSet,
     #[document(summary = "The EVM's spec at the block's height.")]
     pub evm_spec: EvmSpec,
     #[document(summary = "The DEX's fee.")]
@@ -396,6 +422,8 @@ impl Default for VmRules {
             costs: HostCosts::DEFAULT,
             lua_costs: LuaCosts::DEFAULT,
             limits: ContractLimits::DEFAULT,
+            // Every engine this build has, for tools and tests that run no chain.
+            engines: EngineSet::of(&crate::structs::code::Engine::compiled()),
             evm_spec: EvmSpec::default(),
             dex: DexSettings::DEFAULT,
             max_tx_bytes: None,

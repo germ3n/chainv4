@@ -107,8 +107,11 @@ governance = []
 # transactions is every node's, with secp256k1 and evm, whatever it serves.
 ethereum = ["evm", "secp256k1", "http"]
 # The name registry: names such as alice.dev, Tx::Name and PrimaryName, GET /names, chainv4 send
-# name, and resolving names from contracts.
-names = []
+# name, and resolving names from contracts. Unicode names normalize as ENS's do, by ENSIP-15.
+names = ["unicode-names"]
+# Checking and normalizing Unicode names by ENSIP-15 alone, without the registry: what the apps
+# take, so a name they let you type is one the chain takes.
+unicode-names = ["dep:ens-normalize"]
 # Mining on the GPU, through wgpu: Vulkan, Metal and WebGPU. --mine-gpu picks it over the threads.
 gpu = ["gpu-mining", "node"]
 # A worker's GPUs without the node: Rig::gpu, for an app that mines, such as the wallet.
@@ -135,6 +138,8 @@ updates = ["release", "client", "ureq/socks-proxy"]
 node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "json", "dep:hmac", "dep:sha2", "lvm", "rocksdb", "worker"]
 
 [dependencies]
+# ENSIP-15, ENS's normalization of names against look-alikes, for Unicode names (src/registry/names.rs).
+ens-normalize = { version = "=0.1.1", optional = true }
 rocksdb = { version = "0.25.0", optional = true }
 # A RocksDB snapshot owned with the database it reads, for the API's point-in-time reads.
 self_cell = { version = "1.2.0", optional = true }

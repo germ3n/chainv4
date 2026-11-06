@@ -50,6 +50,8 @@ chainv4 genesis --finality none --fees free                     # neither finali
 | `governance` | `null`, or how the chain changes what genesis set by transaction: the kind and its settings, by `type`: `electorate` or `council`. Needs finality that votes. Left out or `null`, nothing changes, and a file from before it keeps its id. `chainv4 genesis --governance electorate` sets it. See [Governance](governance.md). |
 | `locked` | Settings no vote may ever change, by path: a change's name, such as `"reward"`, alone or followed by its fields' names as `GET /governance` writes the change, such as `"anchoring.enforce"`, `"federation.threshold"` or `"limits.tx_limits.fuel"`; each named once. Governance may add more (`Change::Locks`) and nothing takes one away; `"locks"` itself freezes the set. Needs `governance`. Left out or `[]`, nothing is locked, and a file from before it keeps its id; written into the state from the first block while it names any. See [Locks](governance.md#locks). |
 
+| `preinstalls` | Contracts the chain starts with, by name: `deployment_proxy`, the deterministic deployment proxy at `0x4e59…956c`, as other EVM chains have it, so what is deployed through it lands at the same address here, MultiSig.sol and Swap.sol among them (see [EVM](evm.md#deploying)). Needs `evm` in `engines`; each named once. `chainv4 genesis` names it for a chain with the EVM. Left out or `[]`, none, and a file from before it keeps its id, one written before the proxy too. |
+
 Governance may replace `fees`, `reward`, `tx_limits` with `max_block_bytes`, and finality's
 tunables on a running chain (see [Governance](governance.md#fees)); the file, and the chain's id,
 keep what genesis set.

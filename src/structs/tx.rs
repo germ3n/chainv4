@@ -764,7 +764,7 @@ impl Verifiable for Tx {
             },
             // Whether the list is one a chain takes is decided when the transaction runs, and so are
             // name prices and collection standards.
-            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Anchoring(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_) | Change::Locks(_), .. } => Ok(()),
+            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Anchoring(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_) | Change::Locks(_) | Change::Engines(_), .. } => Ok(()),
             // The members' signatures are checked when it runs, against the chain's genesis id and
             // the policy in state.
             Tx::Multisig { account, tx, signatures } => {

@@ -126,6 +126,60 @@ end
 - `GET /contracts/{address}` says what the registry holds for a contract, in `token`;
 - `GET /status` says what makes a token, in `token_functions` (see [API](api.md)).
 
+## Signed authorizations
+
+**Optional:** an owner signs off the chain, and anyone sends it, paying for it: an allowance, as
+EIP-2612's `permit` does, or a transfer a relayer sends, as EIP-3009's
+`transferWithAuthorization` does. Both reference tokens export them all.
+
+| Function | Returns | Does |
+| --- | --- | --- |
+| `permit_message(owner, spender, amount, deadline)` | `string` | The text `owner` signs to let `spender` move up to `amount`, until `deadline`, in milliseconds. |
+| `permit(owner, spender, amount, deadline, key, signature)` | `true` | Sets the allowance the owner signed, as `approve` from the owner would, emitting `Approval`. |
+| `nonces(owner)` | `u256` | How many permits the owner has had taken: the nonce its next one signs. |
+| `transfer_message(from, to, amount, valid_after, valid_before, nonce)` | `string` | The text `from` signs to send `amount` to `to`, after one time and before another, in milliseconds, with a 32-byte nonce it picks. |
+| `transfer_with_authorization(from, to, amount, valid_after, valid_before, nonce, key, signature)` | `true` | Moves the tokens as `transfer` from the owner would, once, emitting `AuthorizationUsed` (`from`, `nonce`) and `Transfer`. |
+| `authorization_state(owner, nonce)` | `bool` | Whether that nonce was used. |
+
+**What is signed** is the text the message functions return, as UTF-8, by the key's own rules, as
+`crypto.verify` checks it: Ed25519 and EdBlake over the bytes, secp256k1 over their keccak256, as
+Ethereum's keys sign, Bitcoin keys over their double SHA-256. Any key kind the chain has signs
+them, so an Ed25519 account and an Ethereum account alike. It reads, line by line:
+
+```
+chainv4 token permit
+chain: <the chain's id>
+token: <the token's address>
+owner: <owner>
+spender: <spender>
+amount: <amount, decimal>
+nonce: <nonces(owner)>
+deadline: <milliseconds>
+```
+
+```
+chainv4 token transfer
+chain: <the chain's id>
+token: <the token's address>
+from: <from>
+to: <to>
+amount: <amount, decimal>
+valid after: <milliseconds>
+valid before: <milliseconds>
+nonce: 0x<the 32 bytes, lowercase hex>
+```
+
+Addresses are in their text form. A wallet calls the message function, shows the text, and signs
+exactly it.
+
+**The key** comes with the signature: the token checks that the key controls the owner's address
+(`crypto.address`), then the signature. A contract's address signs nothing. Each is bound to the
+chain and the token, so it holds nowhere else. A permit is taken once, as its nonce moves on with it.
+A transfer's nonce is used once, by `authorization_state`. A permit past its deadline, or a transfer
+outside its window, is refused. The failures say `the permit has lapsed`, `the authorization is not
+valid yet`, `the authorization has lapsed`, `the authorization was used`, `the key is not the
+owner's` and `the signature does not hold`.
+
 ## Beyond the standard
 
 Anything else is up to the token. The examples add:

@@ -52,6 +52,21 @@ impl Engine {
             Engine::Evm => "evm",
         }
     }
+
+    #[document(
+        parent = "Engine",
+        summary = "The engine a name is for, as genesis and a change of engines write it.",
+        params = { name = "lua, wasm or evm." },
+        returns = "The engine, or why the name is none.",
+    )]
+    pub fn named(name: &str) -> Result<Engine, String> {
+        match name {
+            "lua" => Ok(Engine::Lua),
+            "wasm" => Ok(Engine::Wasm),
+            "evm" => Ok(Engine::Evm),
+            other => Err(format!("unknown engine {other}; use lua, wasm or evm")),
+        }
+    }
 }
 
 impl Hashable for Engine {

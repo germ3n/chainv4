@@ -1285,6 +1285,10 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::TokenFunctions(functions) => format!("what makes a token: {}", functions.join(", ")),
                 crate::governance::Change::EvmSpec { spec, from } => format!("the EVM's {} spec from block {from}", spec.name()),
                 crate::governance::Change::Dex(dex) => format!("a DEX fee of {} basis points", dex.fee_bps),
+                crate::governance::Change::Engines(engines) => match engines.is_empty() {
+                    true => "no engines: every contract frozen".to_string(),
+                    false => format!("the engines {}", engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(", ")),
+                },
                 crate::governance::Change::Anchoring(settings) => format!(
                     "anchoring: Bitcoin {}, Ethereum {}, enforced {}, {} deep, a reward of {} every {} epochs",
                     if settings.bitcoin { "on" } else { "off" },

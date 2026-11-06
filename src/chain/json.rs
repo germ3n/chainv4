@@ -55,6 +55,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "dex": genesis.dex.as_ref().map(crate::params::json::dex_json),
         "anchoring": genesis.anchoring.as_ref().map(crate::params::json::anchoring_json),
         "locked": genesis.locked,
+        "preinstalls": genesis.preinstalls,
     })
 }
 
@@ -117,12 +118,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     let engines = root
         .strings("engines")?
         .iter()
-        .map(|name| match name.as_str() {
-            "lua" => Ok(Engine::Lua),
-            "wasm" => Ok(Engine::Wasm),
-            "evm" => Ok(Engine::Evm),
-            other => Err(format!("engines: unknown engine {other}; use lua, wasm or evm")),
-        })
+        .map(|name| Engine::named(name).map_err(|why| format!("engines: {why}")))
         .collect::<Result<Vec<_>, String>>()?;
     let mut limits = root.object("tx_limits")?;
     let tx_limits = Limits {
@@ -208,6 +204,11 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
     if let Some(problem) = crate::governance::locks::genesis_problem(&locked) {
         return Err(problem);
     }
+    // Absent from files written before it: those chains start with no preinstalls.
+    let preinstalls = match root.map.contains_key("preinstalls") {
+        true => root.strings("preinstalls")?,
+        false => Vec::new(),
+    };
 
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
@@ -241,6 +242,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         dex,
         anchoring,
         locked,
+        preinstalls,
     };
     root.done()?;
 

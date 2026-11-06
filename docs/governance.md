@@ -482,6 +482,26 @@ in `change:evm-spec`, so a block below it replays as it ran.
 Genesis's `dex` (`{"fee_bps": 30}`, 0.3%, when unset) and `Change::Dex` set what a trade on both
 DEXes keeps for the pool, in hundredths of a percent, 0 to 1000. See [DEX](dex.md#the-fee).
 
+## Engines
+
+Genesis's `engines` and `Change::Engines` set which engines contracts deploy and run on: any of
+`lua`, `wasm` and `evm`, each once, several at once, or none. It replaces the set whole, from the
+block after the one that decides it:
+- **An engine turned off freezes its contracts.** Every call to one is refused, from a
+  transaction or another contract of any engine, with "the chain has turned the lua engine off:
+  its contracts are frozen until it is on again"; nothing deploys or upgrades on that engine. Their
+  storage, code and balances stay, readable through the API and provable, and nothing is lost.
+- **Turning it on again** brings every one back as it was.
+- **A node built without an engine the chain turns on stops** once the change is decided, before
+  the next block, saying to build with the engine's feature: it could not run that block as every
+  other node does. A node refuses a genesis naming an engine it lacks, as ever. A node runs every
+  engine it was built with, and the block's rules say which are on, so turning one on needs no
+  restart where the build has it.
+- **Lockable** as `engines`.
+
+`chainv4 send vote-change --change '{"engines": ["lua", "evm"]}'` votes on one from the CLI, as
+the wallet's Governance page does.
+
 ## Anchoring
 
 Genesis's `anchoring` and `Change::Anchoring` set which anchors of the chain's checkpoints in

@@ -579,6 +579,7 @@ fn transaction(wanted: &Wanted, shown: &Shown, chain: Option<u64>) -> Option<Eth
         access_list: Vec::new(),
         signature: [0; 64],
         parity: 0,
+        authorizations: Vec::new(),
     })
 }
 

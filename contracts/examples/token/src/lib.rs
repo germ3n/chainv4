@@ -8,7 +8,8 @@ extern crate alloc;
 
 use {
     alloc::{string::String, vec::Vec},
-    chainv4_sdk::{Address, AddressKind, U256, Value, abort, emit, export, sender, storage},
+    alloc::format,
+    chainv4_sdk::{Address, AddressKind, U256, Value, abort, block_time, chain_id, emit, export, key_address, sender, storage, this, verify},
 };
 
 const NAME: &str = "Example Token";
@@ -149,6 +150,146 @@ fn transfer_from(from: Address, to: Address, amount: U256) -> Result<bool, &'sta
     let key = allowance_key(&from, &sender());
     let allowed = get(&key).checked_sub(amount).ok_or("insufficient allowance")?;
     put(&key, allowed);
+    move_tokens(&from, &to, amount);
+
+    Ok(true)
+}
+
+/// Signed by an owner off the chain, and sent by anyone (docs/token-standard.md, "Signed
+/// authorizations"): the owner's key, which must be the one the owner's address is of, and its
+/// signature over the text below, by its scheme's own rules.
+fn signed_by(owner: &Address, key: &[u8], message: &str, signature: &[u8]) {
+    let scheme = match owner.kind {
+        AddressKind::Ed25519 => "ed25519",
+        AddressKind::EdBlake => "edblake",
+        AddressKind::Secp256k1 => "secp256k1",
+        AddressKind::Bitcoin => "bitcoin",
+        AddressKind::Contract | AddressKind::Evm => abort("only a key's account signs"),
+    };
+
+    if key_address(scheme, key) != *owner {
+        abort("the key is not the owner's");
+    }
+
+    if !verify(scheme, key, message.as_bytes(), signature) {
+        abort("the signature does not hold");
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn permit_key(owner: &Address) -> Vec<u8> {
+    key(b"permit:", &[owner])
+}
+
+fn used_key(owner: &Address, nonce: &[u8]) -> Vec<u8> {
+    let mut key = key(b"used:", &[owner]);
+    key.extend_from_slice(nonce);
+
+    key
+}
+
+fn permits(owner: &Address) -> u64 {
+    storage::get(&permit_key(owner)).and_then(|bytes| bytes.try_into().ok()).map(u64::from_le_bytes).unwrap_or(0)
+}
+
+fn permit_text(owner: &Address, spender: &Address, amount: U256, deadline: u64) -> String {
+    format!(
+        "chainv4 token permit\nchain: {}\ntoken: {}\nowner: {}\nspender: {}\namount: {}\nnonce: {}\ndeadline: {deadline}",
+        chain_id(),
+        this().text(),
+        owner.text(),
+        spender.text(),
+        amount.to_decimal(),
+        permits(owner),
+    )
+}
+
+/// What an owner signs to let a spender move its tokens: the chain, this token, both parties, the
+/// allowance, the owner's next permit nonce and when it lapses, in milliseconds.
+#[export]
+fn permit_message(owner: Address, spender: Address, amount: U256, deadline: u64) -> String {
+    permit_text(&owner, &spender, amount, deadline)
+}
+
+fn transfer_text(from: &Address, to: &Address, amount: U256, valid_after: u64, valid_before: u64, nonce: &[u8]) -> String {
+    format!(
+        "chainv4 token transfer\nchain: {}\ntoken: {}\nfrom: {}\nto: {}\namount: {}\nvalid after: {valid_after}\nvalid before: {valid_before}\nnonce: 0x{}",
+        chain_id(),
+        this().text(),
+        from.text(),
+        to.text(),
+        amount.to_decimal(),
+        hex(nonce),
+    )
+}
+
+/// What an owner signs to send tokens a relayer submits: the chain, this token, both parties, the
+/// amount, the window it holds in, after one time and before another, and a nonce of 32 bytes the
+/// owner picks, used once.
+#[export]
+fn transfer_message(from: Address, to: Address, amount: U256, valid_after: u64, valid_before: u64, nonce: Vec<u8>) -> String {
+    transfer_text(&from, &to, amount, valid_after, valid_before, &nonce)
+}
+
+/// How many permits an owner has had taken: the nonce its next one signs.
+#[export]
+fn nonces(owner: Address) -> U256 {
+    U256::from(permits(&owner))
+}
+
+/// Sets an allowance an owner signed, as approve would from the owner.
+#[export]
+fn permit(owner: Address, spender: Address, amount: U256, deadline: u64, key: Vec<u8>, signature: Vec<u8>) -> Result<bool, &'static str> {
+    if block_time() > deadline {
+        return Err("the permit has lapsed");
+    }
+
+    signed_by(&owner, &key, &permit_text(&owner, &spender, amount, deadline), &signature);
+    storage::set(&permit_key(&owner), &(permits(&owner) + 1).to_le_bytes());
+    put(&allowance_key(&owner, &spender), amount);
+    emit("Approval", &[Value::Address(owner), Value::Address(spender), amount.into()]);
+
+    Ok(true)
+}
+
+fn used(owner: &Address, nonce: &[u8]) -> bool {
+    storage::get(&used_key(owner, nonce)).is_some()
+}
+
+/// Whether a transfer's nonce was used, or not yet.
+#[export]
+fn authorization_state(owner: Address, nonce: Vec<u8>) -> bool {
+    used(&owner, &nonce)
+}
+
+/// Sends tokens their owner signed for, as transfer would from the owner, once.
+#[export]
+#[allow(clippy::too_many_arguments)]
+fn transfer_with_authorization(from: Address, to: Address, amount: U256, valid_after: u64, valid_before: u64, nonce: Vec<u8>, key: Vec<u8>, signature: Vec<u8>) -> Result<bool, &'static str> {
+    if nonce.len() != 32 {
+        return Err("a nonce is 32 bytes");
+    }
+
+    let now = block_time();
+
+    if now <= valid_after {
+        return Err("the authorization is not valid yet");
+    }
+
+    if now >= valid_before {
+        return Err("the authorization has lapsed");
+    }
+
+    if used(&from, &nonce) {
+        return Err("the authorization was used");
+    }
+
+    signed_by(&from, &key, &transfer_text(&from, &to, amount, valid_after, valid_before, &nonce), &signature);
+    storage::set(&used_key(&from, &nonce), &[1]);
+    emit("AuthorizationUsed", &[Value::Address(from), Value::Bytes(nonce)]);
     move_tokens(&from, &to, amount);
 
     Ok(true)

@@ -21,7 +21,7 @@ ur = "0.5.2"
 # Only the parts that build for the browser too: transactions, keys and hashes; transfers through the
 # bridges, to tell what signatures over one are for; and releases, which it checks against the
 # release keys built in and, on the desktop, puts in place of itself.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "sealed-keys", "abi", "swap", "dex", "bridge", "release"] }
+chainv4 = { path = "..", default-features = false, features = ["sha256", "unicode-names", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "sealed-keys", "abi", "swap", "dex", "bridge", "release"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 zeroize = "1.9.1"

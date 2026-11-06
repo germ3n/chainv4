@@ -559,7 +559,7 @@ pub(crate) fn execute_authorized(
     // On a chain with the EVM, any transaction makes its sender known there: coin the EVM sends
     // its alias reaches it from then on. Kept even when the transaction fails, as its nonce is.
     #[cfg(feature = "evm")]
-    if vm.runs_evm() {
+    if runs_evm(vm, rules) {
         crate::vm::evm::remember_alias(block, &sender)?;
     }
 
@@ -580,6 +580,7 @@ pub(crate) fn execute_authorized(
         mut events,
         mut trace,
         mut payments,
+        kept,
     } = contracted;
 
     // A failing database is the node's fault, never the transaction's.
@@ -588,7 +589,11 @@ pub(crate) fn execute_authorized(
         | Err(Failure::Contract(VmError::Storage(err)))
         | Err(Failure::Registry(RegistryError::Vm(VmError::Storage(err)))) => return Err(ExecuteError::Db(err.clone())),
         Ok(_) => block.merge(layer.take_changes()),
-        Err(_) => {}
+        Err(_) => {
+            if let Some(kept) = kept {
+                block.merge(kept);
+            }
+        }
     }
 
     // Running out of fuel uses all it was allowed, whatever the engine counted at the stop. A
@@ -684,6 +689,9 @@ struct Contracted {
     events: Vec<Event>,
     trace: Trace,
     payments: Vec<Payment>,
+    /// What stands even when the transaction fails: an EVM run's EIP-7702 authorizations, the
+    /// delegations they set and the nonces they bumped, as Ethereum keeps them.
+    kept: Option<crate::db::Changes>,
 }
 
 impl From<Hooked> for Contracted {
@@ -693,6 +701,7 @@ impl From<Hooked> for Contracted {
             events: hooked.events,
             trace: hooked.trace,
             payments: hooked.payments,
+            kept: None,
         }
     }
 }
@@ -705,6 +714,7 @@ fn failed_hooks(failed: Failed) -> (Result<Effect, Failure>, Contracted) {
         events: Vec::new(),
         trace: failed.trace,
         payments: Vec::new(),
+        kept: None,
     };
 
     (Err(Failure::Registry(failed.error)), contracted)
@@ -726,6 +736,7 @@ fn refreshed(
         events: outcome.events,
         trace: outcome.trace,
         payments: outcome.payments,
+        kept: None,
     };
     let returned = match outcome.result {
         Ok(returned) => returned,
@@ -978,11 +989,11 @@ fn run(
             }
         }
         #[cfg(feature = "evm")]
-        Tx::Deploy { code: crate::structs::code::Code::Evm(init) } if vm.runs_evm() => {
-            evm(layer, vm, nonce, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[])
+        Tx::Deploy { code: crate::structs::code::Code::Evm(init) } if runs_evm(vm, rules) => {
+            evm(layer, vm, nonce, sender, rules, limits, context, crate::vm::evm::EvmAction::Create { init: init.clone(), value: u256::ZERO }, &[], &[])
         }
         #[cfg(feature = "evm")]
-        Tx::EvmCall { to, value, input } if vm.runs_evm() => evm(
+        Tx::EvmCall { to, value, input } if runs_evm(vm, rules) => evm(
             layer,
             vm,
             nonce,
@@ -992,10 +1003,11 @@ fn run(
             context,
             crate::vm::evm::EvmAction::Call { to: *to, value: value.to_u256(), input: input.clone() },
             &[],
+            &[],
         ),
         // An Ethereum transaction runs as Ethereum runs it: a call, or a create when it has no to.
         #[cfg(feature = "evm")]
-        Tx::Ethereum { raw } if vm.runs_evm() => {
+        Tx::Ethereum { raw } if runs_evm(vm, rules) => {
             // verify_on read it before any block runs it; a dry run's probe may not have been.
             let Ok(ethereum) = crate::crypto::ethereum::decode(raw) else {
                 return (Err(Failure::Contract(VmError::Runtime("not an Ethereum transaction".to_string()))), Contracted::default());
@@ -1005,10 +1017,10 @@ fn run(
                 Some(to) => crate::vm::evm::EvmAction::Call { to: Address::Evm(to), value: ethereum.value, input: ethereum.input },
             };
 
-            evm(layer, vm, nonce, sender, rules, limits, context, action, &ethereum.access_list)
+            evm(layer, vm, nonce, sender, rules, limits, context, action, &ethereum.access_list, &ethereum.authorizations)
         }
         Tx::EvmCall { .. } | Tx::Ethereum { .. } => (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default()),
-        Tx::Upgrade { code, .. } | Tx::Deploy { code } if code.engine() == Engine::Evm && !vm.runs_evm() => {
+        Tx::Upgrade { code, .. } | Tx::Deploy { code } if code.engine() == Engine::Evm && !runs_evm(vm, rules) => {
             (Err(Failure::EngineNotAllowed(Engine::Evm)), Contracted::default())
         }
         Tx::Upgrade { contract: Address::Evm(_), .. } | Tx::Upgrade { code: crate::structs::code::Code::Evm(_), .. } => (
@@ -1016,7 +1028,7 @@ fn run(
             Contracted::default(),
         ),
         Tx::Deploy { code } => {
-            if vm.engine(code.engine()).is_none() {
+            if vm.engine(code.engine()).is_none() || !rules.vm.engines.contains(code.engine()) {
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
@@ -1031,7 +1043,7 @@ fn run(
             }
         }
         Tx::Upgrade { contract, code } => {
-            if vm.engine(code.engine()).is_none() {
+            if vm.engine(code.engine()).is_none() || !rules.vm.engines.contains(code.engine()) {
                 return (Err(Failure::EngineNotAllowed(code.engine())), Contracted::default());
             }
 
@@ -1145,6 +1157,7 @@ fn run(
                 Change::EvmSpec { spec, .. } if *spec < rules.vm.evm_spec => Ok(Some("an EVM spec is no older than the one in force, so no deployed contract loses an opcode")),
                 Change::EvmSpec { spec, .. } => Changes::new(layer).evm_specs().map(|specs| specs.eras.last().is_some_and(|(_, last)| spec < last).then_some("an EVM spec is no older than the one decided last")),
                 Change::Dex(dex) => Ok(dex.problem()),
+                Change::Engines(engines) => Ok(engines.iter().enumerate().any(|(at, engine)| engines[..at].contains(engine)).then_some("engines names each once")),
                 Change::Anchoring(settings) => Ok(settings.problem()),
                 Change::Collections(functions) => Ok(functions.problem()),
                 Change::Federation(federation) => Ok(federation.problem()),
@@ -1245,6 +1258,7 @@ fn evm(
     context: &BlockContext,
     action: crate::vm::evm::EvmAction,
     access_list: &[crate::crypto::ethereum::AccessItem],
+    authorizations: &[crate::crypto::ethereum::Authorization],
 ) -> (Result<Effect, Failure>, Contracted) {
     use crate::vm::evm::{self, EvmBlock, EvmReturned};
 
@@ -1265,13 +1279,27 @@ fn evm(
         stack: Vec::new(),
     };
 
-    match evm::run(layer, &sender, nonce, action, access_list, limits.fuel / fuel_per_gas, limits.memory as u64, block, Some(&bridge)) {
+    match evm::run(layer, &sender, nonce, action, access_list, authorizations, limits.fuel / fuel_per_gas, limits.memory as u64, block, Some(&bridge)) {
         Ok(ran) => {
+            // What its authorizations left accounts with stands whatever else happens to it.
+            let kept = match ran.delegated.is_empty() {
+                true => None,
+                false => {
+                    let keep = State::new(layer.clone());
+
+                    if let Err(err) = evm::keep_delegated(&keep, &ran.delegated) {
+                        return (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default());
+                    }
+
+                    Some(keep.take_changes())
+                }
+            };
             let mut contracted = Contracted {
                 fuel_used: ran.gas_used.saturating_mul(fuel_per_gas),
                 events: ran.events,
                 trace: ran.trace,
                 payments: ran.payments,
+                kept,
             };
             let result = match ran.result {
                 Ok(EvmReturned::Created(address)) => Ok(Effect::Deployed(address)),
@@ -1288,6 +1316,11 @@ fn evm(
         }
         Err(err) => (Err(Failure::Registry(RegistryError::Db(err))), Contracted::default()),
     }
+}
+
+/// Whether the block runs EVM contracts: this node has the engine, and the chain has it on.
+fn runs_evm(vm: &Vm, rules: &Rules) -> bool {
+    vm.runs_evm() && rules.vm.engines.contains(Engine::Evm)
 }
 
 /// The block as contracts see it: what names expire by, and what an EVM call a contract makes

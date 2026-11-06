@@ -1946,6 +1946,100 @@ impl World {
     }
 }
 
+/// A key's bytes and a signature's, as crypto.verify takes them.
+#[cfg(all(feature = "ed25519", feature = "secp256k1"))]
+fn signed_with(key: &crate::crypto::keypair::Keypair, message: &[u8]) -> (TxCallArgumentType, TxCallArgumentType) {
+    use crate::crypto::keypair::{PublicKey, Signature};
+
+    let public = match key.public() {
+        PublicKey::Ed25519(bytes) => bytes.to_vec(),
+        PublicKey::Secp256k1(bytes) => bytes.to_vec(),
+        other => panic!("not for this test: {other:?}"),
+    };
+    let signature = match key.sign(message) {
+        Signature::Ed25519(bytes) | Signature::Secp256k1(bytes) => bytes.to_vec(),
+        other => panic!("not for this test: {other:?}"),
+    };
+
+    (TxCallArgumentType::Bytes(public), TxCallArgumentType::Bytes(signature))
+}
+
+/// Signed authorizations, as both reference tokens take them: a permit an owner signs and anyone
+/// sends, and a transfer an owner signs and a relayer sends, each once, within its time.
+#[cfg(all(feature = "sha256", feature = "ed25519", feature = "secp256k1"))]
+fn takes_signed_authorizations(code: Code) {
+    use crate::crypto::keypair::{Keypair, PrivateKey};
+
+    let mut world = World::new();
+    let token = world.deploy(code);
+    let alice = Keypair::from_seed([0xa1; 32]);
+    let dave = Keypair::from_private(PrivateKey::Secp256k1([0xd4; 32]));
+    let (bob, relayer) = (Address::Ed25519([0xb; 32]), Address::Ed25519([0xe; 32]));
+    let amount = |value: u64| TxCallArgumentType::U256(u256::from(value));
+    let time = |ms: u64| TxCallArgumentType::U64(ms);
+    let at = |sender: Address, function: &str, args: &[TxCallArgumentType], when: u64| world.call_at(sender, token, function, args, 0, when);
+    let text = |outcome: Outcome| match outcome.result.unwrap().as_slice() {
+        [TxCallArgumentType::String(text)] => text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    };
+
+    for owner in [alice.public().address(), dave.public().address()] {
+        assert!(at(DEPLOYER, "transfer", &[address(owner), amount(1_000)], 1).result.is_ok());
+    }
+
+    // A permit: Alice signs an allowance for Bob, and the relayer sends it.
+    let permit = [address(alice.public().address()), address(bob), amount(300), time(5_000)];
+    let message = text(at(relayer, "permit_message", &permit, 1_000));
+    assert!(message.starts_with("chainv4 token permit\nchain: ") && message.contains("\nnonce: 0\ndeadline: 5000"), "{message}");
+    let (key, signature) = signed_with(&alice, message.as_bytes());
+    let signed = [&permit[..], &[key.clone(), signature.clone()]].concat();
+
+    assert!(at(relayer, "permit", &signed, 1_000).result.is_ok());
+    assert_eq!(at(relayer, "allowance", &[address(alice.public().address()), address(bob)], 1_000).result.unwrap(), [amount(300)]);
+    assert_eq!(at(relayer, "nonces", &[address(alice.public().address())], 1_000).result.unwrap(), [amount(1)]);
+    assert!(at(bob, "transfer_from", &[address(alice.public().address()), address(bob), amount(100)], 1_000).result.is_ok());
+
+    let refused = |args: &[TxCallArgumentType], function: &str, when: u64| at(relayer, function, args, when).result.unwrap_err().to_string();
+    assert!(refused(&signed, "permit", 1_000).contains("does not hold"), "a permit is taken once: its nonce moved on");
+    assert!(refused(&signed, "permit", 6_000).contains("lapsed"));
+    let (bob_key, _) = signed_with(&Keypair::from_seed([0xb2; 32]), b"");
+    assert!(refused(&[&permit[..], &[bob_key, signature]].concat(), "permit", 1_000).contains("not the owner's"));
+
+    // A transfer: Dave, an Ethereum key, signs one the relayer sends, once, inside its window.
+    let nonce = TxCallArgumentType::Bytes(vec![7; 32]);
+    let transfer = [address(dave.public().address()), address(bob), amount(250), time(1_000), time(9_000), nonce.clone()];
+    let message = text(at(relayer, "transfer_message", &transfer, 2_000));
+    assert!(message.ends_with(&format!("valid after: 1000\nvalid before: 9000\nnonce: 0x{}", "07".repeat(32))), "{message}");
+    let (key, signature) = signed_with(&dave, message.as_bytes());
+    let signed = [&transfer[..], &[key, signature]].concat();
+
+    assert!(refused(&signed, "transfer_with_authorization", 1_000).contains("not valid yet"));
+    assert!(refused(&signed, "transfer_with_authorization", 9_000).contains("lapsed"));
+    assert_eq!(at(relayer, "authorization_state", &[address(dave.public().address()), nonce.clone()], 2_000).result.unwrap(), [TxCallArgumentType::Bool(false)]);
+    let sent = at(relayer, "transfer_with_authorization", &signed, 2_000);
+    assert!(sent.result.is_ok(), "{:?}", sent.result);
+    assert_eq!(sent.events.iter().map(|event| event.name.as_str()).collect::<Vec<_>>(), ["AuthorizationUsed", "Transfer"]);
+    assert_eq!(at(relayer, "balance_of", &[address(bob)], 2_000).result.unwrap(), [amount(350)]);
+    assert_eq!(at(relayer, "authorization_state", &[address(dave.public().address()), nonce], 2_000).result.unwrap(), [TxCallArgumentType::Bool(true)]);
+    assert!(refused(&signed, "transfer_with_authorization", 3_000).contains("was used"));
+
+    // A contract signs nothing.
+    let by_contract = [address(token), address(bob), amount(1), time(0), time(9_000), TxCallArgumentType::Bytes(vec![8; 32]), TxCallArgumentType::Bytes(vec![0; 32]), TxCallArgumentType::Bytes(vec![0; 64])];
+    assert!(refused(&by_contract, "transfer_with_authorization", 2_000).contains("only a key's account signs"));
+}
+
+#[cfg(all(feature = "sha256", feature = "ed25519", feature = "secp256k1"))]
+#[test]
+fn the_lua_token_takes_signed_permits_and_transfers() {
+    takes_signed_authorizations(Code::Lua(include_str!("../../contracts/lua/token.lua").to_string()));
+}
+
+#[cfg(all(feature = "sha256", feature = "ed25519", feature = "secp256k1"))]
+#[test]
+fn the_rust_token_takes_signed_permits_and_transfers() {
+    takes_signed_authorizations(Code::Wasm(example("token")));
+}
+
 #[cfg(all(feature = "sha256", feature = "keccak256"))]
 #[test]
 fn the_swap_contract_pays_the_recipient_with_the_secret_or_the_locker_after_the_deadline() {

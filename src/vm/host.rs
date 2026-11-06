@@ -653,6 +653,10 @@ impl Host {
             return Outcome::failed(VmError::Runtime("this chain runs no EVM".to_string()));
         }
 
+        if !self.context.block.vm.engines.contains(crate::structs::code::Engine::Evm) {
+            return Outcome::failed(VmError::EngineOff(crate::structs::code::Engine::Evm));
+        }
+
         if self.stack.len() >= self.limits().call_depth as usize {
             return Outcome::failed(VmError::TooDeep);
         }
@@ -680,7 +684,7 @@ impl Host {
             stack: self.stack.clone(),
         };
         let action = EvmAction::Call { to: *to, value, input: input.to_vec() };
-        let ran = match evm::run(&layer, &me, nonce, action, &[], fuel / fuel_per_gas, self.memory as u64, evm_block, Some(&bridge)) {
+        let ran = match evm::run(&layer, &me, nonce, action, &[], &[], fuel / fuel_per_gas, self.memory as u64, evm_block, Some(&bridge)) {
             Ok(ran) => ran,
             Err(err) => return Outcome::failed(self.fail(err)),
         };
@@ -1083,6 +1087,12 @@ pub(super) fn run(
     limits: Limits,
 ) -> Outcome {
     let vm = host.vm.clone();
+
+    // A contract of an engine the chain turned off is frozen.
+    if !host.context.block.vm.engines.contains(record.engine) {
+        return Outcome::failed(VmError::EngineOff(record.engine));
+    }
+
     let Some(engine) = vm.engine(record.engine) else {
         return Outcome::failed(VmError::EngineMissing(record.engine));
     };

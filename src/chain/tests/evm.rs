@@ -547,6 +547,8 @@ fn a_chain_without_the_evm_refuses_evm_transactions() {
     let db = Arc::new(MemoryDb::default());
     let genesis = Genesis {
         engines: Engine::compiled().into_iter().filter(|engine| *engine != Engine::Evm).collect(),
+        // The deployment proxy is EVM code: a chain without the EVM has none.
+        preinstalls: Vec::new(),
         ..super::genesis()
     };
     let mut chain = Chain::open(db, &genesis).unwrap();
@@ -741,6 +743,7 @@ fn ethereum(chain: &Chain, secret: &[u8; 32], kind: crate::crypto::ethereum::Eth
         },
         signature: [0; 64],
         parity: 0,
+        authorizations: Vec::new(),
     };
 
     SignedTx::from_ethereum(unsigned.signed(secret).encode()).unwrap()
@@ -780,6 +783,107 @@ fn ethereum_signed_transactions_deploy_call_and_pay_as_on_ethereum() {
     let pay = ethereum(&chain, &secret, EthereumKind::DynamicFee, 3, Some(other), 1_000, Vec::new());
     assert!(advance(&mut chain, vec![pay])[0].result.is_ok());
     assert_eq!(balance(&chain, &Address::Secp256k1(other)), u256::new(1_000));
+}
+
+/// An EIP-7702 transaction, signed by one key, carrying authorizations other keys signed.
+#[cfg(feature = "secp256k1")]
+fn set_code(chain: &Chain, secret: &[u8; 32], nonce: u64, to: [u8; 20], input: Vec<u8>, authorizations: Vec<crate::crypto::ethereum::Authorization>) -> SignedTx {
+    use crate::crypto::ethereum::{EthereumKind, EthereumTx};
+
+    let unsigned = EthereumTx {
+        kind: EthereumKind::SetCode,
+        chain_id: evm::chain_id(&chain.genesis()),
+        nonce,
+        max_price: u256::ZERO,
+        tip: u256::ZERO,
+        gas_limit: 3_000_000,
+        to: Some(to),
+        value: u256::ZERO,
+        input,
+        access_list: Vec::new(),
+        signature: [0; 64],
+        parity: 0,
+        authorizations,
+    };
+
+    SignedTx::from_ethereum(unsigned.signed(secret).encode()).unwrap()
+}
+
+#[cfg(feature = "secp256k1")]
+fn authorize(chain: &Chain, secret: &[u8; 32], to: [u8; 20], nonce: u64) -> crate::crypto::ethereum::Authorization {
+    crate::crypto::ethereum::Authorization { chain_id: u256::from(evm::chain_id(&chain.genesis())), address: to, nonce, parity: 0, signature: [0; 64] }.signed(secret)
+}
+
+#[cfg(feature = "secp256k1")]
+fn key_of(secret: [u8; 32]) -> Keypair {
+    Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1(secret))
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn an_account_that_delegates_by_eip_7702_runs_its_delegates_code_on_its_own_storage() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &genesis()).unwrap();
+    let counter = deploy(&mut chain, 5);
+    let Address::Evm(target) = counter else { unreachable!() };
+    let (alice_secret, bob_secret) = ([0x51; 32], [0x52; 32]);
+    let alice = ethereum_account(&mut chain, alice_secret);
+    ethereum_account(&mut chain, bob_secret);
+    let Address::Secp256k1(alice_bytes) = alice else { unreachable!() };
+
+    // Bob sends it: Alice's signature lets her account run the counter's code, and his call bumps
+    // her own count, which starts at nothing, not the counter's 5.
+    let signed = authorize(&chain, &alice_secret, target, nonce(&chain, &key_of(alice_secret)));
+    let tx = set_code(&chain, &bob_secret, nonce(&chain, &key_of(bob_secret)), alice_bytes, calldata("bump(uint256)", &[word(3)]), vec![signed]);
+    let receipt = advance(&mut chain, vec![tx]).remove(0);
+
+    assert!(receipt.result.is_ok(), "{receipt:?}");
+    assert_eq!(evm::delegated_to(&chain.state(), alice_bytes).unwrap(), Some(target));
+    assert_eq!(count(&mut chain, alice), word(3), "her own storage");
+    assert_eq!(count(&mut chain, counter), word(5), "the counter's untouched");
+    assert_eq!(nonce(&chain, &key_of(alice_secret)), 1, "her authorization took her nonce");
+
+    // She is still an account: she sends a plain transfer, signed natively.
+    let pay = SignedTx::sign(Tx::Transfer { from: alice, to: Address::Secp256k1([9; 20]), amount: Amount::U128(10) }, 1, FeeOffer::NONE, &key_of(alice_secret), &chain.genesis());
+    assert!(advance(&mut chain, vec![pay])[0].result.is_ok());
+}
+
+#[cfg(feature = "secp256k1")]
+#[test]
+fn an_authorization_stands_when_the_call_reverts_and_its_own_sender_bumps_its_nonce_twice() {
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = Chain::open(db, &genesis()).unwrap();
+    let counter = deploy(&mut chain, 5);
+    let Address::Evm(target) = counter else { unreachable!() };
+    let secret = [0x53; 32];
+    let account = ethereum_account(&mut chain, secret);
+    let Address::Secp256k1(bytes) = account else { unreachable!() };
+
+    // Her own transaction, at nonce 0, so her authorization is for 1, as Ethereum has it; the call
+    // adds nothing and reverts, but the delegation and both nonces stand.
+    let signed = authorize(&chain, &secret, target, 1);
+    let tx = set_code(&chain, &secret, 0, bytes, calldata("bump(uint256)", &[word(0)]), vec![signed]);
+    let receipt = advance(&mut chain, vec![tx]).remove(0);
+
+    assert_eq!(receipt.result, Err(Failure::Contract(VmError::Runtime("reverted: nothing to add".to_string()))));
+    assert_eq!(evm::delegated_to(&chain.state(), bytes).unwrap(), Some(target), "kept through the revert");
+    assert_eq!(nonce(&chain, &key_of(secret)), 2, "the transaction's and the authorization's");
+
+    // An authorization for the address zero clears it; one for a used nonce, or another chain, is
+    // skipped and leaves things as they are.
+    let sponsor = [0x54; 32];
+    ethereum_account(&mut chain, sponsor);
+    let stale = authorize(&chain, &secret, [7; 20], 0);
+    let elsewhere = crate::crypto::ethereum::Authorization { chain_id: u256::from(1u64), address: [7; 20], nonce: 2, parity: 0, signature: [0; 64] }.signed(&secret);
+    let skipped = set_code(&chain, &sponsor, nonce(&chain, &key_of(sponsor)), bytes, calldata("count()", &[]), vec![stale, elsewhere]);
+    assert!(advance(&mut chain, vec![skipped])[0].result.is_ok());
+    assert_eq!(evm::delegated_to(&chain.state(), bytes).unwrap(), Some(target), "neither took");
+    assert_eq!(nonce(&chain, &key_of(secret)), 2);
+
+    let cleared = set_code(&chain, &sponsor, nonce(&chain, &key_of(sponsor)), bytes, Vec::new(), vec![authorize(&chain, &secret, [0; 20], 2)]);
+    assert!(advance(&mut chain, vec![cleared])[0].result.is_ok());
+    assert_eq!(evm::delegation(&chain.state(), bytes).unwrap(), None, "cleared");
+    assert_eq!(nonce(&chain, &key_of(secret)), 3);
 }
 
 #[test]

@@ -23,15 +23,18 @@ pub enum EthereumKind {
     AccessList,
     #[document(summary = "EIP-1559's, type 2: a most per gas, a priority fee and an access list.")]
     DynamicFee,
+    #[document(summary = "EIP-7702's, type 4: as type 2, with authorizations that set accounts' code to a delegation, and never a create.")]
+    SetCode,
 }
 
 impl EthereumKind {
-    #[document(parent = "EthereumKind", summary = "The type as JSON-RPC names it: 0, 1 or 2.")]
+    #[document(parent = "EthereumKind", summary = "The type as JSON-RPC names it: 0, 1, 2 or 4.")]
     pub fn number(self) -> u8 {
         match self {
             EthereumKind::Legacy => 0,
             EthereumKind::AccessList => 1,
             EthereumKind::DynamicFee => 2,
+            EthereumKind::SetCode => 4,
         }
     }
 }
@@ -43,6 +46,58 @@ pub struct AccessItem {
     pub address: [u8; 20],
     #[document(summary = "Its slots.")]
     pub slots: Vec<[u8; 32]>,
+}
+
+#[document(
+    summary = "One of an EIP-7702 transaction's authorizations: an account's owner, by its signature, letting its account run the code at an address as its own, from its nonce on. The address zero clears a delegation.",
+    category = "Ethereum",
+    see_also = "EthereumTx::authorizations",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Authorization {
+    #[document(summary = "The chain it is for, or 0 for any chain.")]
+    pub chain_id: u256,
+    #[document(summary = "Whose code the account runs.")]
+    pub address: [u8; 20],
+    #[document(summary = "The account's nonce it is good for.")]
+    pub nonce: u64,
+    #[document(summary = "The parity that recovers the key: 0 or 1.")]
+    pub parity: u8,
+    #[document(summary = "r and s.")]
+    pub signature: [u8; 64],
+}
+
+#[document(summary = "The magic byte an EIP-7702 authorization is signed under: keccak256(0x05 || rlp([chain_id, address, nonce])).", category = "Ethereum", see_also = "Authorization")]
+pub const AUTHORIZATION_MAGIC: u8 = 0x05;
+
+impl Authorization {
+    #[document(parent = "Authorization", summary = "What its owner signs: 0x05 and the RLP list of its chain id, address and nonce.")]
+    pub fn signing_data(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+        put_number(&mut body, self.chain_id);
+        put_bytes(&mut body, &self.address);
+        put_number(&mut body, u256::from(self.nonce));
+        let mut out = vec![AUTHORIZATION_MAGIC];
+        put_list(&mut out, &body);
+
+        out
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[document(parent = "Authorization", summary = "The compressed key that signed it, its account's owner: None for a signature that recovers none, or has a high s, which Ethereum refuses too.")]
+    pub fn signer(&self) -> Option<[u8; 33]> {
+        recover_strict(&keccak(&self.signing_data()), &self.signature, self.parity)
+    }
+
+    #[cfg(feature = "secp256k1")]
+    #[document(parent = "Authorization", summary = "Signs it with a secp256k1 key, for tests and tools.")]
+    pub fn signed(mut self, secret: &[u8; 32]) -> Authorization {
+        let (signature, parity) = sign_recoverable(secret, &keccak(&self.signing_data()));
+        self.signature = signature;
+        self.parity = parity;
+
+        self
+    }
 }
 
 #[document(
@@ -76,6 +131,8 @@ pub struct EthereumTx {
     pub signature: [u8; 64],
     #[document(summary = "The parity that recovers the key: 0 or 1.")]
     pub parity: u8,
+    #[document(summary = "An EIP-7702 transaction's authorizations, at least one; none for the other types.")]
+    pub authorizations: Vec<Authorization>,
 }
 
 /// An RLP item, as read: bytes, or a list of items.
@@ -223,8 +280,53 @@ fn access_list(item: &Item) -> Result<Vec<AccessItem>, String> {
         .collect()
 }
 
+/// An EIP-7702 transaction's authorization list: at least one, each its chain id, address, nonce,
+/// parity, r and s.
+fn authorization_list(item: &Item) -> Result<Vec<Authorization>, String> {
+    let Item::List(entries) = item else {
+        return Err("the authorization list is not a list".to_string());
+    };
+
+    if entries.is_empty() {
+        return Err("an EIP-7702 transaction has at least one authorization".to_string());
+    }
+
+    entries
+        .iter()
+        .map(|entry| match entry {
+            Item::List(fields) => match fields.as_slice() {
+                [chain, address, nonce, parity, r, s] => Ok(Authorization {
+                    chain_id: number(chain, "an authorization's chain id")?,
+                    address: bytes(address, "an authorization's address")?.try_into().map_err(|_| "an authorization's address is not 20 bytes")?,
+                    nonce: small(nonce, "an authorization's nonce")?,
+                    parity: u8::try_from(small(parity, "an authorization's parity")?).map_err(|_| "an authorization's parity is 0 or 1")?,
+                    signature: [word(r, "an authorization's r")?, word(s, "an authorization's s")?].concat().try_into().expect("64 bytes"),
+                }),
+                _ => Err("an authorization is its chain id, address, nonce, parity, r and s".to_string()),
+            },
+            Item::Bytes(_) => Err("an authorization is a list".to_string()),
+        })
+        .collect()
+}
+
+/// A call's target: an EIP-7702 transaction cannot create.
+fn call_target(item: &Item) -> Result<Option<[u8; 20]>, String> {
+    match to_field(item)? {
+        Some(to) => Ok(Some(to)),
+        None => Err("an EIP-7702 transaction calls an address: it cannot create a contract".to_string()),
+    }
+}
+
+/// What a type this chain does not take is refused with, by its first byte.
+fn refused_type(first: Option<&u8>) -> String {
+    match first {
+        Some(3) => "a blob transaction, EIP-4844's type 3: this chain keeps no blob data, so it takes none".to_string(),
+        _ => "not an Ethereum transaction this chain takes: legacy, or of type 1, 2 or 4".to_string(),
+    }
+}
+
 #[document(
-    summary = "Reads a signed Ethereum transaction from its bytes, as eth_sendRawTransaction takes them: a legacy one, which must carry its chain id as EIP-155 says, or a type 1 or 2 one. Checks only that it reads; verify checks its signature.",
+    summary = "Reads a signed Ethereum transaction from its bytes, as eth_sendRawTransaction takes them: a legacy one, which must carry its chain id as EIP-155 says, or a type 1, 2 or 4 one; a blob transaction, type 3, is refused, as the chain keeps no blob data. Checks only that it reads; verify checks its signature.",
     category = "Ethereum",
     returns = "The transaction, or why its bytes are not one.",
 )]
@@ -236,8 +338,9 @@ pub fn decode(raw: &[u8]) -> Result<EthereumTx, String> {
     let (kind, body) = match raw.first() {
         Some(1) => (EthereumKind::AccessList, &raw[1..]),
         Some(2) => (EthereumKind::DynamicFee, &raw[1..]),
+        Some(4) => (EthereumKind::SetCode, &raw[1..]),
         Some(first) if *first >= 0xc0 => (EthereumKind::Legacy, raw),
-        _ => return Err("not an Ethereum transaction this chain takes: legacy, or of type 1 or 2".to_string()),
+        first => return Err(refused_type(first)),
     };
     let (Item::List(fields), []) = item(body)? else {
         return Err("an Ethereum transaction is one RLP list".to_string());
@@ -267,6 +370,7 @@ pub fn decode(raw: &[u8]) -> Result<EthereumTx, String> {
                 access_list: Vec::new(),
                 signature: signature(r, s)?,
                 parity: ((v - 35) % 2) as u8,
+                authorizations: Vec::new(),
             })
         }
         (EthereumKind::AccessList, [chain, nonce, price, gas, to, value, input, list, parity, r, s]) => {
@@ -285,6 +389,7 @@ pub fn decode(raw: &[u8]) -> Result<EthereumTx, String> {
                 access_list: access_list(list)?,
                 signature: signature(r, s)?,
                 parity: u8::try_from(small(parity, "the parity")?).map_err(|_| "the parity is 0 or 1")?,
+                authorizations: Vec::new(),
             })
         }
         (EthereumKind::DynamicFee, [chain, nonce, tip, max, gas, to, value, input, list, parity, r, s]) => Ok(EthereumTx {
@@ -300,13 +405,29 @@ pub fn decode(raw: &[u8]) -> Result<EthereumTx, String> {
             access_list: access_list(list)?,
             signature: signature(r, s)?,
             parity: u8::try_from(small(parity, "the parity")?).map_err(|_| "the parity is 0 or 1")?,
+            authorizations: Vec::new(),
+        }),
+        (EthereumKind::SetCode, [chain, nonce, tip, max, gas, to, value, input, list, authorizations, parity, r, s]) => Ok(EthereumTx {
+            kind,
+            chain_id: small(chain, "the chain id")?,
+            nonce: small(nonce, "the nonce")?,
+            max_price: number(max, "the max fee per gas")?,
+            tip: number(tip, "the max priority fee per gas")?,
+            gas_limit: small(gas, "the gas limit")?,
+            to: call_target(to)?,
+            value: number(value, "the value")?,
+            input: bytes(input, "the input")?.to_vec(),
+            access_list: access_list(list)?,
+            signature: signature(r, s)?,
+            parity: u8::try_from(small(parity, "the parity")?).map_err(|_| "the parity is 0 or 1")?,
+            authorizations: authorization_list(authorizations)?,
         }),
         _ => Err("an Ethereum transaction with the wrong number of fields for its type".to_string()),
     }
 }
 
 #[document(
-    summary = "Reads an Ethereum transaction before it is signed, as a wallet hands it to a hardware wallet to sign: a legacy one with EIP-155's chain id and two zeros in place of its signature, or a type 1 or 2 one without its signature. Its signing hash is the keccak256 of exactly these bytes: bytes that would encode another way are refused, so what is shown is what is signed.",
+    summary = "Reads an Ethereum transaction before it is signed, as a wallet hands it to a hardware wallet to sign: a legacy one with EIP-155's chain id and two zeros in place of its signature, or a type 1, 2 or 4 one without its signature. Its signing hash is the keccak256 of exactly these bytes: bytes that would encode another way are refused, so what is shown is what is signed.",
     category = "Ethereum",
     returns = "The transaction, its signature zero, or why its bytes are not one.",
     see_also = "decode, EthereumTx::signing_hash",
@@ -319,8 +440,9 @@ pub fn decode_unsigned(raw: &[u8]) -> Result<EthereumTx, String> {
     let (kind, body) = match raw.first() {
         Some(1) => (EthereumKind::AccessList, &raw[1..]),
         Some(2) => (EthereumKind::DynamicFee, &raw[1..]),
+        Some(4) => (EthereumKind::SetCode, &raw[1..]),
         Some(first) if *first >= 0xc0 => (EthereumKind::Legacy, raw),
-        _ => return Err("not an Ethereum transaction: legacy, or of type 1 or 2".to_string()),
+        first => return Err(refused_type(first)),
     };
     let (Item::List(fields), []) = item(body)? else {
         return Err("an Ethereum transaction is one RLP list".to_string());
@@ -338,6 +460,7 @@ pub fn decode_unsigned(raw: &[u8]) -> Result<EthereumTx, String> {
         access_list,
         signature: [0; 64],
         parity: 0,
+        authorizations: Vec::new(),
     };
     let tx = match (kind, fields.as_slice()) {
         (EthereumKind::Legacy, [nonce, price, gas, to, value, input, chain, _, _]) => {
@@ -364,6 +487,20 @@ pub fn decode_unsigned(raw: &[u8]) -> Result<EthereumTx, String> {
             bytes(input, "the input")?,
             access_list(list)?,
         ),
+        (EthereumKind::SetCode, [chain, nonce, tip, max, gas, to, value, input, list, authorizations]) => EthereumTx {
+            authorizations: authorization_list(authorizations)?,
+            ..unsigned(
+                small(chain, "the chain id")?,
+                small(nonce, "the nonce")?,
+                number(max, "the max fee per gas")?,
+                number(tip, "the max priority fee per gas")?,
+                small(gas, "the gas limit")?,
+                call_target(to)?,
+                number(value, "the value")?,
+                bytes(input, "the input")?,
+                access_list(list)?,
+            )
+        },
         _ => return Err("an unsigned Ethereum transaction with the wrong number of fields for its type".to_string()),
     };
 
@@ -455,12 +592,12 @@ impl EthereumTx {
                     }
                 }
             }
-            EthereumKind::AccessList | EthereumKind::DynamicFee => {
+            EthereumKind::AccessList | EthereumKind::DynamicFee | EthereumKind::SetCode => {
                 number(&mut body, self.chain_id);
                 number(&mut body, self.nonce);
 
                 match self.kind {
-                    EthereumKind::DynamicFee => {
+                    EthereumKind::DynamicFee | EthereumKind::SetCode => {
                         put_number(&mut body, self.tip);
                         put_number(&mut body, self.max_price);
                     }
@@ -472,6 +609,23 @@ impl EthereumTx {
                 put_number(&mut body, self.value);
                 put_bytes(&mut body, &self.input);
                 list(&mut body);
+
+                if self.kind == EthereumKind::SetCode {
+                    let mut entries = Vec::new();
+
+                    for authorization in &self.authorizations {
+                        let mut fields = Vec::new();
+                        put_number(&mut fields, authorization.chain_id);
+                        put_bytes(&mut fields, &authorization.address);
+                        put_number(&mut fields, u256::from(authorization.nonce));
+                        put_number(&mut fields, u256::from(authorization.parity));
+                        put_number(&mut fields, u256::from_be_bytes(authorization.signature[..32].try_into().expect("32")));
+                        put_number(&mut fields, u256::from_be_bytes(authorization.signature[32..].try_into().expect("32")));
+                        put_list(&mut entries, &fields);
+                    }
+
+                    put_list(&mut body, &entries);
+                }
 
                 if signed {
                     number(&mut body, u64::from(self.parity));

@@ -27,6 +27,7 @@ const TOKEN_FUNCTIONS: &[u8] = b"change:token-functions";
 const EVM_SPEC: &[u8] = b"change:evm-spec";
 const DEX: &[u8] = b"change:dex";
 const ANCHORING: &[u8] = b"change:anchoring";
+const ENGINES: &[u8] = b"change:engines";
 const COLLECTIONS: &[u8] = b"change:collections";
 const FEDERATION: &[u8] = crate::registry::federation::FEDERATION_KEY;
 const DIRECTORY: &[u8] = crate::registry::directory::DIRECTORY_KEY;
@@ -169,6 +170,14 @@ struct TokenFunctions {
 }
 
 impl Hashable for TokenFunctions {}
+
+/// The engines a change decided, as a state value.
+#[derive(Clone, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+struct Engines {
+    engines: Vec<crate::structs::code::Engine>,
+}
+
+impl Hashable for Engines {}
 
 #[document(
     summary = "One account's vote on a change.",
@@ -379,6 +388,8 @@ pub struct GenesisSettings {
     pub reward: crate::params::Reward,
     #[document(summary = "The limits, as a change of limits carries them.")]
     pub limits: crate::params::BlockLimits,
+    #[document(summary = "The engines contracts run on.")]
+    pub engines: Vec<crate::structs::code::Engine>,
 }
 
 /// How many changes were rejected, as a state value.
@@ -480,6 +491,11 @@ impl<'a> Changes<'a> {
     #[document(parent = "Changes", summary = "Anchoring's settings decided last, or None while governance never decided any, when genesis's stand.")]
     pub fn anchoring(&self) -> Result<Option<crate::params::anchoring::AnchorSettings>, DbError> {
         self.state.get_value(Column::Validators, ANCHORING)
+    }
+
+    #[document(parent = "Changes", summary = "The engines decided last, or None while governance never decided any, when genesis's stand.")]
+    pub fn engines(&self) -> Result<Option<Vec<crate::structs::code::Engine>>, DbError> {
+        Ok(self.state.get_value::<Engines>(Column::Validators, ENGINES)?.map(|decided| decided.engines))
     }
 
     #[document(parent = "Changes", summary = "The DEX's settings decided last, or None while governance never decided any, when genesis's stand.")]
@@ -752,6 +768,7 @@ impl<'a> Changes<'a> {
             self.upgrade()?.map(Change::Upgrade),
             Some(Change::Governance(governance.clone())),
             Some(Change::Locks(self.locks()?)),
+            Some(Change::Engines(self.engines()?.unwrap_or_else(|| genesis.engines.clone()))),
         ];
 
         Ok(settings.into_iter().flatten().collect())
@@ -826,6 +843,7 @@ impl<'a> Changes<'a> {
             Change::TokenFunctions(functions) => self.token_functions()?.as_ref() == Some(functions),
             Change::EvmSpec { spec, .. } => self.evm_specs()?.eras.last().map(|(_, last)| last) == Some(spec),
             Change::Dex(dex) => self.dex()?.as_ref() == Some(dex),
+            Change::Engines(engines) => self.engines()?.as_ref() == Some(engines),
             Change::Anchoring(settings) => self.anchoring()?.as_ref() == Some(settings),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
@@ -908,6 +926,13 @@ impl<'a> Changes<'a> {
             }
             Change::Dex(dex) => {
                 self.state.put_value(Column::Validators, DEX.to_vec(), &dex);
+
+                decided.consensus
+            }
+            // Read for each block from its parent's state: contracts of an engine left out are
+            // frozen from the next block.
+            Change::Engines(engines) => {
+                self.state.put_value(Column::Validators, ENGINES.to_vec(), &Engines { engines });
 
                 decided.consensus
             }

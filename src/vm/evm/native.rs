@@ -216,7 +216,7 @@ impl NativeAt<'_> {
             }
         }
 
-        apply(&seen, context.journal().evm_state(), self.caller, &self.sender)?;
+        apply(&seen, context.journal().evm_state(), self.caller, None, &self.sender)?;
         let layer = Arc::new(State::new(seen));
         let caller = account_of(&layer, inputs.caller.into_array())?;
         let mut native = Vec::with_capacity(values.len());

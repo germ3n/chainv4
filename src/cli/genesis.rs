@@ -393,8 +393,10 @@ mod tests {
     fn a_genesis_from_before_max_block_bytes_keeps_its_id() {
         let mut genesis = dev(DevChain::Authority);
         genesis.max_block_bytes = None;
-        // The EVM, names and collections came later, and joined the dev chains then.
+        // The EVM, names and collections came later, and joined the dev chains then; preinstalls
+        // with the EVM.
         genesis.engines.retain(|engine| *engine != Engine::Evm);
+        genesis.preinstalls.clear();
         genesis.names = None;
         genesis.collections = None;
         genesis.federation = None;
@@ -871,6 +873,35 @@ mod tests {
         assert_eq!(from_json(&without).unwrap().block().id(), plain.block().id());
     }
 
+    #[cfg(feature = "evm")]
+    #[test]
+    fn preinstalls_round_trip_a_file_without_them_starts_with_none_and_bad_ones_are_refused() {
+        use crate::structs::code::Engine;
+
+        let genesis = dev(DevChain::Authority);
+        assert_eq!(genesis.preinstalls, ["deployment_proxy"], "a dev chain with the EVM has the proxy");
+        let value = to_json(&genesis);
+        assert_eq!(value["preinstalls"], json!(["deployment_proxy"]));
+        assert_eq!(from_json(&value).unwrap(), genesis);
+
+        // A file from before the field starts with none, as an EVM chain before the proxy did.
+        let mut without = value.clone();
+        without.as_object_mut().unwrap().remove("preinstalls");
+        let old = from_json(&without).unwrap();
+        assert!(old.preinstalls.is_empty());
+        assert_ne!(old.block().id(), genesis.block().id(), "the proxy is in the first state");
+
+        for (preinstalls, engines, why) in [
+            (vec!["multicall3"], Engine::compiled(), "names only deployment_proxy"),
+            (vec!["deployment_proxy", "deployment_proxy"], Engine::compiled(), "each once"),
+            (vec!["deployment_proxy"], vec![Engine::Lua], "must include the EVM"),
+        ] {
+            let bad = crate::chain::Genesis { preinstalls: preinstalls.into_iter().map(str::to_string).collect(), engines, ..genesis.clone() };
+            let refused = crate::chain::Chain::open(std::sync::Arc::new(crate::db::MemoryDb::default()), &bad).err().map(|err| err.to_string());
+            assert!(refused.as_deref().is_some_and(|refused| refused.contains(why)), "{:?}: {refused:?}", bad.preinstalls);
+        }
+    }
+
     #[test]
     fn every_change_round_trips_through_its_json_and_bad_ones_are_refused() {
         use crate::governance::Change;
@@ -891,6 +922,8 @@ mod tests {
             Change::Upgrade(crate::structs::version::Upgrade { least: "0.2.0".parse().unwrap(), from: 1_000 }),
             Change::Name("chainv4 testnet".to_string()),
             Change::Locks(vec!["anchoring.enforce".to_string(), "reward".to_string()]),
+            Change::Engines(vec![crate::structs::code::Engine::Lua, crate::structs::code::Engine::Evm]),
+            Change::Engines(Vec::new()),
         ];
 
         if let Some(finality) = FinalityConfig::dev(crate::consensus::DevAuthority::dev_keypair().public()) {

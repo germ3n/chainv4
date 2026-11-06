@@ -37,7 +37,8 @@ pub use native::{Bridge, NATIVE_PRECOMPILE, abi_value, native_from_abi, native_t
 use {
     crate::crypto::ethereum::AccessItem,
     crate::db::{Column, DbError, State, address_key},
-    revm::context_interface::transaction::{AccessList, AccessListItem},
+    revm::context_interface::either::Either,
+    revm::context_interface::transaction::{AccessList, AccessListItem, Authorization, RecoveredAuthority, RecoveredAuthorization},
     crate::registry::Accounts,
     crate::registry::contracts::ContractRecord,
     crate::structs::address::Address,
@@ -65,6 +66,9 @@ pub const LOG: &str = crate::structs::event::EVM_LOG;
 
 /// Where an alias is written down, in the storage column: a prefix no address key starts with.
 const ALIAS: &[u8] = b"evm alias";
+/// Where an account's EIP-7702 delegation is kept, by its 20 bytes: the code its authorization set,
+/// 0xef0100 and the address it runs. The account stays the account it is, with no contract record.
+const DELEGATION: &[u8] = b"evm delegation";
 
 #[document(
     summary = "The 20 bytes an address goes by inside the EVM: a secp256k1 account's or an EVM contract's own, and for any other account, the last 20 bytes of the keccak256 of its key, as stored.",
@@ -88,6 +92,66 @@ pub use crate::crypto::ethereum::chain_id;
 
 fn alias_key(alias: &[u8; 20]) -> Vec<u8> {
     [ALIAS, alias].concat()
+}
+
+fn delegation_key(bytes: &[u8; 20]) -> Vec<u8> {
+    [DELEGATION, bytes].concat()
+}
+
+#[document(
+    summary = "The code an account's EIP-7702 delegation set: 0xef0100 and the address whose code it runs as its own. None for an account that never delegated, or cleared it.",
+    category = "VM",
+    see_also = "delegated_to, Authorization",
+)]
+pub fn delegation(state: &State, bytes: [u8; 20]) -> Result<Option<Vec<u8>>, DbError> {
+    state.get(Column::Storage, &delegation_key(&bytes))
+}
+
+#[document(
+    summary = "The address an account delegates to by EIP-7702: whose code runs when it is called. None for one that does not.",
+    category = "VM",
+    see_also = "delegation",
+)]
+pub fn delegated_to(state: &State, bytes: [u8; 20]) -> Result<Option<[u8; 20]>, DbError> {
+    Ok(delegation(state, bytes)?.and_then(|code| code.strip_prefix(&[0xef, 0x01, 0x00][..]).and_then(|target| target.try_into().ok())))
+}
+
+#[document(
+    summary = "What an EVM run's authorizations left an account with, whether the run succeeded or not, as Ethereum keeps them: its delegation, 0xef0100 and an address, or None once cleared, and its nonce.",
+    category = "VM",
+    see_also = "EvmRan::delegated, keep_delegated",
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Delegated {
+    #[document(summary = "The account's 20 bytes.")]
+    pub account: [u8; 20],
+    #[document(summary = "Its code: 0xef0100 and the address it runs, or None.")]
+    pub code: Option<Vec<u8>>,
+    #[document(summary = "How many times its authorizations bumped its nonce, past the transaction's own bump of its sender's.")]
+    pub bumped: u64,
+}
+
+#[document(
+    summary = "Writes what authorizations left accounts with into a state: each delegation set or cleared, and the nonce it bumped. What a failed EVM transaction keeps of its run, as its fee and nonce are kept.",
+    category = "VM",
+    see_also = "Delegated",
+)]
+pub fn keep_delegated(state: &State, delegated: &[Delegated]) -> Result<(), DbError> {
+    let accounts = Accounts::new(state);
+
+    for kept in delegated {
+        match &kept.code {
+            Some(code) => state.put(Column::Storage, delegation_key(&kept.account), code.clone()),
+            None => state.delete(Column::Storage, delegation_key(&kept.account)),
+        }
+
+        let address = account_of(state, kept.account)?;
+        let mut stored = accounts.get(&address)?;
+        stored.nonce = stored.nonce.saturating_add(kept.bumped);
+        accounts.set(&address, &stored);
+    }
+
+    Ok(())
 }
 
 #[document(
@@ -189,7 +253,8 @@ impl Database for ChainDb<'_> {
                 .get_value::<ContractRecord>(Column::Contracts, &address_key(&address))
                 .map_err(Failing)?
                 .map(|record| Bytecode::new_raw(Bytes::from(record.code))),
-            _ => None,
+            // An account that delegated by EIP-7702 shows the EVM its delegation as its code.
+            _ => delegation(self.state, bytes).map_err(Failing)?.map(|code| Bytecode::new_raw(Bytes::from(code))),
         };
 
         if account.balance == u256::ZERO && nonce == 0 && code.is_none() {
@@ -297,6 +362,8 @@ pub struct EvmRan {
     pub trace: Trace,
     #[document(summary = "The tokens the native calls it made asked to be asked again with tokens.refresh, of those that stand; empty when it failed.")]
     pub refresh_tokens: Vec<Address>,
+    #[document(summary = "What its EIP-7702 authorizations left each account they named with, written already when it succeeded; kept by the chain when it failed, as Ethereum keeps them.")]
+    pub delegated: Vec<Delegated>,
 }
 
 #[document(
@@ -335,6 +402,7 @@ pub fn run(
     nonce: u64,
     action: EvmAction,
     access_list: &[AccessItem],
+    authorizations: &[crate::crypto::ethereum::Authorization],
     gas_limit: u64,
     memory: u64,
     block: EvmBlock,
@@ -342,6 +410,38 @@ pub fn run(
 ) -> Result<EvmRan, DbError> {
     register_alias(state, sender);
     let caller = evm_alias(sender);
+    // Each authorization's account, recovered here as Ethereum recovers it: one whose signature
+    // recovers no key, or a high s, is skipped by revm as Ethereum skips it.
+    let authorized: Vec<RecoveredAuthorization> = authorizations
+        .iter()
+        .map(|authorization| {
+            let inner = Authorization {
+                chain_id: to_word(authorization.chain_id),
+                address: Word::from(authorization.address),
+                nonce: authorization.nonce,
+            };
+            let authority = authorization
+                .signer()
+                .and_then(|key| crate::crypto::secp256k1::address(&key))
+                .map_or(RecoveredAuthority::Invalid, |bytes| RecoveredAuthority::Valid(Word::from(bytes)));
+
+            RecoveredAuthorization::new_unchecked(inner, authority)
+        })
+        .collect();
+    let mut authorities: Vec<[u8; 20]> = authorized.iter().filter_map(|authorization| authorization.authority()).map(|bytes| bytes.into_array()).collect();
+    authorities.sort();
+    authorities.dedup();
+    // Each authority's nonce as revm will find it: the caller's as shown to it, bumped once by the
+    // transaction itself, and any other's as the state holds it.
+    let mut before = Vec::new();
+
+    for bytes in &authorities {
+        let start = match *bytes == caller {
+            true => nonce.saturating_add(1),
+            false => Accounts::new(state).get(&account_of(state, *bytes)?)?.nonce,
+        };
+        before.push(start);
+    }
     let (kind, value, input) = match action {
         EvmAction::Create { init, value } => (TxKind::Create, to_word(value), init),
         EvmAction::Call { to, value, input } => (TxKind::Call(Word::from(evm_alias(&to))), to_word(value), input),
@@ -372,8 +472,10 @@ pub fn run(
         ..Default::default()
     };
     let tx = TxEnv {
-        // EIP-2930's type, for one with an access list; the fee is the chain's, so no other.
-        tx_type: u8::from(!access_list.0.is_empty()),
+        // EIP-7702's type for one with authorizations, else EIP-2930's for one with an access list;
+        // the fee is the chain's, so no other.
+        tx_type: if authorized.is_empty() { u8::from(!access_list.0.is_empty()) } else { 4 },
+        authorization_list: authorized.into_iter().map(Either::Right).collect(),
         access_list,
         caller: Word::from(caller),
         gas_limit,
@@ -455,11 +557,23 @@ pub fn run(
                 payments: Vec::new(),
                 trace: Trace::default(),
                 refresh_tokens: Vec::new(),
+                delegated: Vec::new(),
             });
         }
     };
 
     let gas_used = outcome.result.tx_gas_used();
+    // What the authorizations left their accounts with, which stands whatever the call did.
+    let delegated: Vec<Delegated> = authorities
+        .iter()
+        .zip(&before)
+        .filter_map(|(bytes, start)| outcome.state.get(&Word::from(*bytes)).map(|account| (bytes, start, account)))
+        .map(|(bytes, start, account)| Delegated {
+            account: *bytes,
+            code: account.info.code.as_ref().filter(|code| code.is_eip7702()).map(|code| code.original_bytes().to_vec()),
+            bumped: account.info.nonce.saturating_sub(*start),
+        })
+        .collect();
     let result = match outcome.result {
         ExecutionResult::Success { output, logs, .. } => {
             // What the native calls that still stand wrote lands first: an EVM contract a nested
@@ -470,7 +584,7 @@ pub fn run(
                 state.merge(crossed.changes.clone());
             }
 
-            apply(state, &outcome.state, caller, sender)?;
+            apply(state, &outcome.state, caller, Some(nonce), sender)?;
             let logs = logs
                 .iter()
                 .map(|log| Event {
@@ -493,12 +607,12 @@ pub fn run(
             let returned = match output {
                 Output::Create(_, Some(created)) => EvmReturned::Created(Address::Evm(created.into_array())),
                 Output::Create(_, None) => {
-                    return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new(), trace, refresh_tokens: Vec::new() });
+                    return Ok(EvmRan { result: Err(VmError::Runtime("the contract was not created".to_string())), gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new(), trace, refresh_tokens: Vec::new(), delegated: Vec::new() });
                 }
                 Output::Call(bytes) => EvmReturned::Output(bytes.to_vec()),
             };
 
-            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new(), payments, trace, refresh_tokens });
+            return Ok(EvmRan { result: Ok(returned), gas_used, events, reverted: Vec::new(), payments, trace, refresh_tokens, delegated });
         }
         ExecutionResult::Revert { output, .. } => {
             return Ok(EvmRan {
@@ -509,6 +623,7 @@ pub fn run(
                 payments: Vec::new(),
                 trace: traced_run(state, &frames, native_hops, fuel_per_gas, None)?,
                 refresh_tokens: Vec::new(),
+                delegated,
             });
         }
         ExecutionResult::Halt { reason, .. } => Err(match reason {
@@ -518,7 +633,7 @@ pub fn run(
     };
     let trace = traced_run(state, &frames, native_hops, fuel_per_gas, None)?;
 
-    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new(), trace, refresh_tokens: Vec::new() })
+    Ok(EvmRan { result, gas_used, events: Vec::new(), reverted: Vec::new(), payments: Vec::new(), trace, refresh_tokens: Vec::new(), delegated })
 }
 
 /// Where the events of a run that succeeded land in the receipt: the EVM's logs in order, with the
@@ -647,7 +762,7 @@ pub(super) fn revert_reason(output: &[u8]) -> String {
 /// Writes what a successful EVM transaction changed: balances, nonces but the sender's, which the
 /// chain keeps, new contracts' code, and storage. Also how a native call sees what the EVM did so
 /// far. The native precompile's marker slots are the journal's alone, and never written.
-fn apply(state: &State, changes: &EvmState, caller: [u8; 20], sender: &Address) -> Result<(), DbError> {
+fn apply(state: &State, changes: &EvmState, caller: [u8; 20], shown: Option<u64>, sender: &Address) -> Result<(), DbError> {
     let accounts = Accounts::new(state);
 
     for (bytes, account) in changes {
@@ -693,8 +808,25 @@ fn apply(state: &State, changes: &EvmState, caller: [u8; 20], sender: &Address) 
             false => from_word(account.info.balance),
         };
 
-        if bytes != caller {
-            stored.nonce = account.info.nonce;
+        // The chain bumped the sender's nonce already, from the one revm was shown; an
+        // authorization of its own bumps it once more, as Ethereum does, which is added. A native
+        // call's view mid-run, shown None, keeps the chain's.
+        stored.nonce = match (bytes == caller, shown) {
+            (true, Some(shown)) => stored.nonce.saturating_add(account.info.nonce.saturating_sub(shown.saturating_add(1))),
+            (true, None) => stored.nonce,
+            (false, _) => account.info.nonce,
+        };
+
+        // An account's EIP-7702 delegation, set or cleared by an authorization.
+        if !matches!(address, Address::Evm(_)) && !marks {
+            let code = account.info.code.as_ref().filter(|code| code.is_eip7702()).map(|code| code.original_bytes().to_vec());
+
+            if delegation(state, bytes)? != code {
+                match code {
+                    Some(code) => state.put(Column::Storage, delegation_key(&bytes), code),
+                    None => state.delete(Column::Storage, delegation_key(&bytes)),
+                }
+            }
         }
 
         accounts.set(&address, &stored);

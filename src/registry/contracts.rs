@@ -459,6 +459,10 @@ fn spent(limits: Limits, fuel_used: u64) -> Limits {
 
 /// Checks and loads code into the record that stores it, and says what loading burned.
 fn load(vm: &Vm, deployer: Address, code: &Code, limits: Limits, block: &BlockAt) -> Result<(ContractRecord, u64), Failed> {
+    if !block.vm.engines.contains(code.engine()) {
+        return Err(RegistryError::Vm(VmError::EngineOff(code.engine())).into());
+    }
+
     let engine = vm
         .engine(code.engine())
         .ok_or(RegistryError::Vm(VmError::EngineMissing(code.engine())))?;

@@ -108,6 +108,106 @@ function M.transfer_from(from, to, amount)
     return true
 end
 
+-- Signed by an owner off the chain, and sent by anyone (docs/token-standard.md, "Signed
+-- authorizations"): the owner's key, which must be the one the owner's address is of, and its
+-- signature over the text below, by its scheme's own rules.
+local function signed_by(owner, key, message, signature)
+    local scheme = owner:kind()
+
+    if scheme == "contract" or scheme == "evm" then
+        error("only a key's account signs")
+    end
+
+    if crypto.address(scheme, key) ~= owner then
+        error("the key is not the owner's")
+    end
+
+    if not crypto.verify(scheme, key, message, signature) then
+        error("the signature does not hold")
+    end
+end
+
+local function hex(bytes)
+    return (bytes:gsub(".", function(byte) return string.format("%02x", string.byte(byte)) end))
+end
+
+local function permit_key(owner)
+    return "permit:" .. owner:hex()
+end
+
+local function used_key(owner, nonce)
+    return "used:" .. owner:hex() .. ":" .. hex(nonce)
+end
+
+-- What an owner signs to let a spender move its tokens: the chain, this token, both parties, the
+-- allowance, the owner's next permit nonce and when it lapses, in milliseconds.
+function M.permit_message(owner, spender, amount, deadline)
+    return "chainv4 token permit\nchain: " .. tostring(chain.id()) .. "\ntoken: " .. ctx.contract:text() .. "\nowner: " .. owner:text()
+        .. "\nspender: " .. spender:text() .. "\namount: " .. tostring(u256(amount)) .. "\nnonce: " .. tostring(M.nonces(owner))
+        .. "\ndeadline: " .. tostring(deadline)
+end
+
+-- What an owner signs to send tokens a relayer submits: the chain, this token, both parties, the
+-- amount, the window it holds in, after one time and before another, and a nonce of 32 bytes the
+-- owner picks, used once.
+function M.transfer_message(from, to, amount, valid_after, valid_before, nonce)
+    return "chainv4 token transfer\nchain: " .. tostring(chain.id()) .. "\ntoken: " .. ctx.contract:text() .. "\nfrom: " .. from:text()
+        .. "\nto: " .. to:text() .. "\namount: " .. tostring(u256(amount)) .. "\nvalid after: " .. tostring(valid_after)
+        .. "\nvalid before: " .. tostring(valid_before) .. "\nnonce: 0x" .. hex(nonce)
+end
+
+-- How many permits an owner has had taken: the nonce its next one signs.
+function M.nonces(owner)
+    return u256(storage.get(permit_key(owner)) or "0")
+end
+
+-- Sets an allowance an owner signed, as approve would from the owner.
+function M.permit(owner, spender, amount, deadline, key, signature)
+    amount = u256(amount)
+
+    if ctx.time > deadline then
+        error("the permit has lapsed")
+    end
+
+    signed_by(owner, key, M.permit_message(owner, spender, amount, deadline), signature)
+    put(permit_key(owner), M.nonces(owner) + 1)
+    put(allowance_key(owner, spender), amount)
+    events.emit("Approval", owner, spender, amount)
+    return true
+end
+
+-- Whether a transfer's nonce was used, or not yet.
+function M.authorization_state(owner, nonce)
+    return storage.get(used_key(owner, nonce)) ~= nil
+end
+
+-- Sends tokens their owner signed for, as transfer would from the owner, once.
+function M.transfer_with_authorization(from, to, amount, valid_after, valid_before, nonce, key, signature)
+    amount = u256(amount)
+
+    if #nonce ~= 32 then
+        error("a nonce is 32 bytes")
+    end
+
+    if ctx.time <= valid_after then
+        error("the authorization is not valid yet")
+    end
+
+    if ctx.time >= valid_before then
+        error("the authorization has lapsed")
+    end
+
+    if M.authorization_state(from, nonce) then
+        error("the authorization was used")
+    end
+
+    signed_by(from, key, M.transfer_message(from, to, amount, valid_after, valid_before, nonce), signature)
+    storage.set(used_key(from, nonce), "1")
+    events.emit("AuthorizationUsed", from, nonce)
+    move(from, to, amount)
+    return true
+end
+
 -- Beyond the standard: only the owner mints more.
 function M.mint(to, amount)
     if ctx.sender:hex() ~= storage.get("owner") then

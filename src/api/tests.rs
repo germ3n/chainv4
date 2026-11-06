@@ -1593,6 +1593,74 @@ fn names_are_looked_up_by_name_and_accounts_show_their_primary_one() {
 
 #[cfg(feature = "ethereum")]
 #[test]
+fn json_rpc_shows_an_eip_7702_transaction_and_the_delegation_it_set() {
+    use crate::crypto::ethereum::{Authorization, EthereumKind, EthereumTx, chain_id, tx_hash};
+    use crate::crypto::keypair::PrivateKey;
+
+    let authority = DevAuthority::dev_keypair();
+    let mut producer = AuthorityProducer::new(authority.clone(), SLOT);
+    let db = Arc::new(MemoryDb::default());
+    let genesis = Genesis::dev_authority(authority.public());
+    let mut chain = Chain::open(db.clone(), &genesis).unwrap();
+    let secret = [0x47; 32];
+    let sender = Keypair::from_private(PrivateKey::Secp256k1(secret)).public().address();
+    let Address::Secp256k1(from) = sender else { unreachable!() };
+    let chain_id = chain_id(&chain.genesis());
+    let target = [0xd7; 20];
+    // Its own: the transaction at nonce 0, its authorization for 1.
+    let authorization = Authorization { chain_id: u256::from(chain_id), address: target, nonce: 1, parity: 0, signature: [0; 64] }.signed(&secret);
+    let raw = EthereumTx {
+        kind: EthereumKind::SetCode,
+        chain_id,
+        nonce: 0,
+        max_price: u256::from(10_000_000_000u64),
+        tip: u256::ZERO,
+        gas_limit: 200_000,
+        to: Some(from),
+        value: u256::ZERO,
+        input: Vec::new(),
+        access_list: Vec::new(),
+        signature: [0; 64],
+        parity: 0,
+        authorizations: vec![authorization],
+    }
+    .signed(&secret)
+    .encode();
+    let fund = SignedTx::sign(
+        Tx::Transfer { from: authority.public().address(), to: sender, amount: Amount::U128(10u128.pow(21)) },
+        0,
+        FeeOffer { gas_limit: 100_000, max_price: u256::from(10_000_000_000u64), tip: u256::ZERO },
+        &authority,
+        &chain.genesis(),
+    );
+
+    for txs in [vec![fund], vec![SignedTx::from_ethereum(raw.clone()).unwrap()]] {
+        let now = chain.tip().timestamp + SLOT;
+        let mut block = chain.build(txs, Vec::new(), producer.address(&[]), now).unwrap();
+        block.seal = producer.seal(&block.header).unwrap();
+        chain.import(&block, now).unwrap();
+    }
+
+    let address = start(db, None, &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let rpc = |method: &str, params: Value| {
+        let (status, _, answer) = request(address, "POST", "/rpc", &json!({ "jsonrpc": "2.0", "id": 7, "method": method, "params": params }).to_string());
+        assert_eq!(status, 200, "{answer}");
+
+        answer["result"].clone()
+    };
+
+    assert_eq!(rpc("eth_getCode", json!([to_hex(&from), "latest"])), json!(to_hex(&[&[0xef, 0x01, 0x00][..], &target].concat())), "its delegation, as Ethereum shows it");
+    assert_eq!(rpc("eth_getTransactionCount", json!([to_hex(&from), "latest"])), json!("0x2"), "the transaction's nonce and its authorization's");
+
+    let tx = rpc("eth_getTransactionByHash", json!([to_hex(&tx_hash(&raw))]));
+    assert_eq!(tx["type"], json!("0x4"));
+    assert_eq!(tx["authorizationList"][0]["address"], json!(to_hex(&target)));
+    assert_eq!(tx["authorizationList"][0]["nonce"], json!("0x1"));
+    assert_eq!(rpc("eth_getTransactionReceipt", json!([to_hex(&tx_hash(&raw))]))["status"], json!("0x1"));
+}
+
+#[cfg(feature = "ethereum")]
+#[test]
 fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
     use crate::crypto::ethereum::{EthereumKind, EthereumTx, chain_id, tx_hash};
     use crate::crypto::keypair::PrivateKey;
@@ -1621,6 +1689,7 @@ fn ethereum_json_rpc_answers_as_ethereums_tools_ask() {
             access_list: Vec::new(),
             signature: [0; 64],
             parity: 0,
+            authorizations: Vec::new(),
         }
         .signed(&secret)
         .encode()

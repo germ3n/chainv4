@@ -58,14 +58,20 @@ makes a new chain, as any genesis field does.
 A name is labels joined by dots, written without the suffix in transactions and records:
 `alice`, `pay.alice`.
 
-- **A label** is 1 to 63 of `a` to `z`, `0` to `9` and hyphens, neither starting nor ending with
-  a hyphen.
-- **A name you register** is one label, at least 3 characters long.
-- **The whole name,** suffix included, is at most 253 characters, as in DNS.
-- **Upper case is refused, not folded,** in transactions. The CLI and the API lower-case what
-  you type and take the suffix off, so `Alice.dev` and `alice` mean the same there.
-
-Unicode names, with the normalization they need against look-alikes, are not supported yet.
+- **A label** is 1 to 63 characters, neither starting nor ending with a hyphen. Its ASCII is
+  `a` to `z`, `0` to `9` and hyphens; past ASCII, letters of any script and emoji, as ENS allows
+  them: `café`, `日本語`, `москва`, `🦀🦀🦀`.
+- **A name you register** is one label, at least 3 characters long. Characters are counted, not
+  bytes, for the length and for its price: `日本語` is three, priced as `abc` is.
+- **The whole name,** suffix included, is at most 253 bytes.
+- **Each name has one form, ENSIP-15's.** A name is taken only as ENS's normalization
+  (ENSIP-15) leaves it: lower case, accents composed, full-width letters folded. A transaction
+  naming another form is refused, and the refusal names the form it is kept in. Look-alikes are
+  refused outright: a label mixing scripts that confuse, such as a Cyrillic `а` among Latin
+  letters, invisible characters, and whatever else ENS disallows. The CLI, the API and the apps
+  normalize what you type and take the suffix off, so `Café.dev` and `café` mean the same there.
+  Normalizing is the `ens-normalize` crate, pinned, of Unicode 17, in the node and the apps alike;
+  a new Unicode would be a consensus change, as it changes which names are taken.
 
 ## Registering and renewing
 

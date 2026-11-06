@@ -55,6 +55,7 @@ fn names_are_labels_of_lower_case_letters_digits_and_hyphens() {
     assert!(name_problem("-ab").is_some());
     assert!(name_problem("ab-").is_some());
     assert!(name_problem("al ice").is_some());
+    assert!(name_problem("a_ice").is_some(), "no underscore");
     assert!(name_problem("pay..alice").is_some(), "an empty label");
     assert!(name_problem(&"a".repeat(64)).is_some());
     assert!(name_problem(&["a"; 130].join(".")).is_some(), "too long altogether");
@@ -73,6 +74,34 @@ fn names_are_labels_of_lower_case_letters_digits_and_hyphens() {
     assert!(NamesConfig { prices: vec![u256::ONE; MAX_PRICES + 1], ..config() }.problem().is_some());
     assert!(NamesConfig { max_years: 0, ..config() }.problem().is_some());
     assert_eq!(NamesConfig::dev().problem(), None);
+}
+
+#[cfg(feature = "unicode-names")]
+#[test]
+fn unicode_names_are_taken_as_ensip_15_normalizes_them_and_look_alikes_are_refused() {
+    // Letters of any one script, and emoji, as ENS takes them.
+    for name in ["café", "日本語", "москва", "🦀🦀🦀", "pay.café", "ñandú"] {
+        assert_eq!(name_problem(name), None, "{name}");
+    }
+
+    // Only the one form: a name that normalizes to another is refused, naming it.
+    assert!(name_problem("Café").unwrap().contains("normalizes it: café"));
+    assert!(name_problem("cafe\u{301}").unwrap().contains("café"), "a combining accent composes");
+    assert!(name_problem("ｃａｆｅ").is_some(), "full-width letters fold");
+
+    // Mixed scripts that make look-alikes, and what ENS refuses outright.
+    assert!(name_problem("pаypal").unwrap().contains("ENSIP-15 refuses"), "a Cyrillic а among Latin letters");
+    assert!(name_problem("ab\u{200b}c").is_some(), "a zero-width space");
+
+    // ASCII keeps chainv4's own rule beside ENS's: no underscore, no hyphen at an end.
+    assert!(name_problem("_abc").unwrap().contains("ASCII"));
+    assert!(name_problem("-日本").is_some());
+
+    // Lengths are characters, as prices are: three of them are a name.
+    assert_eq!(name_problem("日本"), Some("a name holds at least 3 characters".to_string()));
+    let prices = config().prices;
+    assert_eq!(price(&prices, "日本語", 1), price(&prices, "abc", 1));
+    assert_eq!(config().strip("Café.dev"), "café", "typed text is normalized as it is kept");
 }
 
 #[test]

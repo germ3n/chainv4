@@ -1203,8 +1203,8 @@ fn versions(value: &Value) -> Result<BTreeMap<ChangeKind, u64>, String> {
         .into_iter()
         .map(|kind| match versions.get(kind.name()).and_then(Value::as_u64) {
             Some(version) => Ok((kind, version)),
-            // A node from before locks has none to change.
-            None if kind == ChangeKind::Locks => Ok((kind, 0)),
+            // A node from before locks, or before engines, has none to change.
+            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines) => Ok((kind, 0)),
             None => Err(format!("it says no version for {}", kind.name())),
         })
         .collect()
@@ -1550,6 +1550,10 @@ fn stated(change: &Change, coin: &Coin) -> String {
         Change::TokenFunctions(functions) => format!("Tokens: {} function{} make one: {}", functions.len(), plural(functions.len() as u64), functions.join(", ")),
         Change::EvmSpec { spec, from } => format!("EVM spec: {} from block {}", spec.name(), format::thousands(&from.to_string())),
         Change::Dex(dex) => format!("DEX fee: {}% a trade", dex.fee_bps as f64 / 100.0),
+        Change::Engines(engines) => match engines.is_empty() {
+            true => "Engines: none, every contract frozen".to_string(),
+            false => format!("Engines: {}", engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(", ")),
+        },
         Change::Anchoring(settings) => {
             let on = |on: bool| if on { "on" } else { "off" };
 

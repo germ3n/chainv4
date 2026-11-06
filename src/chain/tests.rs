@@ -622,6 +622,7 @@ fn deploys_for_engines_genesis_leaves_out_fail() {
     let db = Arc::new(MemoryDb::default());
     let lua_only = Genesis {
         engines: vec![Engine::Lua],
+        preinstalls: Vec::new(),
         ..genesis()
     };
     let mut chain = Chain::open(db, &lua_only).unwrap();

@@ -21,5 +21,5 @@ texts(Number(500.0)): fuel 7892, ok Returned([String("6000 7000 14001 500")])
 forever(): fuel 10000000, failed out of fuel
 caught(): fuel 269, ok Returned([String("false table false contract:69: attempt to index nil with 'x'")])
 stored(Number(64.0)): fuel 42226, ok Returned([I64(2080)])
-receipts root 0x910d8b1c01f347e93556b134412f08583aaea83f4d448181686a3c6354dd4ac7
+receipts root 0x256328e4f0061204b0dc76468eb91d281175a0c462df3d4b89ec3ac03ae01648
 state root 0x58c039b3b3bfae5e02d73cbf023c1657b35d603b7e50b31fb1e156fba7ff5e50

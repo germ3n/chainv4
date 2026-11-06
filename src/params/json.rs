@@ -1207,6 +1207,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::Dex(dex) => json!({ "dex": dex_json(dex) }),
         Change::Anchoring(settings) => json!({ "anchoring": anchoring_json(settings) }),
         Change::Locks(paths) => json!({ "locks": paths }),
+        Change::Engines(engines) => json!({ "engines": engines.iter().map(|engine| engine.name()).collect::<Vec<_>>() }),
     }
 }
 
@@ -1314,6 +1315,14 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
             Change::Governance(config)
         }
         // The paths to add, put in order, each once: what the chain takes.
+        "engines" => Change::Engines(
+            value
+                .as_array()
+                .ok_or("engines must be a list, such as [\"lua\", \"evm\"]")?
+                .iter()
+                .map(|name| name.as_str().ok_or_else(|| "engines are named, as lua, wasm or evm".to_string()).and_then(crate::structs::code::Engine::named))
+                .collect::<Result<_, _>>()?,
+        ),
         "locks" => {
             let mut paths = value
                 .as_array()

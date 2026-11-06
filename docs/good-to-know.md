@@ -808,9 +808,33 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
 - **MultiSig.bin is built for Paris** (`solc --evm-version paris --optimize`), so it runs on
   chains without PUSH0; rebuilding it with another solc changes every multisig's address, as its
   init code is in the hash.
-- **chainv4's EVM has the deployment proxy from genesis.** Its runtime code is written at
-  `0x4e59…956c` when genesis names the `evm` engine, which changed the genesis id of every such
-  chain: an old data directory meets `WrongGenesis`. The todo has revisiting it.
+- **chainv4's EVM has the deployment proxy when genesis's `preinstalls` names it.** Its runtime code
+  is written at `0x4e59…956c` for `deployment_proxy`, which `chainv4 genesis` and the dev chains
+  name with the EVM. It used to be written for any chain naming the `evm` engine; a genesis file
+  from then has no `preinstalls`, so it now starts without the proxy, a new chain, and one from
+  before the proxy opens with its old id again.
+- **Names are taken in ENSIP-15's form, checked by `name_problem` everywhere.** The whole name
+  must be what `ens_normalize::normalize` gives back, and its ASCII chainv4's narrower rule (no
+  underscore), so every ASCII name valid before still is, the same. Lengths and prices count
+  `chars()`, code points: an emoji of several code points counts as several. The crate is pinned
+  with `=`: its tables decide which names a chain takes, so moving it is a consensus change. It
+  sits behind the `unicode-names` feature, which `names` turns on and the wallet and explorer turn on
+  alone; a build without it takes ASCII names only, which is why an app must have it.
+- **A node builds every engine it was compiled with; the block's rules say which run.**
+  `VmRules::engines`, genesis's or a `Change::Engines`'s, gates every deploy (the registry's
+  `load`), every native call (`host::run_traced`), every EVM entry (`execute::runs_evm`,
+  `Host::enter_evm`) and the alias every transaction writes on a chain with the EVM. Never test
+  `vm.runs_evm()` alone for what a block does: it says only what the build has. The node's
+  `check_upgrade` stops it when a decided change names an engine its build lacks.
+- **An EIP-7702 delegation is not a contract record.** It is kept in the storage column under
+  `evm delegation` and the account's 20 bytes, so `account_of` still finds the secp256k1 account,
+  which signs and pays as ever; `ChainDb::basic` shows revm the delegation as code. Authorizations
+  stand when the call fails: `EvmRan::delegated` carries them, `execute.rs` merges them as
+  `Contracted::kept` onto the block when it drops the transaction's layer. The sender's nonce is
+  the chain's or revm's, whichever is more, as an authorization of its own bumps it again.
+- **Token authorizations sign readable text.** `permit_message` and `transfer_message` return the
+  exact UTF-8 every key kind signs by its own rules; the Lua and Rust tokens build it alike, and a
+  test runs both. The key travels with the signature and must control the owner's address.
 - **A contract made at a funded address takes the coin over** (`vm::evm::apply`). Before, coin
   sent through the EVM to a counterfactual address was copied into the contract and left with the
   secp256k1 account of those bytes too, and coin sent natively to `evm:0x…` was overwritten with

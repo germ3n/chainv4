@@ -60,11 +60,12 @@ creator's EVM address and nonce, as CREATE gives it, or CREATE2's. A deploy from
 account goes to the address Ethereum would give its alias, at the account's nonce.
 `chainv4 send deploy --evm` prints it before the deploy lands.
 
-**The deterministic deployment proxy is there from genesis**, at `0x4e59…956c` as on other EVM
-chains, since the chain refuses the proxy's own deploy, a legacy transaction without a chain id.
-What is deployed through it, CREATE2 with a salt, lands here where it lands everywhere: Swap.sol,
-and a multisig's MultiSig.sol. It is a chain's genesis state, so adding it changed the genesis of
-every chain running the EVM (see the [todo](todo.md)).
+**The deterministic deployment proxy is there from genesis** when genesis's `preinstalls` names
+`deployment_proxy`, at `0x4e59…956c` as on other EVM chains, since the chain refuses the proxy's
+own deploy, a legacy transaction without a chain id. What is deployed through it, CREATE2 with a
+salt, lands here where it lands everywhere: Swap.sol, and a multisig's MultiSig.sol. `chainv4
+genesis` names it for a chain with the EVM; a genesis file without `preinstalls` starts with none,
+so one from before the proxy opens with its old id (see [Genesis](genesis.md#fields)).
 
 **Coin sent to a contract's address before it exists waits for it.** Sent through the EVM, it sits
 with the secp256k1 account of those 20 bytes, whose key nobody holds; sent here to `evm:0x…`, under
@@ -379,8 +380,30 @@ Two more, built for Paris so they run on any EVM chain:
   `Items`, each minting only for its deployer, which the swap tests lock as
   [NFTs](nft-standard.md).
 
+## EIP-7702 delegations
+
+An Ethereum account may run a contract's code as its own, as Prague allows: a type-4
+transaction carries authorizations, each an account's owner signing the chain, an address and its
+account's nonce, `keccak256(0x05 || rlp([chain_id, address, nonce]))`. Anyone may send one, and a
+sender may carry its own, for its nonce after the transaction's.
+- **What it sets:** the account's code becomes `0xef0100` and the address, kept under the account's
+  20 bytes (`vm::evm::delegation`), not as a contract: the account still signs native
+  transactions and holds its coin. A call to it runs the delegate's code on the account's own
+  storage. `eth_getCode` answers the delegation; the address zero clears it.
+- **What it costs:** EIP-7702's gas, 25,000 an authorization, less 12,500 for an account that was
+  there.
+- **It stands whatever the call does:** a call that reverts or runs out of gas still leaves the
+  delegations and the nonces they bumped, as on Ethereum (`EvmRan::delegated`), while the call's
+  own changes go.
+- **Skipped, not failed:** an authorization for another chain, a used nonce, or a signature that
+  recovers no key leaves its account as it was.
+- **Needs Prague:** a chain whose `evm_spec` is earlier refuses type 4.
+
+JSON-RPC shows a type-4 transaction with its `authorizationList`.
+
 ## Not yet
 
-- **Blob transactions and the KZG point evaluation precompile,** which needs blobs.
+- **Blob transactions and the KZG point evaluation precompile,** which needs blobs: a type-3
+  transaction is refused, saying the chain keeps no blob data.
 - **Selfdestruct** only clears what it can in the same transaction, as Ethereum's Cancun rules
   say: elsewhere it only sends the contract's coin.

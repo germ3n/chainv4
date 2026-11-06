@@ -119,6 +119,39 @@ fn lua_costs_read_and_write_by_name_reach_the_next_block_and_refuse_a_rate_of_no
     assert_eq!(next(&chain).rules.vm.lua_costs, costs);
 }
 
+#[cfg(feature = "wasm")]
+#[test]
+fn an_engine_turned_off_freezes_its_contracts_and_turned_on_again_brings_them_back() {
+    use crate::structs::code::Engine;
+
+    let mut chain = governed(genesis());
+    let deploy = |chain: &mut Chain| {
+        let source = "local M = {}\nfunction M.write() storage.set(\"k\", \"v\") return storage.get(\"k\") end\nreturn M".to_string();
+        let signed = SignedTx::sign(Tx::Deploy { code: Code::Lua(source) }, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis());
+
+        advance(chain, vec![signed]).remove(0).result
+    };
+    let Ok(Effect::Deployed(contract)) = deploy(&mut chain) else { panic!("a deploy") };
+    fuel_of(&mut chain, contract, "write");
+    let call = |chain: &mut Chain| {
+        let tx = Tx::ContractCall { to: contract, func: Hash::Xxh3_64(crate::vm::selector("write")), amount: Amount::U128(0), data: Vec::new() };
+
+        advance(chain, vec![SignedTx::sign(tx, nonce(chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis())]).remove(0).result
+    };
+
+    // Lua turned off: its contract is refused, nothing deploys on it, and what it keeps stays.
+    assert!(refused_change(&mut chain, Change::Engines(vec![Engine::Wasm, Engine::Wasm])).contains("each once"));
+    decide(&mut chain, Change::Engines(vec![Engine::Wasm]));
+    assert!(!next(&chain).rules.vm.engines.contains(Engine::Lua));
+    assert!(call(&mut chain).unwrap_err().to_string().contains("turned the lua engine off"));
+    assert!(deploy(&mut chain).is_err(), "nothing deploys on it");
+    assert!(chain.state().get(crate::db::Column::Storage, &crate::db::storage_key(&contract, b"k")).unwrap().is_some(), "its storage is kept");
+
+    // On again, it is as it was.
+    decide(&mut chain, Change::Engines(vec![Engine::Lua, Engine::Wasm]));
+    assert!(call(&mut chain).is_ok());
+}
+
 #[test]
 fn contract_limits_rise_never_fall_and_bound_the_transaction_and_multisig() {
     let mut chain = governed(genesis());

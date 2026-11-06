@@ -61,6 +61,13 @@ pub use crate::params::fees::VoteRewardSource;
 pub use parallel::Workers;
 use parallel::{Runner, Unfit};
 
+#[document(
+    summary = "The contracts a genesis may name in preinstalls, each written into its first state: deployment_proxy, the deterministic deployment proxy, which CREATE2s its call's data after a 32-byte salt, at the address, deployer and code other EVM chains have it with.",
+    category = "Chain",
+    see_also = "Genesis::preinstalls",
+)]
+pub const PREINSTALLS: &[&str] = &["deployment_proxy"];
+
 /// The deterministic deployment proxy, which CREATE2s its call's data after a 32-byte salt: where
 /// other EVM chains have it, who deployed it there, and its code.
 const PROXY: [u8; 20] = [0x4e, 0x59, 0xb4, 0x48, 0x47, 0xb3, 0x79, 0x57, 0x85, 0x88, 0x92, 0x0c, 0xa7, 0x8f, 0xbf, 0x26, 0xc0, 0xb4, 0x95, 0x6c];
@@ -322,6 +329,9 @@ pub struct Genesis {
     #[document(summary = "Settings no vote may change, by path: a change's name, such as reward, alone or with the dotted names of fields as change_json writes its value, such as anchoring.enforce or limits.tx_limits.fuel, each once. Under governance, Change::Locks adds more and nothing takes one away; a chain without governance names none. A chain that locks upgrade or consensus needs a new genesis for any fix to them. Added after chains launched: empty adds nothing to genesis's encoding.")]
     #[wincode(with = "crate::structs::unset::UnsetMarkedList")]
     pub locked: Vec<String>,
+    #[document(summary = "Contracts the chain starts with, by name, from PREINSTALLS: deployment_proxy, the deterministic deployment proxy at 0x4e59…956c, where other EVM chains have it, so what is deployed through it, MultiSig.sol and Swap.sol, lands at the same address here. Each needs the EVM among engines; chainv4 genesis names it for a chain that runs the EVM. Added after chains launched: empty adds nothing to genesis's encoding, and a file without it starts with none.")]
+    #[wincode(with = "crate::structs::unset::UnsetMarkedList")]
+    pub preinstalls: Vec<String>,
 }
 
 impl Hashable for Genesis {}
@@ -550,6 +560,28 @@ fn txs_bytes(txs: &[SignedTx]) -> u64 {
 }
 
 /// The dev chains' names, in a build with them.
+/// Why a genesis's preinstalls cannot be: a name PREINSTALLS lacks, one named twice, or any without
+/// the EVM, which every one is code for.
+fn preinstalls_problem(preinstalls: &[String], engines: &[Engine]) -> Option<&'static str> {
+    if preinstalls.iter().any(|name| !PREINSTALLS.contains(&name.as_str())) {
+        return Some("preinstalls names only deployment_proxy");
+    }
+
+    if preinstalls.iter().enumerate().any(|(at, name)| preinstalls[..at].contains(name)) {
+        return Some("preinstalls names each once");
+    }
+
+    (!preinstalls.is_empty() && !engines.contains(&Engine::Evm)).then_some("preinstalls are EVM contracts: the chain's engines must include the EVM")
+}
+
+/// The development chains' preinstalls: the deployment proxy, in a build with the EVM.
+fn dev_preinstalls() -> Vec<String> {
+    match Engine::compiled().contains(&Engine::Evm) {
+        true => vec!["deployment_proxy".to_string()],
+        false => Vec::new(),
+    }
+}
+
 fn dev_names() -> Option<crate::registry::names::NamesConfig> {
     cfg!(feature = "names").then(crate::registry::names::NamesConfig::dev)
 }
@@ -604,6 +636,7 @@ impl Genesis {
             max_tx_bytes: None,
             multisig_members: None,
             locked: Vec::new(),
+            preinstalls: dev_preinstalls(),
         }
     }
 
@@ -658,6 +691,7 @@ impl Genesis {
             max_tx_bytes: None,
             multisig_members: None,
             locked: Vec::new(),
+            preinstalls: dev_preinstalls(),
         }
     }
 
@@ -803,9 +837,9 @@ impl Genesis {
             crate::registry::directory::write_directory_admin(state, self.directory_admin);
         }
 
-        // Running the EVM, the chain starts with the deterministic deployment proxy where other EVM
-        // chains have it, so what is deployed through it lands here where it lands there.
-        if self.engines.contains(&Engine::Evm) {
+        // The deterministic deployment proxy where other EVM chains have it, when genesis names it,
+        // so what is deployed through it lands here where it lands there.
+        if self.preinstalls.iter().any(|name| name == "deployment_proxy") {
             let record = crate::registry::contracts::ContractRecord {
                 deployer: Address::Evm(PROXY_DEPLOYER),
                 engine: Engine::Evm,
@@ -906,6 +940,10 @@ impl Genesis {
             return Some(problem);
         }
 
+        if let Some(problem) = preinstalls_problem(&self.preinstalls, &self.engines) {
+            return Some(problem);
+        }
+
         if !self.locked.is_empty() && self.governance.is_none() {
             return Some("locked holds settings against governance: a chain without governance changes nothing, so it locks nothing");
         }
@@ -986,6 +1024,7 @@ impl Genesis {
             costs: self.fees.as_ref().and_then(|fees| fees.costs).unwrap_or_default(),
             lua_costs: self.fees.as_ref().and_then(|fees| fees.lua_costs.as_deref().copied()).unwrap_or_default(),
             limits: self.contract_limits.unwrap_or_default(),
+            engines: crate::params::vm::EngineSet::of(&self.engines),
             evm_spec: self.evm_spec.unwrap_or_default(),
             dex: self.dex.unwrap_or_default(),
             max_tx_bytes: self.max_tx_bytes,
@@ -1008,6 +1047,7 @@ impl Genesis {
             fees: self.fees.clone(),
             reward: self.reward,
             limits: self.block_limits(),
+            engines: self.engines.clone(),
         }
     }
 
@@ -1318,8 +1358,14 @@ impl Chain {
 
         let block = genesis.block();
         let id = block.id();
+        // Every engine genesis runs, which this node must have; and every one it was built with, as
+        // governance may turn others on (Change::Engines), the block's rules saying which run.
+        if let Some(missing) = genesis.engines.iter().find(|engine| !Engine::compiled().contains(engine)) {
+            return Err(ChainError::MissingEngine(*missing));
+        }
+
         let vm = Arc::new(
-            Vm::with_pools(&genesis.engines, genesis.hash, options.pools)
+            Vm::with_pools(&Engine::compiled(), genesis.hash, options.pools)
                 .map_err(ChainError::MissingEngine)?
                 .with_names(genesis.names.clone())
                 .with_federation(genesis.federation.clone())
@@ -3604,6 +3650,10 @@ pub(crate) fn govern_rules(rules: &mut Rules, state: &State, height: u64) -> Res
         // A change of fees names its costs, or goes back to the defaults.
         rules.vm.costs = config.costs.unwrap_or_default();
         rules.vm.lua_costs = config.lua_costs.as_deref().copied().unwrap_or_default();
+    }
+
+    if let Some(engines) = changes.engines()? {
+        rules.vm.engines = crate::params::vm::EngineSet::of(&engines);
     }
 
     if let Some(limits) = changes.limits()? {

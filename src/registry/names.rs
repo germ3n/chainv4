@@ -141,9 +141,9 @@ impl NamesConfig {
         format!("{name}.{}", self.suffix)
     }
 
-    #[document(parent = "NamesConfig", summary = "A name as records keep it: without the suffix, if it ends in it, and in lower case: alice for Alice.dev.")]
+    #[document(parent = "NamesConfig", summary = "A name as records keep it: without the suffix, if it ends in it, and normalized as ENSIP-15 does, lower case among it: alice for Alice.dev. Text that does not normalize is only lowered, for name_problem to say why.")]
     pub fn strip(&self, text: &str) -> String {
-        let lower = text.trim().to_ascii_lowercase();
+        let lower = normalized(text.trim()).unwrap_or_else(|| text.trim().to_lowercase());
 
         match lower.strip_suffix(&format!(".{}", self.suffix)) {
             Some(name) => name.to_string(),
@@ -171,29 +171,40 @@ pub fn prices_problem(prices: &[u256]) -> Option<&'static str> {
     see_also = "NamesConfig::prices",
 )]
 pub fn price(prices: &[u256], name: &str, years: u32) -> Option<u256> {
-    let index = name.len().saturating_sub(MIN_LABEL).min(prices.len().checked_sub(1)?);
+    let index = name.chars().count().saturating_sub(MIN_LABEL).min(prices.len().checked_sub(1)?);
 
     prices[index].checked_mul(u256::from(years))
 }
 
+/// Text as ENSIP-15 normalizes it, in a build with unicode-names; None for text it refuses, or a
+/// build without it, which takes ASCII names alone.
+fn normalized(text: &str) -> Option<String> {
+    #[cfg(feature = "unicode-names")]
+    return ens_normalize::normalize(text).ok();
+    #[cfg(not(feature = "unicode-names"))]
+    return text.is_ascii().then(|| text.to_ascii_lowercase());
+}
+
 #[document(
-    summary = "Why text cannot be a label: empty, shorter than shortest or longer than MAX_LABEL, holding anything but a to z, 0 to 9 and hyphens, or starting or ending with a hyphen.",
+    summary = "Why text cannot be a label: empty, shorter than shortest or longer than MAX_LABEL characters, holding ASCII other than a to z, 0 to 9 and hyphens, or starting or ending with a hyphen. Characters past ASCII, letters of any script and emoji, are ENSIP-15's to allow, for the whole name (name_problem).",
     category = "Names",
 )]
 pub fn label_problem(label: &str, shortest: usize) -> Option<String> {
-    if label.len() < shortest.max(1) {
+    let characters = label.chars().count();
+
+    if characters < shortest.max(1) {
         return Some(match shortest {
             0 | 1 => "a label holds at least one character".to_string(),
             _ => format!("a name holds at least {shortest} characters"),
         });
     }
 
-    if label.len() > MAX_LABEL {
+    if characters > MAX_LABEL {
         return Some(format!("a label holds at most {MAX_LABEL} characters"));
     }
 
-    if !label.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
-        return Some("a label holds only a to z, 0 to 9 and hyphens".to_string());
+    if !label.bytes().all(|byte| !byte.is_ascii() || byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-') {
+        return Some("a label's ASCII is only a to z, 0 to 9 and hyphens".to_string());
     }
 
     if label.starts_with('-') || label.ends_with('-') {
@@ -204,13 +215,21 @@ pub fn label_problem(label: &str, shortest: usize) -> Option<String> {
 }
 
 #[document(
-    summary = "Why text cannot be a name, as records keep it, without the suffix: labels joined by dots, the last one at least MIN_LABEL long, all of it at most MAX_NAME_LENGTH.",
+    summary = "Why text cannot be a name, as records keep it, without the suffix: labels joined by dots, the last one at least MIN_LABEL characters long, all of it at most MAX_NAME_LENGTH bytes, and the whole of it as ENSIP-15 normalizes it, so look-alikes, mixed scripts and characters ENS refuses are refused, and each name has one form. Unicode needs a build with names.",
     category = "Names",
     see_also = "label_problem",
 )]
 pub fn name_problem(name: &str) -> Option<String> {
     if name.len() > MAX_NAME_LENGTH {
-        return Some(format!("a name holds at most {MAX_NAME_LENGTH} characters"));
+        return Some(format!("a name holds at most {MAX_NAME_LENGTH} bytes"));
+    }
+
+    // Its one form first, so a name typed another way is told the form it is kept in.
+    match normalized(name) {
+        Some(normal) if normal != name => return Some(format!("a name is kept as ENSIP-15 normalizes it: {normal}")),
+        Some(_) => {}
+        None if name.split('.').any(str::is_empty) => return Some("a label holds at least one character".to_string()),
+        None => return Some("a name ENSIP-15 refuses: a look-alike, mixed scripts, or a character ENS does not allow".to_string()),
     }
 
     let mut labels = name.split('.').rev();

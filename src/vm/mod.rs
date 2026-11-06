@@ -31,7 +31,9 @@ pub mod wasm;
 #[cfg(feature = "evm")]
 pub mod evm;
 
-pub use proven::{EVM_READ_GAS, EvmRead, ProvenRead, ProvenRunError, evm_read, run_proven, run_proven_evm};
+pub use proven::{ProvenRead, ProvenRunError, run_proven};
+#[cfg(feature = "evm")]
+pub use proven::{EVM_READ_GAS, EvmRead, evm_read, run_proven_evm};
 pub use crate::params::Limits;
 pub use host::{Host, MAX_CALL_DEPTH, MAX_EVENTS, MAX_EVENT_DATA, MAX_EVENT_NAME, MAX_KEY_LEN, MAX_NAMESPACE_LEN, MAX_SCAN, MAX_VALUE_LEN, Space};
 pub use layout::{Access, Declared, Entry, Field, Kind, Layout, Shape, Typed, TypedField};
@@ -579,6 +581,8 @@ pub enum VmError {
     InsufficientBalance,
     #[document(summary = "The chain does not run the engine the contract needs.")]
     EngineMissing(Engine),
+    #[document(summary = "The chain has the engine the contract needs turned off, by Change::Engines: its contracts are frozen until it is turned on again.")]
+    EngineOff(Engine),
     #[document(summary = "The database failed while the contract ran. The node's fault, not the contract's, so the node should stop rather than record the call as failed.")]
     Storage(DbError),
 }
@@ -605,6 +609,7 @@ impl fmt::Display for VmError {
             VmError::TooDeep => write!(f, "calls nest deeper than {MAX_CALL_DEPTH}"),
             VmError::InsufficientBalance => write!(f, "insufficient balance"),
             VmError::EngineMissing(engine) => write!(f, "this chain does not run {} contracts", engine.name()),
+            VmError::EngineOff(engine) => write!(f, "the chain has turned the {} engine off: its contracts are frozen until it is on again", engine.name()),
             VmError::Storage(err) => write!(f, "storage failed: {err}"),
         }
     }

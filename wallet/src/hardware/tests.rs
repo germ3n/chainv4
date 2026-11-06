@@ -56,6 +56,7 @@ fn transaction(kind: EthereumKind) -> EthereumTx {
         access_list: Vec::new(),
         signature: [0; 64],
         parity: 0,
+        authorizations: Vec::new(),
     }
 }
 

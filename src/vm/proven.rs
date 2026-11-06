@@ -99,6 +99,7 @@ pub fn run_proven(vm: &Arc<Vm>, root: &Hash, reads: &[ProvenRead], contract: &Ad
     Ok(outcome)
 }
 
+#[cfg(feature = "evm")]
 #[document(
     summary = "An EVM read, as eth_call takes one: a contract's calldata, from an EVM address, with a fixed gas limit so a node and an app running it over the same state get the same answer.",
     category = "VM",
@@ -114,9 +115,11 @@ pub struct EvmRead {
     pub input: Vec<u8>,
 }
 
+#[cfg(feature = "evm")]
 #[document(summary = "The gas an EVM read may use, a node's and an app's alike: a block's worth.", category = "VM", see_also = "EvmRead")]
 pub const EVM_READ_GAS: u64 = 30_000_000;
 
+#[cfg(feature = "evm")]
 #[document(
     summary = "Runs an EVM read over a state, writing nothing anyone keeps: what POST /call does with calldata, over the state it records, and an app over proven entries. Native contracts the EVM calls run at one fuel a gas, alike everywhere.",
     params = {
@@ -138,9 +141,10 @@ pub fn evm_read(vm: &Arc<Vm>, base: Arc<dyn crate::db::Committed>, read: &EvmRea
     let bridge = Bridge { vm: vm.clone(), fuel_per_gas: 1, stack: Vec::new() };
     let action = EvmAction::Call { to: Address::Evm(read.to), value: crate::structs::u256::u256::ZERO, input: read.input.clone() };
 
-    evm::run(&state, &sender, nonce, action, &[], EVM_READ_GAS, memory, block, Some(&bridge))
+    evm::run(&state, &sender, nonce, action, &[], &[], EVM_READ_GAS, memory, block, Some(&bridge))
 }
 
+#[cfg(feature = "evm")]
 #[document(
     summary = "Runs an EVM read over proven entries alone, once every proof holds against root: an ERC-20's balanceOf or an NFT's ownerOf, answered by the app itself.",
     params = {

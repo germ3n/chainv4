@@ -252,7 +252,8 @@ offline; these would make that hold up as a treasury.
   same for key files already made, never the secret.
 - [x] **relay-sync copes with a throttling Esplora.** It asks at an even pace, again with
   backoff on errors and web pages, 25 headers a transaction, keeping what a pass fetched.
-- [ ] **Revisit the deployment proxy at genesis.** A chain running the EVM starts with the
+- [x] **Revisit the deployment proxy at genesis.** Done 2026-11-06 in batch 12: genesis's
+  `preinstalls` names it, so a file without the field opens again. A chain running the EVM starts with the
   deterministic deployment proxy at `0x4e59…956c` (`Genesis::write_state`), since the chain
   refuses the proxy's own pre-EIP-155 deploy, so a multisig's MultiSig.sol and Swap.sol land at
   their everywhere-addresses here too. It is ownerless, holds nothing and is 69 bytes, as OP
@@ -544,7 +545,8 @@ with.
   `name_of` for WebAssembly and the SDK, and the EVM precompile at `0x…4e53`.
 - [x] **Names, staking and governance as features.** `names`, `staking` and `governance`, each
   on by default.
-- [ ] **Unicode names,** with ENSIP-15's normalization against look-alikes.
+- [x] **Unicode names,** with ENSIP-15's normalization against look-alikes. Done 2026-11-06 in
+  batch 12, by the pinned ens-normalize crate; see [Names](names.md#what-a-name-is).
 
 ### Governance
 
@@ -637,7 +639,9 @@ with.
     shows up at once.
   - **Repeatable.** Runs pinned to one machine and build, each result with its spread, kept with
     the release, so a change to the engines that moves a cost is caught before it ships.
-- [ ] **Changing a running chain's engines.** Which engines a chain runs, Lua, WebAssembly and the
+- [x] **Changing a running chain's engines.** Done 2026-11-06 in batch 12: `Change::Engines`,
+  contracts of an engine turned off frozen but readable, a node without a turned-on engine
+  stopping; see [Governance](governance.md#engines). Which engines a chain runs, Lua, WebAssembly and the
   EVM, is fixed by genesis's `engines`: adding or dropping any of them today takes a new genesis.
   A `Change::Engines` by governance naming the whole new set, several engines at once, taking
   effect at a checkpoint like a consensus change, would let a live chain turn engines on and off,
@@ -790,7 +794,16 @@ with.
   [Proven contract reads](light-client.md#proven-contract-reads).
 - [x] **Old state over JSON-RPC.** Balances, nonces, code, storage and calls at an older block,
   by number, tag or hash, from the node's history. See [Ethereum's tools](ethereum.md).
-- [ ] **Blob and EIP-7702 transactions.**
+- [ ] **Blob and EIP-7702 transactions.** EIP-7702 done 2026-11-06 in batch 12: type-4
+  transactions set a delegation an account runs as its own code, kept through a revert, shown by
+  eth_getCode and eth_getTransactionByHash (see [EVM](evm.md#eip-7702-delegations)). Left: blob
+  transactions, type 3, refused for now as the chain keeps no blob data, and the KZG point
+  evaluation precompile with them; showing type-4 transactions and delegations in the explorer and
+  the wallet, with batch 15.
+- [ ] **Native accounts delegating to contracts (owner, 2026-11-06).** EIP-7702's idea for chainv4's
+  own accounts: an Ed25519, EdBlake or Bitcoin account letting a Lua or WebAssembly contract's
+  code run as its own, by a signed authorization, so it batches, sponsors fees or recovers keys as
+  a smart account, while it still signs as itself. Noted, not planned.
 - [x] **NFTs.** Two standards beside the fungible one: NFTs, ERC-721-like, and multi-token
   collections, ERC-1155-like, with safe transfers a receiving contract agrees to, owners and
   amounts kept provably, and `token_uri` metadata. Reference collections in Lua and Rust held to

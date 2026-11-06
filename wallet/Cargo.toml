@@ -25,7 +25,7 @@ required-features = ["mining"]
 [dependencies]
 # Only the parts that build for the browser too: transactions, keys, hashes and the light client,
 # and checking releases against the keys built in.
-chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "sealed-keys", "abi", "release"] }
+chainv4 = { path = "..", default-features = false, features = ["sha256", "unicode-names", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bitcoin", "mnemonic", "sealed-keys", "abi", "release"] }
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "persistence"] }
 egui = "0.37.0"
 # The look's widgets, talking to the node through a proxy, and running on Android, shared with the
