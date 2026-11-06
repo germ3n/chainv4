@@ -307,7 +307,7 @@ SHA-256s with the link.
 
 | What | Where |
 | --- | --- |
-| Genesis | `0xb04eef3aff841df3…`, 2026-11-05 (the seventh), named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; on the old keys, their rotation still to come |
+| Genesis | `0x05df6e9a22e88343…`, 2026-11-06 (the eighth: whole-number Lua, Luau 0.745), named `chainv4 devnet` by governance, coin CV4, 5 s blocks; the owner 500,000, each of three validators bonded 50,000, FFG, the council the owner alone; on the old keys, their rotation still to come |
 | Machines | Public node `150.40.117.239` (`chain.homepage.gs`), others `150.40.117.247` (builds the images) and `150.40.117.196`: Debian forky, 2 cores, 4 GB and 46 GB each, with 4 GB of swap and the [firewall](docker.md#firewall); `ssh -i ~/.ssh/id_kyun2` |
 | A fourth node | `65.87.7.198`, following and not voting (`VALIDATE=off`, no voting key), its images copied from `.247` and started with `up --no-build` |
 | A worker | `150.40.117.62`, no chain: `chainv4-worker` mining on 2 threads for the public node's open pool, paid to `ed25519:0x190b911b…fbea` (`worker.key`'s address; the key stays here) |
@@ -318,7 +318,7 @@ SHA-256s with the link.
 | Gateway, `gateway.cv4` | `contract:0xe6912df3…55dc` |
 | Bitcoin relay, `btcrelay.cv4` | `contract:0x717374cf…e9c0` (testnet4 from 157248), paid by `secp256k1:0x13813a41…4a7b`, a key on the public node |
 | Bitcoin gateway, `btcgateway.cv4` | `contract:0xc53df990…04e7`, signers on the servers, one key each, under `chainv4-signer` |
-| Sepolia Gateway.sol | `0x077697feade01edde53f34b43f1bf84a176588ce`, from Sepolia block 12070089, peered and in the directory |
+| Sepolia Gateway.sol | `0x901030ba7cd8b6480f50fa260fc496f70ab8cfac`, from Sepolia block 12076609, peered and in the directory |
 | Swap.sol | `0x14ee1befcc7efde4801bb6535c0521f9e09a4e4a` |
 | Tokens `gold.cv4`, `silver.cv4`, `tusd.cv4`; ERC-20 TETH | GLD, SLV, TUSD pooled with the coin; TETH `0x2625baf4…c4c9` on the EVM DEX |
 | Collections `pixels.cv4`, `items.cv4` | `contract:0x48ae529c…73cd`; `contract:0xf915ac76…2406` |
