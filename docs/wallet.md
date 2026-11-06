@@ -1175,11 +1175,19 @@ The **NFTs** page shows what the account holds of the chain's [collections](nft-
 - **Names and pictures:** a token's metadata and picture, where its `token_uri` points. `data:`
   URIs, on the chain, show always. `https://` and `ipfs://` ones only once Settings, **NFTs**,
   lets the wallet fetch them: each fetch tells whoever serves it, the IPFS gateway set there
-  included, which tokens you look at, and from where. PNG, JPEG and WebP pictures show; SVG and GIF
-  ones do not yet. At most 8 MB is fetched.
+  included, which tokens you look at, and from where. PNG, JPEG, WebP, GIF and SVG pictures show.
+  An animated GIF plays, up to 120 frames, each for as long as it says, under 20 ms taken as 100
+  as browsers do. An SVG is drawn from its bytes alone (resvg, built without text or images): it
+  draws no text, and loads no file or URL it points at, so drawing one tells nobody anything. At
+  most 8 MB is fetched.
+- **Royalty:** a token whose collection exports `royalty_info` shows its share of a sale and who it
+  goes to (see [royalties](nft-standard.md#beyond-the-standard-batches-and-royalties)).
 - **Sending:** an NFT, or an amount of a multi-token id, to an address or a name, as a call the
   Send page reviews and signs: `safe_transfer` to a contract, which must say it takes it,
   `transfer` to a key.
+- **Sending several at once:** **Add to a batch** on a multi-token id puts it with others of the
+  same collection and holder; the batch card sends them all in one `batch_transfer_from`, or
+  `safe_batch_transfer_from` to a contract.
 
 ### Bridge
 

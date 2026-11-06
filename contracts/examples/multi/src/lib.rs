@@ -329,6 +329,93 @@ fn set_base_uri(base_uri: String) -> Result<bool, &'static str> {
     Ok(true)
 }
 
+/// Beyond the standard, as ERC-1155's batches: several ids moved at once, each id and its amount
+/// packed in one bytes argument, 64 bytes a pair, the id then the amount, 32 bytes each,
+/// big-endian, as calls take no lists. Each pair moves as transfer_from moves one; the safe kind
+/// asks a receiving contract for each, after all have moved.
+const MOST_BATCH: usize = 100;
+
+fn batch(packed: &[u8]) -> Result<Vec<(U256, U256)>, &'static str> {
+    if packed.is_empty() || !packed.len().is_multiple_of(64) {
+        return Err("a batch is 64 bytes a pair: an id then its amount, 32 bytes each, big-endian");
+    }
+
+    if packed.len() > 64 * MOST_BATCH {
+        return Err("a batch moves at most 100 ids");
+    }
+
+    let big_endian = |bytes: &[u8]| {
+        let mut little = [0u8; 32];
+        little.copy_from_slice(bytes);
+        little.reverse();
+        U256::from_le_bytes(little)
+    };
+
+    Ok(packed.chunks(64).map(|pair| (big_endian(&pair[..32]), big_endian(&pair[32..]))).collect())
+}
+
+#[export]
+fn batch_transfer_from(from: Address, to: Address, packed: Vec<u8>) -> Result<bool, &'static str> {
+    for (id, amount) in batch(&packed)? {
+        checked_transfer(&from, &to, id, amount)?;
+    }
+
+    Ok(true)
+}
+
+#[export]
+fn safe_batch_transfer_from(from: Address, to: Address, packed: Vec<u8>) -> Result<bool, &'static str> {
+    let pairs = batch(&packed)?;
+
+    for (id, amount) in &pairs {
+        checked_transfer(&from, &to, *id, *amount)?;
+    }
+
+    for (id, amount) in &pairs {
+        received(&from, &to, *id, *amount)?;
+    }
+
+    Ok(true)
+}
+
+/// Beyond the standard, as ERC-2981 does it: what a sale of an id owes, and to whom, out of its
+/// price, set by the owner for every id or for one, in basis points out of 10,000.
+fn royalties() -> storage::Namespace<'static> {
+    storage::namespace(b"royalties")
+}
+
+const WHOLE: u64 = 10_000;
+
+#[export]
+fn set_royalty(receiver: Address, bps: U256, id: Option<U256>) -> Result<bool, &'static str> {
+    only_owner()?;
+
+    if bps > U256::from(WHOLE) {
+        return Err("a royalty is at most 10,000 basis points, the whole price");
+    }
+
+    let at = id.map_or_else(|| String::from("*"), key);
+    royalties().set_text(at.as_bytes(), &format!("{}|{}", receiver.text(), bps));
+    emit("RoyaltySet", &[Value::Address(receiver), bps.into(), id.unwrap_or(U256::ZERO).into()]);
+
+    Ok(true)
+}
+
+/// Who a sale of id at price pays, and how much: the zero address and nothing when none is set.
+#[export]
+fn royalty_info(id: U256, price: U256) -> Result<(Address, U256), &'static str> {
+    let kept = royalties().get_text(key(id).as_bytes()).or_else(|| royalties().get_text(b"*"));
+    let Some(kept) = kept else {
+        return Ok((zero(), U256::ZERO));
+    };
+    let (receiver, bps) = kept.rsplit_once('|').ok_or("a royalty kept that does not read")?;
+    let receiver = Address::parse(receiver).ok_or("a royalty kept that does not read")?;
+    let bps = U256::from_decimal(bps).ok_or("a royalty kept that does not read")?;
+    let owed = price.checked_mul(bps).ok_or("a price too large to take a royalty of")?.checked_div(U256::from(WHOLE)).unwrap_or(U256::ZERO);
+
+    Ok((receiver, owed))
+}
+
 /// Asked by the chain before an upgrade: only the owner may.
 #[export]
 fn check_perms(permission: String, who: Address) -> bool {

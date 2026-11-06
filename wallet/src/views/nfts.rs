@@ -57,7 +57,68 @@ enum Media {
     Metadata(Metadata),
     Picture(egui::ColorImage),
     Shown(egui::TextureHandle),
+    /// An animated GIF's frames, each with how long it shows, in seconds.
+    Animation(Vec<(egui::ColorImage, f64)>),
+    ShownAnimation(Vec<(egui::TextureHandle, f64)>),
     Not(String),
+}
+
+/// The widest or tallest a picture is kept at: what a card shows.
+const PICTURE_SIDE: u32 = 512;
+/// The most frames of an animation kept, and the most pixels in all of them.
+const MOST_FRAMES: usize = 120;
+const MOST_FRAME_PIXELS: usize = 24 * 1024 * 1024;
+
+/// An SVG drawn to pixels from its bytes alone: no text, no fonts, and no images it points at,
+/// which this build of resvg cannot load, so drawing one makes no request and reads no file.
+fn svg(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    use resvg::{tiny_skia, usvg};
+
+    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).map_err(|err| format!("an SVG that does not read: {err}"))?;
+    let size = tree.size();
+    let scale = (PICTURE_SIDE as f32 / size.width().max(size.height())).min(4.0);
+    let (width, height) = ((size.width() * scale).ceil().max(1.0) as u32, (size.height() * scale).ceil().max(1.0) as u32);
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("an SVG of no size")?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+
+    Ok(egui::ColorImage::from_rgba_premultiplied([width as usize, height as usize], pixmap.data()))
+}
+
+/// An animated GIF's frames, each shrunk to what a card shows, with how long each shows; None for a
+/// GIF of one frame, which reads as any picture.
+fn gif(bytes: &[u8]) -> Option<Result<Vec<(egui::ColorImage, f64)>, String>> {
+    use image::AnimationDecoder;
+
+    let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut frames = Vec::new();
+    let mut pixels = 0;
+
+    for frame in decoder.into_frames() {
+        let Ok(frame) = frame else {
+            return Some(Err("a GIF that does not read".to_string()));
+        };
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        // As browsers do: a frame of under 20 ms shows for 100.
+        let shows = match f64::from(numerator) / f64::from(denominator.max(1)) {
+            ms if ms < 20.0 => 0.1,
+            ms => ms / 1000.0,
+        };
+        let picture = image::DynamicImage::ImageRgba8(frame.into_buffer());
+        let picture = match picture.width().max(picture.height()) > PICTURE_SIDE {
+            true => picture.thumbnail(PICTURE_SIDE, PICTURE_SIDE).to_rgba8(),
+            false => picture.to_rgba8(),
+        };
+        pixels += (picture.width() * picture.height()) as usize;
+
+        if frames.len() == MOST_FRAMES || pixels > MOST_FRAME_PIXELS {
+            break;
+        }
+
+        let size = [picture.width() as usize, picture.height() as usize];
+        frames.push((egui::ColorImage::from_rgba_unmultiplied(size, picture.as_raw()), shows));
+    }
+
+    (frames.len() > 1).then_some(Ok(frames))
 }
 
 #[derive(Default)]
@@ -81,6 +142,20 @@ pub struct NftsState {
     to: String,
     amount: String,
     trouble: Option<String>,
+    /// Each token's royalty on a sale of 10,000, by collection and id: its receiver and how much,
+    /// so the share in basis points; None once the collection says it keeps none.
+    royalties: HashMap<(String, String), Option<(String, u256)>>,
+    /// Ids of one multi-token collection put together to send at once, with the address holding
+    /// them, each with how many.
+    batch: Option<Batch>,
+}
+
+/// Several ids of one multi-token collection, from one holder, sent in one batch_transfer_from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Batch {
+    pub collection: String,
+    pub holder: String,
+    pub items: Vec<(String, u256)>,
 }
 
 /// The collections a /collections answer lists.
@@ -154,6 +229,15 @@ impl NftsState {
                 if let Some(uri) = uri.into_iter().next() {
                     self.uris.insert((contract, first), uri);
                 }
+            }
+            (Some("royalty_info"), Some(answer)) => {
+                let share = answer.get(1).and_then(|amount| u256::from_str_radix(amount, 10).ok()).unwrap_or(u256::ZERO);
+                let receiver = answer.first().cloned().unwrap_or_default();
+                self.royalties.insert((contract, first), (share > u256::ZERO).then_some((receiver, share)));
+            }
+            // A collection without royalty_info keeps none.
+            (Some("royalty_info"), None) => {
+                self.royalties.insert((contract, first), None);
             }
             _ => {}
         }
@@ -235,7 +319,13 @@ fn read(bytes: &[u8], media: Option<&str>) -> Media {
     }
 
     if media.is_some_and(|media| media.contains("svg")) || bytes.trim_ascii_start().starts_with(b"<") {
-        return Media::Not("an SVG picture, which the wallet does not draw".to_string());
+        return svg(bytes).map_or_else(Media::Not, Media::Picture);
+    }
+
+    if bytes.starts_with(b"GIF8")
+        && let Some(frames) = gif(bytes)
+    {
+        return frames.map_or_else(Media::Not, Media::Animation);
     }
 
     match image::load_from_memory(bytes) {
@@ -249,7 +339,7 @@ fn read(bytes: &[u8], media: Option<&str>) -> Media {
 
             Media::Picture(egui::ColorImage::from_rgba_unmultiplied(size, picture.as_raw()))
         }
-        Err(_) => Media::Not("neither metadata nor a picture the wallet reads: PNG, JPEG or WebP".to_string()),
+        Err(_) => Media::Not("neither metadata nor a picture the wallet reads: PNG, JPEG, WebP, GIF or SVG".to_string()),
     }
 }
 
@@ -386,6 +476,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
         }
     }
 
+    batch_card(ui, ctx, state, &mut prepared);
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Held");
 
@@ -459,6 +551,30 @@ fn picture(ui: &Ui, state: &mut NftsState, card: &Card) -> Option<egui::TextureH
             state.media.insert(source, Media::Shown(texture.clone()));
 
             Some(texture)
+        }
+        Media::Animation(frames) => {
+            let textures = frames.iter().enumerate().map(|(at, (image, shows))| (ui.ctx().load_texture(format!("nft {source} {at}"), image.clone(), egui::TextureOptions::LINEAR), *shows)).collect::<Vec<_>>();
+            let first = textures.first().map(|(texture, _)| texture.clone());
+            state.media.insert(source, Media::ShownAnimation(textures));
+
+            first
+        }
+        // The frame for now, and a repaint for when the next is due.
+        Media::ShownAnimation(frames) => {
+            let total: f64 = frames.iter().map(|(_, shows)| shows).sum();
+            let mut into = ui.input(|input| input.time) % total.max(0.001);
+
+            for (texture, shows) in frames {
+                if into < *shows {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(shows - into));
+
+                    return Some(texture.clone());
+                }
+
+                into -= shows;
+            }
+
+            frames.last().map(|(texture, _)| texture.clone())
         }
         _ => None,
     }
@@ -557,6 +673,17 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
             });
         }
 
+        let at = (card.listed.address.clone(), card.id.clone());
+
+        match state.royalties.get(&at) {
+            None => ctx.node.ask(call_ask(&card.listed.address, "royalty_info", json!([{ "type": "u256", "value": card.id }, { "type": "u256", "value": "10000" }]))),
+            Some(Some((receiver, share))) => super::row(ui, &palette, "Royalty", |ui| {
+                ui.label(format!("{}.{:02}% of a sale, to", share / u256::from(100u64), share % u256::from(100u64)));
+                super::address(ui, &palette, receiver);
+            }),
+            Some(None) => {}
+        }
+
         if let Some(uri) = &uri {
             super::row(ui, &palette, "Token URI", |ui| {
                 ui.label(RichText::new(format::short(uri)).small().color(palette.muted)).on_hover_text(uri);
@@ -603,10 +730,104 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
             }
         }
 
+        // Several ids of a multi-token collection go in one transaction: this one joins the batch.
+        if card.listed.kind == CollectionKind::Multi
+            && let Some(amount) = amount
+        {
+            let fits = state.batch.as_ref().is_none_or(|batch| batch.collection == card.listed.address && batch.holder == card.holder);
+            let added = state.batch.as_ref().is_some_and(|batch| batch.items.iter().any(|(id, _)| *id == card.id));
+
+            if fits && !added && theme::quiet(ui, &palette, "Add to a batch").on_hover_text("Send it with other ids of this collection, in one transaction").clicked() {
+                let batch = state.batch.get_or_insert_with(|| Batch { collection: card.listed.address.clone(), holder: card.holder.clone(), items: Vec::new() });
+                batch.items.push((card.id.clone(), amount));
+            }
+        }
+
         if let Some(trouble) = &state.trouble {
             ui.colored_label(palette.bad, trouble);
         }
     });
+}
+
+/// The ids put together to send at once, with where to, and Review and send.
+fn batch_card(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, prepared: &mut Option<Prepared>) {
+    let palette = *ctx.palette;
+    let Some(batch) = state.batch.clone() else {
+        return;
+    };
+
+    theme::card(ui, &palette, |ui| {
+        theme::end_row(
+            ui,
+            |ui| theme::caps(ui, &palette, &format!("A batch of {} ids", batch.items.len())),
+            |ui| {
+                if theme::quiet(ui, &palette, "Clear").clicked() {
+                    state.batch = None;
+                }
+            },
+        );
+
+        let mut dropped = None;
+
+        for (at, (id, amount)) in batch.items.iter().enumerate() {
+            theme::end_row(ui, |ui| { ui.label(format!("{amount} of #{id}")); }, |ui| {
+                if theme::quiet(ui, &palette, "Take out").clicked() {
+                    dropped = Some(at);
+                }
+            });
+        }
+
+        if let (Some(at), Some(kept)) = (dropped, state.batch.as_mut()) {
+            kept.items.remove(at);
+
+            if kept.items.is_empty() {
+                state.batch = None;
+            }
+        }
+
+        super::row(ui, &palette, "To", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut state.to).hint_text("an address or a name").desired_width(f32::INFINITY));
+        });
+        let to = recipient(ctx, &state.to);
+
+        if theme::primary(ui, &palette, "Review and send them all", to.is_some() && !batch.items.is_empty()).clicked()
+            && let Some(to) = to
+        {
+            match (batch.holder.parse::<Address>(), batch.collection.parse::<Address>()) {
+                (Ok(from), Ok(collection)) => *prepared = Some(batch_transfer(from, collection, &batch.items, to)),
+                _ => state.trouble = Some("An address that does not read.".to_string()),
+            }
+        }
+    });
+}
+
+/// Sending several ids of a multi-token collection at once: safe_batch_transfer_from to a contract,
+/// which must say it takes each, else batch_transfer_from; the ids and amounts packed as the
+/// collection takes them, 64 bytes a pair.
+pub fn batch_transfer(from: Address, collection: Address, items: &[(String, u256)], to: Address) -> Prepared {
+    let function = match to {
+        Address::Contract(_) => "safe_batch_transfer_from",
+        _ => "batch_transfer_from",
+    };
+    let mut packed = Vec::with_capacity(items.len() * 64);
+
+    for (id, amount) in items {
+        packed.extend(u256::from_str_radix(id, 10).unwrap_or(u256::ZERO).to_be_bytes());
+        packed.extend(amount.to_be_bytes());
+    }
+
+    Prepared {
+        from,
+        tx: Tx::ContractCall {
+            to: collection,
+            func: Hasher::digest(HashType::Xxh3_64, function.as_bytes()),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Address(from), TxCallArgumentType::Address(to), TxCallArgumentType::Bytes(packed)],
+        },
+        what: format!("Send a batch of {} ids", items.len()),
+        about: collection.to_string(),
+        coin: u256::ZERO,
+    }
 }
 
 /// Who to send to: an address, or a name the light client proved points at one.

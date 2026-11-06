@@ -49,7 +49,10 @@ getrandom = "0.4"
 qrcode = { version = "0.14.1", default-features = false }
 # Reading QR codes off photos, for signing on a device that never goes online: JPEG and PNG
 # decoded in Rust, alike on every platform, and rqrr to find and read the codes in them.
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+# NFT pictures in SVG, drawn from their bytes alone: no text, no fonts and no images they point at,
+# so a picture can make no request and read no file.
+resvg = { version = "=0.48.1", default-features = false }
 rqrr = { version = "0.11.0", default-features = false }
 ur = "0.5.2"
 minicbor = { version = "2", default-features = false, features = ["alloc"] }

@@ -6,6 +6,7 @@ local M = {}
 
 -- The other side of a mint or a burn.
 local ZERO = address.from_bytes(string.rep("\0", 32))
+local NONE = u256(0)
 -- The most ids tokens_of returns at once.
 local MOST = 100
 local ONE = u256(1)
@@ -309,6 +310,36 @@ function M.set_base_uri(base_uri)
     only_owner()
     storage.set("base_uri", base_uri)
     return true
+end
+
+-- Beyond the standard, as ERC-2981 does it: what a sale of an id owes, and to whom, out of its
+-- price. The owner sets it for every id, or for one, in basis points out of 10,000; unset, nothing.
+local royalties = storage.namespace("royalties")
+local WHOLE = u256(10000)
+
+function M.set_royalty(receiver, bps, id)
+    only_owner()
+    bps = u256(bps)
+
+    if bps > WHOLE then
+        error("a royalty is at most 10,000 basis points, the whole price")
+    end
+
+    royalties:set(id == nil and "*" or key(id), receiver:text() .. "|" .. tostring(bps))
+    events.emit("RoyaltySet", receiver, bps, id == nil and NONE or u256(id))
+    return true
+end
+
+-- Who a sale of id at price pays, and how much: the zero address and nothing when none is set.
+function M.royalty_info(id, price)
+    local kept = royalties:get(key(id)) or royalties:get("*")
+
+    if kept == nil then
+        return ZERO, NONE
+    end
+
+    local receiver, bps = kept:match("^(.*)|(%d+)$")
+    return address.parse(receiver), u256(price) * u256(bps) // WHOLE
 end
 
 -- Asked by the chain before an upgrade: only the owner may.

@@ -109,6 +109,27 @@ no such function, refuses it, so nothing is stuck there.
   call back into the collection while it runs.
 - **EVM contracts** are never asked: the receiver must be a native contract, `contract:0x…`.
 
+## Beyond the standard: batches and royalties
+
+The reference collections, Lua and Rust, export two more kinds of function. Neither is in the
+standard's lists (`STANDARD_NFT_FUNCTIONS`, `STANDARD_MULTI_FUNCTIONS`), so a collection is
+registered with or without them, and the chain's rules are unchanged.
+
+**Batch transfers,** multi-token collections, as ERC-1155's `safeBatchTransferFrom`:
+- `batch_transfer_from(from, to, packed)` and `safe_batch_transfer_from(from, to, packed)`;
+- `packed` is bytes, 64 a pair, the id then its amount, 32 bytes each, big-endian, at most 100
+  pairs, as calls take no lists;
+- each pair moves as `transfer_from` moves one, with its own `TransferSingle`; one that cannot
+  move fails the whole batch, and nothing moves;
+- the safe kind asks a receiving contract for each pair, once all have moved.
+
+**Royalties,** both kinds, as ERC-2981's:
+- `royalty_info(id, price)` answers who a sale owes and how much: the receiver and
+  `price × bps / 10,000`, rounded down; the zero address and 0 while none is set;
+- `set_royalty(receiver, bps, id?)`, the owner's alone, sets it for every id, or for one, which
+  then stands in for the collection's there; at most 10,000 basis points, and `RoyaltySet` says it;
+- nothing makes a sale pay it: a marketplace reads it and pays it, as on Ethereum.
+
 ## Provable ownership
 
 A collection keeps owners and amounts where any client can prove them against a header alone, as

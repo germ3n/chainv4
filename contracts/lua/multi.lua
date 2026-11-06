@@ -262,6 +262,92 @@ function M.set_base_uri(base_uri)
     return true
 end
 
+-- Beyond the standard, as ERC-1155's batches: several ids moved at once, each id and its amount
+-- packed in one bytes argument, 64 bytes a pair, the id then the amount, 32 bytes each,
+-- big-endian, as calls take no lists. Each pair moves as transfer_from moves one, and emits its
+-- own TransferSingle; the safe kind asks a receiving contract for each, after all have moved.
+local MOST_BATCH = 100
+
+local function u256_of(bytes)
+    local hex = {}
+
+    for at = 1, #bytes do
+        hex[at] = string.format("%02x", string.byte(bytes, at))
+    end
+
+    return u256("0x" .. table.concat(hex))
+end
+
+local function batch(packed)
+    if type(packed) ~= "string" or #packed == 0 or #packed % 64 ~= 0 then
+        error("a batch is 64 bytes a pair: an id then its amount, 32 bytes each, big-endian")
+    end
+
+    if #packed > 64 * MOST_BATCH then
+        error("a batch moves at most " .. MOST_BATCH .. " ids")
+    end
+
+    local found = {}
+
+    for at = 1, #packed, 64 do
+        found[#found + 1] = { u256_of(packed:sub(at, at + 31)), u256_of(packed:sub(at + 32, at + 63)) }
+    end
+
+    return found
+end
+
+function M.batch_transfer_from(from, to, packed)
+    for _, pair in ipairs(batch(packed)) do
+        transfer_from(from, to, pair[1], pair[2])
+    end
+
+    return true
+end
+
+function M.safe_batch_transfer_from(from, to, packed)
+    local pairs = batch(packed)
+
+    for _, pair in ipairs(pairs) do
+        transfer_from(from, to, pair[1], pair[2])
+    end
+
+    for _, pair in ipairs(pairs) do
+        received(from, to, pair[1], pair[2])
+    end
+
+    return true
+end
+
+-- Beyond the standard, as ERC-2981 does it: what a sale of an id owes, and to whom, out of its
+-- price. The owner sets it for every id, or for one, in basis points out of 10,000; unset, nothing.
+local royalties = storage.namespace("royalties")
+local WHOLE = u256(10000)
+
+function M.set_royalty(receiver, bps, id)
+    only_owner()
+    bps = u256(bps)
+
+    if bps > WHOLE then
+        error("a royalty is at most 10,000 basis points, the whole price")
+    end
+
+    royalties:set(id == nil and "*" or key(id), receiver:text() .. "|" .. tostring(bps))
+    events.emit("RoyaltySet", receiver, bps, id == nil and NONE or u256(id))
+    return true
+end
+
+-- Who a sale of id at price pays, and how much: the zero address and nothing when none is set.
+function M.royalty_info(id, price)
+    local kept = royalties:get(key(id)) or royalties:get("*")
+
+    if kept == nil then
+        return ZERO, NONE
+    end
+
+    local receiver, bps = kept:match("^(.*)|(%d+)$")
+    return address.parse(receiver), u256(price) * u256(bps) // WHOLE
+end
+
 -- Asked by the chain before an upgrade: only the owner may.
 function M.check_perms(permission, who)
     return permission == "upgrade" and who:text() == storage.get("owner")

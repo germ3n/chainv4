@@ -738,9 +738,10 @@ with.
   genesis or turned on by governance; the wallet's NFTs page, proving what the account holds and
   showing pictures once Settings lets it fetch them; the explorer's NFTs pages; `chainv4 nft`; and
   NFTs in atomic swaps, on chainv4 and EVM chains. See [NFT standards](nft-standard.md).
-- [ ] **NFTs: next.** SVG and GIF pictures in the wallet; batch transfers (`safeBatchTransferFrom`);
-  royalties (ERC-2981); a marketplace contract; EVM collections listed by the apps, as native
-  ones are.
+- [ ] **NFTs: next.** A marketplace contract, which would pay royalties; EVM collections in the
+  apps. Done 2026-11-06: batch transfers and royalties on the reference collections
+  (docs/nft-standard.md), SVG and animated GIF pictures, royalties shown and batches sent in the
+  wallet.
 - [x] **Containers where they matter.** `eth_getLogs` matches its address and topic filters as
   sets, refuses ones past 1,000 addresses or topics at a place, and reads its blocks one at a
   time. The proofs a block carries are picked among same-epoch links in one order, and the chain's

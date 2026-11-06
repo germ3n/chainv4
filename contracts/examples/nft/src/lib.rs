@@ -376,6 +376,44 @@ fn set_base_uri(base_uri: String) -> Result<bool, &'static str> {
     Ok(true)
 }
 
+/// Beyond the standard, as ERC-2981 does it: what a sale of an id owes, and to whom, out of its
+/// price, set by the owner for every id or for one, in basis points out of 10,000.
+fn royalties() -> storage::Namespace<'static> {
+    storage::namespace(b"royalties")
+}
+
+const WHOLE: u64 = 10_000;
+
+#[export]
+fn set_royalty(receiver: Address, bps: U256, id: Option<U256>) -> Result<bool, &'static str> {
+    only_owner()?;
+
+    if bps > U256::from(WHOLE) {
+        return Err("a royalty is at most 10,000 basis points, the whole price");
+    }
+
+    let at = id.map_or_else(|| String::from("*"), key);
+    royalties().set_text(at.as_bytes(), &format!("{}|{}", receiver.text(), bps));
+    emit("RoyaltySet", &[Value::Address(receiver), bps.into(), id.unwrap_or(U256::ZERO).into()]);
+
+    Ok(true)
+}
+
+/// Who a sale of id at price pays, and how much: the zero address and nothing when none is set.
+#[export]
+fn royalty_info(id: U256, price: U256) -> Result<(Address, U256), &'static str> {
+    let kept = royalties().get_text(key(id).as_bytes()).or_else(|| royalties().get_text(b"*"));
+    let Some(kept) = kept else {
+        return Ok((zero(), U256::ZERO));
+    };
+    let (receiver, bps) = kept.rsplit_once('|').ok_or("a royalty kept that does not read")?;
+    let receiver = Address::parse(receiver).ok_or("a royalty kept that does not read")?;
+    let bps = U256::from_decimal(bps).ok_or("a royalty kept that does not read")?;
+    let owed = price.checked_mul(bps).ok_or("a price too large to take a royalty of")?.checked_div(U256::from(WHOLE)).unwrap_or(U256::ZERO);
+
+    Ok((receiver, owed))
+}
+
 /// Asked by the chain before an upgrade: only the owner may.
 #[export]
 fn check_perms(permission: String, who: Address) -> bool {

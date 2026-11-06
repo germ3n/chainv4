@@ -45,8 +45,9 @@ fn what_is_held_is_asked_then_proven_by_kind() {
 #[test]
 fn bytes_become_metadata_a_picture_or_a_reason() {
     assert!(matches!(read(br#"{"name":"Ape","image":"ipfs://x"}"#, None), Media::Metadata(metadata) if metadata.name.as_deref() == Some("Ape")));
-    assert!(matches!(read(b"<svg xmlns='http://www.w3.org/2000/svg'/>", Some("image/svg+xml")), Media::Not(why) if why.contains("SVG")));
-    assert!(matches!(read(b"not a picture", None), Media::Not(why) if why.contains("PNG, JPEG or WebP")));
+    assert!(matches!(read(b"<svg xmlns='http://www.w3.org/2000/svg'/>", Some("image/svg+xml")), Media::Picture(_)), "one of no size takes SVG's own 100 by 100");
+    assert!(matches!(read(b"<svg not closed", Some("image/svg+xml")), Media::Not(why) if why.contains("SVG")));
+    assert!(matches!(read(b"not a picture", None), Media::Not(why) if why.contains("PNG, JPEG, WebP, GIF or SVG")));
 
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(3, 2, image::Rgba([9, 8, 7, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
@@ -225,3 +226,73 @@ fn a_multi_token_id_one_address_lists_is_proven_at_every_address_of_the_account(
 
     assert_eq!(holders, expected);
 }
+
+#[test]
+fn an_svg_is_drawn_from_its_bytes_alone_and_an_animated_gif_keeps_its_frames() {
+    // Drawn to fit a card, at most four times the size it says it is.
+    let square = br#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32"><rect width="64" height="32" fill="red"/></svg>"#;
+    let Media::Picture(drawn) = read(square, Some("image/svg+xml")) else { panic!("an SVG is drawn") };
+    assert_eq!(drawn.size, [256, 128]);
+    let large = br#"<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="1024"><rect width="2048" height="1024" fill="red"/></svg>"#;
+    assert!(matches!(read(large, None), Media::Picture(picture) if picture.size == [512, 256]), "a big one shrinks to a card's");
+    assert_eq!(drawn.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+
+    // An image it points at, by a file or a URL, is never loaded: it draws without it.
+    let pointing = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image href="file:///etc/passwd" width="8" height="8"/><image xlink:href="https://example.org/x.png" width="8" height="8"/></svg>"#;
+    let Media::Picture(drawn) = read(pointing, None) else { panic!("drawn, without what it points at") };
+    assert!(drawn.pixels.iter().all(|pixel| pixel.a() == 0), "nothing loaded into it");
+
+    // A GIF of two frames animates, each frame for as long as it says.
+    let frame = |rgb: [u8; 3], ms: u32| {
+        let buffer = image::RgbaImage::from_pixel(4, 4, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
+        image::Frame::from_parts(buffer, 0, 0, image::Delay::from_numer_denom_ms(ms, 1))
+    };
+    let mut animated = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut animated);
+        encoder.encode_frames([frame([255, 0, 0], 200), frame([0, 0, 255], 5)]).unwrap();
+    }
+    let Media::Animation(frames) = read(&animated, Some("image/gif")) else { panic!("an animation") };
+    assert_eq!(frames.len(), 2);
+    assert_eq!((frames[0].1, frames[1].1), (0.2, 0.1), "a frame under 20 ms shows for 100, as browsers do");
+
+    // One frame alone is a picture as any other.
+    let mut still = Vec::new();
+    image::codecs::gif::GifEncoder::new(&mut still).encode_frames([frame([0, 255, 0], 100)]).unwrap();
+    assert!(matches!(read(&still, None), Media::Picture(picture) if picture.size == [4, 4]));
+}
+
+#[test]
+fn a_batch_packs_each_id_and_amount_and_goes_safely_to_a_contract() {
+    let from = Address::Ed25519([1; 32]);
+    let collection = Address::Contract([9; 32]);
+    let items = vec![("7".to_string(), u256::from(2u64)), ("300".to_string(), u256::from(1u64))];
+    let packed = |prepared: &Prepared| match &prepared.tx {
+        Tx::ContractCall { func, data, .. } => (*func, data.clone()),
+        _ => panic!("a call"),
+    };
+
+    let (func, data) = packed(&batch_transfer(from, collection, &items, Address::Secp256k1([2; 20])));
+    assert_eq!(func, Hasher::digest(HashType::Xxh3_64, b"batch_transfer_from"));
+    let TxCallArgumentType::Bytes(bytes) = &data[2] else { panic!("packed in bytes") };
+    assert_eq!(bytes.len(), 128);
+    assert_eq!((bytes[31], bytes[63], &bytes[94..96], bytes[127]), (7, 2, &[1u8, 44][..], 1), "big-endian, 32 bytes each");
+    assert_eq!(data[0], TxCallArgumentType::Address(from));
+
+    let (func, _) = packed(&batch_transfer(from, collection, &items, Address::Contract([3; 32])));
+    assert_eq!(func, Hasher::digest(HashType::Xxh3_64, b"safe_batch_transfer_from"));
+}
+
+#[test]
+fn a_royalty_is_read_as_a_share_of_ten_thousand_and_none_where_the_collection_keeps_none() {
+    let mut state = NftsState::default();
+    let ask = |id: &str| call_ask("contract:0x01", "royalty_info", serde_json::json!([{ "type": "u256", "value": id }, { "type": "u256", "value": "10000" }]));
+
+    state.answered(&ask("5"), &returned(&[serde_json::json!({ "type": "address", "value": "ed25519:0x77" }), serde_json::json!({ "type": "u256", "value": "250" })]));
+    assert_eq!(state.royalties[&("contract:0x01".to_string(), "5".to_string())], Some(("ed25519:0x77".to_string(), u256::from(250u64))));
+    state.answered(&ask("6"), &returned(&[serde_json::json!({ "type": "address", "value": "ed25519:0x00" }), serde_json::json!({ "type": "u256", "value": "0" })]));
+    assert_eq!(state.royalties[&("contract:0x01".to_string(), "6".to_string())], None, "nothing owed is none");
+    state.answered(&ask("7"), &ok(serde_json::json!({ "status": "failed", "error": "no such function" })));
+    assert_eq!(state.royalties[&("contract:0x01".to_string(), "7".to_string())], None);
+}
+

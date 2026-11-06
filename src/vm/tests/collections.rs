@@ -49,6 +49,30 @@ fn refused(world: &World, sender: Address, contract: Address, function: &str, ar
     world.call_as(sender, contract, function, args).result.unwrap_err().to_string()
 }
 
+/// Beyond the standard, both kinds: royalties as ERC-2981's, the owner's alone to set, for every id
+/// or one, at most the whole price, rounded down.
+fn royalties_hold(world: &World, collection: Address, stranger: Address) {
+    let call = |sender: Address, function: &str, args: &[TxCallArgumentType]| ok(world, sender, collection, function, args);
+    let receiver = Address::Ed25519([0x77; 32]);
+    let other = Address::Secp256k1([0x78; 20]);
+    let none = vec![address(Address::Ed25519([0; 32])), id(0)];
+
+    assert_eq!(call(DEPLOYER, "royalty_info", &[id(1), id(1_000)]).0, none, "nothing until one is set");
+    assert!(refused(world, stranger, collection, "set_royalty", &[address(receiver), id(500)]).contains("only the collection's owner"));
+    assert!(refused(world, DEPLOYER, collection, "set_royalty", &[address(receiver), id(10_001)]).contains("at most 10,000"));
+    assert_eq!(
+        call(DEPLOYER, "set_royalty", &[address(receiver), id(250)]),
+        (yes(), vec![("RoyaltySet".to_string(), vec![address(receiver), id(250), id(0)])])
+    );
+    assert_eq!(call(DEPLOYER, "royalty_info", &[id(1), id(1_000)]).0, [address(receiver), id(25)], "2.5% of 1,000");
+    assert_eq!(call(DEPLOYER, "royalty_info", &[id(1), id(39)]).0, [address(receiver), id(0)], "rounded down");
+
+    // One id's own, which stands in for the collection's there alone.
+    call(DEPLOYER, "set_royalty", &[address(other), id(1_000), id(5)]);
+    assert_eq!(call(DEPLOYER, "royalty_info", &[id(5), id(1_000)]).0, [address(other), id(100)]);
+    assert_eq!(call(DEPLOYER, "royalty_info", &[id(6), id(1_000)]).0, [address(receiver), id(25)]);
+}
+
 /// Runs the NFT standard against an example collection, whichever engine runs it.
 fn conforms_to_the_nft_standard(code: Code) {
     let mut world = World::new();
@@ -161,6 +185,8 @@ fn conforms_to_the_nft_standard(code: Code) {
     call(dave, "burn", &[id(9)]);
     call(dave, "burn", &[id(10)]);
 
+    royalties_hold(&world, nft, bob);
+
     // Only the owner upgrades, and owners outlive it.
     assert_eq!(world.upgrade(bob, nft, code.clone()), Err(crate::registry::RegistryError::NotPermitted));
     world.upgrade(DEPLOYER, nft, code).unwrap();
@@ -253,6 +279,35 @@ fn conforms_to_the_multi_token_standard(code: Code) {
     assert_eq!(call(alice, "burn", &[address(alice), id(7), id(4)]).1, [moved(alice, address(alice), zero, 7, 4)]);
     assert_eq!(call(DEPLOYER, "total_supply", &[id(7)]).0, [id(6)]);
     assert!(ids(alice).is_empty());
+
+    // Batches: several ids at once, each as transfer_from moves it, in one bytes argument of
+    // 64-byte pairs, an id then its amount, big-endian.
+    let pairs = |pairs: &[(u64, u64)]| {
+        let mut packed = Vec::new();
+
+        for (token, amount) in pairs {
+            packed.extend(u256::from(*token).to_be_bytes());
+            packed.extend(u256::from(*amount).to_be_bytes());
+        }
+
+        TxCallArgumentType::Bytes(packed)
+    };
+    call(DEPLOYER, "mint", &[address(alice), id(20), id(5)]);
+    call(DEPLOYER, "mint", &[address(alice), id(21), id(3)]);
+    assert_eq!(
+        call(alice, "batch_transfer_from", &[address(alice), address(bob), pairs(&[(20, 2), (21, 3)])]),
+        (yes(), vec![moved(alice, address(alice), address(bob), 20, 2), moved(alice, address(alice), address(bob), 21, 3)])
+    );
+    assert_eq!((balance(alice, 20), balance(bob, 20), balance(bob, 21), balance(alice, 21)), (vec![id(3)], vec![id(2)], vec![id(3)], vec![id(0)]));
+    assert!(no(carol, "batch_transfer_from", &[address(alice), address(carol), pairs(&[(20, 1)])]).contains("not the holder or an operator"));
+    assert!(no(alice, "batch_transfer_from", &[address(alice), address(bob), pairs(&[(20, 1), (20, 9)])]).contains("insufficient balance"), "all or none");
+    assert_eq!(balance(alice, 20), [id(3)], "nothing moved of a batch that failed");
+    assert!(no(alice, "batch_transfer_from", &[address(alice), address(bob), TxCallArgumentType::Bytes(vec![0; 63])]).contains("64 bytes a pair"));
+    assert!(no(alice, "safe_batch_transfer_from", &[address(alice), address(plain), pairs(&[(20, 1)])]).contains("did not take"));
+    assert_eq!(call(alice, "safe_batch_transfer_from", &[address(alice), address(accepting), pairs(&[(20, 1)])]).0, yes());
+    assert_eq!(balance(accepting, 20), [id(1)]);
+
+    royalties_hold(&world, multi, alice);
 
     assert_eq!(world.upgrade(alice, multi, code.clone()), Err(crate::registry::RegistryError::NotPermitted));
     world.upgrade(DEPLOYER, multi, code).unwrap();
