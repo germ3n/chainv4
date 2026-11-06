@@ -103,6 +103,13 @@ jobs:
         run: cargo test --manifest-path explorer/Cargo.toml --locked
       - name: clippy (web)
         run: cargo clippy --manifest-path explorer/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+      # The web bundle itself, as the node image builds it: index.html, wasm-bindgen and wasm-opt.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.0
+      - name: web bundle
+        working-directory: explorer
+        run: trunk build --release --locked
 
   # The wallet too: a workspace of its own, for the desktop and the browser.
   wallet:
@@ -130,6 +137,13 @@ jobs:
         run: cargo clippy --manifest-path wallet/Cargo.toml --all-targets --locked --no-default-features -- -D warnings
       - name: clippy (web)
         run: cargo clippy --manifest-path wallet/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+      # The web bundle itself, as the node image builds it: index.html, wasm-bindgen and wasm-opt.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.22.0
+      - name: web bundle
+        working-directory: wallet
+        run: trunk build --release --locked
 
   # Every hash and key scheme sits behind a feature; these make sure each subset still builds,
   # lints clean and passes its tests.

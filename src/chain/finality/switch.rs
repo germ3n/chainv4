@@ -145,6 +145,7 @@ fn into_ffg(state: &State, target: u64) -> Result<(), DbError> {
 /// not vote or the one decided already, a change of finality or consensus still to take effect, a
 /// consensus the new kind does not fit, other epochs than genesis's, validators named for FFG, too
 /// soon, or settings no chain could finalize with.
+#[cfg(feature = "governance")]
 pub(crate) fn switch_problem(
     state: &State,
     genesis: &FinalityConfig,
@@ -176,6 +177,7 @@ pub(crate) fn switch_problem(
 }
 
 /// A switch into FFG names no validators: they bond for it, from their own balances.
+#[cfg(feature = "governance")]
 fn named_validators(config: &FinalityConfig) -> Option<&'static str> {
     match config {
         #[cfg(feature = "finality-ffg")]
@@ -186,6 +188,7 @@ fn named_validators(config: &FinalityConfig) -> Option<&'static str> {
 
 /// Whether the consensus decided last is the one fixed for the furthest epoch fixed so far: no
 /// change of consensus is on its way.
+#[cfg(feature = "governance")]
 fn consensus_settled(changes: &Changes, epoch: u64, delay: u64) -> Result<bool, DbError> {
     let fixed = match changes.consensus_for(epoch + delay)? {
         Some(fixed) => Some(fixed),
@@ -199,6 +202,7 @@ fn consensus_settled(changes: &Changes, epoch: u64, delay: u64) -> Result<bool, 
 
 /// Whether a change of consensus or finality decided earlier may still be overtaken: a switch of
 /// finality's kind that has yet to take effect, which every other change of either waits for.
+#[cfg(feature = "governance")]
 pub(crate) fn switching(state: &State, genesis: &FinalityConfig, epoch: u64) -> Result<bool, DbError> {
     Ok(Changes::new(state).switch_ahead(epoch, genesis)?.is_some())
 }

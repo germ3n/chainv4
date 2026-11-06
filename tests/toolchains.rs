@@ -1,7 +1,8 @@
 //! The toolchains are pinned in several places that must agree (docs/development.md, "Toolchains"):
 //! Rust's version in rust-toolchain.toml, docker/Dockerfile's RUST_VERSION and every workflow's
 //! toolchain, and clang's major version in docker/Dockerfile's CLANG_VERSION and every workflow
-//! that installs it. A version changed in one place and not the others fails here.
+//! that installs it. A version changed in one place and not the others fails here. The Lua forks,
+//! consensus as the interpreters are, are held to their commits the same way.
 
 use std::{fs, path::Path};
 
@@ -84,4 +85,51 @@ fn clang_is_llvm_s_release_by_its_hash_everywhere() {
     }
 
     assert!(builds > 0, "a workflow builds the node with the pinned clang");
+}
+
+/// The commit a git package is locked at in Cargo.lock, with its source as written there.
+fn locked(lock: &str, name: &str) -> (String, String) {
+    let entry = lock.split("[[package]]").find(|entry| entry.lines().any(|line| line.trim() == format!("name = \"{name}\""))).unwrap_or_else(|| panic!("{name} in Cargo.lock"));
+    let source = after(entry, "source = ").first().copied().unwrap_or_else(|| panic!("{name}'s source")).to_string();
+    let commit = source.rsplit_once('#').map(|(_, commit)| commit.to_string()).unwrap_or_else(|| panic!("{name} is a git package"));
+
+    (source, commit)
+}
+
+#[test]
+fn the_lua_forks_are_pinned_by_commit() {
+    let manifest = read("Cargo.toml");
+    let lock = read("Cargo.lock");
+    let mlua = manifest.lines().find(|line| line.starts_with("mlua = ")).expect("mlua in Cargo.toml");
+    let rev = mlua.split("rev = \"").nth(1).and_then(|rest| rest.split('"').next()).expect("mlua pinned by rev, not by branch");
+    assert_eq!(rev.len(), 40, "a whole commit, not {rev}");
+
+    for name in ["mlua", "mlua-sys"] {
+        let (source, commit) = locked(&lock, name);
+        assert!(source.starts_with("git+https://github.com/germ3n/mlua?rev="), "{name} from the fork by rev: {source}");
+        assert_eq!(commit, rev, "{name} locked at the rev Cargo.toml names");
+    }
+
+    let luau = after(&manifest, "luau0-src = ");
+    assert_eq!(luau.len(), 1, "the Luau fork's commit in [package.metadata.consensus]");
+    let (source, commit) = locked(&lock, "luau0-src");
+    assert!(source.starts_with("git+https://github.com/germ3n/luau-src-rs"), "Luau from the fork: {source}");
+    assert_eq!(commit, luau[0], "luau0-src locked at the commit Cargo.toml names: a `cargo update` moved it, or the pin wants moving with it");
+}
+
+#[test]
+fn trunk_is_pinned_alike_everywhere() {
+    let dockerfile = read("docker/Dockerfile");
+    let docker = after(&dockerfile, "ARG TRUNK_VERSION=");
+    assert_eq!(docker.len(), 1, "one TRUNK_VERSION in docker/Dockerfile");
+    let mut seen = 0;
+
+    for (path, text) in workflows() {
+        for tool in after(&text, "tool: trunk@") {
+            assert_eq!(tool, docker[0], "{path}'s trunk");
+            seen += 1;
+        }
+    }
+
+    assert!(seen >= 3, "the extension's build and the explorer's and wallet's web bundles install trunk");
 }

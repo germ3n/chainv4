@@ -48,6 +48,7 @@ Where the chain stands:
 | `upgrade` | `null`, or the [upgrade](updates.md#upgrades) governance decided last: nodes older than `least` stop before block `from`. |
 | `version` | The node's own chainv4 version, such as `0.1.0`. |
 | `name` | The chain's name, genesis's or the one governance decided last, such as `chainv4 testnet`, or `null` for a chain that has none: what the apps call the network. |
+| `names_suffix` | The ending every [name](names.md) on the chain has, such as `dev` for `alice.dev`, which genesis sets once, or `null` for a chain without names: what the apps strip to find a name's record. |
 | `dex_fee_bps` | The DEX's fee for the next block, in hundredths of a percent, which both DEXes charge. |
 | `evm_spec` | The EVM's spec for the next block, such as `prague`. |
 | `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) the `directory` names, else the one a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |

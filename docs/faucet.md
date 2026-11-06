@@ -57,5 +57,7 @@ the last one's. A solution is good for one chain, one address and one window alo
 - **A drip that does not go out** frees the address and IP to ask again: one to bytes that are no
   key, say, or one the node would not take.
 
-The cooldowns live in the node's memory: a restart forgets them. The faucet keeps its own nonce
-counter, so drips go out one after another before the chain has taken the last.
+The cooldowns are kept in the node's database, in a `faucet` column of their own, so a restart
+forgets none of them. Each address and IP stays there only until its period ends, and a node that
+starts lets go of those that ended meanwhile. The faucet keeps its own nonce counter, so drips go
+out one after another before the chain has taken the last.

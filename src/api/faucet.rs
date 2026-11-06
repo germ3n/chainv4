@@ -1,7 +1,8 @@
 //! The faucet, for dev and test chains: the node's --faucet-key pays a drip to whoever asks at POST
 //! /faucet, once per address and once per IP each period, each request carrying a moment's proof of
 //! work (crate::faucet). The coins are the operator's own, so any chain may run one; the docs say
-//! what it is for.
+//! what it is for. Who had a drip when is kept in the database's faucet column until the period
+//! ends, so a restart lets no one ask again early.
 //!
 //! Behind a proxy on this machine or its private network, as the Docker stack's nginx is, the IP is
 //! the last one X-Forwarded-For names: the one the proxy added itself, which a caller cannot forge.
@@ -9,6 +10,7 @@
 use {
     super::{Answer, Api, ApiError, asker, at_height, json_body, parse_address, tip},
     crate::crypto::keypair::Keypair,
+    crate::db::{Changes, Column, Database},
     crate::faucet::{FAUCET_WINDOW_MS, enough_work, faucet_hash, faucet_window},
     crate::mempool::MempoolError,
     crate::node::SubmitError,
@@ -58,18 +60,54 @@ impl std::fmt::Debug for FaucetConfig {
 /// The faucet running: its settings, who had a drip when, and the nonce its next one takes.
 pub(super) struct Faucet {
     config: FaucetConfig,
-    /// When each address and IP last had a drip, in milliseconds, by "to:…" and "ip:…".
+    /// When each address and IP last had a drip, in milliseconds, by "to:…" and "ip:…": the
+    /// database's faucet column as it stands, read once at the start.
     given: Mutex<HashMap<String, u64>>,
+    /// Where given is kept, so a restart forgets none of it.
+    db: Arc<dyn Database>,
     /// The nonce after the last drip sent, which the chain may not have reached yet.
     next_nonce: Mutex<u64>,
 }
 
 impl Faucet {
-    pub(super) fn new(config: FaucetConfig) -> Faucet {
+    /// The faucet, with the drips kept in db whose period has not ended by now; those that have
+    /// are let go.
+    pub(super) fn new(config: FaucetConfig, db: Arc<dyn Database>, now: u64) -> Faucet {
+        let mut given = HashMap::new();
+        let mut ended = Changes::new();
+        let read = db.scan(Column::Faucet, &[], &[], &mut |key, value| {
+            match (std::str::from_utf8(key), <[u8; 8]>::try_from(value).map(u64::from_be_bytes)) {
+                (Ok(name), Ok(at)) if now.saturating_sub(at) < config.every_ms => {
+                    given.insert(name.to_string(), at);
+                }
+                _ => {
+                    ended.insert((Column::Faucet, key.to_vec()), None);
+                }
+            }
+
+            true
+        });
+
+        if let Err(err) = read.and_then(|()| if ended.is_empty() { Ok(()) } else { db.commit(ended) }) {
+            log::warn!("[faucet] the drips kept could not be read, so this start remembers none: {err}");
+        }
+
         Faucet {
             config,
-            given: Mutex::default(),
+            given: Mutex::new(given),
+            db,
             next_nonce: Mutex::new(0),
+        }
+    }
+
+    /// Writes these keys' times to the database, None letting a key go.
+    fn keep(&self, keys: impl IntoIterator<Item = (String, Option<u64>)>) {
+        let changes: Changes = keys.into_iter().map(|(key, at)| ((Column::Faucet, key.into_bytes()), at.map(|at| at.to_be_bytes().to_vec()))).collect();
+
+        if !changes.is_empty()
+            && let Err(err) = self.db.commit(changes)
+        {
+            log::warn!("[faucet] a drip could not be kept, so a restart forgets it: {err}");
         }
     }
 
@@ -144,6 +182,8 @@ pub(super) async fn give(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInf
                 given.remove(key);
             }
 
+            faucet.keep(keys.iter().map(|key| (key.clone(), None)));
+
             Err(err)
         }
     }
@@ -153,17 +193,30 @@ pub(super) async fn give(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInf
 fn reserve(faucet: &Faucet, keys: &[String], now: u64) -> Result<(), ApiError> {
     let every = faucet.config.every_ms;
     let mut given = faucet.given.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    given.retain(|_, at| now.saturating_sub(*at) < every);
+    let mut kept = Vec::new();
+    given.retain(|key, at| {
+        let live = now.saturating_sub(*at) < every;
+
+        if !live {
+            kept.push((key.clone(), None));
+        }
+
+        live
+    });
 
     if let Some(at) = keys.iter().filter_map(|key| given.get(key)).max() {
         let left = every.saturating_sub(now.saturating_sub(*at));
+        faucet.keep(kept);
 
         return Err(ApiError::TooMany(format!("this address or this connection had a drip already: again in {}", span(left))));
     }
 
     for key in keys {
         given.insert(key.clone(), now);
+        kept.push((key.clone(), Some(now)));
     }
+
+    faucet.keep(kept);
 
     Ok(())
 }
@@ -227,7 +280,7 @@ fn span(ms: u64) -> String {
     }
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_millis() as u64)
 }
 
@@ -256,5 +309,37 @@ mod tests {
         assert_eq!(asker(outside, &headers, &trusted), outside.ip(), "a caller from outside cannot name another IP");
         assert_eq!(asker(loopback, &HeaderMap::new(), &none), loopback.ip());
         assert_eq!((span(86_340_000), span(300_000), span(400)), ("23h 59m".to_string(), "5m".to_string(), "1s".to_string()));
+    }
+
+    #[test]
+    fn a_restart_remembers_who_had_a_drip_until_their_period_ends() {
+        let db: Arc<dyn Database> = Arc::new(crate::db::MemoryDb::default());
+        let config = FaucetConfig { key: Keypair::development(), amount: u256::from(5u64), every_ms: 60_000, work_bits: 0 };
+        let first = Faucet::new(config.clone(), db.clone(), 1_000);
+        let alice = ["to:alice".to_string(), "ip:1.2.3.4".to_string()];
+        let bob = ["to:bob".to_string(), "ip:5.6.7.8".to_string()];
+
+        assert!(reserve(&first, &alice, 1_000).is_ok());
+        assert!(reserve(&first, &bob, 2_000).is_ok());
+        // Bob's drip did not go out, as give() lets it go.
+        first.keep(bob.iter().map(|key| (key.clone(), None)));
+        drop(first);
+
+        let again = Faucet::new(config.clone(), db.clone(), 30_000);
+        assert!(matches!(reserve(&again, &alice, 30_000), Err(ApiError::TooMany(_))), "the restart remembers alice");
+        assert!(matches!(reserve(&again, &["to:carol".to_string(), "ip:1.2.3.4".to_string()], 30_000), Err(ApiError::TooMany(_))), "and her IP");
+        assert!(reserve(&again, &bob, 30_000).is_ok());
+        drop(again);
+
+        // Past alice's period, a start lets her go, from the database too.
+        let later = Faucet::new(config, db.clone(), 61_000);
+        assert!(reserve(&later, &alice, 61_000).is_ok());
+        let mut kept = Vec::new();
+        db.scan(Column::Faucet, &[], &[], &mut |key, _| {
+            kept.push(String::from_utf8(key.to_vec()).unwrap());
+            true
+        })
+        .unwrap();
+        assert_eq!(kept, ["ip:1.2.3.4", "ip:5.6.7.8", "to:alice", "to:bob"]);
     }
 }

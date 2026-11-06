@@ -277,7 +277,8 @@ struct Api {
     /// key it reads, the tip included, is from one commit. Committed rather than Read, so listings
     /// can scan it.
     db: Arc<dyn Committed>,
-    /// The database itself, which snapshots are taken of. Never written here.
+    /// The database itself, which snapshots are taken of. Only the faucet writes it, to its own
+    /// column, which is not chain state.
     live: Arc<dyn Database>,
     /// None when no node runs behind the API, so nothing can be submitted.
     node: Option<NodeHandle>,
@@ -734,6 +735,9 @@ pub fn start(
                     tokio::spawn(trusted_proxies.clone().keep_looking());
                 }
 
+                #[cfg(feature = "faucet")]
+                let faucet = options.faucet.map(|config| Arc::new(faucet::Faucet::new(config, db.clone(), faucet::now_ms())));
+
                 if let Err(err) = axum::serve(listener, router(Api {
                     db: db.clone(),
                     live: db,
@@ -760,7 +764,7 @@ pub fn start(
                     #[cfg(any(feature = "governance", feature = "anchoring"))]
                     genesis: whole,
                     #[cfg(feature = "faucet")]
-                    faucet: options.faucet.map(|config| Arc::new(faucet::Faucet::new(config))),
+                    faucet,
                     #[cfg(feature = "swap")]
                     swap_contract: options.swap_contract,
                     #[cfg(feature = "dex")]
@@ -1063,6 +1067,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
         "version": crate::structs::version::Version::ours().to_string(),
         "name": crate::registry::changes::Changes::new(&State::new(db.clone())).name()?,
+        "names_suffix": names_suffix(&api),
         "collections": api.rules.standards_in(&State::new(db.clone()))?.collections.as_ref().map(crate::cli::genesis::collections_json),
         "finality": finality,
         "fees": fees,
@@ -1173,6 +1178,18 @@ fn operator_json(api: &Api) -> Value {
     match named.is_empty() {
         true => Value::Null,
         false => Value::Object(named),
+    }
+}
+
+/// The ending every name on the chain has, such as dev for alice.dev, which genesis sets once: what
+/// apps strip to find a name's record. Null on a chain without names.
+fn names_suffix(api: &Api) -> Option<String> {
+    #[cfg(feature = "names")]
+    return api.rules.names.as_ref().map(|names| names.suffix.clone());
+    #[cfg(not(feature = "names"))]
+    {
+        let _ = api;
+        None
     }
 }
 

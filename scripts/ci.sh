@@ -78,6 +78,7 @@ if [ -z "${CI_MATRIX_ONLY:-}" ]; then
     step "explorer clippy" "cargo clippy --manifest-path explorer/Cargo.toml --all-targets --locked -- -D warnings"
     step "explorer tests" "cargo test --manifest-path explorer/Cargo.toml --locked"
     step "explorer clippy, web" "cargo clippy --manifest-path explorer/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings"
+    step "explorer web bundle" "(cd explorer && trunk build --release --locked)"
     step "explorer check, ios" "cargo check --manifest-path explorer/Cargo.toml --target aarch64-apple-ios --locked"
 
     step "wallet clippy" "cargo clippy --manifest-path wallet/Cargo.toml --all-targets --locked -- -D warnings"
@@ -86,6 +87,7 @@ if [ -z "${CI_MATRIX_ONLY:-}" ]; then
     step "wallet clippy, store" "cargo clippy --manifest-path wallet/Cargo.toml --all-targets --locked --no-default-features --features store -- -D warnings"
     step "wallet clippy, web" "cargo clippy --manifest-path wallet/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings"
     step "wallet clippy, web store" "cargo clippy --manifest-path wallet/Cargo.toml --target wasm32-unknown-unknown --locked --no-default-features --features store -- -D warnings"
+    step "wallet web bundle" "(cd wallet && trunk build --release --locked)"
     step "wallet check, ios" "cargo check --manifest-path wallet/Cargo.toml --target aarch64-apple-ios --locked"
     step "wallet check, ios simulator" "cargo check --manifest-path wallet/Cargo.toml --target aarch64-apple-ios-sim --locked"
 fi

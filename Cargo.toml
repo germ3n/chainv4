@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
+[package.metadata.consensus]
+# The Luau fork's commit, which Cargo.lock's luau0-src must be (tests/toolchains.rs).
+luau0-src = "3fad1fbb5470696ef35be086c18dc3ccd8462da6"
+
 [workspace]
 members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
 # Contracts build for wasm32, and the explorer for the desktop and the browser; each has a
@@ -174,7 +178,10 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"], opt
 # The interpreter is consensus: an upgrade can change what a module costs, so it is pinned.
 revm = { version = "43.0.3", default-features = false, features = ["std", "optional_fee_charge", "optional_no_base_fee", "optional_block_gas_limit", "memory_limit"], optional = true }
 wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"], optional = true }
-mlua = { git = "https://github.com/germ3n/mlua", branch = "main", features = ["luau", "send"], optional = true }
+# Lua is consensus too, so the forks are pinned by commit: mlua by its rev here, and Luau, which
+# mlua-sys takes from its fork's main, by the commit below, which tests/toolchains.rs holds
+# Cargo.lock to, so a `cargo update` cannot move either.
+mlua = { git = "https://github.com/germ3n/mlua", rev = "46bc6e2ec9054ffe6a60805913ff3980c12cadb6", features = ["luau", "send"], optional = true }
 # Stopping cleanly on SIGTERM and SIGINT: as a container's PID 1, nothing else would.
 signal-hook = { version = "0.3.18", optional = true }
 

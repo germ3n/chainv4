@@ -65,6 +65,9 @@ holds addresses that matter.
 | `Names` | The [name registry](names.md#in-the-state): each name's record by `n` and the name, and each account's primary name by `p` and its address's key. | Yes |
 | `Pools` | Mining pools' claims: each pool block's root by `r` and its height, and what each miner claimed from each pool by `c`, the pool's key and the miner's (see [Mining pools](consensus.md#mining-pools)). | Yes |
 | `Namespaces` | Contract storage in [namespaces](contracts.md#storage-namespaces) and each contract's own space: by the contract's address, the namespace's name with its length in front (none for the own space), then the contract's own key. Which namespaces a contract's code may use is its [layout](contracts.md#storage-layouts), kept in its `Contracts` record. | Yes |
+| `Peers` | Peers this node met, by peer id, with the addresses each said it listens on: dialed at the next start. | No |
+| `Bans` | Peers this node banned, by peer id, with the IP banned under `--ban-ips`, kept until each ends so a restart lifts none. | No |
+| `Faucet` | On a node running a [faucet](faucet.md): when each address and each IP last had a drip, kept until its period ends so a restart lets no one ask again early. | No |
 
 **Chain state** is what every node computes the same from the blocks.
 

@@ -186,7 +186,7 @@ decides.
 | Account | Transactions and events from what was read; balance and nonce by a direct proof. No contract's code, holdings or names |
 | Events, Decoded | From what was read, read by the ABIs that ship with the app, and any pasted; what a contract would say of itself through a call is off |
 | Finality | What the light client checked. Voters, signers and evidence are off |
-| Names, Name | One name's record by a direct proof. The directory, prices and what a name resolves to once expired are off |
+| Names, Name | One name's record by a direct proof, said as the record it is kept as: the chain's ending, which the node gives in `/status`, comes off, so `pay.alice` typed without it is found too. The directory, prices and what a name resolves to once expired are off |
 | Tokens | One token's record by a direct proof. The registry's list is off |
 | Rich list & supply | Minted and burned by a direct proof. The rich list and what is staked are off |
 | Send | As above |
@@ -374,7 +374,9 @@ hour. An older node answers 404, and the explorer shows nothing.
   this explorer no longer works with the network, with **Update** and **Quit**. In the browser
   there is no Quit.
 - **Update,** on the desktop, when the release has a binary for the target the explorer was
-  built for: it downloads it through the proxy set, off the UI thread, and checks its size and
+  built for: it downloads it through the same client and proxy as every request to the node, off
+  the UI thread, the one request that goes to another host, and only when pressed, so reading from
+  checked blocks lets it go. It checks its size and
   SHA-256 against the signed release. It writes it beside the running binary, then renames it
   over. It then says `Restart the explorer to run 0.2.0`.
 - **Elsewhere,** in the browser, on Android and on iOS, or without a binary for this target, it

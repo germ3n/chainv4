@@ -10,20 +10,31 @@ use {
     egui::{RichText, Ui},
 };
 
-/// A name as its record is kept: without the chain's ending, as alice for alice.dev. A chain says what
-/// its ending is, and only a node says that.
-pub fn record_name(name: &str) -> &str {
-    name.rsplit_once('.').map_or(name, |(kept, _)| kept)
+/// A name as its record is kept: without the chain's ending, as alice for alice.dev, and pay.alice
+/// for pay.alice.dev or for pay.alice typed without it. The ending is the node's word in /status;
+/// from a node that does not say, the last label is taken for it, as an ending is always one label.
+pub fn record_name(name: &str, suffix: Option<&str>) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    let kept = match suffix {
+        Some(suffix) => lower.strip_suffix(&format!(".{}", suffix.to_ascii_lowercase())),
+        None => lower.rsplit_once('.').map(|(kept, _)| kept),
+    };
+
+    kept.map_or_else(|| lower.clone(), str::to_string)
 }
 
 /// With Read from checked blocks on: a name's record by a direct proof someone pressed for. What a year
 /// costs and what it comes to on a name that expired are worked out by the node.
 fn reading(ui: &mut Ui, ctx: &mut Ctx, name: &str) {
     let look = ctx.look;
-    let key = chainv4::registry::names::record_key(record_name(name));
+    let suffix = ctx.store.status.as_ref().and_then(|status| status.names_suffix.clone());
+    let kept = record_name(name, suffix.as_deref());
+    let key = chainv4::registry::names::record_key(&kept);
 
     super::heading(ui, look, name, "", |_| {});
     super::section(ui, look, "Name", |ui| {
+        // What the proof is of, so a suffix the node gave wrongly shows rather than misleads.
+        super::note(ui, look, format!("The record kept as {kept}."));
         let Some(proven) = super::reading::direct_proof(ui, ctx, "this name's record", chainv4::db::Column::Names, &key) else {
             return;
         };
@@ -134,5 +145,20 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, name: &str) {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_name;
+
+    #[test]
+    fn a_record_is_found_by_the_chain_s_ending_alone() {
+        assert_eq!(record_name("Alice.dev", Some("dev")), "alice");
+        assert_eq!(record_name("pay.alice.dev", Some("dev")), "pay.alice");
+        assert_eq!(record_name("pay.alice", Some("dev")), "pay.alice", "typed without the ending");
+        assert_eq!(record_name("alice", Some("dev")), "alice");
+        assert_eq!(record_name("alice.dev", None), "alice", "a node that does not say: the last label");
+        assert_eq!(record_name("alice", None), "alice");
     }
 }

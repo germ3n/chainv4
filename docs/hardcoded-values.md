@@ -144,7 +144,7 @@ Before the governance batch, governance could change consensus, bootnodes, name_
 
 | Where | Value | What / note | Class |
 |---|---|---|---|
-| `src/api/faucet.rs` | Per address and per IP only | There is no total budget per period, so many IPs drain the key. Limits live in memory (todo). | **C**: `--faucet-budget` per `--faucet-every` |
+| `src/api/faucet.rs` | Per address and per IP only | There is no total budget per period, so many IPs drain the key. Limits are kept in the database until their period ends. | **C**: `--faucet-budget` per `--faucet-every` |
 | `src/faucet.rs:22` `FAUCET_WINDOW_MS` | 10 min | Shared with the clients that compute the work | **E** |
 | `src/mining/shares.rs:34` `SHARE_EVERY` | 10 s | The vardiff target | **C**: `--pool-share-every` |
 | `src/mining/shares.rs:37-41` | MOST_SHARES 2^20, KEPT_BLOCKS 100 | Bounds on the pool's books. Shares are already bounded by `--pool-window`. | **C** (low) |

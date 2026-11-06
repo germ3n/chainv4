@@ -116,6 +116,9 @@ pub enum Column {
     #[document(summary = "Peers this node banned, by peer id: the IP banned with each under --ban-ips, and when each ends, kept until then so a restart lifts none. Not chain state.")]
     #[wincode(tag = 26)]
     Bans,
+    #[document(summary = "The faucet's limits, on a node that runs one: when each address and each IP last had a drip, by \"to:…\" and \"ip:…\", kept until its period ends so a restart lets no one ask again early. Not chain state.")]
+    #[wincode(tag = 27)]
+    Faucet,
 }
 
 impl Hashable for Column {
@@ -123,7 +126,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 27] = [
+    pub const ALL: [Column; 28] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -151,6 +154,7 @@ impl Column {
         Column::Decisions,
         Column::Members,
         Column::Bans,
+        Column::Faucet,
     ];
 
     #[document(
@@ -186,6 +190,7 @@ impl Column {
             Column::Decisions => "decisions",
             Column::Members => "members",
             Column::Bans => "bans",
+            Column::Faucet => "faucet",
         }
     }
 }

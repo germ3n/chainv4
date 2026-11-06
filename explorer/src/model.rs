@@ -22,6 +22,10 @@ pub struct Status {
     /// without one, and from older nodes.
     #[serde(default)]
     pub name: Option<String>,
+    /// The ending every name on the chain has, such as dev for alice.dev; none on a chain without
+    /// names, and from older nodes.
+    #[serde(default)]
+    pub names_suffix: Option<String>,
     /// The functions that make a contract a token on this chain; none keeps no registry.
     #[serde(default)]
     pub token_functions: Vec<String>,

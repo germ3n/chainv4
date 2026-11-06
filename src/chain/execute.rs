@@ -24,7 +24,7 @@ use {
     std::sync::Arc,
 };
 
-#[cfg(any(feature = "governance", feature = "names"))]
+#[cfg(feature = "governance")]
 use crate::registry::changes::Changes;
 #[cfg(feature = "governance")]
 use crate::{governance::Change, registry::changes::ChangeVoted};

@@ -503,8 +503,9 @@ with.
 - [ ] **Prove the locks to the apps.** The wallet and the explorer read `locks` and `in_force` from
   the node, unproven. `change:locks` is one state entry, so a light-client proof of it could back
   them, as it backs balances.
-- [ ] **Tidy the warnings in a build without governance:** an unused `Changes` import in
-  `execute.rs`, and four unused helpers in `chain/finality/switch.rs`.
+- [x] **Tidy the warnings in a build without governance:** an unused `Changes` import in
+  `execute.rs`, and four unused helpers in `chain/finality/switch.rs`. Done 2026-11-06: the import and the switch's
+  helpers are built with governance alone.
 
 - [x] **Governance over the consensus.** Genesis's `governance` names a kind, behind the
   `Governance` trait: `electorate`, finality's own validators by stake or signers by
@@ -840,8 +841,10 @@ with.
 - [x] **Typed exports in the SDK.** `#[export]` reads the call's arguments into the function's
   parameters and returns what it returns, refusing arguments that do not fit; the token and
   counter examples use it.
-- [ ] **The Luau fork is pinned by branch, not commit.** `Cargo.lock` holds the commit, but
-  `cargo update` would move it. Like wasmi it is consensus: pin a `rev` in `Cargo.toml`.
+- [x] **The Luau fork is pinned by branch, not commit.** `Cargo.lock` holds the commit, but
+  `cargo update` would move it. Like wasmi it is consensus: pin a `rev` in `Cargo.toml`. Done 2026-11-06: mlua by `rev` in
+  Cargo.toml, and Luau, which mlua-sys takes from its fork's main, by the commit in
+  `[package.metadata.consensus]`, which `tests/toolchains.rs` holds Cargo.lock to.
 
 ### Database
 
@@ -1306,11 +1309,12 @@ with.
   `expires`, 30 days unless told, renewed with `chainv4 release renew`, and nothing acts on one past it. Every build has
   an `issued` floor, and the wallet, explorer, worker and CLI keep the newest they saw as the node does, so a host can
   hide a newer one for as long as the last one counts, and no longer.
-- [ ] **A chain's own signature on a transaction is not bound to its chain.** `signing_bytes` covers the transaction,
+- [x] **A chain's own signature on a transaction is not bound to its chain.** `signing_bytes` covers the transaction,
   nonce, fee offer and signer, while votes, EIP-155 and EIP-712 name the genesis. So a transaction signed on one
   chain is valid on another where its account has that nonce: with the keys reused, as across the devnet's
   genesises, anyone can send it again there. Binding it changes what every signer signs, so it needs every node
-  and app at once, and a new genesis.
+  and app at once, and a new genesis. Stale: done on the fourth
+  genesis, as `signing_bytes` takes the genesis id.
 - [x] **After a new chain, Activity showed the old one's transactions.** A row kept from the old chain stood in for
   a transaction with the same id on the new one, and being final was never proven again. With no chain followed,
   it listed every chain's. Each is kept with its genesis and goes by it now, the pinned one with none followed.
@@ -1325,11 +1329,14 @@ with.
   before this gets real use. Save the client as the wallet does.
 - [ ] **Reading from checked blocks: the explorer holds its whole index in memory.** How much that takes has not
   been measured, and 128 MB encoded could be noticeably more.
-- [ ] **Reading from checked blocks: the explorer takes a name's ending to be its last label.** `alice.dev` is looked
+- [x] **Reading from checked blocks: the explorer takes a name's ending to be its last label.** `alice.dev` is looked
   up as `alice`, as only a node says what the suffix is. A chain with a differently shaped suffix could wrongly
-  be told nobody holds a name.
-- [ ] **Reading from checked blocks: the explorer's update download goes around its request gate.** It goes straight
-  to the release host, only on the desktop and only when pressed.
+  be told nobody holds a name. Done
+  2026-11-06: `/status` gives `names_suffix`, which alone comes off, and the page says which record
+  it proved.
+- [x] **Reading from checked blocks: the explorer's update download goes around its request gate.** It goes straight
+  to the release host, only on the desktop and only when pressed. Done
+  2026-11-06: it goes through the API's own client (`Api::download_client`).
 - [x] **A setting for the wallet and the explorer to take everything from the blocks they fetched,** history
   among it, rather than look things up from the node: what they show then rests on blocks they checked, and
   the node learns less of what they look at. Off by default, as reading blocks costs far more than asking.
@@ -1549,8 +1556,9 @@ with.
   per IP each period, each request with a moment's proof of work; the wallet, the explorer and
   `chainv4 faucet` ask it, and `docker/pow.sh faucet` sets one up on the VPS. See
   [Faucet](faucet.md).
-- [ ] **The faucet's limits survive a restart.** They live in memory; a column of their own would
-  keep them.
+- [x] **The faucet's limits survive a restart.** They live in memory; a column of their own would
+  keep them. Done 2026-11-06: the `faucet` column keeps each
+  address and IP until its period ends.
 - [x] **Engine pools sized on the node.** `--lua-states` (16), `--lua-builders` (2),
   `--wasm-cache-mb` (32) and `--wasm-cache-modules` (1,024), which the `Vm` takes at
   `Chain::open_with` (`EnginePools`), the API's own engines too. The EVM still builds its context
@@ -1587,8 +1595,9 @@ with.
 
   The images are x86_64, as the servers are; this Mac is arm64 and would build them under
   emulation, so a server stays the builder.
-- [ ] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
-  `send` at a node across the internet.
+- [x] **The CLI speaks plain HTTP only.** ureq is built without TLS; add it before pointing
+  `send` at a node across the internet. Stale: ureq is built with rustls, and the devnet's
+  scripts send to https://chain.homepage.gs.
 - [ ] **Key files are not encrypted.** They are created readable by their owner only, but hold
   the seed in plain hex.
 - [x] **Genesis files.** `chainv4 genesis` writes the dev defaults as JSON; `--genesis FILE`
@@ -1840,9 +1849,10 @@ with.
   out are not wiped; a locked page of shown words keeps the glyph runs until egui drops them.
 - [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
   explorer's holdings do.
-- [ ] **CI does not build the web bundles.** It lints the explorer's and the wallet's wasm32 builds
+- [x] **CI does not build the web bundles.** It lints the explorer's and the wallet's wasm32 builds
   but never runs `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when
-  someone builds them.
+  someone builds them. Done 2026-11-06: the explorer and wallet jobs, and
+  scripts/ci.sh, run `trunk build --release --locked`, with trunk pinned as the image pins it.
 - [ ] **Windows builds in CI.** Left out because of RocksDB and Luau build setup.
 
 ### Engine script layer

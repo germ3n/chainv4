@@ -556,6 +556,14 @@ impl Api {
         }
     }
 
+    /// What Update downloads a release's binary through, once pressed: the one request that goes
+    /// to another host than the node, the release's own, by the same client and proxy as every
+    /// ask, or by none when the proxy set does not build. Reading from checked blocks lets it go,
+    /// as it tells the node nothing; it is handed out here so no request leaves around the gate.
+    pub fn download_client(&self) -> Result<Client, String> {
+        self.client.clone()
+    }
+
     /// What Retry or Reload asked again since last time.
     pub fn retried(&mut self) -> Vec<Ask> {
         std::mem::take(&mut self.retried)

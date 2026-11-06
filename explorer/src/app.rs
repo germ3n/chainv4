@@ -1127,7 +1127,7 @@ impl Explorer {
         let look = self.look(narrow);
 
         if views::update::notice(ui, look, &mut self.update) {
-            self.update.start(client(&self.settings), self.wake.clone());
+            self.update.start(self.api.download_client(), self.wake.clone());
         }
 
         self.notice(ui);
@@ -1256,7 +1256,7 @@ impl eframe::App for Explorer {
                 .frame(egui::Frame::new().fill(palette.paper).inner_margin(egui::Margin::symmetric(16, 16)))
                 .show(ui, |ui| {
                     if views::update::blocking(ui, self.look(narrow), &self.update) {
-                        self.update.start(client(&self.settings), self.wake.clone());
+                        self.update.start(self.api.download_client(), self.wake.clone());
                     }
                 });
             ui.ctx().request_repaint_after(Duration::from_millis(500));

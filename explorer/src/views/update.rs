@@ -1,7 +1,8 @@
 //! The explorer's own updates: a notice over the page when the release the node relays names a
 //! newer explorer, and a screen in place of every page once this one no longer works with the
 //! network. On the desktop, Update downloads the release's binary for this target, off the UI
-//! thread and through the proxy set, and puts it in place of this one.
+//! thread and through the API's own client (Api::download_client), with its proxy, and puts it in
+//! place of this one.
 
 use {
     super::Look,

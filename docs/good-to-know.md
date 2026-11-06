@@ -286,8 +286,9 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   refuses to open the chain rather than fall out of step.
 - **wasmi is pinned to `=2.0.0`.** Its version, enabled features and stack limits decide what a
   module does and costs. Upgrade on purpose, never with `cargo update`.
-- **The Luau fork.** The germ3n forks of mlua and Luau meter fuel. They are pinned by branch, with
-  the commit in `Cargo.lock`; `cargo update` would move them, so pinning a `rev` would be safer.
+- **The Luau fork.** The germ3n forks of mlua and Luau meter fuel. mlua is pinned by `rev`, and
+  Luau, which mlua-sys takes from its fork's main, by the commit in Cargo.toml's
+  `[package.metadata.consensus]`: `tests/toolchains.rs` fails when `cargo update` moves either.
   Never swap them for upstream. Its comparisons are consensus too: a number against a userdata,
   and two userdata of different types, ask the userdata's metamethods, where plain Luau would
   fail or call them unequal (see below). So are its memory limit and its collector's pacing,
@@ -987,7 +988,8 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## The faucet
 
-- **Its limits forget on restart.** Who had a drip when lives in the node's memory alone.
+- **Its limits survive a restart.** Who had a drip when is kept in the database's `faucet` column
+  until each period ends, IPs among it.
 - **Behind a proxy, the IP is the last X-Forwarded-For names,** and only when the connection comes
   from this machine or a private network: the Docker stack's nginx appends the real one. A node
   reached straight from the internet goes by the connection.
