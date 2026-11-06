@@ -29,6 +29,9 @@ pub struct FeeConfig {
     pub vote_rewards: Option<VoteRewardSource>,
     #[document(summary = "What host operations cost in fuel, and the EVM's native and names precompiles in gas, or None for HostCosts::DEFAULT. A change of fees may name them, from the block after the one that decides it.")]
     pub costs: Option<super::vm::HostCosts>,
+    #[document(summary = "What Lua contracts' opcodes and library work cost in fuel, or None for LuaCosts::DEFAULT, the Luau fork's own. A change of fees may name them, from the block after the one that decides it.")]
+    // Boxed: a kilobyte, which a transaction changing fees would otherwise carry inline.
+    pub lua_costs: Option<Box<super::vm::LuaCosts>>,
 }
 
 impl Hashable for FeeConfig {}
@@ -239,7 +242,11 @@ impl FeeConfig {
             return Some("burn_permille must be at most 1000");
         }
 
-        self.schedule.problem().or_else(|| self.pricing.problem())
+        self.schedule
+            .problem()
+            .or_else(|| self.pricing.problem())
+            .or_else(|| self.costs.as_ref().and_then(super::vm::HostCosts::problem))
+            .or_else(|| self.lua_costs.as_deref().and_then(super::vm::LuaCosts::problem))
     }
 }
 

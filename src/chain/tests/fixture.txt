@@ -1,0 +1,25 @@
+deploy: fuel 2553
+power(Number(3.0), Number(33.0)): fuel 190, ok Returned([String("5559060566555523")])
+power(Number(2.0), Number(53.0)): fuel 175, failed runtime error: contract:6: numbers are whole, within 2^53 either way: this would be a fraction, infinite or past 2^53 (divide with //, or use the integer types)
+stack traceback:
+	[C]: in ?
+	contract:6: in function 'power'
+power(Number(2.0), Number(54.0)): fuel 175, failed runtime error: contract:6: numbers are whole, within 2^53 either way: this would be a fraction, infinite or past 2^53 (divide with //, or use the integer types)
+stack traceback:
+	[C]: in ?
+	contract:6: in function 'power'
+backtrack(Number(60.0)): fuel 675259, ok Returned([Bool(false)])
+backtrack(Number(400.0)): fuel 10000000, failed out of fuel
+sorted(Number(5000.0)): fuel 135180, ok Returned([String("0,4999")])
+grown(Number(12.0)): fuel 516, ok Returned([I64(8192)])
+grown(Number(40.0)): fuel 524649, failed out of memory
+held(Number(1000.0)): fuel 44158, ok Returned([I64(1000)])
+held(Number(10000000.0)): fuel 8920823, failed out of memory
+churn(Number(50000.0)): fuel 1650151, ok Returned([I64(150000)])
+integers(): fuel 285, ok Returned([String("16541727033902313631938712144098272550467140666520080577065369143987589948562 1 -3000000000000000000 nil")])
+texts(Number(500.0)): fuel 7892, ok Returned([String("6000 7000 14001 500")])
+forever(): fuel 10000000, failed out of fuel
+caught(): fuel 269, ok Returned([String("false table false contract:69: attempt to index nil with 'x'")])
+stored(Number(64.0)): fuel 42226, ok Returned([I64(2080)])
+receipts root 0x910d8b1c01f347e93556b134412f08583aaea83f4d448181686a3c6354dd4ac7
+state root 0x58c039b3b3bfae5e02d73cbf023c1657b35d603b7e50b31fb1e156fba7ff5e50

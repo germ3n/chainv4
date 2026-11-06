@@ -1149,7 +1149,7 @@ fn run(
                 Change::Collections(functions) => Ok(functions.problem()),
                 Change::Federation(federation) => Ok(federation.problem()),
                 Change::Directory(directory) => Ok(directory.problem()),
-                Change::Fees(fees) => Ok(fees.problem().or_else(|| fees.costs.as_ref().and_then(crate::params::vm::HostCosts::problem))),
+                Change::Fees(fees) => Ok(fees.problem()),
                 Change::Reward(reward) => Ok(crate::chain::reward_problem(reward)),
                 Change::Limits(limits) => Ok(limits.problem().or_else(|| limits.contract.and_then(|contract| rules.vm.limits.lowering_problem(&contract)))),
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),

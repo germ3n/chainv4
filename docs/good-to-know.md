@@ -560,6 +560,29 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   screen; `WalletEntry::unprotected` marks it. Settings adds or removes one, or makes it need
   biometrics. A wallet with biometrics alone is not this: its key is random, and no empty password
   opens it.
+- **Lua's fuel costs live in each Lua state, not in the fork's code.** The Luau fork keeps a table
+  of 132 slots per state: an opcode's cost at its number, then bytes and elements a fuel pays for,
+  a sort comparison and a match step (`luau_setfuelcosts`, mlua's `Lua::set_fuel_costs`).
+  `LuaCosts` mirrors it in chainv4, slot for slot, names included, and a test checks the two match.
+  Adding an opcode to the fork means a name in both, and a slot number past the last. Every
+  `Pristine::ready` sets the block's table before a deploy or call runs, so a state never runs by
+  another block's prices. Whether an "out of fuel" error is the tank running dry is judged by the
+  dearest opcode in the table in force, not a fixed 10, so a governed table may price any opcode
+  at any cost.
+- **Luau's C++ is built optimized in debug builds too** (`[profile.dev.package.mlua-sys]` and
+  `luau0-src` at `opt-level = 2`; mlua-sys's build script compiles it, so its level is what counts).
+  A contract nesting through C, a `table.sort` comparator or a `gsub` callback calling back in, may
+  go 200 boundaries deep (`LUAI_MAXCCALLS`): optimized that takes under 512 KiB of stack, but
+  unoptimized about 10 KB a boundary, past a test thread's 2 MiB, and
+  `nesting_without_end_fails_cleanly` overflowed. Nodes run contracts on default 2 MiB threads,
+  four times what the deepest nesting takes. Any thread that runs contracts needs at least that.
+- **`--@const_params` and `const` parameters are the fork's parser.** chainv4's annotation check
+  only refuses `--@const_params` after the first statement, where Luau would quietly ignore it.
+  The fork also says "is constant and may not be reassigned" for every assignment to a const,
+  where upstream does only behind `LuauExportValueSyntax`.
+- **`tonumber` groups digits in the fork, not chainv4.** `luaB_tonumber` copies the text without
+  its `_`s into a Lua buffer, which the memory limit counts, before parsing. The fastcall path
+  hands text holding a `_` to it. `luaO_str2d`, which arithmetic on strings uses, is left alone.
 - **Wallet secrets are zeroized.** `Vault`'s key, the opened vault's JSON, `Words`, typed
   passwords, words and keys (`chainv4_ui::secret::Typed`), and biometric secrets
   (`chainv4_ui::biometric::Secret`) are wiped as they drop; the Android glue overwrites Java's copy

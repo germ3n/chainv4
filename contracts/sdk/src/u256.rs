@@ -258,16 +258,28 @@ impl U256 {
         String::from_utf8(digits).expect("ASCII digits")
     }
 
-    /// Reads decimal digits, as Lua's u256(text) does: None for anything else, or for more than
-    /// MAX.
+    /// Reads decimal digits, as Lua's u256(text) does, grouped by `_` as in 1_000_000, each `_`
+    /// between two digits: None for anything else, such as _1, 1_ or 1__0, or for more than MAX.
     pub fn from_decimal(text: &str) -> Option<U256> {
-        if text.is_empty() {
+        let bytes = text.as_bytes();
+
+        if bytes.is_empty() {
             return None;
         }
 
         let mut value = U256::ZERO;
 
-        for byte in text.bytes() {
+        for (at, byte) in bytes.iter().enumerate() {
+            if *byte == b'_' {
+                let between = at > 0 && bytes[at - 1].is_ascii_digit() && bytes.get(at + 1).is_some_and(u8::is_ascii_digit);
+
+                if !between {
+                    return None;
+                }
+
+                continue;
+            }
+
             if !byte.is_ascii_digit() {
                 return None;
             }

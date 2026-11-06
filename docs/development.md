@@ -317,6 +317,52 @@ pages do.
 - Tests for one kind of finality, engine or scheme are gated on its feature, so every row of the
   feature matrix passes.
 
+### The fuel and memory fixture
+
+`src/chain/tests/fixture.rs` runs Lua calls whose outcome rests on how the Luau fork counts fuel and
+memory, each in its own block on one chain:
+- powers;
+- a backtracking pattern;
+- a sort;
+- strings and tables grown past the memory limit;
+- garbage made and dropped;
+- the integer types;
+- utf8 and the string library;
+- an endless loop;
+- caught errors;
+- storage.
+
+It writes each call's fuel and how it ended, then the receipts and state roots, and compares that
+byte for byte with `fixture.txt` beside it. A machine whose fuel, memory counting or roots differ
+fails the test and prints the lines that differ: such a node would split the chain. Run it on each
+kind of machine a chain mixes, `cargo test --lib --features lvm chain::tests::fixture`:
+- Linux x86-64 and arm64;
+- macOS arm64 and x86-64;
+- Windows;
+- under load as well as idle.
+
+After a consensus change meant to move it, write it again with `CHAINV4_WRITE_FIXTURE=1` and commit
+the new file with the change.
+
+### Measuring fuel
+
+`chainv4 calibrate` (built with `lvm`) times what fuel should cost on the machine it runs on. Each
+probe is a loop in a deployed Lua contract, its body against a base that does all but the one
+thing, at `--iterations` a call, the fastest of `--rounds` calls:
+- **Opcodes:** one fuel is anchored to the opcode probes together, what they took over what they
+  are charged, so overall prices stay where they are and only what each costs against the others
+  moves (`--ns-per-fuel` sets it instead). The cheapest opcodes take hundredths of a nanosecond,
+  too little to time alone.
+- **Library rates:** the same call at two sizes, so only the work that grows with size is left.
+- **Host operations:** storage reads and writes and hashing, past a cheap call into the host.
+
+It prints each one's time, its cost now, what it was charged and what it suggests, and marks what
+is charged under half of what it costs: the way to stall every node with cheap work. `--json FILE`
+writes the measurements, and the suggestions as a fees object's `lua_costs` and `costs`, for a
+genesis file or a `Change::Fees`. WebAssembly's instructions and the EVM's opcodes are priced by
+wasmi and revm, and are not probed yet. Run it on the machines a chain's nodes run on, and price
+for the slowest.
+
 ### End to end
 
 The tests above run a node in-process. The end-to-end tests start real processes on this machine's

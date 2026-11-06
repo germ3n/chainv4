@@ -9,6 +9,9 @@ use crate::structs::code::Engine;
 use crate::vm::{CallContext, Vm};
 use std::sync::Arc;
 
+/// The most one instruction costs by the fork's own costs: an out-of-fuel run leaves less.
+const DEAREST: u64 = 10;
+
 const LIMITS: Limits = Limits {
     fuel: 1_000_000,
     memory: 16 * 1024 * 1024,
@@ -417,7 +420,7 @@ fn an_endless_loop_runs_out_of_fuel() {
     let outcome = call("spin", &[]);
 
     assert_eq!(outcome.result.unwrap_err(), VmError::OutOfFuel);
-    assert!(outcome.fuel_used > LIMITS.fuel - MAX_INSTRUCTION_COST);
+    assert!(outcome.fuel_used > LIMITS.fuel - DEAREST);
     assert!(matches!(Contract::load("while true do end", LIMITS), Err(VmError::OutOfFuel)));
 }
 
@@ -443,7 +446,7 @@ fn loading_pays_for_compiling_and_the_top_level() {
     let endless = engine.load(b"while true do end", LIMITS);
 
     assert_eq!(endless.result.unwrap_err(), VmError::OutOfFuel);
-    assert!(endless.fuel_used > LIMITS.fuel - MAX_INSTRUCTION_COST);
+    assert!(endless.fuel_used > LIMITS.fuel - DEAREST);
 
     let starved = engine.load(light.as_bytes(), Limits { fuel: 10, ..LIMITS });
 
@@ -682,8 +685,8 @@ const HEAVY_LIMITS: Limits = Limits { fuel: 10_000_000, memory: 32 * 1024 * 1024
 
 /// The fuel a call used, what it came to, and the bytes its memory limit counted at the end.
 fn heavy(state: Pristine, code: &[u8], name: &str, args: &[TxCallArgumentType]) -> (u64, String, i64) {
-    let state = state.ready(HEAVY_LIMITS).unwrap();
-    let outcome = super::call(&state, code, name, args, host(), HEAVY_LIMITS);
+    let state = state.ready(HEAVY_LIMITS, &LuaCosts::DEFAULT).unwrap();
+    let outcome = super::call(&state, code, name, args, host(), HEAVY_LIMITS, &LuaCosts::DEFAULT);
 
     (outcome.fuel_used, format!("{:?}", outcome.result), state.lua.memory_counted())
 }
@@ -777,7 +780,7 @@ fn memory_heavy_calls_come_out_the_same_in_any_state_under_load() {
 fn the_memory_limit_counts_from_the_call_s_start() {
     let engine = LuaEngine::new();
     let code = engine.load(HEAVY.as_bytes(), HEAVY_LIMITS).result.unwrap().code;
-    let state = Pristine::new().unwrap().ready(HEAVY_LIMITS).unwrap();
+    let state = Pristine::new().unwrap().ready(HEAVY_LIMITS, &LuaCosts::DEFAULT).unwrap();
 
     assert_eq!(state.lua.memory_counted(), 0);
 

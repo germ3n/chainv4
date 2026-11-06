@@ -704,6 +704,7 @@ mod tests {
                 schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
                 pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
                 costs: None,
+                lua_costs: None,
                 vote_rewards: None,
             }), "Voted Yes on a fees change from v3"),
             (Change::Reward(Reward { initial: u256::new(25), halving_interval: Some(210_000) }), "Voted Yes on a reward change from v3"),

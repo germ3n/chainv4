@@ -46,6 +46,7 @@ impl FeeConfig {
             pricing: PricingConfig::BaseFee(BaseFee::dev()),
             vote_rewards: None,
             costs: None,
+            lua_costs: None,
         }
     }
 

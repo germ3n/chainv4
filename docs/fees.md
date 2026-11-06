@@ -10,6 +10,8 @@ chain free, with blocks unbounded.
 | `burn_permille` | How much of the base part of each fee is burned, in thousandths: 0 sends it all to the producer, 1000 burns it all. |
 | `schedule` | The scorer: how much gas a transaction costs. |
 | `pricing` | What each gas costs. |
+| `costs` | Optional: what host operations cost in fuel, any of `HostCosts`' fields, the rest their defaults (see [Fuel](contracts.md#fuel)). |
+| `lua_costs` | Optional: what Lua's opcodes and library work cost in fuel, by opcode name (`ADD`, `GETTABLEKS`, …) or rate (`bytes_per_fuel`, `elements_per_fuel`, `sort_comparison`, `match_step`), the rest the Luau fork's own. `chainv4 calibrate` suggests a table (see [Measuring fuel](development.md#measuring-fuel)). |
 
 ## What a transaction pays
 

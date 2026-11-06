@@ -186,6 +186,9 @@ fn decimals_read_and_write_with_a_sign() {
     assert_eq!(I256::from_decimal("-0"), Some(I256::ZERO));
     assert_eq!(I256::from_decimal("-42"), Some(int(-42)));
     assert_eq!(I256::from_decimal("007"), Some(int(7)));
+    assert_eq!(I256::from_decimal("-1_000"), Some(int(-1000)));
+    assert_eq!(I256::from_decimal("-_1"), None);
+    assert_eq!(I256::from_decimal("1_"), None);
 
     for bad in ["", "-", "--1", "+1", "1.5", "0x10", " 1", "-57896044618658097711785492504343953926634992332820282019728792003956564819969", "57896044618658097711785492504343953926634992332820282019728792003956564819968"] {
         assert_eq!(I256::from_decimal(bad), None, "{bad}");

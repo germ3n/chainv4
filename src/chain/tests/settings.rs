@@ -89,6 +89,37 @@ fn host_costs_a_change_of_fees_names_charge_every_call_from_the_next_block() {
 }
 
 #[test]
+fn lua_costs_read_and_write_by_name_reach_the_next_block_and_refuse_a_rate_of_nothing() {
+    use crate::params::{
+        json::{fees_from_text, fees_json},
+        vm::LuaCosts,
+    };
+
+    let mut costs = LuaCosts::DEFAULT;
+    costs.slots[LuaCosts::slot("ADD").unwrap()] = 7;
+    costs.slots[LuaCosts::slot("bytes_per_fuel").unwrap()] = 32;
+    let fees = crate::params::fees::FeeConfig { lua_costs: Some(Box::new(costs)), ..crate::params::fees::FeeConfig::dev() };
+
+    // Written by name, only what differs from the fork's own, and read back the same.
+    let json = fees_json(&fees);
+    assert_eq!(json["lua_costs"], serde_json::json!({ "ADD": 7, "bytes_per_fuel": 32 }));
+    assert_eq!(fees_from_text(&json.to_string()).unwrap(), fees);
+
+    let mut unknown = json.clone();
+    unknown["lua_costs"]["ADDD"] = 1.into();
+    assert!(fees_from_text(&unknown.to_string()).unwrap_err().contains("ADDD"));
+    let mut nothing = json.clone();
+    nothing["lua_costs"] = serde_json::json!({ "elements_per_fuel": 0 });
+    assert!(fees_from_text(&nothing.to_string()).unwrap_err().contains("at least 1"));
+
+    // A change of fees naming them sets the next block's.
+    let mut chain = governed(genesis());
+    assert_eq!(next(&chain).rules.vm.lua_costs, LuaCosts::DEFAULT);
+    decide(&mut chain, Change::Fees(fees));
+    assert_eq!(next(&chain).rules.vm.lua_costs, costs);
+}
+
+#[test]
 fn contract_limits_rise_never_fall_and_bound_the_transaction_and_multisig() {
     let mut chain = governed(genesis());
     let standing = genesis().block_limits();

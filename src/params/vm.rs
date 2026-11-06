@@ -299,7 +299,69 @@ impl Default for DexSettings {
 }
 
 #[document(
-    summary = "What a block's contracts run under, from its parent's state: the host costs, the contract limits, the EVM's spec and the DEX's fee. Every call in the block reads the same.",
+    summary = "What Lua contracts' fuel costs, slot by slot, as the Luau fork charges it: each opcode's cost at its number, then the library's rates, bytes and elements a unit of fuel pays for, a sort comparison and a pattern-matching step. Genesis's fees, or a Change::Fees, may name any of them as fees.lua_costs, by LUA_FUEL_SLOT_NAMES; the rest are LuaCosts::DEFAULT's, which are the fork's own. chainv4 calibrate measures what each costs on this machine.",
+    category = "Fees",
+    see_also = "FeeConfig::lua_costs, LUA_FUEL_SLOT_NAMES, HostCosts",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SchemaWrite, SchemaRead)]
+pub struct LuaCosts {
+    #[document(summary = "Each slot's cost, LUA_FUEL_SLOTS of them.")]
+    pub slots: [u64; LUA_FUEL_SLOTS],
+}
+
+#[document(summary = "How many fuel cost slots the Luau fork keeps: 128 for opcodes, then 4 rates.", category = "Fees", see_also = "LuaCosts")]
+pub const LUA_FUEL_SLOTS: usize = 132;
+
+#[document(summary = "How many of the Lua fuel cost slots are for opcodes, the first 128; the rates follow.", category = "Fees", see_also = "LuaCosts")]
+pub const LUA_FUEL_OPCODES: usize = 128;
+
+#[document(
+    summary = "Each Lua fuel cost slot's name, as genesis's fees.lua_costs names it: an opcode's, such as ADD or GETTABLEKS, or a rate's, bytes_per_fuel, elements_per_fuel, sort_comparison and match_step. Empty for a slot no opcode uses.",
+    category = "Fees",
+    see_also = "LuaCosts",
+)]
+pub const LUA_FUEL_SLOT_NAMES: [&str; LUA_FUEL_SLOTS] = ["NOP", "BREAK", "LOADNIL", "LOADB", "LOADN", "LOADK", "MOVE", "GETGLOBAL", "SETGLOBAL", "GETUPVAL", "SETUPVAL", "CLOSEUPVALS", "GETIMPORT", "GETTABLE", "SETTABLE", "GETTABLEKS", "SETTABLEKS", "GETTABLEN", "SETTABLEN", "NEWCLOSURE", "NAMECALL", "CALL", "RETURN", "JUMP", "JUMPBACK", "JUMPIF", "JUMPIFNOT", "JUMPIFEQ", "JUMPIFLE", "JUMPIFLT", "JUMPIFNOTEQ", "JUMPIFNOTLE", "JUMPIFNOTLT", "ADD", "SUB", "MUL", "DIV", "MOD", "POW", "ADDK", "SUBK", "MULK", "DIVK", "MODK", "POWK", "AND", "OR", "ANDK", "ORK", "CONCAT", "NOT", "MINUS", "LENGTH", "NEWTABLE", "DUPTABLE", "SETLIST", "FORNPREP", "FORNLOOP", "FORGLOOP", "FORGPREP_INEXT", "FASTCALL3", "FORGPREP_NEXT", "NATIVECALL", "GETVARARGS", "DUPCLOSURE", "PREPVARARGS", "LOADKX", "JUMPX", "FASTCALL", "COVERAGE", "CAPTURE", "SUBRK", "DIVRK", "FASTCALL1", "FASTCALL2", "FASTCALL2K", "FORGPREP", "JUMPXEQKNIL", "JUMPXEQKB", "JUMPXEQKN", "JUMPXEQKS", "IDIV", "IDIVK", "GETUDATAKS", "SETUDATAKS", "NAMECALLUDATA", "NEWCLASSMEMBER", "CALLFB", "CMPPROTO", "FASTPCALL", "NEWCLASS", "CONSTRUCT", "FINCONSTRUCT", "GETPRIVATEFIELD", "SETPRIVATEFIELD", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "bytes_per_fuel", "elements_per_fuel", "sort_comparison", "match_step"];
+
+impl LuaCosts {
+    #[document(parent = "LuaCosts", summary = "The Luau fork's own costs, as a state starts with them.")]
+    pub const DEFAULT: LuaCosts = LuaCosts { slots: [1, 1, 1, 1, 1, 1, 1, 5, 5, 2, 2, 3, 5, 4, 4, 4, 4, 4, 4, 10, 5, 5, 2, 2, 3, 3, 3, 4, 4, 4, 4, 4, 4, 2, 2, 3, 4, 4, 5, 1, 1, 3, 4, 4, 5, 2, 2, 2, 2, 4, 1, 1, 2, 6, 8, 4, 3, 3, 4, 4, 3, 4, 10, 3, 8, 2, 1, 3, 3, 1, 2, 2, 4, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 6, 5, 4, 3, 8, 8, 3, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 64, 8, 1, 1] };
+
+    #[document(
+        parent = "LuaCosts",
+        summary = "The slot a name is for.",
+        params = { name = "An opcode's name or a rate's, as LUA_FUEL_SLOT_NAMES has it." },
+        returns = "Its slot, or None for a name no slot has.",
+    )]
+    pub fn slot(name: &str) -> Option<usize> {
+        (!name.is_empty()).then(|| LUA_FUEL_SLOT_NAMES.iter().position(|slot| *slot == name)).flatten()
+    }
+
+    #[document(parent = "LuaCosts", summary = "Each named slot whose cost is not the default's, with its name: what genesis and a change of fees write.")]
+    pub fn changed(&self) -> Vec<(&'static str, u64)> {
+        LUA_FUEL_SLOT_NAMES
+            .iter()
+            .zip(self.slots.iter().zip(LuaCosts::DEFAULT.slots.iter()))
+            .filter(|(name, (cost, default))| !name.is_empty() && cost != default)
+            .map(|(name, (cost, _))| (*name, *cost))
+            .collect()
+    }
+
+    #[document(parent = "LuaCosts", summary = "Why no chain could charge them: a rate, bytes or elements a fuel pays for, of 0.")]
+    pub fn problem(&self) -> Option<&'static str> {
+        let rate = |name| self.slots[LuaCosts::slot(name).expect("a rate's slot")];
+
+        (rate("bytes_per_fuel") == 0 || rate("elements_per_fuel") == 0).then_some("fees.lua_costs' bytes_per_fuel and elements_per_fuel are at least 1")
+    }
+}
+
+impl Default for LuaCosts {
+    fn default() -> LuaCosts {
+        LuaCosts::DEFAULT
+    }
+}
+
+#[document(
+    summary = "What a block's contracts run under, from its parent's state: the host costs, Lua's costs, the contract limits, the EVM's spec and the DEX's fee. Every call in the block reads the same.",
     category = "VM",
     see_also = "HostCosts, ContractLimits, EvmSpec, DexSettings, BlockAt",
 )]
@@ -307,6 +369,8 @@ impl Default for DexSettings {
 pub struct VmRules {
     #[document(summary = "What host operations cost.")]
     pub costs: HostCosts,
+    #[document(summary = "What Lua contracts' instructions and library work cost.")]
+    pub lua_costs: LuaCosts,
     #[document(summary = "The limits a contract keeps within.")]
     pub limits: ContractLimits,
     #[document(summary = "The EVM's spec at the block's height.")]
@@ -330,6 +394,7 @@ impl Default for VmRules {
     fn default() -> VmRules {
         VmRules {
             costs: HostCosts::DEFAULT,
+            lua_costs: LuaCosts::DEFAULT,
             limits: ContractLimits::DEFAULT,
             evm_spec: EvmSpec::default(),
             dex: DexSettings::DEFAULT,

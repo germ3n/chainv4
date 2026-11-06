@@ -70,7 +70,7 @@ fn authority() -> FinalityConfig {
 }
 
 fn fees(schedule: ScheduleConfig, pricing: PricingConfig) -> FeeConfig {
-    FeeConfig { block_gas_limit: 50_000_000, burn_permille: 500, schedule, pricing, costs: None, vote_rewards: None }
+    FeeConfig { block_gas_limit: 50_000_000, burn_permille: 500, schedule, pricing, costs: None, lua_costs: None, vote_rewards: None }
 }
 
 fn weights() -> Weighted {

@@ -97,6 +97,44 @@ fn values_are_made_from_numbers_text_and_other_integers() {
 }
 
 #[test]
+fn digits_grouped_by_underscores_read_as_the_same_digits() {
+    let lua = setup();
+
+    holds(&lua, &[
+        "u256('1_000_000') == u256('1000000')",
+        "u64('0xff_ff') == u64(65535)",
+        "i256('-1_000') == i256(-1000)",
+        "u128('1_2_3') == u128(123)",
+        "i64('0xFF_00') == i64(65280)",
+        "tonumber('1_000') == 1000",
+        "tonumber('0xff_ff') == 65535",
+        "tonumber('ff_ff', 16) == 65535",
+        "tonumber('1_0', 2) == 2",
+        "tonumber('  1_000  ') == 1000",
+        "(function(f) return f('2_5') end)(tonumber) == 25",
+    ]);
+
+    // Each _ between two digits: a slip is refused, not read as some other number.
+    for bad in ["_1", "1_", "1__0", "0x_ff", "1_.5", "-_1", "1_a"] {
+        fails(&lua, &format!("local _ = u256('{bad}')"), "not a u256");
+        fails(&lua, &format!("local _ = i256('{bad}')"), "not an i256");
+    }
+
+    holds(&lua, &[
+        "tonumber('_1') == nil",
+        "tonumber('1_') == nil",
+        "tonumber('1__0') == nil",
+        "tonumber('0x_ff') == nil",
+        "tonumber('1_.5') == nil",
+        "tonumber('1_2', 2) == nil",
+        "tonumber('1_5') ~= nil and tonumber('1_000.5') == nil",
+    ]);
+
+    // Arithmetic on text is untouched: grouped digits are for the readers alone.
+    fails(&lua, "local _ = '1_000' + 1", "");
+}
+
+#[test]
 fn bad_values_are_refused() {
     let lua = setup();
 

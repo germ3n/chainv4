@@ -596,14 +596,18 @@ with.
   finality, the federation and the directory may be given in part, laid over what stands; the
   deciding receipt says `Decided { decision, kind, version }`, the chain's count kept gap-free for
   light clients.
-- [ ] **Read-only parameters in Lua contracts (owner, 2026-11-06).** Luau has none: `const` binds
+- [x] **Read-only parameters in Lua contracts (owner, 2026-11-06).** Done 2026-11-06 in batch 11:
+  `const` before a parameter, and `--@const_params` at the top for all of them (the `--@`
+  convention), in the fork's parser; see [Contracts](contracts.md#lua-contracts). Luau has none: `const` binds
   locals and local functions (`const LIMIT = 5`, `const function f() end`), while a parameter is a
   plain local the body may assign, and `function f(const x)` is a syntax error. In the Luau fork,
   let `const` stand before a parameter, `function transfer(const to, const amount)`, compiled as a
   const local is, so assigning it fails the deploy; and perhaps `@const_params` on a function, or a
   contract-wide `--!const_params`, for all of them at once. As it changes which contracts deploy,
   with the consensus batches and the fork's pin moved, tested in both engines' contract tests.
-- [ ] **`_` as a digit separator everywhere a number is read from text (owner, 2026-11-06).** In
+- [x] **`_` as a digit separator everywhere a number is read from text (owner, 2026-11-06).** Done
+  2026-11-06 in batch 11: the integer types' text, `tonumber` in the fork, and the SDK's
+  `from_decimal`. In
   contracts, a consensus change for the next regenesis or fork: `u64()` to `i256()` and each
   `.new`, decimal and `0x` hex, and `tonumber` in the Luau fork, as Luau's own literals take
   `1_000_000`; with them the SDK's `U256::from_decimal` and `I256::from_decimal`, which mirror
@@ -611,7 +615,12 @@ with.
   CLI's amounts, coins, spans and typed arguments. Only between two digits: `_1`, `1_`, `1__0` and
   `0x_ff` are refused, stricter than Rust's and Luau's literals, so a slip is not read as some
   other number.
-- [ ] **Fuel costs measured, not guessed.** `vm::cost` is a table of hand-picked constants
+- [ ] **Fuel costs measured, not guessed.** Lua's part done 2026-11-06 in batch 11: the fork's
+  costs are a per-state table chainv4 sets from genesis's `fees.lua_costs` or a `Change::Fees`
+  (`LuaCosts`), and `chainv4 calibrate` times Lua's opcodes, library rates and some host operations
+  and suggests a table. Left: probing WebAssembly's and the EVM's instructions, signature checks
+  and the rest of the host's operations, and choosing the table for the regenesis from runs on
+  the servers. `vm::cost` is a table of hand-picked constants
   (a storage write 500, a call 1,000, a hash 20…) compiled into the node. A Rust tool, run at
   build time or as `chainv4 calibrate`, would time each fuel-charged operation on a reference
   machine, Lua and WebAssembly instructions, every host call, signature checks and transfers, and
@@ -674,7 +683,10 @@ with.
   Run it in CI on Linux x86-64, macOS arm64 and an Android or arm64 Linux target, and turn
   whatever disagrees into a deterministic rule. Related: the pentest's finding that Lua's `^`
   calls the platform's `pow()`.
-- [ ] **Test the Lua fixes across OSes and CPU architectures (the owner's ask, 2026-11-05).** That
+- [ ] **Test the Lua fixes across OSes and CPU architectures (the owner's ask, 2026-11-05).** The
+  fixture is done (2026-11-06, batch 11): `src/chain/tests/fixture.rs` against `fixture.txt`, byte
+  for byte (see [Development](development.md#the-fuel-and-memory-fixture)). Left: running it on
+  each machine listed here. That
   means the memory fix (a1134bc, Luau 93df670, mlua 3832a79): the limit counted from zero by the
   sizes Luau asks for, and collection paced by the heap goal, not the clock. It also means the
   fuel fixes (Luau 325972b): the pattern matcher's steps, what the string, table and utf8 libraries
@@ -873,9 +885,8 @@ with.
   merged with upstream on their `upstream-merge` branches: Luau 0.653 to 0.745, mlua 0.10.2 to
   0.12.2. The whole-number rule above is on the Luau one. On 2026-11-06 both were pushed and
   fast-forwarded onto the forks' `main` (luau-src-rs 3fad1fb, mlua 46bc6e2), and chainv4's
-  `lua-upstream` branch locks those commits with no `[patch]`. Left to ship it:
-  - merge into master;
-  - regenesis, as contract results and fuel change.
+  `lua-upstream` branch locks those commits with no `[patch]`. Merged into master (ccf57e2). Left
+  to ship it: the regenesis after batches 11 to 15, as contract results and fuel change.
 
   Known on the forks: upstream's new `require`, `loadstring`, integer library, classes and
   coroutine `close` are left out or off. mlua's user values, `take` and `destroy` keep a table keyed

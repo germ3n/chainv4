@@ -2120,6 +2120,7 @@ mod evm;
 #[cfg(feature = "names")]
 mod names;
 mod multisig;
+mod fixture;
 mod pentest_lua;
 #[cfg(all(feature = "bridge", feature = "evm", feature = "secp256k1"))]
 mod pentest_gateway;

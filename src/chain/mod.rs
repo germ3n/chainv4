@@ -980,10 +980,11 @@ impl Genesis {
         }
     }
 
-    #[document(parent = "Genesis", summary = "What contracts run under from the first block: genesis's limits, costs, EVM spec and DEX fee, or the defaults it leaves unset.")]
+    #[document(parent = "Genesis", summary = "What contracts run under from the first block: genesis's limits, costs, Lua costs, EVM spec and DEX fee, or the defaults it leaves unset.")]
     pub fn vm_rules(&self) -> crate::params::vm::VmRules {
         crate::params::vm::VmRules {
             costs: self.fees.as_ref().and_then(|fees| fees.costs).unwrap_or_default(),
+            lua_costs: self.fees.as_ref().and_then(|fees| fees.lua_costs.as_deref().copied()).unwrap_or_default(),
             limits: self.contract_limits.unwrap_or_default(),
             evm_spec: self.evm_spec.unwrap_or_default(),
             dex: self.dex.unwrap_or_default(),
@@ -3602,6 +3603,7 @@ pub(crate) fn govern_rules(rules: &mut Rules, state: &State, height: u64) -> Res
 
         // A change of fees names its costs, or goes back to the defaults.
         rules.vm.costs = config.costs.unwrap_or_default();
+        rules.vm.lua_costs = config.lua_costs.as_deref().copied().unwrap_or_default();
     }
 
     if let Some(limits) = changes.limits()? {

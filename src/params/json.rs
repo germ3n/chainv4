@@ -356,6 +356,10 @@ pub fn fees_json(fees: &FeeConfig) -> Value {
         value["costs"] = costs_json(costs);
     }
 
+    if let Some(costs) = &fees.lua_costs {
+        value["lua_costs"] = lua_costs_json(costs);
+    }
+
     value
 }
 
@@ -479,6 +483,27 @@ pub fn costs_json(costs: &crate::params::vm::HostCosts) -> Value {
 }
 
 /// Host costs from their JSON, each field left out taking HostCosts::DEFAULT's.
+/// Lua's costs as genesis and a change of fees write them: the slots that are not the default's, by
+/// name.
+pub fn lua_costs_json(costs: &crate::params::vm::LuaCosts) -> Value {
+    Value::Object(costs.changed().into_iter().map(|(name, cost)| (name.to_string(), Value::from(cost))).collect())
+}
+
+/// Reads Lua's costs as lua_costs_json writes them: any slots by name, the rest the default's.
+pub(crate) fn lua_costs_from_json(mut fields: Fields) -> Result<crate::params::vm::LuaCosts, String> {
+    let mut costs = crate::params::vm::LuaCosts::DEFAULT;
+    let names: Vec<&String> = fields.map.keys().collect();
+
+    for name in names {
+        let slot = crate::params::vm::LuaCosts::slot(name).ok_or_else(|| format!("{}: no Lua fuel cost is called that", fields.name(name)))?;
+        costs.slots[slot] = fields.later_whole(name)?.expect("a key the object holds");
+    }
+
+    fields.done()?;
+
+    Ok(costs)
+}
+
 pub(crate) fn costs_from_json(mut fields: Fields) -> Result<crate::params::vm::HostCosts, String> {
     let base = crate::params::vm::HostCosts::DEFAULT;
     let mut cost = |key: &'static str, default: u64| -> Result<u64, String> { Ok(fields.later_whole(key)?.unwrap_or(default)) };
@@ -755,6 +780,7 @@ pub(crate) fn fees_from_fields(mut fees: Fields) -> Result<FeeConfig, String> {
             None => None,
         },
         costs: fees.later_object("costs")?.map(costs_from_json).transpose()?,
+        lua_costs: fees.later_object("lua_costs")?.map(lua_costs_from_json).transpose()?.map(Box::new),
     };
     fees.done()?;
 

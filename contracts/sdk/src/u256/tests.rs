@@ -57,7 +57,10 @@ fn decimals_read_and_write_as_lua_writes_them() {
     assert_eq!(U256::from_decimal("340282366920938463463374607431768211456"), Some(U256([0, 0, 1, 0])));
     assert_eq!(U256::from_decimal("007"), Some(U256::from(7u64)));
 
-    for bad in ["", "-1", "1.5", "0x10", " 1", "115792089237316195423570985008687907853269984665640564039457584007913129639936"] {
+    assert_eq!(U256::from_decimal("1_000_000"), Some(U256::from(1_000_000u64)), "grouped as Lua's u256 takes them");
+    assert_eq!(U256::from_decimal("1_2_3"), Some(U256::from(123u64)));
+
+    for bad in ["", "-1", "1.5", "0x10", " 1", "115792089237316195423570985008687907853269984665640564039457584007913129639936", "_1", "1_", "1__0", "_", "1_.5"] {
         assert_eq!(U256::from_decimal(bad), None, "{bad}");
     }
 }

@@ -57,6 +57,10 @@ enum Command {
     /// (bench chain), or transfers submitted to running nodes at a rising rate (bench load).
     #[cfg(feature = "client")]
     Bench(cli::BenchArgs),
+    /// What fuel should cost, measured here: each Lua opcode, library rate and host operation timed
+    /// against what it is charged, with suggested lua_costs and costs for a genesis file's fees.
+    #[cfg(feature = "lvm")]
+    Calibrate(cli::CalibrateArgs),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
@@ -617,6 +621,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Bridge(args)) => cli::bridge(*args),
         #[cfg(feature = "client")]
         Some(Command::Bench(args)) => cli::bench(args),
+        #[cfg(feature = "lvm")]
+        Some(Command::Calibrate(args)) => cli::calibrate(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
         Some(Command::Db(args)) => cli::db(args),

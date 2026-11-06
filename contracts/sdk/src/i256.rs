@@ -176,8 +176,8 @@ impl I256 {
         if self.is_negative() { alloc::format!("-{digits}") } else { digits }
     }
 
-    /// Reads decimal digits after an optional minus, as Lua's i256(text) does: None for anything
-    /// else, or for a value past MIN or MAX.
+    /// Reads decimal digits after an optional minus, as Lua's i256(text) does, grouped by `_` as
+    /// U256::from_decimal takes them: None for anything else, or for a value past MIN or MAX.
     pub fn from_decimal(text: &str) -> Option<I256> {
         let (negative, digits) = match text.strip_prefix('-') {
             Some(digits) => (true, digits),

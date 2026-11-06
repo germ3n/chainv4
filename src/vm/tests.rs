@@ -2220,6 +2220,50 @@ fn both_engines_charge_and_limit_by_their_block_s_rules_and_not_by_constants() {
 }
 
 #[test]
+fn lua_s_opcodes_and_library_cost_what_their_block_s_lua_costs_say() {
+    use crate::params::vm::{LuaCosts, VmRules};
+
+    let mut world = World::new();
+    let adds = world.lua_code("local M = {}\nfunction M.read() local n = 0 for i = 1, 100 do n = n + i end return n end\nreturn M");
+    let sorts = world.lua_code("local M = {}\nfunction M.read() local t = {} for i = 64, 1, -1 do t[#t + 1] = i end table.sort(t) return t[1] end\nreturn M");
+    let run = |contract: Address, costs: LuaCosts| {
+        let block = crate::vm::BlockAt { vm: VmRules { lua_costs: costs, ..VmRules::default() }, ..crate::vm::BlockAt::at(0) };
+        let context = CallContext { sender: DEPLOYER, contract, value: u256::ZERO, block };
+        let outcome = Contracts::new(&world.state).call(&world.vm, &context, &Hash::Xxh3_64(selector("read")), &[], LIMITS).unwrap();
+        assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+
+        outcome.fuel_used
+    };
+    let with = |name: &str, cost: u64| {
+        let mut costs = LuaCosts::DEFAULT;
+        costs.slots[LuaCosts::slot(name).unwrap()] = cost;
+        costs
+    };
+
+    // n + i runs a hundred times: each ADD dearer by 9 is 900 more.
+    let add = LuaCosts::DEFAULT.slots[LuaCosts::slot("ADD").unwrap()];
+    assert_eq!(run(adds, with("ADD", add + 9)) - run(adds, LuaCosts::DEFAULT), 900);
+
+    // table.sort's comparisons cost what sort_comparison says, a library rate as well.
+    let (once, thrice) = (run(sorts, LuaCosts::DEFAULT), run(sorts, with("sort_comparison", 3)));
+    assert_eq!(thrice - once, 2 * 64 * 7, "n log n comparisons, 64 of 7 bits, twice dearer");
+}
+
+#[test]
+fn lua_costs_mirror_the_forks_own_slot_for_slot() {
+    use crate::params::vm::{LUA_FUEL_SLOT_NAMES, LUA_FUEL_SLOTS, LuaCosts};
+
+    let names = mlua::Lua::fuel_cost_names();
+    assert_eq!(names.len(), LUA_FUEL_SLOTS);
+
+    for (slot, (ours, fork)) in LUA_FUEL_SLOT_NAMES.iter().zip(&names).enumerate() {
+        assert_eq!(*ours, fork.unwrap_or(""), "slot {slot}");
+    }
+
+    assert_eq!(mlua::Lua::default_fuel_costs(), LuaCosts::DEFAULT.slots, "the defaults are the fork's own");
+}
+
+#[test]
 fn contracts_read_the_chain_s_id_for_the_same_fuel_in_either_engine_and_cannot_change_it() {
     const ID: u64 = 0xabcd_ef01_2345;
     let mut world = World {

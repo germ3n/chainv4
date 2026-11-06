@@ -6,7 +6,7 @@ license = "MIT"
 
 [package.metadata.consensus]
 # The Luau fork's commit, which Cargo.lock's luau0-src must be (tests/toolchains.rs).
-luau0-src = "3fad1fbb5470696ef35be086c18dc3ccd8462da6"
+luau0-src = "8c1973741bae634cd80e0adec620fd4e55f7d86a"
 
 [workspace]
 members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
@@ -185,7 +185,7 @@ wasmi = { version = "=2.0.0", default-features = false, features = ["std", "vali
 # Lua is consensus too, so the forks are pinned by commit: mlua by its rev here, and Luau, which
 # mlua-sys takes from its fork's main, by the commit below, which tests/toolchains.rs holds
 # Cargo.lock to, so a `cargo update` cannot move either.
-mlua = { git = "https://github.com/germ3n/mlua", rev = "46bc6e2ec9054ffe6a60805913ff3980c12cadb6", features = ["luau", "send"], optional = true }
+mlua = { git = "https://github.com/germ3n/mlua", rev = "ac9dda35ed946042bea35a62f4927f851442fd77", features = ["luau", "send"], optional = true }
 # Stopping cleanly on SIGTERM and SIGINT: as a container's PID 1, nothing else would.
 signal-hook = { version = "0.3.18", optional = true }
 
@@ -212,3 +212,14 @@ tungstenite = { version = "0.29.0", default-features = false, features = ["hands
 [build-dependencies]
 wiki = { path = "wiki" }
 
+
+# Luau's C++ optimized in debug builds too. Unoptimized, each C boundary a contract nests through,
+# a table.sort comparator or a gsub callback calling back in, takes about 10 KB of stack, and the
+# 200 Luau allows overflow a test thread's 2 MiB; optimized, as a node runs it, they fit in under
+# 512 KiB. Tests run then as a node does, and faster.
+# mlua-sys's build script compiles it, so its level is the one cc reads.
+[profile.dev.package.mlua-sys]
+opt-level = 2
+
+[profile.dev.package.luau0-src]
+opt-level = 2

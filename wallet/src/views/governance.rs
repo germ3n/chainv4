@@ -1973,6 +1973,7 @@ mod tests {
             schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
             pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
             costs: None,
+            lua_costs: None,
             vote_rewards: None,
         };
         let mut value = council();
@@ -2146,6 +2147,7 @@ mod tests {
                     schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1_000, per_byte: 10, per_code_byte: 20, fuel_per_gas: 1 }),
                     pricing: PricingConfig::Bid(Bid { min_price: u256::new(7) }),
                     costs: None,
+                    lua_costs: None,
                     vote_rewards: None,
                 }),
                 "Fees: 50,000,000 gas a block, 50% of each fee burned, weighted gas schedule, bids of at least 0.000000000000000007 DEV a gas",
@@ -2157,6 +2159,7 @@ mod tests {
                     schedule: ScheduleConfig::Weighted(Weighted { per_tx: 1, per_byte: 1, per_code_byte: 1, fuel_per_gas: 1 }),
                     pricing: PricingConfig::BaseFee(BaseFee { initial: u256::new(10), min: u256::new(1), elasticity: 2, change_denominator: 8 }),
                     costs: None,
+                    lua_costs: None,
                     vote_rewards: None,
                 }),
                 "a base price from",

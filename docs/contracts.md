@@ -398,6 +398,13 @@ what its storage or calls cost (`vm::cost`).
   call may depend on: so a module evicted by many others, which the node must compile again,
   costs the call the same, and pays for that compiling.
 
+**What Lua costs is a table the chain sets.** Each opcode has a price, from 1 for a `MOVE` to 10
+for making a closure, and the libraries charge at four rates: bytes and elements a fuel pays for,
+a sort comparison and a pattern-matching step. Genesis's `fees.lua_costs`, or a `Change::Fees`,
+names any of them, by opcode name or rate; the rest are the fork's own (`LuaCosts::DEFAULT`).
+`chainv4 calibrate` times each on the machine it runs on and suggests a table (see
+[Development](development.md#measuring-fuel)). The numbers below are the defaults.
+
 **Lua's libraries pay for what they go over,** in the forked Luau, as instructions alone would let
 one call do a great deal for nothing. Each is the same on every platform:
 - **Patterns:** `string.find`, `match`, `gmatch` and `gsub` pay 1 fuel for every step of the
@@ -423,6 +430,13 @@ every one of those exactly, so nothing a contract computes is ever rounded:
   round it to `1`;
 - dividing by zero fails, where a double would give an infinity or NaN;
 - `tonumber` gives `nil` for text that reads as a fraction or as a number past the bound.
+
+**Digits group with `_`**, as people write them: `1_000_000`, in literals as Luau takes them, and
+in text that `tonumber` and the integer types read, `u256("1_000_000")` or `u64("0xff_ff")`, with
+`tonumber("ff_ff", 16)` in other bases. Each `_` stands between two digits, hex digits after `0x`:
+`_1`, `1_`, `1__0`, `1_.5` and `0x_ff` are refused, `tonumber` giving `nil`, so a slip never reads
+as some other number. Arithmetic on text does not group: `"1_000" + 1` fails. The Rust SDK's
+`U256::from_decimal` and `I256::from_decimal` take them the same way.
 
 Past 2^53, use the [integer types](#integers), which are exact to 2^256. The compiler folds
 constants by the same rules, and leaves whatever would fail for the VM to refuse. Nor does it fold
@@ -494,6 +508,13 @@ end
 
 return M
 ```
+
+**Parameters can be read-only.** `const` before a parameter's name makes it one, as `const` makes a
+local: `function M.transfer(const to, const amount)`, and a body that assigns it, `amount = 0` or
+`amount += 1`, even from a closure, fails the deploy with "Variable 'amount' is constant and may
+not be reassigned". A `--@const_params` line at the script's top, with the other annotations,
+before its first statement, makes every parameter in the file read-only; after the first
+statement it is refused. A parameter may still be called `const`.
 
 **The sandbox** has only:
 - the globals that behave the same on every machine: `assert`, `error`, `pairs`, `pcall`,

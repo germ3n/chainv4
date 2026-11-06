@@ -6,6 +6,7 @@
 //! could fail a call another node passes. Building a state is most of what a call costs, so the
 //! engine builds them ahead, on a thread of its own, and still uses each one once.
 
+use crate::params::vm::{LUA_FUEL_OPCODES, LuaCosts};
 use {
     super::{Host, Limits, Loaded, Loading, Outcome, ScriptEngine, VmError, selector},
     crate::structs::hash::Hash,
@@ -32,9 +33,6 @@ pub const POOL_SIZE: usize = 16;
 #[document(summary = "How many threads build pristine Lua states, unless --lua-builders says otherwise: 2. Building one takes about twice as long as a call that uses it, so two keep up with calls back to back.", category = "Lua VM", see_also = "EnginePools::lua_builders")]
 pub const BUILDERS: usize = 2;
 
-/// The most fuel one instruction costs in the forked Luau. When an out-of-fuel error leaves less
-/// than this, the script really ran dry.
-const MAX_INSTRUCTION_COST: u64 = 10;
 
 /// Globals a script may use. Everything else is left out, including anything that reads the
 /// clock, the platform or the garbage collector, since nodes would disagree on those.
@@ -87,20 +85,20 @@ impl Contract {
         },
     )]
     pub fn from_bytecode(bytecode: Vec<u8>, limits: Limits) -> Result<Contract, VmError> {
-        Contract::explore(bytecode, limits).1
+        Contract::explore(bytecode, limits, &LuaCosts::DEFAULT).1
     }
 
     /// Runs compiled bytecode's top level once to find the functions it exports, and says what
     /// that burned, whether or not it worked.
-    fn explore(bytecode: Vec<u8>, limits: Limits) -> (u64, Result<Contract, VmError>) {
-        let state = match Pristine::new().and_then(|state| state.ready(limits)) {
+    fn explore(bytecode: Vec<u8>, limits: Limits, costs: &LuaCosts) -> (u64, Result<Contract, VmError>) {
+        let state = match Pristine::new().and_then(|state| state.ready(limits, costs)) {
             Ok(state) => state,
             Err(err) => return (0, Err(err)),
         };
         let result = Contract::exports(&state, bytecode);
         let remaining = state.lua.get_fuel().unwrap_or(0);
 
-        (limits.fuel - remaining, fueled(result, remaining))
+        (limits.fuel - remaining, fueled(result, remaining, costs))
     }
 
     fn exports(state: &Pristine, bytecode: Vec<u8>) -> Result<Contract, VmError> {
@@ -189,8 +187,10 @@ impl Contract {
             return Outcome::failed(VmError::NoSuchFunction);
         };
 
-        match Pristine::new().and_then(|state| state.ready(limits)) {
-            Ok(state) => call(&state, &self.bytecode, name, args, host, limits),
+        let costs = host.rules().lua_costs;
+
+        match Pristine::new().and_then(|state| state.ready(limits, &costs)) {
+            Ok(state) => call(&state, &self.bytecode, name, args, host, limits, &costs),
             Err(err) => Outcome::failed(err),
         }
     }
@@ -246,10 +246,14 @@ impl ScriptEngine for LuaEngine {
             Ok(bytecode) => bytecode,
             Err(err) => return Loading::failed(fee, err),
         };
-        let (ran, contract) = Contract::explore(bytecode, Limits {
-            fuel: limits.fuel - fee,
-            ..limits
-        });
+        let (ran, contract) = Contract::explore(
+            bytecode,
+            Limits {
+                fuel: limits.fuel - fee,
+                ..limits
+            },
+            &rules.lua_costs,
+        );
         let result = contract.and_then(|contract| {
             let functions = contract.function_names();
             let reentrant = annotations::reentrant(source, &functions)?;
@@ -272,9 +276,11 @@ impl ScriptEngine for LuaEngine {
     fn run(&self, code: &[u8], function: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
         let pool = self.pool();
 
-        match pool.take().and_then(|state| state.ready(limits)) {
+        let costs = host.rules().lua_costs;
+
+        match pool.take().and_then(|state| state.ready(limits, &costs)) {
             Ok(state) => {
-                let outcome = call(&state, code, function, args, host, limits);
+                let outcome = call(&state, code, function, args, host, limits, &costs);
                 pool.retire(state);
 
                 outcome
@@ -329,8 +335,10 @@ impl Pristine {
     /// the sizes it asks for. Neither the allocator's pages nor when the collector runs, which
     /// follows those bytes alone, changes where a call runs out, so every node fails it at the
     /// same allocation, with the same fuel used.
-    fn ready(self, limits: Limits) -> Result<Pristine, VmError> {
+    /// Its fuel costs are the block's, which the setup before ran by the fork's own.
+    fn ready(self, limits: Limits, costs: &LuaCosts) -> Result<Pristine, VmError> {
         self.lua.set_memory_limit(limits.memory)?;
+        self.lua.set_fuel_costs(&costs.slots);
         self.lua.set_fuel(limits.fuel)?;
 
         Ok(self)
@@ -389,13 +397,13 @@ impl Pool {
 
 /// Runs one exported function of compiled bytecode in a state readied for it. The state is not
 /// to be used again.
-fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentType], host: Host, limits: Limits) -> Outcome {
+fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentType], host: Host, limits: Limits, costs: &LuaCosts) -> Outcome {
     let result = run(state, bytecode, name, args, host);
     // The call's host goes now, wherever the state is closed later.
     state.lua.remove_app_data::<Host>();
     state.lua.remove_app_data::<CallArgs>();
     let remaining = state.lua.get_fuel().unwrap_or(0);
-    let result = fueled(result, remaining);
+    let result = fueled(result, remaining, costs);
 
     Outcome {
         fuel_used: limits.fuel - remaining,
@@ -407,10 +415,13 @@ fn call(state: &Pristine, bytecode: &[u8], name: &str, args: &[TxCallArgumentTyp
     }
 }
 
-/// A script's own "out of fuel" error is only running out when the tank is nearly empty.
-fn fueled<T>(result: Result<T, VmError>, remaining: u64) -> Result<T, VmError> {
+/// A script's own "out of fuel" error is only running out when the tank is nearly empty: less left
+/// than the dearest instruction costs, by the costs in force.
+fn fueled<T>(result: Result<T, VmError>, remaining: u64, costs: &LuaCosts) -> Result<T, VmError> {
+    let dearest = costs.slots[..LUA_FUEL_OPCODES].iter().copied().max().unwrap_or(0);
+
     match result {
-        Err(VmError::Runtime(text)) if text.contains("out of fuel") && remaining < MAX_INSTRUCTION_COST => {
+        Err(VmError::Runtime(text)) if text.contains("out of fuel") && remaining < dearest.max(1) => {
             Err(VmError::OutOfFuel)
         }
         other => other,

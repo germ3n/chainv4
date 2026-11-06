@@ -91,14 +91,52 @@ mod tests {
 
 #[cfg(test)]
 mod const_tests {
+    use super::compile;
+
     #[test]
     fn luau_s_const_bindings_compile_and_cannot_be_assigned_again() {
         let source = "const LIMIT = 5\nconst function double(n) return n * 2 end\nreturn { f = function() return double(LIMIT) end }";
-        assert!(super::compile(source).is_ok(), "{:?}", super::compile(source).err());
-        assert!(super::compile("const LIMIT = 5\nLIMIT = 6\nreturn {}").is_err(), "a const is not assigned again");
-        assert!(super::compile("const function f() end\nf = nil\nreturn {}").is_err(), "nor a const function");
-        // Parameters have no const yet (docs/todo.md): one is a syntax error, and a body may assign its own.
-        assert!(super::compile("local function f(const x) return x end\nreturn {}").is_err());
-        assert!(super::compile("local function f(x) x = 1 return x end\nreturn {}").is_ok());
+        assert!(compile(source).is_ok(), "{:?}", compile(source).err());
+        assert!(compile("const LIMIT = 5\nLIMIT = 6\nreturn {}").is_err(), "a const is not assigned again");
+        assert!(compile("const function f() end\nf = nil\nreturn {}").is_err(), "nor a const function");
+    }
+
+    #[test]
+    fn a_const_parameter_is_read_and_never_assigned() {
+        let reads = "local function transfer(const to, const amount: number, memo) memo = memo or '' return to, amount, memo end\nreturn { f = transfer }";
+        assert!(compile(reads).is_ok(), "read, and the plain one beside them assigned: {:?}", compile(reads).err());
+
+        for assigns in [
+            "local function f(const x) x = 1 return x end\nreturn {}",
+            "local function f(a, const x) x += 1 return x end\nreturn {}",
+            "local t = {}\nfunction t.f(const x) local g = function() x = 2 end return g end\nreturn t",
+            "local t = {}\nfunction t:m(const x) x = nil end\nreturn t",
+            "return { f = function(const x, ...) x = 3 end }",
+        ] {
+            let err = compile(assigns).expect_err(assigns);
+            assert!(err.to_string().contains("is constant and may not be reassigned"), "{assigns}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_parameter_named_const_is_still_one() {
+        for source in ["local function f(const) return const end\nreturn {}", "local function f(const, b) const = b return const end\nreturn {}", "local function f(const: number) return const end\nreturn {}"] {
+            assert!(compile(source).is_ok(), "{source}: {:?}", compile(source).err());
+        }
+    }
+
+    #[test]
+    fn const_params_in_the_header_makes_every_parameter_const() {
+        let header = "--@const_params\n";
+        assert!(compile(&format!("{header}local function f(a, b) return a + b end\nreturn {{}}")).is_ok());
+
+        for body in ["local function f(a, b) b = 1 return a end", "return { m = function(x) x = 1 end }", "local t = {}\nfunction t.g(...) local function h(y) y = 2 end end"] {
+            let source = format!("{header}{body}\nreturn {{}}");
+            assert!(compile(&source).is_err(), "{source}");
+        }
+
+        // Its locals are as ever, and only the header's comment counts.
+        assert!(compile(&format!("{header}local function f(a) local b = a b = 2 return b end\nreturn {{}}")).is_ok());
+        assert!(compile("local x = 1\n--@const_params\nlocal function f(a) a = 1 end\nreturn {}").is_ok(), "after the first statement it is a comment");
     }
 }

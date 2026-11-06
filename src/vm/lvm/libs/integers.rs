@@ -666,7 +666,8 @@ fn text(value: &Value) -> mlua::Result<String> {
 }
 
 /// Makes a value of this type from a whole number, decimal or 0x hex text, with a minus for a
-/// signed one, or any integer that it holds.
+/// signed one and its digits grouped by `_` as `structs::digits::ungrouped` takes them, or any
+/// integer that it holds.
 fn new_int(value: &Value, kind: IntKind) -> mlua::Result<Int> {
     if let Some(int) = int_of(value) {
         return int.to(kind).ok_or_else(|| Error::runtime(format!("not {}: {int}", kind.library_article())));
@@ -676,10 +677,14 @@ fn new_int(value: &Value, kind: IntKind) -> mlua::Result<Int> {
         return number_as(value, kind);
     };
     let text = text.to_str()?;
+    let refused = || Error::runtime(format!("not {}: {}", kind.library_article(), &*text));
     let (negative, digits) = match text.strip_prefix('-') {
         Some(rest) if kind.signed() => (true, rest),
         _ => (false, &*text),
     };
+    // Grouped as people write them, 1_000_000 or 0xff_ff, each _ between two digits.
+    let digits = crate::structs::digits::ungrouped(digits).ok_or_else(refused)?;
+    let digits = &*digits;
     let magnitude = match digits.strip_prefix("0x") {
         Some(hex) => u256::from_str_radix(hex, 16),
         None => u256::from_str_radix(digits, 10),
@@ -689,7 +694,7 @@ fn new_int(value: &Value, kind: IntKind) -> mlua::Result<Int> {
         .ok()
         .filter(|_| !digits.starts_with(['+', '-']))
         .and_then(|magnitude| Exact::new(negative, magnitude).to(kind))
-        .ok_or_else(|| Error::runtime(format!("not {}: {}", kind.library_article(), &*text)))
+        .ok_or_else(refused)
 }
 
 /// The checked_ methods, and the operator each stands for.

@@ -448,7 +448,8 @@ mod tests {
         // from: its hash, key, engines and finality all go into it. Taken again for format 9,
         // whose headers commit to their payouts too, which moved every block's id; and again for
         // the coin's supply, kept in state from genesis on, which moved every state root; and again
-        // for FFG's slash_permille, which every FFG config encodes, set or not.
+        // for FFG's slash_permille, which every FFG config encodes, set or not; and again for fees'
+        // lua_costs, which every fee config encodes, set or not.
         if cfg!(all(
             feature = "blake3",
             feature = "ed25519",
@@ -458,7 +459,7 @@ mod tests {
             feature = "finality-authority",
             feature = "finality-depth"
         )) {
-            assert_eq!(read.block().id().to_string(), "0x6f74438c3cf44ab7357e15f1275a6967927626dd6d232a70548dc13d120b7820");
+            assert_eq!(read.block().id().to_string(), "0xf707153c93394fffc2619bbfee37f8945aae0585b7b646b3830a713910178fa8");
         }
 
         // Set, it is part of the chain: the dev chains now have their own ids.

@@ -1,6 +1,6 @@
 //! Annotations: comment lines starting `--@` that say something about the script, in the style
-//! of Luau's `--!strict`: about the function defined on the next line, or about its storage
-//! layout. The source stays plain Luau, and every node reads the annotations the same way when
+//! of Luau's `--!strict`: about the function defined on the next line, about its storage layout, or,
+//! with `--@const_params` at its top, that no function may assign its parameters. The source stays plain Luau, and every node reads the annotations the same way when
 //! the contract is deployed.
 
 use {
@@ -26,8 +26,13 @@ const LAYOUT_ENTRIES: &[&str] = &["namespace", "key", "retired"];
 pub fn reentrant(source: &str, exported: &[String]) -> Result<Vec<String>, VmError> {
     let mut marked = Vec::new();
     let mut lines = source.lines().enumerate();
+    // Whether a statement has come yet: --@const_params counts only before one, in the header,
+    // which is where the Luau fork reads it.
+    let mut header = Header::default();
 
     while let Some((index, line)) = lines.next() {
+        let in_header = header.read(line);
+
         let Some(annotation) = line.trim().strip_prefix(PREFIX) else {
             continue;
         };
@@ -37,6 +42,10 @@ pub fn reentrant(source: &str, exported: &[String]) -> Result<Vec<String>, VmErr
         if annotation != "reentrant" {
             match annotation.split_whitespace().next() {
                 Some(word) if LAYOUT_ENTRIES.contains(&word) => continue,
+                Some(CONST_PARAMS) if annotation == CONST_PARAMS && in_header => continue,
+                Some(CONST_PARAMS) if annotation == CONST_PARAMS => {
+                    return Err(error(index, format!("{PREFIX}{CONST_PARAMS} must come before the script's first statement, with the annotations at its top")));
+                }
                 Some("include") => {
                     return Err(error(
                         index,
@@ -89,6 +98,35 @@ pub fn layout(source: &str) -> Result<Layout, VmError> {
     }
 
     Layout::new(entries).map_err(VmError::Compile)
+}
+
+/// Every function parameter in the script const, as `const` before one's name makes it: a body that
+/// assigns one fails to compile. The Luau fork reads it, in the header alone.
+const CONST_PARAMS: &str = "const_params";
+
+/// Where a script's header ends: at its first line that is neither blank nor a comment, a block
+/// comment's lines included.
+#[derive(Default)]
+struct Header {
+    over: bool,
+    in_block: bool,
+}
+
+impl Header {
+    /// Takes the next line; whether it is still in the header.
+    fn read(&mut self, line: &str) -> bool {
+        let line = line.trim();
+
+        if self.in_block {
+            self.in_block = !line.contains("]]") && !line.contains("]=");
+        } else if line.starts_with("--[[") || line.starts_with("--[=") {
+            self.in_block = !line[3..].contains("]]") && !line[3..].contains("]=");
+        } else if !line.is_empty() && !line.starts_with("--") {
+            self.over = true;
+        }
+
+        !self.over
+    }
 }
 
 /// The name in `function M.name(` or `function M:name(`.
@@ -165,6 +203,18 @@ return M
         ] {
             assert!(matches!(super::layout(source), Err(VmError::Compile(text)) if text.contains(expected)), "{source}");
         }
+    }
+
+    #[test]
+    fn const_params_is_taken_in_the_header_alone() {
+        let headed = "--@namespace balances u256\n--[[ a contract\n   whose parameters stay put ]]\n  --@ const_params\nlocal M = {}\nreturn M";
+        assert_eq!(reentrant(headed, &exported()).unwrap(), Vec::<String>::new());
+        assert!(layout(headed).is_ok(), "the layout reads past it");
+
+        let late = "local M = {}\n--@const_params\nreturn M";
+        let err = reentrant(late, &exported()).unwrap_err();
+        assert!(matches!(&err, VmError::Compile(text) if text.contains("line 2") && text.contains("before the script's first statement")), "{err:?}");
+        assert!(matches!(reentrant("--@const_params yes", &exported()), Err(VmError::Compile(text)) if text.contains("unknown annotation")), "it takes no words");
     }
 
     #[test]
