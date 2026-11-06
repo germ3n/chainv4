@@ -133,6 +133,10 @@ wasm-bindgen = "0.2.129"
 [target.'cfg(target_os = "android")'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["android-native-activity"] }
 
+# The end-to-end tests drive the whole app headlessly, through what accesskit sees of it.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dev-dependencies]
+egui_kittest = { version = "=0.37.0", features = ["eframe"] }
+
 # A workspace of its own, as the explorer is: egui and the browser crates never meet the node's
 # lockfile.
 [workspace]

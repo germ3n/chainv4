@@ -227,6 +227,7 @@ also attaches to its release. Beside them, also by hand:
   draft release (see [Updates](updates.md#publishing-a-release));
 - **windows** (`windows.yml`): the node built and its library tests on Windows, and the desktop
   wallet and explorer built there.
+- **e2e** (`e2e.yml`): the end-to-end tests below, with Bitcoin Core's release and Foundry's anvil.
 
 The matrix:
 - covers each hash and key scheme on its own;
@@ -310,3 +311,31 @@ pages do.
 - CLI tests run a real node and API on a thread.
 - Tests for one kind of finality, engine or scheme are gated on its feature, so every row of the
   feature matrix passes.
+
+### End to end
+
+The tests above run a node in-process. The end-to-end tests start real processes on this machine's
+loopback, and drive them as people do. They take minutes and need outside programs, so they are
+`#[ignore]`d; the **e2e** workflow runs them by hand in CI:
+- **`tests/e2e_nodes.rs`** (`cargo test --release --test e2e_nodes -- --ignored --test-threads 1`):
+  - three nodes of an authority chain over QUIC: blocks gossiped and synced, a transfer sent to
+    one follower held by all, a checkpoint finalized;
+  - a follower stopped and started again on its database, catching up;
+  - a fourth node joining from a snapshot and holding the transfer it never ran;
+  - two proof-of-work miners that mined apart meeting on one chain.
+- **`tests/e2e_swaps.rs`** (needs `anvil` and `bitcoind` on the path):
+  - chainv4 against anvil: Swap.sol deployed with `swap evm-deploy`, both legs locked and claimed
+    by the CLI, and a second lock refunded once anvil's clock passes its deadline;
+  - Bitcoin against chainv4: the HTLC's funding block taken back by `invalidateblock` and mined
+    again on another branch, then the coin claimed with the secret and the bitcoin with what it
+    showed; another HTLC refused a refund before its lock time and refunded once `setmocktime`
+    passes it.
+- **`wallet/tests/e2e_wallet.rs`** and **`explorer/tests/e2e_explorer.rs`** (`cargo test --test
+  e2e_wallet -- --ignored` in their folders, after `cargo build` at the root): the whole desktop
+  app, driven headlessly through what accesskit sees of it (egui_kittest), against a real node:
+  - the wallet restored from words, a payment the CLI makes shown once proven, a send from its
+    Send page that the node then holds, and what is left shown;
+  - the explorer's latest blocks, an account found by searching it, and the block that paid it.
+
+Each keeps its nodes' logs in a folder under the system's temp folder, left there when it fails
+and named in the failure.

@@ -1697,7 +1697,13 @@ with.
   alone and none sent twice. See [Node](node.md#throughput).
 - [x] **`chainv4 bench`:** blocks built and imported in-process, and load against running nodes.
 - [ ] **End-to-end tests.** Today's tests run a node in-process, or the CLI against one, and the
-  regtest ones run Bitcoin Core; nothing runs the whole system as people use it. Tests that start
+  regtest ones run Bitcoin Core; nothing runs the whole system as people use it. Done 2026-11-06,
+  run by hand in the e2e workflow (see [Development](development.md#end-to-end)): several nodes
+  as processes (gossip, sync, finality, a restart, a snapshot join, miners that mined apart);
+  swaps across a node, anvil and Bitcoin Core (claims both ways, refunds past deadlines, a reorg
+  under the Bitcoin lock); the wallet and the explorer driven by egui_kittest against a node.
+  Left: the offline signer's codes, the Swaps and Trade pages and the DEXes through the apps,
+  reorgs under a chainv4 or EVM lock, the extension with MetaMask, and Docker. Tests that start
   real processes and drive them through what users touch:
   - **several nodes** over real networking: producing, gossip, sync, finality, restarts, a node
     cut off and rejoining (as the laptop did, mining alone while the VPS rebuilt), snapshots,

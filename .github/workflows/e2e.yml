@@ -1,0 +1,68 @@
+name: e2e
+
+# The end-to-end tests: real processes on the runner's loopback (docs/development.md, "End to
+# end"). Several nodes over QUIC; swaps across a chainv4 node, anvil and Bitcoin Core on regtest;
+# the wallet's Bitcoin light client against Bitcoin Core; and the desktop wallet and explorer driven
+# headlessly against a node. Run by hand, as every workflow here is.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BITCOIN_CORE: "29.0"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # As rust-toolchain.toml pins it; tests/toolchains.rs checks they agree.
+          toolchain: "1.98.1"
+      - name: clang
+        run: |
+          sudo sh docker/llvm.sh /opt/llvm
+          echo "CC=/opt/llvm/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=/opt/llvm/bin/clang++" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/opt/llvm/lib" >> "$GITHUB_ENV"
+          echo "/opt/llvm/bin" >> "$GITHUB_PATH"
+      - name: the apps' system libraries
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      # Bitcoin Core's release, checked against the SHA256SUMS published beside it.
+      - name: Bitcoin Core
+        run: |
+          base="https://bitcoincore.org/bin/bitcoin-core-$BITCOIN_CORE"
+          file="bitcoin-$BITCOIN_CORE-x86_64-linux-gnu.tar.gz"
+          curl -fsSLO "$base/$file"
+          curl -fsSLO "$base/SHA256SUMS"
+          grep " $file\$" SHA256SUMS | sha256sum -c -
+          tar -xzf "$file"
+          sudo install -m 0755 "bitcoin-$BITCOIN_CORE/bin/bitcoind" "bitcoin-$BITCOIN_CORE/bin/bitcoin-cli" /usr/local/bin/
+          bitcoind -version | head -n 1
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            wallet -> target
+            explorer -> target
+      - name: nodes
+        run: cargo test --release --locked --test e2e_nodes -- --ignored --test-threads 1
+      - name: swaps
+        run: cargo test --locked --test e2e_swaps -- --ignored --test-threads 1
+      - name: the node binary the apps' tests start
+        run: cargo build --locked
+      - name: the wallet's Bitcoin light client against Bitcoin Core
+        run: cargo test --locked --manifest-path wallet/Cargo.toml --lib light::tests -- --ignored
+      - name: wallet
+        run: cargo test --locked --manifest-path wallet/Cargo.toml --test e2e_wallet -- --ignored
+      - name: explorer
+        run: cargo test --locked --manifest-path explorer/Cargo.toml --test e2e_explorer -- --ignored
+      - name: logs
+        if: failure()
+        run: find "${RUNNER_TEMP:-/tmp}" /tmp -maxdepth 2 -name 'chainv4-e2e-*' -type d 2>/dev/null | head -n 20
