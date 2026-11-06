@@ -172,6 +172,11 @@ impl MultisigState {
 
     /// Every multisig this wallet knows of: those the node lists any of its accounts in, and those
     /// it follows by address.
+    /// The multisig shown, whose policy the light client proves.
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
     pub fn known(&self, ctx: &Ctx) -> Vec<Known> {
         known(&self.memberships, &names_by_address(ctx.holders), &ctx.settings.multisigs)
     }
@@ -581,6 +586,11 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &format!("{} members must agree", create::of(threshold as u32, members.len())));
+
+        // Its members and threshold as the light client proved them, against what the node listed.
+        let proven = account.and_then(|account| ctx.chain.policies.get(&account.to_string()));
+        let (said, color) = policy_proof(proven, &members, threshold, &palette);
+        ui.add(egui::Label::new(RichText::new(said).small().color(color)).wrap());
         super::row(ui, &palette, "Balance", |ui| {
             ui.label(ctx.amount(None, value["balance"].as_str().unwrap_or("0")));
         });
@@ -1128,6 +1138,22 @@ fn fee_of(value: &Value) -> Result<(FeeOffer, Option<String>), String> {
     Ok((fee, warning))
 }
 
+/// What the light client says of the policy the node listed: proven, at which block, or not the
+/// chain's.
+fn policy_proof(proven: Option<&crate::chain::Proven<Option<chainv4::registry::multisig::MultisigPolicy>>>, members: &[Value], threshold: u64, palette: &theme::Palette) -> (String, egui::Color32) {
+    let Some(proven) = proven else {
+        return ("Its members and threshold are the node's word until the light client proves them.".to_string(), palette.muted);
+    };
+    match &proven.value {
+        // Each member whole, its Bitcoin xpub and EVM address too, written as the node writes them.
+        Some(policy) if u64::from(policy.threshold) == threshold && policy.members.iter().map(|member| chainv4::structs::json::multisig_member(member, policy.testnet)).eq(members.iter().cloned()) => {
+            (format!("Members and threshold proven at block {}{}.", proven.assurance.height, if proven.assurance.final_ { ", final" } else { "" }), palette.good)
+        }
+        Some(policy) => (format!("The node lists other members than the chain holds: the chain says {} of {}. Trust nothing it lists here.", policy.threshold, policy.members.len()), palette.bad),
+        None => ("The chain holds no multisig at this address, whatever the node lists. Trust nothing it lists here.".to_string(), palette.bad),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1196,29 @@ mod tests {
             "balance": "1000",
             "proposals": [],
         })
+    }
+
+    #[test]
+    fn a_policy_the_light_client_proved_backs_the_listing_or_shows_it_false() {
+        use chainv4::registry::multisig::{MultisigMember, MultisigPolicy};
+
+        let palette = chainv4_ui::theme::LIGHT;
+        let keys: Vec<PublicKey> = (1..=3u8).map(|seed| Keypair::from_seed([seed; 32]).public()).collect();
+        let policy = MultisigPolicy { members: keys.iter().map(|key| MultisigMember { key: *key, bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
+        let members: Vec<Value> = policy.members.iter().map(|member| chainv4::structs::json::multisig_member(member, false)).collect();
+        let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()), height: 9, final_: true };
+        let proven = |value| crate::chain::Proven { value, assurance };
+
+        let (said, color) = policy_proof(None, &members, 2, &palette);
+        assert!(said.contains("node's word") && color == palette.muted);
+        let (said, color) = policy_proof(Some(&proven(Some(policy.clone()))), &members, 2, &palette);
+        assert!(said.contains("proven at block 9, final") && color == palette.good, "{said}");
+        let (said, color) = policy_proof(Some(&proven(Some(policy.clone()))), &members, 1, &palette);
+        assert!(said.contains("other members") && color == palette.bad, "a threshold the node made up: {said}");
+        let (said, color) = policy_proof(Some(&proven(Some(policy.clone()))), &members[..2], 2, &palette);
+        assert!(color == palette.bad, "a member left out: {said}");
+        let (said, color) = policy_proof(Some(&proven(None)), &members, 2, &palette);
+        assert!(said.contains("holds no multisig") && color == palette.bad);
     }
 
     #[test]

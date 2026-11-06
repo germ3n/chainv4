@@ -15,6 +15,47 @@ mod store;
 mod theme;
 mod views;
 
+/// What each test thread holds on the heap, for measuring what a structure takes in memory.
+#[cfg(test)]
+pub(crate) mod counting {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static LIVE: Cell<i64> = const { Cell::new(0) };
+    }
+
+    pub struct Counting;
+
+    // SAFETY: every call goes to the system allocator as it came; only a thread-local count
+    // is kept beside it, read with try_with so a thread being torn down is never touched.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = LIVE.try_with(|live| live.set(live.get() + layout.size() as i64));
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            let _ = LIVE.try_with(|live| live.set(live.get() - layout.size() as i64));
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = LIVE.try_with(|live| live.set(live.get() + new_size as i64 - layout.size() as i64));
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// What this thread holds now.
+    pub fn live() -> i64 {
+        LIVE.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: counting::Counting = counting::Counting;
+
 /// The explorer, for eframe to run. It talks to this node, or else to the one it talked to last,
 /// or else to the fallback. What it reads of a chain, when told to, is kept under this folder of the
 /// app's, or, in a browser, which has none, in IndexedDB.

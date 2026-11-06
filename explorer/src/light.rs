@@ -63,6 +63,9 @@ pub struct Trust<'a> {
     pub node: &'a str,
     pub pinned: &'a mut HashMap<String, String>,
     pub checkpoints: &'a HashMap<String, String>,
+    /// What the client checked, saved between launches, by genesis id: it carries on from there
+    /// rather than walk every header again.
+    pub saved: &'a HashMap<String, String>,
     /// Whether this node is trusted to start the client at its own finalized checkpoint.
     pub fast_resume: bool,
     /// Whether to walk every header, even from a node met for the first time, unless a checkpoint was
@@ -114,7 +117,12 @@ pub struct Light {
     /// Proofs a page asked for to check itself, by what they prove: a state entry's column and
     /// key, or receipts and a transaction id.
     fetched: HashMap<(String, String), Fetched>,
+    /// Where the client stood when it was last saved, its tip and finalized heights, and when.
+    last_saved: Option<((u64, u64), f64)>,
 }
+
+/// How often what the client checked is saved, at most, while it moves.
+const SAVE_EVERY: f64 = 10.0;
 
 /// A proof a page asked for: the node's latest answer, at whichever block it was asked.
 #[derive(Clone, Debug, Default)]
@@ -132,6 +140,22 @@ fn proven_entry(ask: &Ask) -> Option<(String, String)> {
 }
 
 impl Light {
+    /// What the client checked, to keep between launches by its genesis id, once it moved since
+    /// last time, and at most every SAVE_EVERY seconds unless now.
+    pub fn saved(&mut self, time: f64, now: bool) -> Option<(String, String)> {
+        let client = self.client.as_ref()?;
+        let at = (client.tip().height, client.final_height());
+
+        if self.last_saved.is_some_and(|(was, when)| was == at || (!now && time - when < SAVE_EVERY)) {
+            return None;
+        }
+
+        self.last_saved = Some((at, time));
+        let state = wincode::serialize(&client.save()).ok()?;
+
+        Some((client.genesis().to_string(), chainv4::structs::hex::to_hex(&state)))
+    }
+
     /// The lowest header it holds: 0 when it followed from genesis.
     #[cfg(test)]
     fn lowest(&self) -> Option<u64> {
@@ -451,11 +475,27 @@ impl Light {
                 }
 
                 let pasted = trust.checkpoints.get(trust.node).and_then(|text| from_hex(text)).and_then(|bytes| Hash::from_bytes(params.hash, &bytes));
+                // What it checked at an earlier launch, for this genesis, if its headers link up.
+                let restored = trust
+                    .saved
+                    .get(&trusted)
+                    .and_then(|hex| from_hex(hex))
+                    .and_then(|bytes| wincode::deserialize::<chainv4::light::LightState>(&bytes).ok())
+                    .and_then(|state| LightClient::restore(state, header.id()).ok());
 
                 let resuming = may_resume(trust.fast_resume, params.finality);
 
-                // A checkpoint pasted comes first; then the node's own, on first use or on a node
-                // trusted for it, whose voters' signatures are checked from there; else genesis.
+                // A checkpoint pasted comes first; then what an earlier launch checked, carried on
+                // from; then the node's own, on first use or on a node trusted for it, whose
+                // voters' signatures are checked from there; else genesis.
+                if pasted.is_none()
+                    && let Some(client) = restored
+                {
+                    self.client = Some(client);
+
+                    return Ok(());
+                }
+
                 match (pasted, (first_use && !trust.walks) || resuming) {
                     (Some(checkpoint), _) => self.starting = Some(Starting { params, header, checkpoint: Some(checkpoint), resuming: false }),
                     (None, true) => self.starting = Some(Starting { params, header, checkpoint: None, resuming }),
@@ -672,7 +712,7 @@ mod tests {
 
             for reply in replies {
                 if let Reply::Answer { ask, result } = reply {
-                    let trust = Trust { node, pinned, checkpoints: &HashMap::new(), fast_resume, walks: false };
+                    let trust = Trust { node, pinned, checkpoints: &HashMap::new(), saved: &HashMap::new(), fast_resume, walks: false };
                     light.answered(&ask, &result, trust, u64::MAX / 2, 0.0);
                 }
             }
@@ -722,6 +762,7 @@ mod tests {
         genesis: SealedHeader,
         pinned: HashMap<String, String>,
         checkpoints: HashMap<String, String>,
+        saved: HashMap<String, String>,
         trusted: bool,
         walks: bool,
     }
@@ -771,11 +812,11 @@ mod tests {
             genesis.header.proof_root = params(finality).hash(HashType::default_chain());
             let pinned = HashMap::from([("http://node".to_string(), genesis.id().to_string())]);
 
-            Met { light: Light::default(), finality, genesis, pinned, checkpoints: HashMap::new(), trusted, walks: false }
+            Met { light: Light::default(), finality, genesis, pinned, checkpoints: HashMap::new(), saved: HashMap::new(), trusted, walks: false }
         }
 
         fn answer(&mut self, ask: Ask, answer: Result<Value, Failure>) {
-            let trust = Trust { node: "http://node", pinned: &mut self.pinned, checkpoints: &self.checkpoints, fast_resume: self.trusted, walks: self.walks };
+            let trust = Trust { node: "http://node", pinned: &mut self.pinned, checkpoints: &self.checkpoints, saved: &self.saved, fast_resume: self.trusted, walks: self.walks };
 
             assert!(self.light.answered(&ask, &answer, trust, u64::MAX / 2, 0.0));
         }
@@ -803,6 +844,35 @@ mod tests {
             let start = CheckpointStart { updates: vec![None; ((height - from) / 8 + 1) as usize], headers };
             self.answer(Ask::Checkpoint(None), Ok(json!({ "checkpoint": { "block": block.to_string() }, "start": encoded(&start) })));
         }
+    }
+
+    #[test]
+    fn what_the_client_checked_is_saved_and_the_next_launch_carries_on_from_it() {
+        let mut first = Met::new(Some(VOTES), false);
+        first.light();
+        let (genesis, state) = first.light.saved(0.0, true).expect("a client to save");
+        assert_eq!(genesis, first.genesis.id().to_string());
+        assert!(first.light.saved(100.0, false).is_none(), "nothing moved since");
+
+        // A node trusted for fast resume starts at its own checkpoint, asking for it...
+        let mut fresh = Met::new(Some(VOTES), true);
+        fresh.light();
+        assert!(fresh.light.client().is_none());
+        assert_eq!(fresh.light.ask(0.0), Some(Ask::Checkpoint(None)));
+
+        // ...but what was saved comes first, and nothing is asked to start.
+        let mut again = Met::new(Some(VOTES), true);
+        again.saved.insert(genesis.clone(), state.clone());
+        again.light();
+        assert!(again.light.client().is_some(), "carried on from what was saved");
+        assert_ne!(again.light.ask(0.0), Some(Ask::Checkpoint(None)));
+
+        // Damaged, it starts as it would have.
+        let mut damaged = Met::new(Some(VOTES), true);
+        damaged.saved.insert(genesis, "0x00".to_string());
+        damaged.light();
+        assert!(damaged.light.client().is_none());
+        assert_eq!(damaged.light.ask(0.0), Some(Ask::Checkpoint(None)));
     }
 
     #[test]

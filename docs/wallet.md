@@ -416,6 +416,14 @@ finalized block:
   decimals. Then each address's balance of it, by the token standard's
   [provable balances](token-standard.md#provable-balances).
 
+- **A multisig's policy:** the one the Multisig page shows, its entry in `Column::Accounts`
+  (`Multisigs::policy_key`), at the tip. The page says its members and threshold are proven at
+  block N, comparing each member whole, key, Bitcoin xpub and EVM address, with what the node
+  listed; where they differ, or the chain holds no multisig there, it says to trust nothing the
+  node listed. Which multisigs a key is in still comes from the node's member index.
+- **Governance's locks:** `change:locks` in `Column::Validators`, at the tip. The Governance page
+  and its forms go by the proven locks once they come, and say when the node listed others.
+
 Home shows the coin added up across the account's addresses, then each address with what it
 holds of the coin and of each token.
 

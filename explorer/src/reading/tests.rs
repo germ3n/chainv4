@@ -1028,7 +1028,7 @@ fn a_real_nodes_blocks_read_here_say_what_the_node_says_of_them() {
 
         for reply in api.replies() {
             if let Reply::Answer { ask, result } = reply {
-                let trust = Trust { node: &node, pinned: &mut pinned, checkpoints: &HashMap::new(), fast_resume: false, walks: true };
+                let trust = Trust { node: &node, pinned: &mut pinned, checkpoints: &HashMap::new(), saved: &HashMap::new(), fast_resume: false, walks: true };
 
                 light.answered(&ask, &result, trust, u64::MAX / 2, time);
             }
@@ -1407,3 +1407,22 @@ fn with_the_setting_off_the_pages_ask_as_they_always_did_and_say_nothing_of_it()
     assert!(!said.contains("needs asking"), "{said}");
 }
 
+#[test]
+fn what_an_index_takes_in_memory_beside_what_it_holds_encoded() {
+    // A block a transfer each, the busiest kind of reading a phone does.
+    let fixture = long_chain(2_000, &(0..=2_000).collect::<Vec<_>>());
+    let before = crate::counting::live();
+    let mut reading = opened(&fixture);
+    reading.most = u64::MAX / 2;
+    reading.further_back(0);
+    fixture.read_all(&mut reading);
+    let held = crate::counting::live() - before;
+    let encoded = reading.standing().unwrap().bytes as i64;
+    let times = held as f64 / encoded as f64;
+
+    println!("index: {encoded} bytes encoded, {held} on the heap, {times:.2} times");
+    // docs/explorer.md gives the measure: an index held in memory takes about this many times its
+    // encoded bytes, so the 128 MB cap is some 128 MB times this on a desktop.
+    assert!(times < 4.0, "{times:.2} times what it holds encoded");
+    assert!(times > 1.0, "{times:.2}: more than encoded, as maps and their keys take room");
+}

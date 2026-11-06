@@ -66,6 +66,10 @@ enum Target {
     Directory,
     /// The bridges' federation in force.
     Federation,
+    /// A multisig's policy, by its address as text.
+    Policy(String),
+    /// Governance's locks.
+    Locks,
 }
 
 /// An NFT a page shows, for its ownership to be proven: a token of an NFT collection, or a
@@ -311,6 +315,12 @@ pub struct Chain {
     /// The bridges' federation in force, proven at the tip: None on a chain without one. What
     /// deposit addresses to Bitcoin are computed from, never taken from a node.
     pub federation: Option<Proven<Option<DecidedFederation>>>,
+    /// Multisigs' policies, proven, by address as text: None for an address that holds none.
+    pub policies: HashMap<String, Proven<Option<chainv4::registry::multisig::MultisigPolicy>>>,
+    /// The multisigs whose policies a page wants proven, as the app last said.
+    pub wanted_policies: Vec<String>,
+    /// Governance's locks, proven: none at all on a chain that set none.
+    pub locks: Option<Proven<Vec<String>>>,
     /// The lowest height a receipt landed at below every header the client holds: what it takes
     /// ancestors down to, a stretch at a time.
     wanted_below: Option<u64>,
@@ -513,6 +523,14 @@ impl Chain {
         }
 
         targets.push((Column::Validators, DIRECTORY_KEY.to_vec(), Target::Directory, vec![tip]));
+        targets.push((Column::Validators, chainv4::registry::changes::Changes::locks_key().to_vec(), Target::Locks, vec![tip]));
+
+        // The multisigs a page shows, so their members and threshold rest on no node's word.
+        for multisig in &self.wanted_policies {
+            if let Ok(parsed) = multisig.parse::<Address>() {
+                targets.push((Column::Accounts, chainv4::registry::Multisigs::policy_key(&parsed), Target::Policy(multisig.clone()), vec![tip]));
+            }
+        }
         targets.push((Column::Validators, FEDERATION_KEY.to_vec(), Target::Federation, vec![tip]));
 
         wanted.extend(self.not_proven_yet(&blocks, targets));
@@ -1087,6 +1105,19 @@ impl Chain {
                             .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a federation that does not decode"))
                             .transpose()?;
                         self.federation = Some(Proven { value: federation, assurance });
+                    }
+                    Target::Policy(multisig) => {
+                        let policy: Option<chainv4::registry::multisig::MultisigPolicy> = held
+                            .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a multisig's policy that does not decode"))
+                            .transpose()?;
+                        self.policies.insert(multisig, Proven { value: policy, assurance });
+                    }
+                    Target::Locks => {
+                        let locks = match held {
+                            Some(bytes) => chainv4::registry::changes::Changes::decode_locks(&bytes).ok_or("locks that do not decode")?,
+                            None => Vec::new(),
+                        };
+                        self.locks = Some(Proven { value: locks, assurance });
                     }
                 }
 

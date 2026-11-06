@@ -108,6 +108,8 @@ pub struct Explorer {
     keys: ReleaseKeys,
     /// A newer explorer, if one is out, and putting it in place.
     update: UpdateState,
+    /// The frame's time last seen, for when the light client was saved.
+    light_time: f64,
     /// Something to tell the person, and whether it is bad news.
     notice: Option<(String, bool)>,
     palette: Palette,
@@ -184,6 +186,7 @@ impl Explorer {
                 ReleaseKeys::default()
             }),
             update: UpdateState::default(),
+            light_time: 0.0,
             notice: None,
             palette,
             scrolled: chainv4_ui::layout::Scrolled::default(),
@@ -253,6 +256,14 @@ impl Explorer {
         }
     }
 
+    /// Keeps what the light client checked in the settings, for the next launch to carry on from:
+    /// once it moved, at most every few seconds, or now.
+    fn keep_light(&mut self, now: bool) {
+        if let Some((genesis, state)) = self.light.saved(self.light_time, now) {
+            self.settings.light_saved.insert(genesis, state);
+        }
+    }
+
     /// Takes everything that arrived. Why something failed stands until it is answered, or asked
     /// again by Retry or Reload: a page says so steadily, rather than between spells of loading,
     /// while what it goes on asking is held back by the Api.
@@ -271,6 +282,7 @@ impl Explorer {
                         node: &self.settings.node,
                         pinned: &mut self.settings.pinned,
                         checkpoints: &self.settings.checkpoints,
+                        saved: &self.settings.light_saved,
                         fast_resume: !reading && self.settings.fast_resume.get(&self.settings.node).copied().unwrap_or(false),
                         walks: reading,
                     };
@@ -1244,6 +1256,8 @@ impl eframe::App for Explorer {
         let time = ui.input(|input| input.time);
         let now = now_ms();
         self.take(now, time);
+        self.light_time = time;
+        self.keep_light(false);
         self.retitle(ui.ctx());
         self.poll(time);
         layout::suit_touch(ui.ctx());
@@ -1328,6 +1342,7 @@ impl eframe::App for Explorer {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.keep_light(true);
         eframe::set_value(storage, eframe::APP_KEY, &self.settings);
 
         if self.settings.read_blocks {

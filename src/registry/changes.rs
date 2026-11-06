@@ -693,6 +693,16 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, GOVERNANCE)
     }
 
+    #[document(parent = "Changes", summary = "Where the locks are kept, in Column::Validators: change:locks, the one entry a light client proves them by.")]
+    pub fn locks_key() -> &'static [u8] {
+        LOCKS
+    }
+
+    #[document(parent = "Changes", summary = "The locks a change:locks entry holds, as a light client proved its bytes: None for bytes that are no locks.")]
+    pub fn decode_locks(bytes: &[u8]) -> Option<Vec<String>> {
+        wincode::deserialize::<Locks>(bytes).ok().map(|locks| locks.paths)
+    }
+
     #[document(parent = "Changes", summary = "The locks that stand, in order: genesis's, written as the chain starts, and every one decided since. None is ever taken away.")]
     pub fn locks(&self) -> Result<Vec<String>, DbError> {
         Ok(self.state.get_value::<Locks>(Column::Validators, LOCKS)?.unwrap_or_default().paths)

@@ -203,6 +203,9 @@ is.
 
 - **It is bounded:** 128 MB on a desktop, about 18 days of the devnet's empty blocks, and 32 MB on a phone or in
   a browser, about 4, unless **Keeps at most** in its card says 16 MB, 32 MB, 128 MB, 512 MB or 2 GB.
+  The cap counts the index as encoded; held in memory it takes about 3.2 times that, measured on a
+  block a transfer each (`what_an_index_takes_in_memory_beside_what_it_holds_encoded`), so 128 MB
+  is some 410 MB of memory, and 32 MB some 100 MB.
   A smaller cap than it holds asks first (**Yes, let them go**), and then lets the oldest go at once. Transactions weigh what they weigh, a deploy's code among them. Past the cap the
   oldest blocks go, 1,024 heights at a time, and the height it knows from moves up to say so. It is all
   in memory while the app is open. With no room left, reading further back says so.
@@ -246,7 +249,13 @@ of itself, and says what was wrong. 429 and 503 are waited out, as long as `Retr
 
 The explorer does not have to take the node's word for balances. It runs the library's
 [light client](light-client.md) against the node it talks to:
-- **What it trusts:** the genesis it saw the first time it met the node, which it pins.
+- **What it trusts:** the genesis it saw the first time it met the node, which it pins; or one
+  given under Settings → Light client before it meets the node, **Trust it**, as someone you trust
+  shows the genesis id, after which a node on any other chain is refused from the start.
+- **What it keeps:** what the client checked, saved by genesis id with the settings at most every
+  10 seconds while it moves, so the next launch carries on from there rather than walk every
+  header again, Read from checked blocks on or off. A checkpoint pasted still comes first; a saved
+  state that does not restore for the genesis trusted is set aside.
 - **Where it starts:** from genesis; the first time it meets a node, from the node's own
   finalized checkpoint; and from a checkpoint pasted under Settings → Light client, each time. See
   [Starting at a checkpoint](light-client.md#starting-at-a-checkpoint). Settings → Light client →

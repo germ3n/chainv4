@@ -92,8 +92,13 @@ pub struct Listing {
     pub finality: Option<String>,
     /// A switch of finality's kind ahead: its epoch and kind.
     pub switch: Option<(u64, String)>,
-    /// The paths no vote may change, in order: genesis's and those decided since.
+    /// The paths no vote may change, in order: genesis's and those decided since. Once the light
+    /// client proved them, the proven ones, in place of the node's.
     pub locks: Vec<String>,
+    /// Where the locks were proven, its height and whether final, once they were.
+    pub locks_proven: Option<(u64, bool)>,
+    /// Whether the node listed other locks than the chain holds.
+    pub locks_disagreed: bool,
 }
 
 /// An open change and its votes.
@@ -324,6 +329,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, send: &mut 
 
     let voters = voters(ctx);
     state.poll(ctx, &voters);
+
+    // The locks as the light client proved them, in place of the node's word, wherever the page
+    // goes by them.
+    if let (Some(Ok(listing)), Some(proven)) = (&mut state.listing, &ctx.chain.locks) {
+        prove_locks(listing, &proven.value, proven.assurance.height, proven.assurance.final_);
+    }
 
     let listing = match &state.listing {
         None => {
@@ -1026,6 +1037,15 @@ fn in_force(ui: &mut Ui, ctx: &mut Ctx, listing: &Listing) {
                 if setting.kind != "locks" && chainv4::governance::locks::whole(&listing.locks, &setting.kind).is_some() {
                     ui.label(RichText::new("locked").small().color(palette.bad));
                 }
+
+                if setting.kind == "locks" {
+                    let (said, color) = match (listing.locks_proven, listing.locks_disagreed) {
+                        (Some(_), true) => ("the node listed other locks: these are the chain's".to_string(), palette.bad),
+                        (Some((height, final_)), false) => (format!("proven at block {height}{}", if final_ { ", final" } else { "" }), palette.good),
+                        (None, _) => ("the node's word, until the light client proves them".to_string(), palette.muted),
+                    };
+                    ui.label(RichText::new(said).small().color(color));
+                }
             });
         }
     });
@@ -1149,7 +1169,30 @@ fn listing(value: &Value) -> Result<Listing, String> {
         finality: value["finality"].as_str().map(str::to_string),
         switch: value["switch"]["epoch"].as_u64().zip(value["switch"]["type"].as_str().map(str::to_string)),
         locks: value["locks"].as_array().map(|locks| locks.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
+        locks_proven: None,
+        locks_disagreed: false,
     })
+}
+
+/// Takes the locks the light client proved in place of those the node listed, noting where they were
+/// proven and whether the node's differed.
+pub fn prove_locks(listing: &mut Listing, proven: &[String], height: u64, final_: bool) {
+    if listing.locks_proven.is_some_and(|(at, _)| at == height) {
+        return;
+    }
+
+    let mut listed = listing.locks.clone();
+    let mut chain = proven.to_vec();
+    listed.sort();
+    chain.sort();
+    // What the node listed is only there before the first proof is taken in; after, the
+    // listing holds the proven ones already, and what it found stands.
+    if listing.locks_proven.is_none() {
+        listing.locks_disagreed = listed != chain;
+    }
+
+    listing.locks = proven.to_vec();
+    listing.locks_proven = Some((height, final_));
 }
 
 /// GET /governance's versions, one for every kind the wallet knows.
@@ -2192,6 +2235,17 @@ mod tests {
         assert_eq!(kind_choice(&listing, "fees"), "Fees", "a field locked is not all of it");
         assert_eq!(locks_words(&listing.locks), "Locked for good: reward, fees.burn_permille");
         assert_eq!(locks_words(&[]), "Nothing is locked");
+
+        // Proven, the chain's locks stand in for the node's, and a node that listed others is caught.
+        let mut honest = listing.clone();
+        let chain = honest.locks.iter().rev().cloned().collect::<Vec<_>>();
+        prove_locks(&mut honest, &chain, 7, true);
+        assert_eq!((honest.locks_proven, honest.locks_disagreed), (Some((7, true)), false), "the same, in any order");
+        let mut lying = listing.clone();
+        prove_locks(&mut lying, &["fees".to_string()], 7, false);
+        assert_eq!((lying.locks.clone(), lying.locks_proven, lying.locks_disagreed), (vec!["fees".to_string()], Some((7, false)), true));
+        prove_locks(&mut lying, &["fees".to_string()], 8, true);
+        assert!(lying.locks_disagreed, "found out, it stays so until the node is asked again");
 
         // A node from before locks lists none, and no version for them.
         let mut old = council();

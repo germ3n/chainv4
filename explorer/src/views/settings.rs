@@ -16,6 +16,8 @@ pub struct SettingsState {
     proxy: Option<String>,
     proxy_trouble: Option<String>,
     checkpoint: String,
+    /// A genesis id typed, to trust at this node before meeting it.
+    genesis: String,
 }
 
 /// How the explorer uses the network: Low data, and how long it waits for an answer. A new wait
@@ -199,7 +201,27 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
                     *connect = Some(node.clone());
                 }
             }
-            None => super::note(ui, look, "It trusts nothing at this node yet: it pins the genesis it sees there first."),
+            None => {
+                super::note(ui, look, "It trusts nothing at this node yet: it pins the genesis it sees there first. Or give the genesis id to trust, as someone you trust shows it, and it refuses a node on any other chain from the start.");
+                let trust = widgets::beside(
+                    ui,
+                    |ui| widgets::quiet(ui, &palette, "Trust it").clicked(),
+                    |ui, width| {
+                        ui.add(egui::TextEdit::singleline(&mut state.genesis).hint_text("a genesis id, 0x…").desired_width(width));
+                    },
+                );
+
+                if trust {
+                    match trusted_genesis(&state.genesis) {
+                        Some(genesis) => {
+                            ctx.settings.pinned.insert(node.clone(), genesis);
+                            state.genesis.clear();
+                            *connect = Some(node.clone());
+                        }
+                        None => state.genesis = "not a genesis id".to_string(),
+                    }
+                }
+            }
         }
 
         ui.add_space(8.0);
@@ -270,5 +292,24 @@ mod tests {
                 assert!(said.contains("gives up after 12 seconds without getting connected, and 30 seconds in all"), "today's waits: {said}");
             }
         }
+    }
+}
+
+/// A genesis id as typed, written as the explorer pins one: None for text that is no id.
+fn trusted_genesis(text: &str) -> Option<String> {
+    chainv4::structs::hex::from_hex(text.trim()).filter(|bytes| bytes.len() >= 16).map(|bytes| chainv4::structs::hex::to_hex(&bytes))
+}
+
+#[cfg(test)]
+mod genesis_tests {
+    use super::trusted_genesis;
+
+    #[test]
+    fn a_genesis_id_typed_is_pinned_as_the_light_client_writes_one() {
+        let id = chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()).to_string();
+
+        assert_eq!(trusted_genesis(&format!("  {}  ", id.to_uppercase().replacen("0X", "0x", 1))), Some(id));
+        assert_eq!(trusted_genesis("0x1234"), None, "too short for an id");
+        assert_eq!(trusted_genesis("not hex"), None);
     }
 }

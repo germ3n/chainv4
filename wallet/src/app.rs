@@ -981,6 +981,9 @@ impl Wallet {
 
         let addresses: Vec<Address> = self.holders.iter().flat_map(Holder::addresses).collect();
 
+        // The multisig the Multisig page shows, for its policy to be proven too.
+        self.chain.wanted_policies = self.views.multisig.selected().map(str::to_string).into_iter().collect();
+
         // A slow way to the node, as Tor, leaves a round waiting: a new one on top would only grow.
         if !self.node.proofs_waiting() {
             for ask in self.chain.proofs_due(&addresses, time) {

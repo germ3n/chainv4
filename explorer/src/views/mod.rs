@@ -204,6 +204,10 @@ pub struct Settings {
     pub abis: HashMap<String, HashMap<String, String>>,
     /// The genesis id the light client first saw at each node, which it trusts there from then on.
     pub pinned: HashMap<String, String>,
+    /// What the light client checked, by genesis id, so a launch carries on from there rather than
+    /// walk every header again: LightState, hex.
+    #[serde(default)]
+    pub light_saved: HashMap<String, String>,
     /// A finalized checkpoint's block id to start the light client from at each node, pasted,
     /// rather than genesis.
     pub checkpoints: HashMap<String, String>,

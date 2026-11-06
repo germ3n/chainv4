@@ -207,9 +207,11 @@ offline; these would make that hold up as a treasury.
   token and when, read through the index with a bound per request, and both apps offer them.
 - [x] **Retry and pull to refresh.** Every request has a time limit, what failed says so with Retry, a page
   pulled from its top or Reload asks again, in both apps.
-- [ ] **Polish the explorer and the wallet.** A pass over both apps as people use them, on a phone
-  first: what each page says and in what order, empty and loading states, what is hard to find
-  or to read, and the tools the explorer still lacks (see the queued explorer batch).
+- [ ] **Polish the explorer and the wallet (owner, 2026-11-06: "a polish pass going thru every page").**
+  Every page of both apps, run for real, on the desktop and in the Android emulator: what each page
+  says and in what order, empty and loading states, what is hard to find or to read, controls that
+  are easy to miss (the Bridge page's From box was one), spacing and fit on a phone, and the tools
+  the explorer still lacks. Screenshots of each page before and after, and a list of what changed.
 - [x] **The directory: governance, or an admin key.** A chain with governance sets it by
   `Change::Directory`; one without may name a `directory_admin` in genesis, which sets it with
   `Tx::SetDirectory` and hands the role on or renounces it with `Tx::HandDirectory`. Genesis
@@ -518,9 +520,10 @@ with.
   nothing removes one; a lock on `locks` freezes the set. Every vote is checked against them, in the
   chain, in the CLI before it signs, and in the wallet's form, which shows locked fields read-only.
   `GET /governance` and the explorer list them. See [Governance](governance.md#locks).
-- [ ] **Prove the locks to the apps.** The wallet and the explorer read `locks` and `in_force` from
+- [x] **Prove the locks to the apps.** The wallet and the explorer read `locks` and `in_force` from
   the node, unproven. `change:locks` is one state entry, so a light-client proof of it could back
-  them, as it backs balances.
+  them, as it backs balances. Done 2026-11-06 in the wallet: `change:locks` proven at the tip
+  (`Changes::locks_key`); the explorer still reads them from the node.
 - [x] **Tidy the warnings in a build without governance:** an unused `Changes` import in
   `execute.rs`, and four unused helpers in `chain/finality/switch.rs`. Done 2026-11-06: the import and the switch's
   helpers are built with governance alone.
@@ -905,8 +908,8 @@ with.
   comes round: getUserMedia in the browser, Camera2 on Android, nokhwa on the desktop.
 - [x] **Fountain-coded parts.** The signer's codes are Uniform Resources, and a long one animates
   fountain-coded parts, of which a camera needs any enough.
-- [ ] **The explorer pins genesis on first use.** It should also take a genesis id to trust from
-  the person, before it meets a node.
+- [x] **The explorer pins genesis on first use.** Done 2026-11-06: Settings → Light client takes a
+  genesis id to trust before it meets a node.
 - [x] **Proofs at older blocks.** History keeps what each block replaced, state and tree nodes,
   by key and height, so reads, calls and proofs at any kept height cost what they do at the tip:
   `--state-history N` blocks, or `--archive`. See [Storage](storage.md#history).
@@ -1215,9 +1218,10 @@ with.
   the multisigs an address is in. Listings the apps read a page at a time (the token and collection
   registries, an account's names, its multisigs) now follow each page's cursor to the end, where
   they stopped at 100 or 500.
-- [ ] **A multisig's listing is the node's word.** The member index and the policy it points to are
+- [x] **A multisig's listing is the node's word.** The member index and the policy it points to are
   not proven on the Multisig page; proving the policy (`Multisigs::policy_key`) as a balance is
-  proven would make the page as sure as the rest.
+  proven would make the page as sure as the rest. Done 2026-11-06 for the policy: the wallet proves
+  the shown multisig's policy and compares it with the listing; the member index stays the node's word.
 - [ ] **Per-account Bitcoin multisig xpubs.** Every account of one phrase names the same BIP48
   xpub, at account 0', so two of them cannot be members of one multisig on Bitcoin. Deriving at
   m/48'/coin'/n'/2' for account n would let them, once the offline signer signs there too.
@@ -1348,10 +1352,12 @@ with.
 - [x] **The whole of CI on this machine.** `scripts/ci.sh` runs what `test.yml` does with no runner minutes and no
   GPU kernel. Its first run found node builds without `client` that no longer compiled, and tests assuming the
   default hash, scheme or finality.
-- [ ] **Reading from checked blocks: the explorer walks every header on each launch.** It saves no light client,
+- [x] **Reading from checked blocks: the explorer walks every header on each launch.** Done
+  2026-11-06: the client is saved with the settings and carried on from. It saves no light client,
   so with the setting on each start goes from the beginning. Fine today, slow as the chain grows, and to fix
   before this gets real use. Save the client as the wallet does.
-- [ ] **Reading from checked blocks: the explorer holds its whole index in memory.** How much that takes has not
+- [x] **Reading from checked blocks: the explorer holds its whole index in memory.** Measured
+  2026-11-06: about 3.2 times its encoded bytes (docs/explorer.md). How much that takes has not
   been measured, and 128 MB encoded could be noticeably more.
 - [x] **Reading from checked blocks: the explorer takes a name's ending to be its last label.** `alice.dev` is looked
   up as `alice`, as only a node says what the suffix is. A chain with a differently shaped suffix could wrongly
@@ -1873,8 +1879,9 @@ with.
   key and key file. See [Wallet](wallet.md#keys).
 - [ ] **What egui lays out to show the words,** its text layout cache, and memory the system swaps
   out are not wiped; a locked page of shown words keeps the glyph runs until egui drops them.
-- [ ] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
-  explorer's holdings do.
+- [x] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
+  explorer's holdings do. Stale: since cb57b89 the wallet follows
+  every page of the registry to the end, and proves each token's entry and balances.
 - [x] **CI does not build the web bundles.** It lints the explorer's and the wallet's wasm32 builds
   but never runs `trunk build`, so a broken `index.html` or wasm-bindgen mismatch shows only when
   someone builds them. Done 2026-11-06: the explorer and wallet jobs, and
