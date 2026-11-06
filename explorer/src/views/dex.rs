@@ -82,8 +82,6 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
     };
     let ms_per_block = block_ms(ctx);
     let tip = ctx.store.status.as_ref().map_or(0, |status| status.height);
-    // The fee both DEXes charge now, as the node says: governance's, or 0.3%.
-    let fee_bps = ctx.store.status.as_ref().and_then(|status| status.dex_fee_bps).unwrap_or(chainv4::dex::DEFAULT_FEE_BPS);
 
     super::section(ui, look, "Pools", |ui| {
         if pools.is_empty() {
@@ -97,10 +95,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState) {
             .iter()
             .map(|pool| {
                 let (a, b) = (symbol(ctx, &pool.a, state.evm), symbol(ctx, &pool.b, state.evm));
-                let (day, week, fees) = (volume(&trades, pool, tip, DAY_MS / ms_per_block), volume(&trades, pool, tip, 7 * DAY_MS / ms_per_block), fees(&trades, pool, tip, 7 * DAY_MS / ms_per_block, fee_bps));
+                let (day, week, fees) = (volume(&trades, pool, tip, DAY_MS / ms_per_block), volume(&trades, pool, tip, 7 * DAY_MS / ms_per_block), fees(&trades, pool, tip, 7 * DAY_MS / ms_per_block));
 
                 [
-                    format!("{a} / {b}"),
+                    // A pair may have a pool at each tier.
+                    format!("{a} / {b} · {}%", f64::from(pool.fee_bps) / 100.0),
                     format!("{} and {}", shown(ctx, &pool.a, pool.reserve_a, state.evm), shown(ctx, &pool.b, pool.reserve_b, state.evm)),
                     price(ctx, pool, state.evm).map_or("—".to_string(), |price| format!("{price:.6} {b}")),
                     shown(ctx, &pool.a, day, state.evm),
@@ -243,12 +242,14 @@ fn evm_pools(ctx: &mut Ctx, state: &mut DexState, router: [u8; 20]) -> Option<Ve
             rpc(ctx, state, &pair, "token0()", &[]).and_then(|output| address_at(&output, 0)),
             rpc(ctx, state, &pair, "token1()", &[]).and_then(|output| address_at(&output, 0)),
             rpc(ctx, state, &pair, "getReserves()", &[]),
+            rpc(ctx, state, &pair, "fee()", &[]).and_then(|output| u32::try_from(number_at(&output, 0)?).ok()),
         );
 
-        if let (Some(zero), Some(one), Some(reserves)) = parts
+        if let (Some(zero), Some(one), Some(reserves), Some(fee_bps)) = parts
             && let (Some(held0), Some(held1)) = (number_at(&reserves, 0), number_at(&reserves, 1))
         {
-            pools.push(DexPool { a: coin(zero), b: coin(one), reserve_a: held0, reserve_b: held1, share: chainv4::structs::address::Address::Evm(pair) });
+            let share = chainv4::structs::address::Address::Evm(pair);
+            pools.push(DexPool { a: coin(zero), b: coin(one), fee_bps, reserve_a: held0, reserve_b: held1, share, venue: chainv4::dex::Venue::Evm });
         }
     }
 
@@ -264,6 +265,9 @@ struct Activity {
     b: chainv4::structs::address::Address,
     /// For a trade: what went in of a, of b, came out of a, of b.
     amounts: [u256; 4],
+    /// The pool's tier; none from the native DEX's events before tiers, which every pool of the
+    /// pair matches.
+    fee_bps: Option<u32>,
     height: u64,
     tx: String,
     block: String,
@@ -284,16 +288,17 @@ fn native_trades(ctx: &mut Ctx, dex: &str) -> Vec<Activity> {
 
 /// One of the native DEX's events as a trade, add or removal.
 fn native_activity(event: &FoundEvent) -> Option<Activity> {
-    let (kind, amounts) = match event.name.as_str() {
-        // Swap(asset_in, asset_out, sender, amount_in, amount_out)
-        "Swap" => ("trade", [amount(event, 3), u256::ZERO, u256::ZERO, amount(event, 4)]),
-        // Mint and Burn(a, b, sender, amount_a, amount_b, shares)
-        "Mint" => ("add", [amount(event, 3), amount(event, 4), u256::ZERO, u256::ZERO]),
-        "Burn" => ("take out", [u256::ZERO, u256::ZERO, amount(event, 3), amount(event, 4)]),
+    let (kind, amounts, tier) = match event.name.as_str() {
+        // Swap(asset_in, asset_out, sender, amount_in, amount_out, fee)
+        "Swap" => ("trade", [amount(event, 3), u256::ZERO, u256::ZERO, amount(event, 4)], 5),
+        // Mint and Burn(a, b, sender, amount_a, amount_b, shares, fee)
+        "Mint" => ("add", [amount(event, 3), amount(event, 4), u256::ZERO, u256::ZERO], 6),
+        "Burn" => ("take out", [u256::ZERO, u256::ZERO, amount(event, 3), amount(event, 4)], 6),
         _ => return None,
     };
+    let fee_bps = event.data.get(tier).and_then(|value| value.text().parse().ok());
 
-    Some(Activity { kind, a: asset(event, 0)?, b: asset(event, 1)?, amounts, height: event.height, tx: event.tx.clone(), block: event.block.clone() })
+    Some(Activity { kind, a: asset(event, 0)?, b: asset(event, 1)?, amounts, fee_bps, height: event.height, tx: event.tx.clone(), block: event.block.clone() })
 }
 
 /// What asks the node's index for an EVM pair's logs.
@@ -319,7 +324,7 @@ fn evm_activity(pool: &DexPool, event: &FoundEvent) -> Option<Activity> {
         _ => return None,
     };
 
-    Some(Activity { kind, a: pool.a, b: pool.b, amounts, height: event.height, tx: event.tx.clone(), block: event.block.clone() })
+    Some(Activity { kind, a: pool.a, b: pool.b, amounts, fee_bps: Some(pool.fee_bps), height: event.height, tx: event.tx.clone(), block: event.block.clone() })
 }
 
 fn events_of(ctx: &mut Ctx, query: EventQuery) -> Vec<FoundEvent> {
@@ -336,6 +341,10 @@ fn events_of(ctx: &mut Ctx, query: EventQuery) -> Vec<FoundEvent> {
 /// A pool's trades, in its order of assets: what went in of a and b, and came out of each.
 fn in_pool(pool: &DexPool, activity: &Activity) -> Option<[u256; 4]> {
     let [in_first, in_second, out_first, out_second] = activity.amounts;
+
+    if activity.fee_bps.is_some_and(|fee| fee != pool.fee_bps) {
+        return None;
+    }
 
     match (activity.a == pool.a && activity.b == pool.b, activity.a == pool.b && activity.b == pool.a) {
         (true, _) => Some([in_first, in_second, out_first, out_second]),
@@ -354,9 +363,9 @@ fn volume(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64) -> u256 {
         .fold(u256::ZERO, |sum, [in_a, _, out_a, _]| sum + in_a + out_a)
 }
 
-/// The fees a pool kept over the last so many blocks, in its first asset: the chain's fee on what came in, of
-/// the second asset at today's price.
-fn fees(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64, fee_bps: u32) -> u256 {
+/// The fees a pool's trades paid over the last so many blocks, in its first asset: its tier's fee on
+/// what came in, of the second asset at today's price.
+fn fees(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64) -> u256 {
     trades
         .iter()
         .filter(|trade| trade.kind == "trade" && trade.height + blocks > tip)
@@ -364,7 +373,7 @@ fn fees(trades: &[Activity], pool: &DexPool, tip: u64, blocks: u64, fee_bps: u32
         .fold(u256::ZERO, |sum, [in_a, in_b, _, _]| {
             let in_b_as_a = pool.matching(&pool.b, in_b).unwrap_or(u256::ZERO);
 
-            sum + chainv4::dex::fee_of(in_a + in_b_as_a, fee_bps)
+            sum + chainv4::dex::fee_of(in_a + in_b_as_a, pool.fee_bps)
         })
 }
 
@@ -527,9 +536,11 @@ fn prices(ctx: &mut Ctx, pool: &DexPool, native: &Option<String>, evm: bool) -> 
             .iter()
             .filter_map(|event| {
                 let (a, b) = (asset(event, 0)?, asset(event, 1)?);
-                let synced = DexPool { a, b, reserve_a: amount(event, 2), reserve_b: amount(event, 3), share: pool.share };
+                // The tier last, since tiers; before, every pool of a pair was the one.
+                let fee_bps = event.data.get(4).map_or(Some(pool.fee_bps), |fee| fee.text().parse().ok())?;
+                let synced = DexPool { a, b, fee_bps, reserve_a: amount(event, 2), reserve_b: amount(event, 3), share: pool.share, venue: pool.venue };
 
-                synced.pairs(&pool.a, &pool.b).then(|| synced.price(&pool.a, decimals_a, decimals_b)).flatten().map(|price| [event.height as f64, price])
+                (fee_bps == pool.fee_bps && synced.pairs(&pool.a, &pool.b)).then(|| synced.price(&pool.a, decimals_a, decimals_b)).flatten().map(|price| [event.height as f64, price])
             })
             .collect(),
         (true, _) => {
@@ -540,7 +551,7 @@ fn prices(ctx: &mut Ctx, pool: &DexPool, native: &Option<String>, evm: bool) -> 
                 .filter(|event| event.data.first().is_some_and(|topic| topic.text() == sync))
                 .filter_map(|event| {
                     let data = from_hex(&event.data.last()?.text())?;
-                    let synced = DexPool { a: pool.a, b: pool.b, reserve_a: number_at(&data, 0)?, reserve_b: number_at(&data, 1)?, share: pool.share };
+                    let synced = DexPool { reserve_a: number_at(&data, 0)?, reserve_b: number_at(&data, 1)?, ..pool.clone() };
 
                     synced.price(&pool.a, decimals_a, decimals_b).map(|price| [event.height as f64, price])
                 })

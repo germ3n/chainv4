@@ -37,6 +37,7 @@ const IMPORTS: &str = r#"
   (import "chain" "hash" (func $hash (param i32 i32 i32 i32) (result i32)))
   (import "chain" "balance" (func $balance (param i32 i32)))
   (import "chain" "transfer" (func $transfer (param i32 i32) (result i32)))
+  (import "chain" "burn" (func $burn (param i32) (result i32)))
   (import "chain" "call" (func $call (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "chain" "delegate" (func $delegate (param i32 i64 i32 i32) (result i32)))
   (import "chain" "clone" (func $clone (param i32 i32 i32 i32 i32 i32) (result i32)))

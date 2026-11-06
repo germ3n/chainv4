@@ -3,6 +3,9 @@
 //! mint more, and may upgrade it.
 
 #![no_std]
+// transfer_with_authorization takes EIP-3009's eight arguments; export copies a function's own
+// attributes, so the allow goes here.
+#![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
 
@@ -267,7 +270,6 @@ fn authorization_state(owner: Address, nonce: Vec<u8>) -> bool {
 
 /// Sends tokens their owner signed for, as transfer would from the owner, once.
 #[export]
-#[allow(clippy::too_many_arguments)]
 fn transfer_with_authorization(from: Address, to: Address, amount: U256, valid_after: u64, valid_before: u64, nonce: Vec<u8>, key: Vec<u8>, signature: Vec<u8>) -> Result<bool, &'static str> {
     if nonce.len() != 32 {
         return Err("a nonce is 32 bytes");

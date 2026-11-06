@@ -37,25 +37,35 @@ fn chain_lib() {}
 )]
 fn chain_id() {}
 
-// The DEX's fee in basis points, as governance set it for the call's block.
-fn dex_fee(lua: &Lua, (): ()) -> mlua::Result<f64> {
+// The DEXes' settings, as governance set them for the call's block.
+fn dex(lua: &Lua, (): ()) -> mlua::Result<mlua::Table> {
     let host = lua
         .app_data_ref::<Host>()
         .map(|host| host.clone())
         .ok_or_else(|| Error::runtime("chain is only available inside a call"))?;
     charge(lua, costs(lua).federation)?;
+    let settings = host.rules().dex;
+    let table = lua.create_table()?;
+    let tiers = lua.create_table()?;
 
-    Ok(f64::from(host.rules().dex.fee_bps))
+    for (index, tier) in settings.offered().into_iter().enumerate() {
+        tiers.raw_set(index + 1, f64::from(tier))?;
+    }
+
+    table.set("tiers", tiers)?;
+    table.set("protocol_permille", f64::from(settings.protocol_permille))?;
+
+    Ok(table)
 }
 
 #[document(
     lua,
     parent = "chain",
-    name = "dex_fee",
-    summary = "The DEX's fee, in hundredths of a percent: what a swap keeps for the pool, 30 being 0.3%. Genesis sets it and governance changes it, from the block after a decision; both DEXes charge it.",
-    returns = { ty = "number", desc = "0 to 1000." },
+    name = "dex",
+    summary = "The DEXes' settings, as genesis sets them and governance changes them, from the block after a decision: tiers, the fees in hundredths of a percent a new pool may pick, ascending, 30 being 0.3%; and protocol_permille, the share of each trade's fee burned, in thousandths. Costs 200 fuel by default.",
+    returns = { ty = "table", desc = "{ tiers = { 5, 30, 100 }, protocol_permille = 0 }." },
 )]
-fn chain_dex_fee() {}
+fn chain_dex() {}
 
 // The Ethereum network anchoring names, as SSZ.
 fn eth_network(lua: &Lua, (): ()) -> mlua::Result<Option<mlua::LuaString>> {
@@ -83,7 +93,7 @@ fn chain_eth_network() {}
 pub fn register_chain_lib(lua: &Lua) {
     let table = lua.create_table().expect("[chain] Failed to create chain table");
     table.set("id", lua.create_function(id).expect("[chain] Failed to create id")).expect("[chain] Failed to set id");
-    table.set("dex_fee", lua.create_function(dex_fee).expect("[chain] Failed to create dex_fee")).expect("[chain] Failed to set dex_fee");
+    table.set("dex", lua.create_function(dex).expect("[chain] Failed to create dex")).expect("[chain] Failed to set dex");
     table.set("eth_network", lua.create_function(eth_network).expect("[chain] Failed to create eth_network")).expect("[chain] Failed to set eth_network");
     lua.globals().set("chain", table).expect("[chain] Failed to set chain table");
 }

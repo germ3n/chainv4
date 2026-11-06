@@ -515,6 +515,21 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "Burns coin from this contract's own balance: it leaves the supply, counted as burned, as the burned part of a fee is. Kept only if the call succeeds.",
+        params = { amount = "How much." },
+        panics = "InsufficientBalance when the contract holds less.",
+    )]
+    pub fn burn(&self, amount: u256) -> Result<(), VmError> {
+        if amount == u256::ZERO {
+            return Ok(());
+        }
+
+        Accounts::new(&self.state).debit(&self.context.contract, amount).map_err(|err| self.refused(err))?;
+        crate::registry::supply::Supply::burn(&self.state, amount).map_err(VmError::Storage)
+    }
+
+    #[document(
+        parent = "Host",
         summary = "Calls another contract, whichever engine runs it, and sends it value from this contract's balance. The callee sees this contract as its sender and the value in its context. Its writes, and the value, stay only if it succeeds. A contract already running further up the chain can only be entered again through a function marked reentrant.",
         params = {
             target = "The contract to call.",

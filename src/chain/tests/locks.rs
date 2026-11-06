@@ -78,7 +78,7 @@ fn genesis_locks_refuse_a_change_to_their_field_while_the_rest_of_the_kind_still
 #[test]
 fn a_change_of_locks_adds_paths_and_none_is_ever_taken_away() {
     let mut chain = governed(&["reward"], false);
-    let dex = |fee_bps: u32| Change::Dex(crate::params::vm::DexSettings { fee_bps });
+    let dex = |protocol_permille: u32| Change::Dex(crate::params::vm::DexSettings { protocol_permille, ..crate::params::vm::DexSettings::DEFAULT });
 
     decided(vote(&mut chain, &authority(), Change::Locks(paths(&["anchoring.enforce", "dex"]))));
     assert_eq!(locks(&chain), ["anchoring.enforce", "dex", "reward"]);
@@ -86,7 +86,7 @@ fn a_change_of_locks_adds_paths_and_none_is_ever_taken_away() {
 
     // What stands already is refused, by itself or under a wider lock.
     assert_eq!(vote(&mut chain, &authority(), Change::Locks(paths(&["dex"]))), Err("dex is locked already".to_string()));
-    assert_eq!(vote(&mut chain, &authority(), Change::Locks(paths(&["dex.fee_bps"]))), Err("dex.fee_bps is locked already, under dex".to_string()));
+    assert_eq!(vote(&mut chain, &authority(), Change::Locks(paths(&["dex.protocol_permille"]))), Err("dex.protocol_permille is locked already, under dex".to_string()));
 
     // A wider lock joins the narrower one under it; neither goes.
     decided(vote(&mut chain, &authority(), Change::Locks(paths(&["anchoring"]))));
@@ -107,7 +107,7 @@ fn locks_locked_freeze_the_set() {
     // Genesis may freeze it from the start.
     let mut chain = governed(&["locks"], false);
     assert_eq!(vote(&mut chain, &authority(), Change::Locks(paths(&["dex"]))), Err("locks is locked".to_string()));
-    decided(vote(&mut chain, &authority(), Change::Dex(crate::params::vm::DexSettings { fee_bps: 50 })));
+    decided(vote(&mut chain, &authority(), Change::Dex(crate::params::vm::DexSettings { protocol_permille: 50, ..crate::params::vm::DexSettings::DEFAULT })));
 }
 
 #[test]
@@ -153,18 +153,18 @@ fn variant_kinds_are_held_by_what_each_variant_holds_and_consensus_switch_and_up
 #[test]
 fn a_lock_is_checked_again_at_the_vote_that_would_decide_a_change_cast_before_it() {
     let mut chain = governed(&[], true);
-    let raised = Change::Dex(crate::params::vm::DexSettings { fee_bps: 50 });
+    let raised = Change::Dex(crate::params::vm::DexSettings { protocol_permille: 50, ..crate::params::vm::DexSettings::DEFAULT });
 
     // One of the two Yes votes it needs, before any lock.
     assert_eq!(vote(&mut chain, &authority(), raised.clone()), Ok(Effect::Done));
 
     // Both lock the DEX's fee.
-    let lock = Change::Locks(paths(&["dex.fee_bps"]));
+    let lock = Change::Locks(paths(&["dex.protocol_permille"]));
     assert_eq!(vote(&mut chain, &authority(), lock.clone()), Ok(Effect::Done));
     decided(vote(&mut chain, &member(), lock));
 
     // The second Yes would decide the fee, but what stands is locked since.
-    assert_eq!(vote(&mut chain, &member(), raised), Err("dex.fee_bps is locked".to_string()));
+    assert_eq!(vote(&mut chain, &member(), raised), Err("dex.protocol_permille is locked".to_string()));
     assert_eq!(Changes::new(&chain.state()).dex().unwrap(), None, "genesis's fee stands");
 }
 

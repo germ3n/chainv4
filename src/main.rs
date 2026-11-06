@@ -1138,6 +1138,7 @@ fn evm_bytes(text: &str) -> Result<[u8; 20], String> {
 }
 
 /// A size in bytes, or with KiB, MiB or GiB after it, such as 256MiB: 1 MiB to 64 GiB.
+#[cfg(feature = "node")]
 fn parse_bytes(text: &str) -> Result<u64, String> {
     let text = text.trim();
     let (number, unit) = text.find(|c: char| !c.is_ascii_digit()).map_or((text, ""), |at| text.split_at(at));

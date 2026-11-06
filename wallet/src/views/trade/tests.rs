@@ -1,7 +1,7 @@
 use {super::*, chainv4::abi::{decode_values, parse_signature}};
 
 fn pool(a: Address, b: Address, reserve_a: u128, reserve_b: u128) -> DexPool {
-    DexPool { a, b, reserve_a: u256::new(reserve_a), reserve_b: u256::new(reserve_b), share: Address::Contract([0x55; 32]) }
+    DexPool { a, b, fee_bps: 30, reserve_a: u256::new(reserve_a), reserve_b: u256::new(reserve_b), share: Address::Contract([0x55; 32]), venue: chainv4::dex::Venue::Native }
 }
 
 #[test]
@@ -39,12 +39,15 @@ fn trades_go_to_the_send_page_as_calls_to_the_dex_or_the_router() {
     }
 
     // The router's calls, in Solidity's ABI.
-    let signature = "swapExactDEVForTokens(uint256,address[],address,uint256)";
+    let signature = "swapExactDEVForTokens(uint256,address[],uint256[],address,uint256)";
     let path = AbiValue::Array(vec![AbiValue::Address([0xa; 20]), AbiValue::Address([0xb; 20])]);
-    let input = calldata(signature, &[AbiType::Uint(256), AbiType::Array(Box::new(AbiType::Address)), AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(u256::new(9)), path.clone(), AbiValue::Address([0xc; 20]), AbiValue::Uint(u256::new(60))]);
+    let fees = AbiValue::Array(vec![AbiValue::Uint(u256::new(30))]);
+    let types = [AbiType::Uint(256), AbiType::Array(Box::new(AbiType::Address)), AbiType::Array(Box::new(AbiType::Uint(256))), AbiType::Address, AbiType::Uint(256)];
+    let input = calldata(signature, &types, &[AbiValue::Uint(u256::new(9)), path.clone(), fees.clone(), AbiValue::Address([0xc; 20]), AbiValue::Uint(u256::new(60))]);
     let (selector, types) = parse_signature(signature).unwrap();
     assert_eq!(input[..4], selector.unwrap());
     assert_eq!(decode_values(&types, &input[4..]).unwrap()[1], path);
+    assert_eq!(decode_values(&types, &input[4..]).unwrap()[2], fees);
     let sent = evm_call(me, [0xe; 20], input, u256::new(9), "Trade".to_string());
     assert!(matches!(sent.tx, Tx::EvmCall { to: Address::Evm(to), value: Amount::U128(9), .. } if to == [0xe; 20]));
     assert_eq!(approve_input([0xd; 20], u256::new(5))[..4], keccak(b"approve(address,uint256)")[..4]);
@@ -62,11 +65,16 @@ fn deadline_with(minutes: Option<u32>) -> TxCallArgumentType {
 
     crate::views::drawn::page_in(&mut world, &mut book, &mut holders, (360.0, 740.0), |_, ctx| {
         ctx.dex = (Some(dex), None);
-        sent = swap(ctx, &TradeState::default(), Address::Ed25519([1; 32]), u256::new(5), Address::Contract([7; 32]), None, u256::new(1)).map(|prepared| prepared.tx);
+        let route = chainv4::dex::TradeRoute { fee_bps: 100, middle: None, out: u256::new(4), impact: 0 };
+        sent = swap(ctx, &TradeState::default(), Address::Ed25519([1; 32]), u256::new(5), Address::Contract([7; 32]), &route, u256::new(1)).map(|prepared| prepared.tx);
     });
 
     match sent {
-        Some(Tx::ContractCall { data, .. }) => data[4].clone(),
+        // The pool's tier goes after the two assets.
+        Some(Tx::ContractCall { data, .. }) => {
+            assert_eq!(data[2], TxCallArgumentType::I64(100));
+            data[5].clone()
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -120,8 +128,13 @@ fn the_evm_dexs_answers_list_its_pairs_with_wdev_as_the_coin() {
     answer(&mut state, Read::Token0([0x11; 20]), vec![address(0x0a)]);
     answer(&mut state, Read::Token1([0x11; 20]), vec![address(0xee)]);
     answer(&mut state, Read::Reserves([0x11; 20]), vec![number(300), number(700), number(0)]);
+    assert!(state.listed().is_empty(), "not until its tier is read");
+    answer(&mut state, Read::Fee([0x11; 20]), vec![number(100)]);
 
-    assert_eq!(state.listed(), [DexPool { a: Address::Evm([0x0a; 20]), b: COIN, reserve_a: u256::new(300), reserve_b: u256::new(700), share: Address::Evm([0x11; 20]) }]);
+    assert_eq!(
+        state.listed(),
+        [DexPool { a: Address::Evm([0x0a; 20]), b: COIN, fee_bps: 100, reserve_a: u256::new(300), reserve_b: u256::new(700), share: Address::Evm([0x11; 20]), venue: chainv4::dex::Venue::Evm }]
+    );
     assert!(!state.answered_rpc(&json!({ "id": 5 }).to_string(), &Ok(json!({}))), "the dApp page's");
 }
 

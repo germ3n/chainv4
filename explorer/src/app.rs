@@ -304,7 +304,7 @@ impl Explorer {
                         (Ask::Call { .. }, Ok(value)) => {
                             let status = self.store.status.as_ref();
                             let rules = chainv4_ui::rerun::Rules {
-                                dex_fee_bps: status.and_then(|status| status.dex_fee_bps).unwrap_or(chainv4::params::vm::DexSettings::DEFAULT.fee_bps),
+                                dex: status.map_or(chainv4::params::vm::DexSettings::DEFAULT, crate::model::Status::dex),
                                 evm_spec: status.and_then(|status| status.evm_spec.as_deref()).and_then(|spec| spec.parse().ok()),
                             };
                             let body = ask.body().unwrap_or_default();

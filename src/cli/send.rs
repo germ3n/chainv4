@@ -1284,7 +1284,11 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::Names(settings) => format!("{} name price{}, {} ms of grace and {} years at most", settings.prices.len(), if settings.prices.len() == 1 { "" } else { "s" }, settings.grace_ms, settings.max_years),
                 crate::governance::Change::TokenFunctions(functions) => format!("what makes a token: {}", functions.join(", ")),
                 crate::governance::Change::EvmSpec { spec, from } => format!("the EVM's {} spec from block {from}", spec.name()),
-                crate::governance::Change::Dex(dex) => format!("a DEX fee of {} basis points", dex.fee_bps),
+                crate::governance::Change::Dex(dex) => format!(
+                    "DEX fee tiers of {} basis points, {} thousandths of each fee burned",
+                    dex.offered().iter().map(u32::to_string).collect::<Vec<_>>().join(", "),
+                    dex.protocol_permille
+                ),
                 crate::governance::Change::Engines(engines) => match engines.is_empty() {
                     true => "no engines: every contract frozen".to_string(),
                     false => format!("the engines {}", engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(", ")),

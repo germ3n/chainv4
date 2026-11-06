@@ -1549,7 +1549,11 @@ fn stated(change: &Change, coin: &Coin) -> String {
         Change::TokenFunctions(functions) if functions.is_empty() => "Tokens: keep no token registry".to_string(),
         Change::TokenFunctions(functions) => format!("Tokens: {} function{} make one: {}", functions.len(), plural(functions.len() as u64), functions.join(", ")),
         Change::EvmSpec { spec, from } => format!("EVM spec: {} from block {}", spec.name(), format::thousands(&from.to_string())),
-        Change::Dex(dex) => format!("DEX fee: {}% a trade", dex.fee_bps as f64 / 100.0),
+        Change::Dex(dex) => format!(
+            "DEX fee tiers: {}; {}% of each fee burned",
+            dex.offered().iter().map(|tier| format!("{}%", f64::from(*tier) / 100.0)).collect::<Vec<_>>().join(", "),
+            f64::from(dex.protocol_permille) / 10.0
+        ),
         Change::Engines(engines) => match engines.is_empty() {
             true => "Engines: none, every contract frozen".to_string(),
             false => format!("Engines: {}", engines.iter().map(|engine| engine.name()).collect::<Vec<_>>().join(", ")),
@@ -2203,7 +2207,7 @@ mod tests {
             ),
             (Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]), "Tokens: 2 functions make one: balance_of, transfer"),
             (Change::EvmSpec { spec: chainv4::params::vm::EvmSpec::Osaka, from: 9_000 }, "EVM spec: osaka from block 9,000"),
-            (Change::Dex(chainv4::params::vm::DexSettings { fee_bps: 25 }), "DEX fee: 0.25% a trade"),
+            (Change::Dex(chainv4::params::vm::DexSettings { tiers: [5, 25, 100, 0], protocol_permille: 100 }), "DEX fee tiers: 0.05%, 0.25%, 1%; 10% of each fee burned"),
             (Change::Locks(vec!["anchoring.enforce".to_string(), "reward".to_string()]), "Lock for good: anchoring.enforce, reward"),
             (
                 Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32])], threshold: 1, approval_epochs: 8, quorum_permille: 500 }),

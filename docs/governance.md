@@ -36,7 +36,7 @@ What can change today:
 - **Governance itself:** a council's members, threshold, how long votes count, and the quorum
   (see [Governance itself](#governance-itself)).
 - **What makes a token, the EVM's spec and the DEX's fee** (see [Tokens](#tokens),
-  [EVM spec](#evm-spec) and [DEX fee](#dex-fee)).
+  [EVM spec](#evm-spec) and [DEX fees](#dex-fees)).
 - **Host costs, contract limits, the slash, the PoW steps and the Bitcoin policy,** as parts of
   fees, limits, finality, the consensus and the federation (see
   [What else each kind carries](#what-else-each-kind-carries)).
@@ -81,7 +81,7 @@ governance itself, which clears them all.
    change's kind it changes, how many changes of that kind were decided before, the `change`,
    and the `vote`: `yes`, `no` or `abstain`. The first vote on a change proposes it.
    `chainv4 send --key account.key vote-change --vote yes --consensus '{"type":"staked","slot_ms":2000,"schedule":"draw"}'`
-   sends one, taking the kind's version from the node; `--change '{"dex":{"fee_bps":25}}'`
+   sends one, taking the kind's version from the node; `--change '{"dex":{"tiers":[5,30,100],"protocol_permille":100}}'`
    takes any change as `GET /governance` writes one. The consensus must fit the chain's finality
    as genesis's must: `rotating` needs authority finality, `staked` needs FFG.
 2. **Part of a setting.** Fees, the reward, limits, finality, the federation, the directory,
@@ -477,10 +477,16 @@ chainv4 send --key member.key vote-change --vote yes --change '{"evm_spec":{"spe
 decided last, so no deployed contract loses an opcode. Each spec decided is kept with its height
 in `change:evm-spec`, so a block below it replays as it ran.
 
-## DEX fee
+## DEX fees
 
-Genesis's `dex` (`{"fee_bps": 30}`, 0.3%, when unset) and `Change::Dex` set what a trade on both
-DEXes keeps for the pool, in hundredths of a percent, 0 to 1000. See [DEX](dex.md#the-fee).
+Genesis's `dex` and `Change::Dex` set both DEXes' fee tiers and the share of each fee burned:
+`{"tiers": [5, 30, 100], "protocol_permille": 0}` when unset.
+- **`tiers`:** one to four fees a new pool may open at, in hundredths of a percent, 1 to 1,000
+  each, smallest first. A pool keeps its tier when a vote takes it off the list.
+- **`protocol_permille`:** the thousandths of each trade's fee burned, 0 to 1,000.
+
+The wallet's form takes the tiers as a list and the share as thousandths; each may be locked,
+`dex.tiers` and `dex.protocol_permille`. See [DEX](dex.md#fee-tiers-and-the-burned-share).
 
 ## Engines
 
@@ -545,8 +551,8 @@ chainv4 send --key member.key vote-change --vote yes --change '{"locks":["reward
   nothing. What a switch sets is held by the locks under `finality`, against the finality that
   runs: `finality.type` refuses every switch, `finality.vote_reward` one that pays otherwise.
 - **Locks only grow.** A change of locks names the paths to add, in order, each once, none locked
-  already by itself or a lock over it (`dex.fee_bps` under `dex` is refused, `dex` over
-  `dex.fee_bps` is not). Deciding it adds them to what stands, from the next vote on; nothing
+  already by itself or a lock over it (`dex.tiers` under `dex` is refused, `dex` over
+  `dex.tiers` is not). Deciding it adds them to what stands, from the next vote on; nothing
   takes one away, governance changing itself included. A lock on `locks` freezes the set: no more
   may be added.
 - **Any kind may be locked,** consensus and upgrade included. A chain that locks `upgrade` can

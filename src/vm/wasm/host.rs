@@ -37,6 +37,7 @@ pub(super) const NAMES: &[&str] = &[
     "hash",
     "balance",
     "transfer",
+    "burn",
     "call",
     "delegate",
     "clone",
@@ -337,6 +338,16 @@ fn chain_balance() {}
     returns = { ty = "i32", desc = "0 when the funds moved; 1 when the contract holds too little, with the reason in the result buffer." },
 )]
 fn chain_transfer() {}
+
+#[document(
+    wasm,
+    parent = "chain",
+    name = "burn",
+    summary = "Burns coin from this contract's own balance, out of the supply. Kept only if the call succeeds. Costs what a transfer does.",
+    params = { amount = { ty = "i32", desc = "How much: 32 bytes, a little-endian u256." } },
+    returns = { ty = "i32", desc = "0 when it burned; 1 when the contract holds too little, with the reason in the result buffer." },
+)]
+fn chain_burn() {}
 
 #[document(
     wasm,
@@ -708,6 +719,7 @@ pub(super) fn linker(engine: &Engine) -> Linker<Run> {
     linker.func_wrap(IMPORT_MODULE, "hash", hash).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "balance", balance).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "transfer", transfer).expect(defined);
+    linker.func_wrap(IMPORT_MODULE, "burn", burn).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "call", call).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "delegate", delegate).expect(defined);
     linker.func_wrap(IMPORT_MODULE, "clone", clone).expect(defined);
@@ -957,6 +969,23 @@ fn transfer(mut caller: Caller<'_, Run>, address: u32, amount: u32) -> Result<u3
     let amount = amount_at(&mut caller, amount)?;
 
     match host.transfer(&to, amount) {
+        Ok(()) => Ok(0),
+        Err(err @ VmError::Storage(_)) => Err(stop(&mut caller, err)),
+        Err(err) => {
+            caller.data_mut().result = err.to_string().into_bytes();
+
+            Ok(1)
+        }
+    }
+}
+
+fn burn(mut caller: Caller<'_, Run>, amount: u32) -> Result<u32> {
+    let host = host(&mut caller)?;
+    let fuel = { let costs = costs(&caller); costs.transfer };
+    charge(&mut caller, fuel)?;
+    let amount = amount_at(&mut caller, amount)?;
+
+    match host.burn(amount) {
         Ok(()) => Ok(0),
         Err(err @ VmError::Storage(_)) => Err(stop(&mut caller, err)),
         Err(err) => {

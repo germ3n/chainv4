@@ -29,7 +29,8 @@ const LIMITS: Limits = Limits { fuel: 10_000_000_000, memory: 256 * 1024 * 1024 
 /// with, the node's word until genesis is proven too.
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
-    pub dex_fee_bps: u32,
+    /// The DEXes' settings, as /status says them (chainv4::params::json::dex_from_status).
+    pub dex: DexSettings,
     pub evm_spec: Option<chainv4::params::vm::EvmSpec>,
 }
 
@@ -103,7 +104,7 @@ fn run_here(engines: &mut Engines, body: &str, answer: &Value, client: Option<&L
     }
 
     let reads = proven["entries"].as_array().into_iter().flatten().map(read).collect::<Result<Vec<_>, _>>()?;
-    let mut vm_rules = VmRules { dex: DexSettings { fee_bps: rules.dex_fee_bps }, ..VmRules::default() };
+    let mut vm_rules = VmRules { dex: rules.dex, ..VmRules::default() };
 
     if let Some(spec) = rules.evm_spec {
         vm_rules.evm_spec = spec;
@@ -191,7 +192,7 @@ mod tests {
         assert_eq!((sent["prove"].as_bool(), sent["block"].as_str(), sent["function"].as_str()), (Some(true), Some("0xabc"), Some("balance_of")));
         assert!(proving("not json", "0xabc").is_none());
 
-        let rules = Rules { dex_fee_bps: 30, evm_spec: None };
+        let rules = Rules { dex: DexSettings::DEFAULT, evm_spec: None };
         let answer = json!({ "status": "returned", "values": [{ "type": "i64", "value": "1" }] });
         let mut engines = Engines::default();
 

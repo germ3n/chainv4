@@ -18,13 +18,14 @@ fn token() -> Address {
 }
 
 fn pool() -> DexPool {
-    DexPool { a: COIN, b: token(), reserve_a: u256::new(1_000_000), reserve_b: u256::new(4_000_000), share: Address::Contract([9; 32]) }
+    DexPool { a: COIN, b: token(), fee_bps: 30, reserve_a: u256::new(1_000_000), reserve_b: u256::new(4_000_000), share: Address::Contract([9; 32]), venue: chainv4::dex::Venue::Native }
 }
 
 #[test]
 fn the_native_dexs_events_read_as_trades_adds_and_removals_in_the_pools_order() {
     let (coin, token) = (COIN.to_string(), token().to_string());
-    let swap_in_token = event("Swap", vec![token.clone(), coin.clone(), "ed25519:0x01".into(), "40000".into(), "9900".into()], 20);
+    let swap_in_token = event("Swap", vec![token.clone(), coin.clone(), "ed25519:0x01".into(), "40000".into(), "9900".into(), "30".into()], 20);
+    // From before tiers: no tier, so the pair's pool at any.
     let added = event("Mint", vec![coin.clone(), token.clone(), "ed25519:0x01".into(), "100".into(), "400".into(), "200".into()], 10);
     let trade = native_activity(&swap_in_token).unwrap();
     let add = native_activity(&added).unwrap();
@@ -38,8 +39,13 @@ fn the_native_dexs_events_read_as_trades_adds_and_removals_in_the_pools_order() 
     let trades = [trade, add];
     assert_eq!(volume(&trades, &pool(), 20, 5), u256::new(9_900));
     assert_eq!(volume(&trades, &pool(), 100, 5), u256::ZERO, "outside the window");
-    assert_eq!(fees(&trades, &pool(), 20, 5, 30), u256::new(30), "40,000 tokens are 10,000 of the coin at 4 to 1");
-    assert_eq!(fees(&trades, &pool(), 20, 5, 100), u256::new(100), "at the fee the chain sets");
+    assert_eq!(fees(&trades, &pool(), 20, 5), u256::new(30), "40,000 tokens are 10,000 of the coin at 4 to 1");
+
+    // The same pair's pool at another tier: the trade at 0.3% is not its, the add from before tiers is.
+    let other = DexPool { fee_bps: 100, ..pool() };
+    assert_eq!(in_pool(&other, &trades[0]), None);
+    assert!(in_pool(&other, &trades[1]).is_some());
+    assert_eq!(fees(&trades, &other, 20, 5), u256::ZERO);
 }
 
 #[test]

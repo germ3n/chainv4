@@ -523,8 +523,8 @@ pub struct Wallet {
     swap_contract: Option<String>,
     /// The DEX, and the EVM DEX's router, the node names in GET /status.
     dex: (Option<String>, Option<String>),
-    /// The DEX's fee in force, in hundredths of a percent, as the node's status says.
-    dex_fee_bps: u32,
+    /// The DEXes' fee tiers and burned share in force, as the node's status says.
+    dex_settings: chainv4::params::vm::DexSettings,
     /// The EVM's spec /status names, which reads run here go by.
     #[cfg(not(target_arch = "wasm32"))]
     evm_spec: Option<chainv4::params::vm::EvmSpec>,
@@ -641,7 +641,7 @@ impl Wallet {
             faucet: None,
             swap_contract: None,
             dex: (None, None),
-            dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
+            dex_settings: chainv4::params::vm::DexSettings::DEFAULT,
             #[cfg(not(target_arch = "wasm32"))]
             evm_spec: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -830,7 +830,7 @@ impl Wallet {
                     self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
-                    self.dex_fee_bps = value["dex_fee_bps"].as_u64().and_then(|bps| u32::try_from(bps).ok()).unwrap_or(chainv4::params::vm::DexSettings::DEFAULT.fee_bps);
+                    self.dex_settings = chainv4::params::json::dex_from_status(value);
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.evm_spec = value["evm_spec"].as_str().and_then(|spec| spec.parse().ok());
@@ -851,7 +851,7 @@ impl Wallet {
                     #[cfg(not(target_arch = "wasm32"))]
                     let result = match (&ask, result) {
                         (Ask::Call(body), Ok(value)) => {
-                            let rules = chainv4_ui::rerun::Rules { dex_fee_bps: self.dex_fee_bps, evm_spec: self.evm_spec };
+                            let rules = chainv4_ui::rerun::Rules { dex: self.dex_settings, evm_spec: self.evm_spec };
                             Ok(chainv4_ui::rerun::checked(&mut self.engines, body, value, self.chain.client.as_ref(), rules))
                         }
                         (_, result) => result,
@@ -1803,7 +1803,7 @@ impl eframe::App for Wallet {
                             faucet: self.faucet.as_ref(),
                             swap_contract: self.swap_contract.as_deref(),
                             dex: (self.dex.0.as_deref(), self.dex.1.as_deref()),
-                            dex_fee_bps: self.dex_fee_bps,
+                            dex_settings: self.dex_settings,
                             node_stops: self.updates.stops(),
                             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
                             lights: &mut self.lights,

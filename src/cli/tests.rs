@@ -1147,8 +1147,8 @@ mod send {
         let raised = send(running.args(vote(Some(r#"{"reward":{"initial":"5"}}"#), None)));
         let halving = send(running.args(vote(Some(r#"{"reward":{"halving_interval":1000}}"#), None)));
         let locked = send(running.args(vote(None, Some("dex"))));
-        let under = send(running.args(vote(None, Some("dex.fee_bps"))));
-        let dex = send(running.args(vote(Some(r#"{"dex":{"fee_bps":50}}"#), None)));
+        let under = send(running.args(vote(None, Some("dex.tiers"))));
+        let dex = send(running.args(vote(Some(r#"{"dex":{"tiers":[5,50,100]}}"#), None)));
         let nothing = send(running.args(vote(None, Some("dex.nothing"))));
         let governance = crate::cli::send::ok(crate::cli::send::agent(&Default::default()).unwrap().get(format!("http://{}/governance", running.api)).call()).unwrap();
         let node = running.stop();
@@ -1156,7 +1156,7 @@ mod send {
         assert_eq!(raised.unwrap_err().to_string(), "reward.initial is locked");
         halving.unwrap();
         locked.unwrap();
-        assert_eq!(under.unwrap_err().to_string(), "dex.fee_bps is locked already, under dex");
+        assert_eq!(under.unwrap_err().to_string(), "dex.tiers is locked already, under dex");
         assert_eq!(dex.unwrap_err().to_string(), "dex is locked");
         assert!(nothing.unwrap_err().to_string().contains("names nothing in dex"));
         assert_eq!(governance["locks"], serde_json::json!(["dex", "reward.initial"]));
@@ -2003,7 +2003,7 @@ mod send {
         let me = DevAuthority::dev_keypair().public().address();
         let hash = crate::structs::hash::HashType::default_chain();
         let nonce = |node: &str| -> u64 { serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/accounts/{me}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["nonce"].as_u64().unwrap() };
-        let run = |action: DexAction, evm: bool, contract: Option<Address>, router: Option<String>| dex(DexArgs { action, node: node.clone(), tls: Default::default(), key: None, evm, dex: contract, router });
+        let run = |action: DexAction, evm: bool, contract: Option<Address>, router: Option<String>| dex(DexArgs { action, node: node.clone(), tls: Default::default(), key: None, evm, dex: contract, router, split_router: None });
         let read = |contract: &Address, function: &str, args: serde_json::Value| -> serde_json::Value {
             let body = serde_json::json!({ "contract": contract.to_string(), "function": function, "args": args });
             serde_json::from_str(&ureq::post(format!("{node}/call")).header("content-type", "application/json").send(body.to_string()).unwrap().body_mut().read_to_string().unwrap()).unwrap()
@@ -2022,26 +2022,26 @@ mod send {
 
         // Opened by its first deposit, then traded both ways, then half taken out.
         let (coin, token_text) = ("coin".to_string(), token.to_string());
-        run(DexAction::Add { a: coin.clone(), b: token_text.clone(), amount_a: u256::new(1_000_000), amount_b: u256::new(4_000_000), slippage: 0.5 }, false, Some(contract), None).unwrap();
+        run(DexAction::Add { a: coin.clone(), b: token_text.clone(), amount_a: u256::new(1_000_000), amount_b: u256::new(4_000_000), slippage: 0.5, fee: crate::dex::DEFAULT_FEE_BPS }, false, Some(contract), None).unwrap();
         run(DexAction::Quote { from: coin.clone(), to: token_text.clone(), amount: u256::new(10_000) }, false, Some(contract), None).unwrap();
         let held = |owner: &Address| read(&token, "balance_of", serde_json::json!([{ "type": "address", "value": owner.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
         let before = held(&me);
-        run(DexAction::Swap { from: coin.clone(), to: token_text.clone(), amount: u256::new(10_000), slippage: 1.0 }, false, Some(contract), None).unwrap();
+        run(DexAction::Swap { from: coin.clone(), to: token_text.clone(), amount: u256::new(10_000), slippage: 1.0, split: false }, false, Some(contract), None).unwrap();
         assert_eq!(held(&me) - before, crate::dex::amount_out(u256::new(10_000), u256::new(1_000_000), u256::new(4_000_000), crate::dex::DEFAULT_FEE_BPS).unwrap().as_u128());
-        run(DexAction::Swap { from: token_text.clone(), to: coin.clone(), amount: u256::new(20_000), slippage: 1.0 }, false, Some(contract), None).unwrap();
-        let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token_text }]));
+        run(DexAction::Swap { from: token_text.clone(), to: coin.clone(), amount: u256::new(20_000), slippage: 1.0, split: false }, false, Some(contract), None).unwrap();
+        let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token_text }, { "type": "i64", "value": "30" }]));
         let share: Address = pool["values"][2]["value"].as_str().unwrap().parse().unwrap();
         let shares = read(&share, "balance_of", serde_json::json!([{ "type": "address", "value": me.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
-        run(DexAction::Remove { a: coin.clone(), b: token_text.clone(), shares: u256::new(shares / 2) }, false, Some(contract), None).unwrap();
+        run(DexAction::Remove { a: coin.clone(), b: token_text.clone(), shares: u256::new(shares / 2), fee: crate::dex::DEFAULT_FEE_BPS }, false, Some(contract), None).unwrap();
         let left = read(&share, "balance_of", serde_json::json!([{ "type": "address", "value": me.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap();
         assert_eq!(left, shares - shares / 2);
-        let none = run(DexAction::Swap { from: coin.clone(), to: Address::Contract([9; 32]).to_string(), amount: u256::new(1), slippage: 1.0 }, false, Some(contract), None);
+        let none = run(DexAction::Swap { from: coin.clone(), to: Address::Contract([9; 32]).to_string(), amount: u256::new(1), slippage: 1.0, split: false }, false, Some(contract), None);
         assert!(none.unwrap_err().to_string().contains("no pool"));
 
         // Amounts far off the pool's ratio, either way: the pair at its ratio within them goes in,
         // with no slippage allowed at all. The token's allowance is spent, so it is approved first.
         let reserves = || -> (u256, u256) {
-            let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token.to_string() }]));
+            let pool = read(&contract, "pool", serde_json::json!([{ "type": "address", "value": crate::dex::COIN.to_string() }, { "type": "address", "value": token.to_string() }, { "type": "i64", "value": "30" }]));
             let number = |at: usize| u256::from_str_radix(pool["values"][at]["value"].as_str().unwrap(), 10).unwrap();
 
             (number(0), number(1))
@@ -2051,7 +2051,7 @@ mod send {
             let (coin_in, token_in) = crate::dex::add_amounts(coin_held, token_held, u256::new(coin_most), u256::new(token_most)).unwrap();
             let (before, sent) = (held(&me), nonce(&node));
             let approved_already = read(&token, "allowance", serde_json::json!([{ "type": "address", "value": me.to_string() }, { "type": "address", "value": contract.to_string() }]))["values"][0]["value"].as_str().unwrap().parse::<u128>().unwrap() >= token_most;
-            run(DexAction::Add { a: coin.clone(), b: token_text.clone(), amount_a: u256::new(coin_most), amount_b: u256::new(token_most), slippage: 0.0 }, false, Some(contract), None).unwrap();
+            run(DexAction::Add { a: coin.clone(), b: token_text.clone(), amount_a: u256::new(coin_most), amount_b: u256::new(token_most), slippage: 0.0, fee: crate::dex::DEFAULT_FEE_BPS }, false, Some(contract), None).unwrap();
             assert_eq!(reserves(), (coin_held + coin_in, token_held + token_in), "at most {coin_most} and {token_most}");
             assert_eq!(u256::new(before - held(&me)), token_in);
             assert_eq!(nonce(&node) - sent, if approved_already { 1 } else { 2 });
@@ -2060,7 +2060,7 @@ mod send {
         // Approved for plenty, an add sends the add alone.
         send(running.args(TxArgs::Call { to: token, function: "approve".into(), amount: u256::ZERO, args: vec![crate::structs::tx::TxCallArgumentType::Address(contract), crate::structs::tx::TxCallArgumentType::U256(u256::new(10u128.pow(12)))] })).unwrap();
         let sent = nonce(&node);
-        run(DexAction::Add { a: token_text.clone(), b: coin.clone(), amount_a: u256::new(70_000), amount_b: u256::new(9_000_000), slippage: 0.5 }, false, Some(contract), None).unwrap();
+        run(DexAction::Add { a: token_text.clone(), b: coin.clone(), amount_a: u256::new(70_000), amount_b: u256::new(9_000_000), slippage: 0.5, fee: crate::dex::DEFAULT_FEE_BPS }, false, Some(contract), None).unwrap();
         assert_eq!(nonce(&node) - sent, 1, "no approval: the DEX may move enough already");
         let plan = crate::cli::dex::plan_add(Some((u256::new(4), u256::new(1))), u256::new(400), u256::new(400), 50).unwrap();
         assert_eq!((plan.amount_a, plan.amount_b, plan.least_a, plan.least_b, plan.opens), (u256::new(400), u256::new(100), u256::new(398), u256::new(100), false), "the least is the pair less the slippage");
@@ -2080,20 +2080,20 @@ mod send {
         let erc20 = crate::vm::evm::create_address(&me, nonce(&node));
         send(running.args(TxArgs::Deploy { lua: None, wasm: None, evm: Some(bin), constructor: None, constructor_args: Vec::new() })).unwrap();
         let erc20 = erc20.to_string();
-        run(DexAction::Add { a: erc20.clone(), b: coin.clone(), amount_a: u256::new(3_000_000), amount_b: u256::new(1_000_000), slippage: 0.5 }, true, None, Some(router.clone())).unwrap();
-        run(DexAction::Swap { from: coin.clone(), to: erc20.clone(), amount: u256::new(5_000), slippage: 1.0 }, true, None, Some(router.clone())).unwrap();
-        run(DexAction::Swap { from: erc20.clone(), to: coin.clone(), amount: u256::new(9_000), slippage: 1.0 }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Add { a: erc20.clone(), b: coin.clone(), amount_a: u256::new(3_000_000), amount_b: u256::new(1_000_000), slippage: 0.5, fee: crate::dex::DEFAULT_FEE_BPS }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Swap { from: coin.clone(), to: erc20.clone(), amount: u256::new(5_000), slippage: 1.0, split: false }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Swap { from: erc20.clone(), to: coin.clone(), amount: u256::new(9_000), slippage: 1.0, split: false }, true, None, Some(router.clone())).unwrap();
         run(DexAction::Pools, true, None, Some(router.clone())).unwrap();
 
         // Off the pair's ratio with no slippage allowed, both ways: the router takes the pair
         // worked out. The first approves, its allowance spent; the second has plenty left over.
         let sent = nonce(&node);
-        run(DexAction::Add { a: erc20.clone(), b: coin.clone(), amount_a: u256::new(3_000_000), amount_b: u256::new(10_000), slippage: 0.0 }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Add { a: erc20.clone(), b: coin.clone(), amount_a: u256::new(3_000_000), amount_b: u256::new(10_000), slippage: 0.0, fee: crate::dex::DEFAULT_FEE_BPS }, true, None, Some(router.clone())).unwrap();
         assert_eq!(nonce(&node) - sent, 2, "approved, then added");
         let sent = nonce(&node);
-        run(DexAction::Add { a: coin.clone(), b: erc20.clone(), amount_a: u256::new(5_000_000), amount_b: u256::new(20_000), slippage: 0.0 }, true, None, Some(router.clone())).unwrap();
+        run(DexAction::Add { a: coin.clone(), b: erc20.clone(), amount_a: u256::new(5_000_000), amount_b: u256::new(20_000), slippage: 0.0, fee: crate::dex::DEFAULT_FEE_BPS }, true, None, Some(router.clone())).unwrap();
         assert_eq!(nonce(&node) - sent, 1, "no approval: the router may move enough already");
-        let refused =run(DexAction::Swap { from: token.to_string(), to: coin, amount: u256::new(1), slippage: 1.0 }, true, None, Some(router));
+        let refused =run(DexAction::Swap { from: token.to_string(), to: coin, amount: u256::new(1), slippage: 1.0, split: false }, true, None, Some(router));
         assert!(refused.is_err(), "a native token is no ERC-20 on the EVM DEX");
         running.stop();
     }

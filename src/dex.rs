@@ -1,7 +1,9 @@
 //! The DEX's arithmetic, for the apps that quote it: contracts/lua/dex.lua's pools, and the EVM's
-//! DexPair, keep the same constant product, so one formula prices both. A trade's route is the
-//! best of the pool that holds both assets and every path through one middle pool; its least is
-//! what slippage allows; its price impact is how far its rate falls below the pools' own.
+//! DexPair, keep the same constant product, so one formula prices both, each pool at its own fee
+//! tier. A trade's route is the best of every pool that holds both assets and every path through
+//! one middle pool, at any tiers; a split is the best way to divide an amount between the two DEXes
+//! (contracts/lua/router.lua runs it); its least is what slippage allows; its price impact is how
+//! far its rate falls below the pools' own.
 
 use {
     crate::structs::address::Address,
@@ -15,8 +17,18 @@ use {
 )]
 pub const COIN: Address = Address::Contract([0; 32]);
 
-#[document(summary = "What a trade leaves in the pool on a chain whose governance never set the DEX's fee, in hundredths of a percent: 30, Uniswap V2's 0.3%. The fee in force is GET /status's dex_fee_bps, which both DEXes charge.", category = "DEX", see_also = "DexSettings")]
+#[document(summary = "The middle fee tier a chain offers by default, in hundredths of a percent: 30, Uniswap V2's 0.3%. The tiers in force are GET /status's dex_tiers; each pool charges its own.", category = "DEX", see_also = "DexSettings")]
 pub const DEFAULT_FEE_BPS: u32 = 30;
+
+#[document(summary = "Which DEX a pool is on: the native one, dex.lua, or the EVM's, Dex.sol.", category = "DEX", see_also = "DexPool")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Venue {
+    #[document(summary = "contracts/lua/dex.lua.")]
+    #[default]
+    Native,
+    #[document(summary = "Dex.sol's pairs, through its DexRouter.")]
+    Evm,
+}
 
 #[document(
     summary = "What a trade of amount_in pays out of a pool holding reserve_in and reserve_out, as Uniswap V2's getAmountOut: the fee off what goes in, then the product kept, as both DEXes reckon it. None for nothing in, or a pool holding nothing.",
@@ -38,30 +50,35 @@ pub fn fee_of(amount: u256, fee_bps: u32) -> u256 {
     amount.checked_mul(u256::from(fee_bps)).map_or(u256::ZERO, |all| all / u256::from(10_000u64))
 }
 
-#[document(summary = "A pool: its two assets, what it holds of each, and its share token.", category = "DEX", see_also = "best_route")]
+#[document(summary = "A pool: its two assets, its fee tier, what it holds of each, its share token and which DEX it is on.", category = "DEX", see_also = "best_route")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DexPool {
     pub a: Address,
     pub b: Address,
+    #[document(summary = "Its fee, in hundredths of a percent, fixed when it opened.")]
+    pub fee_bps: u32,
     pub reserve_a: u256,
     pub reserve_b: u256,
     #[document(summary = "Its share token: a clone of lp_token.lua, or the EVM pair itself.")]
     pub share: Address,
+    #[document(summary = "Which DEX it is on.")]
+    pub venue: Venue,
 }
 
 impl DexPool {
     #[document(
         parent = "DexPool",
-        summary = "A pool from what the DEX's pool_at answers, as text: a, b, what it holds of each, and its share token.",
+        summary = "A pool from what the native DEX's pool_at answers, as text: a, b, its fee tier, what it holds of each, and its share token.",
     )]
     pub fn from_values(values: &[String]) -> Result<DexPool, String> {
-        let [a, b, reserve_a, reserve_b, share] = values else {
+        let [a, b, fee, reserve_a, reserve_b, share] = values else {
             return Err("an answer the DEX does not give".to_string());
         };
         let address = |text: &str| text.parse::<Address>().map_err(|_| format!("{text} is not an address"));
         let number = |text: &str| u256::from_str_radix(text, 10).map_err(|_| format!("{text} is not an amount"));
+        let fee_bps = fee.parse().map_err(|_| format!("{fee} is not a fee tier"))?;
 
-        Ok(DexPool { a: address(a)?, b: address(b)?, reserve_a: number(reserve_a)?, reserve_b: number(reserve_b)?, share: address(share)? })
+        Ok(DexPool { a: address(a)?, b: address(b)?, fee_bps, reserve_a: number(reserve_a)?, reserve_b: number(reserve_b)?, share: address(share)?, venue: Venue::Native })
     }
 
     #[document(parent = "DexPool", summary = "What it holds of from, then of the other asset: None when it does not hold from.")]
@@ -109,27 +126,28 @@ impl DexPool {
     }
 }
 
-#[document(summary = "A trade's way through the pools, and what it pays.", category = "DEX", see_also = "best_route")]
+#[document(summary = "A trade's way through the pools of one DEX, and what it pays.", category = "DEX", see_also = "best_route")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TradeRoute {
-    #[document(summary = "The asset traded through on the way, for a trade through two pools.")]
-    pub middle: Option<Address>,
+    #[document(summary = "The first pool's fee tier, in hundredths of a percent.")]
+    pub fee_bps: u32,
+    #[document(summary = "The asset traded through on the way, and the second pool's tier, for a trade through two pools.")]
+    pub middle: Option<(Address, u32)>,
     #[document(summary = "What comes out.")]
     pub out: u256,
-    #[document(summary = "How far the trade's rate falls below the pools' own before it, in parts in 10,000: the fee and the trade's own weight on the price.")]
+    #[document(summary = "How far the trade's rate falls below the pools' own before it, in parts in 10,000: the fees and the trade's own weight on the price.")]
     pub impact: u32,
 }
 
 #[document(
-    summary = "The best route for a trade: through the pool that holds both assets, or through one middle pool, whichever pays out more. None when no pools join them.",
+    summary = "The best route for a trade through pools of one DEX: through any pool that holds both assets, at any tier, or through one middle asset, two pools at any tiers, whichever pays out more. None when no pools join them.",
     category = "DEX",
 )]
-pub fn best_route(pools: &[DexPool], from: &Address, to: &Address, amount: u256, fee_bps: u32) -> Option<TradeRoute> {
-    let pool = |x: &Address, y: &Address| pools.iter().find(|pool| pool.pairs(x, y));
-    let step = |x: &Address, y: &Address, amount: u256| {
-        let (held_in, held_out) = pool(x, y)?.facing(x)?;
+pub fn best_route(pools: &[DexPool], from: &Address, to: &Address, amount: u256) -> Option<TradeRoute> {
+    let step = |pool: &DexPool, x: &Address, amount: u256| {
+        let (held_in, held_out) = pool.facing(x)?;
 
-        Some((amount_out(amount, held_in, held_out, fee_bps)?, held_in, held_out))
+        Some((amount_out(amount, held_in, held_out, pool.fee_bps)?, held_in, held_out))
     };
     // The pools' own rate along a path, before the trade: what amount would buy with no fee and
     // no weight of its own.
@@ -145,24 +163,91 @@ pub fn best_route(pools: &[DexPool], from: &Address, to: &Address, amount: u256,
         }
     };
 
-    if let Some((out, held_in, held_out)) = step(from, to, amount) {
-        consider(TradeRoute { middle: None, out, impact: impact(out, spot(amount.as_f64(), held_in, held_out)) });
+    for pool in pools.iter().filter(|pool| pool.pairs(from, to)) {
+        if let Some((out, held_in, held_out)) = step(pool, from, amount) {
+            consider(TradeRoute { fee_bps: pool.fee_bps, middle: None, out, impact: impact(out, spot(amount.as_f64(), held_in, held_out)) });
+        }
     }
 
-    let middles = pools.iter().filter_map(|pool| pool.other(from)).filter(|middle| middle != to);
+    for first in pools.iter().filter(|pool| pool.facing(from).is_some()) {
+        let Some(middle) = first.other(from).filter(|middle| middle != to) else {
+            continue;
+        };
+        let Some((between, first_in, first_out)) = step(first, from, amount) else {
+            continue;
+        };
 
-    for middle in middles {
-        let Some((between, first_in, first_out)) = step(from, &middle, amount) else {
-            continue;
-        };
-        let Some((out, second_in, second_out)) = step(&middle, to, between) else {
-            continue;
-        };
-        let rate = spot(spot(amount.as_f64(), first_in, first_out), second_in, second_out);
-        consider(TradeRoute { middle: Some(middle), out, impact: impact(out, rate) });
+        for second in pools.iter().filter(|pool| pool.pairs(&middle, to)) {
+            let Some((out, second_in, second_out)) = step(second, &middle, between) else {
+                continue;
+            };
+            let rate = spot(spot(amount.as_f64(), first_in, first_out), second_in, second_out);
+            consider(TradeRoute { fee_bps: first.fee_bps, middle: Some((middle, second.fee_bps)), out, impact: impact(out, rate) });
+        }
     }
 
     best
+}
+
+#[document(summary = "A trade divided between the two DEXes: how much goes each way, by which route, and what both pay together.", category = "DEX", see_also = "best_split")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Split {
+    #[document(summary = "The part traded on the native DEX, and its route there.")]
+    pub native: Option<(u256, TradeRoute)>,
+    #[document(summary = "The part traded on the EVM's, and its route there, in its assets: WDEV for the coin.")]
+    pub evm: Option<(u256, TradeRoute)>,
+    #[document(summary = "What both pay together.")]
+    pub out: u256,
+}
+
+#[document(
+    summary = "The best way to trade an amount across both DEXes: all of it on one, or divided between them, in twentieths and then hundredths around the best twentieth, whichever pays out the most together. evm_of names each native asset's side on the EVM, WDEV for the coin, an ERC-20 itself, None for a token the EVM has not; with none for either end, the trade stays native. None when neither DEX joins them.",
+    category = "DEX",
+    see_also = "best_route, Split",
+)]
+pub fn best_split(pools: &[DexPool], from: &Address, to: &Address, amount: u256, evm_of: impl Fn(&Address) -> Option<Address>) -> Option<Split> {
+    let (native, evm): (Vec<DexPool>, Vec<DexPool>) = pools.iter().cloned().partition(|pool| pool.venue == Venue::Native);
+    let evm_ends = evm_of(from).zip(evm_of(to));
+    let on_native = |part: u256| (part != u256::ZERO).then(|| best_route(&native, from, to, part)).flatten();
+    let on_evm = |part: u256| (part != u256::ZERO).then(|| evm_ends.and_then(|(x, y)| best_route(&evm, &x, &y, part))).flatten();
+    let at = |parts: u64, of: u64| {
+        let native_part = amount.checked_mul(u256::from(parts)).map_or(u256::ZERO, |all| all / u256::from(of));
+        let evm_part = amount - native_part;
+        let (n, e) = (on_native(native_part), on_evm(evm_part));
+
+        // Either part with no route there pays nothing, and the split is no split.
+        match ((native_part == u256::ZERO) == n.is_none(), (evm_part == u256::ZERO) == e.is_none()) {
+            (true, true) => {
+                let out = n.as_ref().map_or(u256::ZERO, |route| route.out) + e.as_ref().map_or(u256::ZERO, |route| route.out);
+                Some(Split { native: n.map(|route| (native_part, route)), evm: e.map(|route| (evm_part, route)), out })
+            }
+            _ => None,
+        }
+    };
+    let better = |best: Option<Split>, next: Option<Split>| match (best, next) {
+        (Some(best), Some(next)) => Some(if next.out > best.out { next } else { best }),
+        (best, next) => best.or(next),
+    };
+
+    let mut best: Option<(u64, Split)> = None;
+
+    for parts in 0..=20 {
+        if let Some(split) = at(parts, 20) {
+            best = match best {
+                Some((_, ref kept)) if kept.out >= split.out => best,
+                _ => Some((parts, split)),
+            };
+        }
+    }
+
+    let (twentieth, mut chosen) = best.map(|(parts, split)| (parts, Some(split)))?;
+
+    // Finer, around it: a hundredth at a time between its neighbours.
+    for parts in (twentieth * 5).saturating_sub(4)..=(twentieth * 5 + 4).min(100) {
+        chosen = better(chosen, at(parts, 100));
+    }
+
+    chosen
 }
 
 #[document(
@@ -208,7 +293,7 @@ mod tests {
     use super::*;
 
     fn pool(a: u8, b: u8, reserve_a: u128, reserve_b: u128) -> DexPool {
-        DexPool { a: Address::Contract([a; 32]), b: Address::Contract([b; 32]), reserve_a: u256::new(reserve_a), reserve_b: u256::new(reserve_b), share: Address::Contract([a ^ b ^ 0x40; 32]) }
+        DexPool { a: Address::Contract([a; 32]), b: Address::Contract([b; 32]), fee_bps: DEFAULT_FEE_BPS, reserve_a: u256::new(reserve_a), reserve_b: u256::new(reserve_b), share: Address::Contract([a ^ b ^ 0x40; 32]), venue: Venue::Native }
     }
 
     fn at(byte: u8) -> Address {
@@ -231,17 +316,48 @@ mod tests {
     fn the_route_is_the_one_that_pays_more_direct_or_through_a_middle() {
         // 1 to 3 direct is thin; through 2 it is deep.
         let pools = [pool(1, 3, 1_000, 1_000), pool(1, 2, 10u128.pow(9), 10u128.pow(9)), pool(2, 3, 10u128.pow(9), 10u128.pow(9))];
-        let route = best_route(&pools, &at(1), &at(3), u256::new(10_000), DEFAULT_FEE_BPS).unwrap();
-        assert_eq!(route.middle, Some(at(2)));
+        let route = best_route(&pools, &at(1), &at(3), u256::new(10_000)).unwrap();
+        assert_eq!(route.middle, Some((at(2), DEFAULT_FEE_BPS)));
         assert!(route.out > u256::new(9_900), "{route:?}");
         assert!(route.impact >= 59 && route.impact < 70, "two fees, about 0.6%: {}", route.impact);
 
         // A small trade in a deep pool goes direct.
         let pools = [pool(1, 3, 10u128.pow(15), 10u128.pow(15)), pool(1, 2, 1_000, 1_000), pool(2, 3, 1_000, 1_000)];
-        let direct = super::best_route(&pools, &at(3), &at(1), u256::new(10u128.pow(6)), DEFAULT_FEE_BPS).unwrap();
+        let direct = super::best_route(&pools, &at(3), &at(1), u256::new(10u128.pow(6))).unwrap();
         assert_eq!((direct.middle, direct.out), (None, amount_out(u256::new(10u128.pow(6)), u256::new(10u128.pow(15)), u256::new(10u128.pow(15)), DEFAULT_FEE_BPS).unwrap()));
         assert_eq!(direct.impact, 30, "the fee alone");
-        assert_eq!(super::best_route(&pools, &at(1), &at(9), u256::new(1), DEFAULT_FEE_BPS), None, "nothing joins them");
+        assert_eq!(super::best_route(&pools, &at(1), &at(9), u256::new(1)), None, "nothing joins them");
+    }
+
+    #[test]
+    fn the_cheaper_tier_of_two_pools_wins_when_both_are_as_deep() {
+        let cheap = DexPool { fee_bps: 5, ..pool(1, 2, 10u128.pow(12), 10u128.pow(12)) };
+        let dear = DexPool { fee_bps: 100, ..pool(1, 2, 10u128.pow(12), 10u128.pow(12)) };
+        let route = best_route(&[dear, cheap], &at(1), &at(2), u256::new(10u128.pow(6))).unwrap();
+
+        assert_eq!((route.fee_bps, route.impact), (5, 5));
+    }
+
+    #[test]
+    fn a_split_divides_a_large_trade_between_two_equal_dexes_and_a_small_one_goes_whole() {
+        let native = pool(1, 2, 10u128.pow(9), 10u128.pow(9));
+        let evm = DexPool { a: Address::Evm([1; 20]), b: Address::Evm([2; 20]), venue: Venue::Evm, ..native.clone() };
+        let evm_of = |asset: &Address| match asset {
+            Address::Contract(bytes) => Some(Address::Evm([bytes[0]; 20])),
+            _ => None,
+        };
+        let pools = [native.clone(), evm];
+
+        // A tenth of either pool: halved, each half moves its pool's price half as far.
+        let split = best_split(&pools, &at(1), &at(2), u256::new(10u128.pow(8)), evm_of).unwrap();
+        let (native_part, evm_part) = (split.native.as_ref().unwrap().0, split.evm.as_ref().unwrap().0);
+        assert_eq!(native_part, evm_part, "equal pools take equal parts");
+        assert!(split.out > best_route(std::slice::from_ref(&native), &at(1), &at(2), u256::new(10u128.pow(8))).unwrap().out);
+
+        // Without the EVM's side of an asset, it stays native, whole.
+        let whole = best_split(&pools, &at(1), &at(2), u256::new(10u128.pow(8)), |_| None).unwrap();
+        assert_eq!((whole.native.map(|(part, _)| part), whole.evm), (Some(u256::new(10u128.pow(8))), None));
+        assert_eq!(best_split(&pools, &at(1), &at(9), u256::new(1), evm_of), None);
     }
 
     #[test]
@@ -254,7 +370,8 @@ mod tests {
         assert_eq!(pool.price(&at(1), 18, 6), Some(3.0), "3 of the six-decimal asset per one of the other");
         assert_eq!(pool.matching(&at(1), u256::new(10u128.pow(18))), Some(u256::new(3_000_000)));
         assert_eq!(pool.other(&at(2)), Some(at(1)));
-        assert_eq!(DexPool::from_values(&[at(1).to_string(), at(2).to_string(), "5".into(), "6".into(), at(3).to_string()]).unwrap().reserve_b, u256::new(6));
+        let read = DexPool::from_values(&[at(1).to_string(), at(2).to_string(), "100".into(), "5".into(), "6".into(), at(3).to_string()]).unwrap();
+        assert_eq!((read.fee_bps, read.reserve_b), (100, u256::new(6)));
     }
 
     #[test]

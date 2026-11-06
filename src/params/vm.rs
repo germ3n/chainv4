@@ -269,26 +269,64 @@ impl std::str::FromStr for EvmSpec {
     }
 }
 
+#[document(summary = "How many fee tiers the DEXes' settings may offer.", category = "DEX", see_also = "DexSettings")]
+pub const DEX_TIERS: usize = 4;
+
 #[document(
-    summary = "The DEX's fee, as genesis's dex or a Change::Dex sets it: what a swap keeps for the pool's liquidity, in hundredths of a percent, 30 being 0.3%. Both DEXes read it as they trade, the native one through the chain's dex library, the EVM one through the native precompile, and the apps quote by it.",
+    summary = "The DEXes' settings, as genesis's dex or a Change::Dex sets them: the fee tiers a new pool may pick from, in hundredths of a percent, and the share of each trade's fee the protocol takes and burns. A pool's tier is fixed when it opens, one pool for each pair and tier, so a change of tiers only bounds the pools opened after it. Both DEXes read them as they trade, the native one through the chain library, the EVM one through the native precompile, and the apps quote by them.",
     category = "DEX",
     see_also = "Change::Dex, Genesis::dex",
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, SchemaWrite, SchemaRead)]
 pub struct DexSettings {
-    #[document(summary = "The fee, in basis points: 0 to 1000, 10%.")]
-    pub fee_bps: u32,
+    #[document(summary = "The tiers, in basis points, ascending, each 1 to 1000, 10%, and 0 for each slot past the last.")]
+    pub tiers: [u32; DEX_TIERS],
+    #[document(summary = "The share of every trade's fee the protocol takes and burns, in thousandths: 0, the default, leaves it all to the pool's providers, 1000 burns all of it.")]
+    pub protocol_permille: u32,
 }
 
 impl Hashable for DexSettings {}
 
 impl DexSettings {
-    #[document(parent = "DexSettings", summary = "0.3%, what both DEXes charged before the fee was governed.")]
-    pub const DEFAULT: DexSettings = DexSettings { fee_bps: 30 };
+    #[document(parent = "DexSettings", summary = "Three tiers, 0.05%, 0.3% and 1%, as Uniswap V3 offers them, and no protocol share.")]
+    pub const DEFAULT: DexSettings = DexSettings { tiers: [5, 30, 100, 0], protocol_permille: 0 };
 
-    #[document(parent = "DexSettings", summary = "Why no DEX could charge it: more than 10%.")]
+    #[document(parent = "DexSettings", summary = "The tiers it offers, in order, without the unused slots.")]
+    pub fn offered(&self) -> Vec<u32> {
+        self.tiers.iter().copied().take_while(|tier| *tier != 0).collect()
+    }
+
+    #[document(parent = "DexSettings", summary = "Whether a new pool may pick this fee.", params = { fee_bps = "The fee, in basis points." })]
+    pub fn offers(&self, fee_bps: u32) -> bool {
+        fee_bps != 0 && self.tiers.contains(&fee_bps)
+    }
+
+    #[document(parent = "DexSettings", summary = "The protocol's part of a fee taken in, burned: the fee times protocol_permille, in thousandths, rounded down.", params = { fee = "What a trade paid in fees." })]
+    pub fn protocol_cut(&self, fee: crate::structs::u256::u256) -> crate::structs::u256::u256 {
+        fee.checked_mul(crate::structs::u256::u256::from(self.protocol_permille)).map_or(crate::structs::u256::u256::ZERO, |all| all / crate::structs::u256::u256::from(1000u64))
+    }
+
+    #[document(parent = "DexSettings", summary = "Why no DEX could run by them: no tier, a tier of 0 before another, a tier past 10%, tiers out of order or twice, or a protocol share past 1000.")]
     pub fn problem(&self) -> Option<&'static str> {
-        (self.fee_bps > 1000).then_some("dex.fee_bps is 0 to 1000, at most 10%")
+        let offered = self.offered();
+
+        if offered.is_empty() {
+            return Some("dex.tiers offers at least one fee tier");
+        }
+
+        if self.tiers[offered.len()..].iter().any(|tier| *tier != 0) {
+            return Some("dex.tiers lists its tiers first, with none left out between");
+        }
+
+        if offered.iter().any(|tier| *tier > 1000) {
+            return Some("dex.tiers are 1 to 1000 basis points each, at most 10%");
+        }
+
+        if offered.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Some("dex.tiers go up, each once");
+        }
+
+        (self.protocol_permille > 1000).then_some("dex.protocol_permille is 0 to 1000")
     }
 }
 

@@ -36,6 +36,7 @@ unsafe extern "C" {
     /// 0 when the funds moved; 1 when the contract holds too little, with the reason in the
     /// result buffer.
     pub fn transfer(address: *const u8, amount: *const u8) -> u32;
+    pub fn burn(amount: *const u8) -> u32;
     /// 0 when the call succeeded, with its encoded return values in the result buffer; 1 when
     /// it failed, with the error text there.
     pub fn call(

@@ -913,7 +913,7 @@ mod tests {
             Change::Names(crate::registry::names::NameSettings { prices: vec![u256::new(5), u256::new(1)], grace_ms: 1_000, max_years: 3 }),
             Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]),
             Change::EvmSpec { spec: crate::params::vm::EvmSpec::Osaka, from: 1_000 },
-            Change::Dex(crate::params::vm::DexSettings { fee_bps: 25 }),
+            Change::Dex(crate::params::vm::DexSettings { tiers: [5, 25, 0, 0], protocol_permille: 100 }),
             Change::Collections(CollectionFunctions::standard()),
             Change::Directory(Directory { swap: Some(Address::Contract([7; 32])), ..Directory::default() }),
             Change::Fees(FeeConfig::dev()),

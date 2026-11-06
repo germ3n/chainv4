@@ -552,14 +552,52 @@ pub fn name_settings_json(settings: &crate::registry::names::NameSettings) -> Va
 
 /// The DEX's settings as JSON.
 pub fn dex_json(dex: &crate::params::vm::DexSettings) -> Value {
-    json!({ "fee_bps": dex.fee_bps })
+    json!({ "tiers": dex.offered(), "protocol_permille": dex.protocol_permille })
 }
 
-/// The DEX's settings from their JSON.
+/// The DEXes' settings as GET /status says them, dex_tiers and dex_protocol_permille: what the apps
+/// quote and re-run calls by. The defaults for a node that says neither, from before tiers.
+pub fn dex_from_status(status: &Value) -> crate::params::vm::DexSettings {
+    let mut settings = crate::params::vm::DexSettings::DEFAULT;
+
+    if let Some(tiers) = status["dex_tiers"].as_array() {
+        let offered: Vec<u32> = tiers.iter().filter_map(|tier| tier.as_u64().and_then(|tier| u32::try_from(tier).ok())).take(crate::params::vm::DEX_TIERS).collect();
+        settings.tiers = [0; crate::params::vm::DEX_TIERS];
+        settings.tiers[..offered.len()].copy_from_slice(&offered);
+    } else if let Some(fee) = status["dex_fee_bps"].as_u64().and_then(|fee| u32::try_from(fee).ok()) {
+        settings.tiers = [fee, 0, 0, 0];
+    }
+
+    if let Some(permille) = status["dex_protocol_permille"].as_u64().and_then(|permille| u32::try_from(permille).ok()) {
+        settings.protocol_permille = permille;
+    }
+
+    settings
+}
+
+/// The DEX's settings from their JSON: tiers, or a file's fee_bps from before tiers, as the one
+/// tier; and the protocol's share, 0 when left out.
 pub(crate) fn dex_from_json(mut fields: Fields) -> Result<crate::params::vm::DexSettings, String> {
-    let fee_bps = fields.small("fee_bps")?;
+    let offered: Vec<u32> = match fields.map.contains_key("fee_bps") {
+        true => vec![fields.small("fee_bps")?],
+        false => fields
+            .get("tiers")?
+            .as_array()
+            .ok_or("dex.tiers is a list of basis points, such as [5, 30, 100]")?
+            .iter()
+            .map(|tier| tier.as_u64().and_then(|tier| u32::try_from(tier).ok()).ok_or_else(|| "dex.tiers are whole basis points".to_string()))
+            .collect::<Result<_, _>>()?,
+    };
+    let protocol_permille = fields.later_whole("protocol_permille")?.unwrap_or(0);
     fields.done()?;
-    let dex = crate::params::vm::DexSettings { fee_bps };
+
+    if offered.len() > crate::params::vm::DEX_TIERS {
+        return Err(format!("dex.tiers offers at most {} tiers", crate::params::vm::DEX_TIERS));
+    }
+
+    let mut tiers = [0; crate::params::vm::DEX_TIERS];
+    tiers[..offered.len()].copy_from_slice(&offered);
+    let dex = crate::params::vm::DexSettings { tiers, protocol_permille: u32::try_from(protocol_permille).map_err(|_| "dex.protocol_permille is too large".to_string())? };
 
     dex.problem().map_or(Ok(dex), |problem| Err(problem.to_string()))
 }

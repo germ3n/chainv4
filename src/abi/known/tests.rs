@@ -59,7 +59,7 @@ fn what_both_standards_have_says_so_and_only_the_token_s_own_amounts_are_amounts
     assert_eq!(read_call(None, &known, &input).unwrap().by.label(), "read as ERC-20 or ERC-721", "the third argument is an amount in one and a token in the other");
 
     // A router's amounts are of other tokens, so they stay plain numbers.
-    let swap = call("swapExactDEVForTokens(uint256,address[],address,uint256)", &[AbiValue::Uint(u256::new(9)), AbiValue::Array(vec![AbiValue::Address([3; 20])]), AbiValue::Address([4; 20]), AbiValue::Uint(u256::new(1))]);
+    let swap = call("swapExactDEVForTokens(uint256,address[],uint256[],address,uint256)", &[AbiValue::Uint(u256::new(9)), AbiValue::Array(vec![AbiValue::Address([3; 20])]), AbiValue::Array(vec![AbiValue::Uint(u256::new(30))]), AbiValue::Address([4; 20]), AbiValue::Uint(u256::new(1))]);
     let read = read_call(None, &known, &swap).unwrap();
 
     assert_eq!(read.by.label(), "read as DEX router");

@@ -241,7 +241,7 @@ mod tests {
         let long = chainv4::abi::known::read_call(None, &known, &input("pay(string)", &[AbiValue::String("W".repeat(90_000))])).unwrap();
         // A huge array, under a router's path.
         let path = vec![AbiValue::Address([1; 20]); 2_000];
-        let many = chainv4::abi::known::read_call(None, &known, &input("swapExactDEVForTokens(uint256,address[],address,uint256)", &[AbiValue::Uint(u256::ONE), AbiValue::Array(path), AbiValue::Address([2; 20]), AbiValue::Uint(u256::ONE)])).unwrap();
+        let many = chainv4::abi::known::read_call(None, &known, &input("swapExactDEVForTokens(uint256,address[],uint256[],address,uint256)", &[AbiValue::Uint(u256::ONE), AbiValue::Array(path), AbiValue::Array(vec![AbiValue::Uint(u256::new(30))]), AbiValue::Address([2; 20]), AbiValue::Uint(u256::ONE)])).unwrap();
 
         for read in [long, many] {
             let (height, read_bottom, fee_top, _) = drawn(&read);

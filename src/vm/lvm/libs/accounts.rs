@@ -39,6 +39,26 @@ fn transfer(lua: &Lua, (to, amount): (AnyUserData, Value)) -> mlua::Result<()> {
     host.transfer(&to.0, amount).map_err(refused)
 }
 
+fn burn(lua: &Lua, amount: Value) -> mlua::Result<()> {
+    let amount = exact_as::<u256>(&amount)?;
+    let host = host(lua)?;
+    charge(lua, costs(lua).transfer)?;
+
+    host.burn(amount).map_err(refused)
+}
+
+#[document(
+    lua,
+    parent = "accounts",
+    name = "burn",
+    summary = "Burns coin from this contract's own balance, out of the supply, as the burned part of a fee is. Raises an error when the contract holds less. Costs what a transfer does.",
+    params = {
+        amount = { ty = "U256 | number", desc = "How much: a U256, or a non-negative whole number." },
+    },
+    returns = { ty = "nil", desc = "" },
+)]
+fn accounts_burn() {}
+
 #[document(
     lua,
     kind = "library",
@@ -93,6 +113,9 @@ pub fn register_accounts_lib(lua: &Lua) {
                 .expect("[accounts] Failed to create transfer"),
         )
         .expect("[accounts] Failed to set transfer");
+    accounts_table
+        .set("burn", lua.create_function(burn).expect("[accounts] Failed to create burn"))
+        .expect("[accounts] Failed to set burn");
 
     lua.globals()
         .set("accounts", accounts_table)

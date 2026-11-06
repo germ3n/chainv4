@@ -1369,7 +1369,16 @@ pub fn summary(kind: &str, value: &Value, coin: &Coin) -> String {
             None => "?".to_string(),
         },
         "evm_spec" => format!("{} from block {}", text("spec"), number("from")),
-        "dex" => format!("{}%", value["fee_bps"].as_u64().map_or_else(|| "?".to_string(), |bps| (bps as f64 / 100.0).to_string())),
+        "dex" => {
+            let tiers = value["tiers"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|bps| format!("{}%", bps as f64 / 100.0)).collect::<Vec<_>>();
+            let burned = value["protocol_permille"].as_u64().unwrap_or(0);
+
+            match tiers.is_empty() {
+                // From before tiers: the one fee.
+                true => format!("{}%", value["fee_bps"].as_u64().map_or_else(|| "?".to_string(), |bps| (bps as f64 / 100.0).to_string())),
+                false => format!("tiers {}, {}% of fees burned", tiers.join(", "), burned as f64 / 10.0),
+            }
+        }
         "collections" => {
             let count = |name: &str| value[name].as_array().map_or(0, Vec::len);
 

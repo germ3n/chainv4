@@ -43,6 +43,8 @@ pub enum Line {
     Account,
     /// A setting's path, as a lock names it: anchoring.enforce.
     Path,
+    /// A DEX's fee tier, in hundredths of a percent: 1 to 1,000, written as a number.
+    Tier,
 }
 
 /// The control a field takes, and how what is typed in it is written in the change's JSON.
@@ -206,7 +208,10 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("spec", "Hard fork", "No older than the one in force, so no deployed contract loses an opcode.", Control::Choice(EVM_SPECS)),
             field("from", "From block", "Must be ahead of the block that decides it; blocks below replay as they ran.", Control::Whole),
         ],
-        "dex" => vec![field("fee_bps", "Fee a trade keeps, in hundredths of a percent", "30 is 0.3%. Both DEXes charge it from the block after the decision.", Control::Small).most(1000)],
+        "dex" => vec![
+            field("tiers", "Fee tiers, in hundredths of a percent", "30 is 0.3%. A new pool picks one, at most 4, smallest first. A pool keeps its tier when the list changes.", Control::List(Line::Tier)),
+            field("protocol_permille", "Share of each trade's fee burned, in thousandths", "0 leaves it all to the pool's providers; 100 burns a tenth.", Control::Permille).most(1000),
+        ],
         "anchoring" => vec![
             field("bitcoin", "Bitcoin anchors", "Whether the chain takes proofs of its checkpoints written into Bitcoin.", Control::Flag { off: "Off", on: "On" }),
             field("ethereum", "Ethereum anchors", "Whether the chain takes proofs of its checkpoints written into Ethereum, checked against the Ethereum relay.", Control::Flag { off: "Off", on: "On" }),
@@ -402,7 +407,7 @@ pub fn defaults(kind: &str) -> Value {
         "bootnodes" | "token_functions" | "locks" => json!([]),
         "names" => json!({ "prices": [], "grace_ms": 7_776_000_000u64, "max_years": 100 }),
         "evm_spec" => json!({ "spec": "prague", "from": null }),
-        "dex" => json!({ "fee_bps": 30 }),
+        "dex" => json!({ "tiers": [5, 30, 100], "protocol_permille": 0 }),
         "anchoring" => json!({ "bitcoin": false, "ethereum": false, "enforce": false, "relay": null, "btc_start": null, "eth_relay": null, "eth_start": null, "depth": 6, "every": 90, "reward": "0" }),
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),

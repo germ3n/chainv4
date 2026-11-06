@@ -8,7 +8,7 @@ use {
 };
 
 /// The dev chain with a council of the authority alone, deciding any change with one Yes.
-fn governed(genesis: Genesis) -> Chain {
+pub(super) fn governed(genesis: Genesis) -> Chain {
     let genesis = Genesis {
         governance: Some(GovernanceConfig::Council { members: vec![authority().public().address()], threshold: 1, approval_epochs: 8, quorum_permille: 0 }),
         ..genesis
@@ -18,7 +18,7 @@ fn governed(genesis: Genesis) -> Chain {
 }
 
 /// Votes Yes on a change at its kind's version, which the council of one decides at once.
-fn decide(chain: &mut Chain, change: Change) {
+pub(super) fn decide(chain: &mut Chain, change: Change) {
     let version = Changes::new(&chain.state()).version_of(change.kind()).unwrap();
     let vote = Tx::VoteChange { version, change, vote: ChangeVote::Yes };
     // On a chain with fees the vote pays for itself, well above the base price.
@@ -208,8 +208,19 @@ fn token_functions_names_and_the_dex_fee_each_change_from_the_next_block() {
     let names = next(&chain).rules.names.unwrap();
     assert_eq!((names.grace_ms, names.max_years, names.suffix.as_str()), (1_000, 3, "dev"), "the suffix stays genesis's");
 
-    assert_eq!(next(&chain).rules.vm.dex.fee_bps, 30, "0.3% until governance says otherwise");
-    decide(&mut chain, Change::Dex(crate::params::vm::DexSettings { fee_bps: 50 }));
-    assert_eq!(next(&chain).rules.vm.dex.fee_bps, 50);
-    assert!(refused_change(&mut chain, Change::Dex(crate::params::vm::DexSettings { fee_bps: 1_001 })).contains("10%"));
+    use crate::params::vm::DexSettings;
+
+    assert_eq!(next(&chain).rules.vm.dex, DexSettings::DEFAULT, "0.05%, 0.3% and 1%, nothing burned, until governance says otherwise");
+    let decided = DexSettings { tiers: [1, 30, 0, 0], protocol_permille: 250 };
+    decide(&mut chain, Change::Dex(decided));
+    assert_eq!((next(&chain).rules.vm.dex.offered(), next(&chain).rules.vm.dex.protocol_permille), (vec![1, 30], 250));
+    for (bad, why) in [
+        (DexSettings { tiers: [1_001, 0, 0, 0], ..decided }, "10%"),
+        (DexSettings { tiers: [30, 5, 0, 0], ..decided }, "go up"),
+        (DexSettings { tiers: [5, 0, 30, 0], ..decided }, "none left out"),
+        (DexSettings { tiers: [0; 4], ..decided }, "at least one"),
+        (DexSettings { protocol_permille: 1_001, ..decided }, "protocol_permille"),
+    ] {
+        assert!(refused_change(&mut chain, Change::Dex(bad)).contains(why), "{bad:?}");
+    }
 }

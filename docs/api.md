@@ -50,7 +50,8 @@ Where the chain stands:
 | `name` | The chain's name, genesis's or the one governance decided last, such as `chainv4 testnet`, or `null` for a chain that has none: what the apps call the network. |
 | `bodies_from` | The lowest height whose block this node holds whole: 0 for one that holds every block, the block after the snapshot it synced from, or where it pruned to with `--prune-blocks`. Below it, `GET /blocks/{block}` answers the header alone, with `bodies_from`, and transactions there are not found. |
 | `names_suffix` | The ending every [name](names.md) on the chain has, such as `dev` for `alice.dev`, which genesis sets once, or `null` for a chain without names: what the apps strip to find a name's record. |
-| `dex_fee_bps` | The DEX's fee for the next block, in hundredths of a percent, which both DEXes charge. |
+| `dex_tiers` | The fee tiers a new pool may open at on both DEXes for the next block, in hundredths of a percent, smallest first. A pool keeps its own tier: the native DEX's `pool_at` and an EVM pair's `fee()` say it. |
+| `dex_protocol_permille` | The thousandths of each DEX trade's fee burned, for the next block. |
 | `evm_spec` | The EVM's spec for the next block, such as `prague`. |
 | `swap` | `null`, or `{"contract": …}`: the [swap contract](swaps.md) the `directory` names, else the one a node started with `--swap-contract` names, for the wallet and `chainv4 swap`. |
 | `dex` | `null`, or `{"contract": …, "router": …}`, either `null`: the [DEX](dex.md) and the EVM DEX's router the `directory` names, each else the one a node started with `--dex-contract` and `--dex-router` names. |

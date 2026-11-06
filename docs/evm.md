@@ -249,6 +249,18 @@ bytes memory out = Native(address(0x4e43)).callNative{value: msg.value}(counter,
 uint64 total = abi.decode(out, (uint64));
 ```
 
+The same precompile answers the [DEXes' settings](dex.md#fee-tiers-and-the-burned-share), for
+`Dex.sol` and any contract that wants them, at what the crypto precompile charges for a federation
+read:
+
+```solidity
+interface ChainSettings {
+    function dexTier(uint256 fee) external view returns (uint256);   // 1 if a new pool may open at it
+    function dexProtocolPermille() external view returns (uint256);  // thousandths of a fee burned
+}
+```
+
+For `callNative`:
 - `target` is the native contract's 32 bytes, as `contract:0x…` writes them.
 - `types` lists its arguments' native types, comma separated, and `args` holds them ABI-encoded
   as these:

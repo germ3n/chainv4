@@ -55,8 +55,10 @@ pub const NATIVE_PRECOMPILE: [u8; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 
 
 const CALL_NATIVE: &str = "callNative(bytes32,string,string,bytes)";
-/// The DEX's fee in basis points, as governance set it: what the EVM DEX charges.
-const DEX_FEE: &str = "dexFeeBps()";
+/// What answers whether a fee, in basis points, is a tier a new EVM DEX pair may pick: 1 or 0.
+const DEX_TIER: &str = "dexTier(uint256)";
+/// What answers the share of each DEX fee the protocol burns, in thousandths.
+const DEX_PROTOCOL: &str = "dexProtocolPermille()";
 
 const USAGE: &str = "call callNative(bytes32 target, string name, string types, bytes args)";
 
@@ -144,14 +146,28 @@ impl NativeAt<'_> {
         let input = inputs.input.as_bytes(context).to_vec();
         let costs = self.block.vm.costs;
 
-        // The DEX's fee: one of the chain's settings, read as a native contract reads it.
-        if input.as_slice() == &keccak256(DEX_FEE.as_bytes())[..4] {
+        // The DEXes' settings, read as a native contract reads them: whether a fee is a tier a
+        // new pool may pick, and the share of each fee burned.
+        let tier = input.len() == 36 && input[..4] == keccak256(DEX_TIER.as_bytes())[..4];
+        let protocol = input.as_slice() == &keccak256(DEX_PROTOCOL.as_bytes())[..4];
+
+        if tier || protocol {
             if costs.federation > inputs.gas_limit {
                 return PrecompileOutput::halt(PrecompileHalt::OutOfGas, inputs.reservoir);
             }
 
+            let dex = self.block.vm.dex;
+            let answer = match tier {
+                true => {
+                    let asked = &input[4..];
+                    let fee = asked[..28].iter().all(|byte| *byte == 0).then(|| u32::from_be_bytes(asked[28..].try_into().expect("4 bytes")));
+
+                    u32::from(fee.is_some_and(|fee| dex.offers(fee)))
+                }
+                false => dex.protocol_permille,
+            };
             let mut word = [0u8; 32];
-            word[28..].copy_from_slice(&self.block.vm.dex.fee_bps.to_be_bytes());
+            word[28..].copy_from_slice(&answer.to_be_bytes());
 
             return PrecompileOutput::new(costs.federation, Bytes::from(word.to_vec()), inputs.reservoir);
         }

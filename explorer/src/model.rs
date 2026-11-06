@@ -29,10 +29,16 @@ pub struct Status {
     /// The functions that make a contract a token on this chain; none keeps no registry.
     #[serde(default)]
     pub token_functions: Vec<String>,
-    /// The DEX's fee in force, in hundredths of a percent; none from older nodes, which charged
-    /// 0.3%.
+    /// The fee tiers a new pool may open at, in hundredths of a percent; none from older nodes,
+    /// which had the one fee below.
+    #[serde(default)]
+    pub dex_tiers: Option<Vec<u32>>,
+    /// The one fee older nodes charged every trade.
     #[serde(default)]
     pub dex_fee_bps: Option<u32>,
+    /// The thousandths of each trade's fee burned; none from older nodes, which burned none.
+    #[serde(default)]
+    pub dex_protocol_permille: Option<u32>,
     /// The EVM's spec for the next block, such as prague; none from older nodes. What contract
     /// reads run here go by, off the browser.
     #[serde(default)]
@@ -87,6 +93,19 @@ pub fn chain_name(name: Option<&str>) -> &str {
 }
 
 impl Status {
+    /// The DEXes' settings in force, as the node says them: the defaults where it says nothing.
+    pub fn dex(&self) -> chainv4::params::vm::DexSettings {
+        let mut status = serde_json::json!({ "dex_protocol_permille": self.dex_protocol_permille });
+
+        match (&self.dex_tiers, self.dex_fee_bps) {
+            (Some(tiers), _) => status["dex_tiers"] = serde_json::json!(tiers),
+            (None, Some(fee)) => status["dex_fee_bps"] = serde_json::json!(fee),
+            (None, None) => {}
+        }
+
+        chainv4::params::json::dex_from_status(&status)
+    }
+
     /// The chain's name to show, [`UNNAMED`] for a chain without one.
     pub fn chain_name(&self) -> &str {
         chain_name(self.name.as_deref())

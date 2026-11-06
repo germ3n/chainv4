@@ -768,18 +768,25 @@ with.
   coin, tokens and ERC-20s on the EVM, each pool's shares a clone of `contracts/lua/lp_token.lua`,
   and `contracts/evm/Dex.sol`'s WDEV, factory, pairs and router; `contracts.clone` for contracts
   that make contracts; `chainv4 dex`; the wallet's Trade page. See [DEX](dex.md).
-- [ ] **Decide what the DEXes' fees are for.** Today every trade's 0.3% stays in the pool, for its
-  liquidity providers alone, on both DEXes, fixed in the code. Decide whether part of it goes
-  elsewhere (a protocol share to a treasury, burned like the chain's fees, or to stakers), whether
-  the rate is one for all pools or set per pool, and whether governance sets either, as it sets
-  the chain's own fees; then the native DEX, Dex.sol and the apps' quotes follow.
+- [x] **Decide what the DEXes' fees are for.** Done 2026-11-06 in batch 13: each pool picks a fee
+  tier when it opens, from the governed `dex.tiers`, one pool per pair and tier; a governed share
+  of each fee, `dex.protocol_permille`, 0 by default, is burned, the coin out of the supply and
+  tokens to the zero address or `0x…dEaD`; the rest stays with the pool's providers. See
+  [DEX](dex.md#fee-tiers-and-the-burned-share).
 - [x] **The DEX and swaps in the explorer.** A DEX page, both DEXes' pools with prices, volume and
   fees over a day and a week, a pool's price chart and latest activity; a Swaps page, the swap
   contract's locks, claims and refunds with each lock's finality, and a swap found by hash or by
   its code. See [Explorer](explorer.md).
-- [ ] **The DEX: next.** Price oracles (time-weighted prices, as V2's cumulative ones), flash
-  swaps, a fee switch for the protocol, concentrated liquidity (V3's ranges), and routing across
-  both DEXes at once.
+- [x] **The DEX: next.** Done 2026-11-06 in batch 13, on both DEXes: V2's cumulative prices for
+  time-weighted ones, flash swaps, the burned protocol share, fee tiers, and `contracts/lua/router.lua`
+  dividing one trade between both DEXes, which `dex::best_split` and `chainv4 dex swap --split` work
+  out. See [DEX](dex.md).
+- [ ] **The DEX in the apps, with batch 15.** The wallet's Trade page routes within the DEX switched
+  to, at every tier, and opens a new pool at 0.3%. Left: a split route through router.lua (and the
+  directory naming router.lua, which only `--split-router` names now), picking a tier when opening
+  a pool, and time-weighted prices shown in the wallet and the explorer.
+- [ ] **Concentrated liquidity.** V3's ranges: liquidity placed between two prices, ticks, and
+  positions as NFTs. Not planned yet.
 - [x] **Native calls in EVM traces.** Done 2026-11-04. The EVM's inspector records every frame as a
   hop (calls, delegate calls, creates as the new `create` kind), and the native precompile puts each
   native call's hops under the frame that made it, events placed where they land; `evm.call` from Lua

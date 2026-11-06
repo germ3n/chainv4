@@ -1203,8 +1203,27 @@ voting finality it now goes back to the checkpoint and follows the node from the
   key, which swap.lua uses inside, is no valid key, and transactions refuse it as an argument.
 - **ERC-20s in native pools** are approved to the DEX's EVM address, as the EVM sees it, not its
   `contract:` one.
-- **The two DEXes are separate:** their pools do not share liquidity, and a trade goes through
-  one or the other. The EVM DEX trades the coin as WDEV, and Lua tokens not at all.
+- **The two DEXes are separate:** their pools do not share liquidity. A trade goes through one or
+  the other, or through `contracts/lua/router.lua`, which divides it between both in one
+  transaction. The EVM DEX trades the coin as WDEV, and Lua tokens not at all.
+- **A pool is a pair and a fee tier,** so a pair may have a pool at each tier. Every call names the
+  tier, `fee`, in hundredths of a percent: the native DEX's functions after the two assets, the
+  EVM router's after them too, and its swaps a `uint256[] fees` beside the path. Calls without it
+  fail, so contracts and scripts that call either DEX change with them. The wallet and
+  `chainv4 dex` default to 0.3%.
+- **A tier voted off the list keeps its pools.** Only a new pool must take a tier the chain offers;
+  one already open trades on at its own.
+- **The burned share comes out of the pool, not the trader.** A trade pays out as at any tier;
+  what the pool keeps of the fee is smaller. A token's share goes to the zero address, which no
+  transaction can name, so it is gone; an ERC-20's to `0x…dEaD`.
+- **The tier comes last in the native DEX's events:** `Sync`, `Swap`, `Mint` and `Burn` gained it,
+  so readers that took the old fields by position still read them. Events from before have none,
+  and the apps take them for a pair's pool at any tier.
+- **Flash loans lock the native DEX:** while one is out, only `repay` takes calls. A borrower pays
+  the coin back through `repay`, and tokens by approving the DEX; either way `on_flash` returns
+  what it pays of each, and coin sent to `repay` past that comes back.
+- **The two DEXes' cumulative prices differ:** the native one sums 10^18 fixed point over
+  milliseconds, the EVM's UQ112x112 over seconds, as V2 does.
 - **Gas estimates are checked now:** `POST /offer` and `eth_estimateGas` try the limit they give
   and raise it until a run succeeds. A DEX router's nested calls need more gas than they use, and
   failed with no reason before.

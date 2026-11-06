@@ -542,7 +542,7 @@ and `debug` are not there at all.
 | --- | --- |
 | `ctx` | `ctx.sender`, `ctx.contract`, `ctx.value`, `ctx.args`, the call's arguments as a values list, and `ctx.time` and `ctx.height`, the block's time in milliseconds since 1970 and its height: the header's, the same on every node, for deadlines. |
 | `storage` | `storage.get(key)`, `storage.set(key, value)`; `nil` deletes. Keys and values are strings. `storage.namespace(name)` and `storage.own` have the same `get` and `set`, as methods, on keys of their own. |
-| `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance. |
+| `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance, `accounts.burn(amount)`: coin out of the contract's balance and out of the supply, as the chain's fees burn it, kept only if the call succeeds. |
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.check_layout(from, to)`, `contracts.selector(name)`, `contracts.clone(template, salt, ...)`, `contracts.cloned_at(salt)`. |
 | `events` | `events.emit(name, ...)`. |
 | `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
@@ -554,7 +554,7 @@ and `debug` are not there at all.
 | `hash` | `hash.sha256`, `blake3`, `blake2s`, `blake2b`, `xxh3`, `keccak256`, whichever the node has; the result has `hex`, `bytes`, `algorithm`. |
 | `crypto` | See [Crypto](#crypto). |
 | `federation` | `federation.get()`: the bridges' federation in force, `{ version, threshold, signers }`, or `nil`. `federation.at(version)`: the one of any version, in force or past, as the chain keeps every one it decided, with `decided_height` and `decided_time`, the block that decided it, and once the next was decided, `replaced_height` and `replaced_time`, that block's; `nil` for a version never decided. Version 0 is genesis's. Each costs what reading the one in force does. See [Bridges](bridges.md#the-federation). |
-| `chain` | `chain.id()`: the chain's id, what its EVM answers `CHAINID` with and the [bridges](bridges.md) name it by. Six bytes of its genesis id, so nothing an owner sets: bind to it whatever must hold on this chain alone. |
+| `chain` | `chain.id()`: the chain's id, what its EVM answers `CHAINID` with and the [bridges](bridges.md) name it by. Six bytes of its genesis id, so nothing an owner sets: bind to it whatever must hold on this chain alone. `chain.dex()`: the [DEXes' settings](dex.md#fee-tiers-and-the-burned-share) for this block, `{ tiers = {5, 30, 100}, protocol_permille = 0 }`. |
 
 ### Crypto
 
@@ -751,6 +751,7 @@ into its exported memory.
 | `block_time`, `block_height` | The block's time, in milliseconds since 1970, and its height, as `i64`s: the SDK's `block_time()` and `block_height()`. |
 | `hash` | Hashes bytes with a chosen algorithm. |
 | `balance`, `transfer` | Funds, from the contract's own balance. |
+| `burn` | Coin out of the contract's own balance and the supply, the SDK's `burn`. |
 | `call`, `delegate` | Other contracts: `call(address, value, name, name_len, args, args_len)`. |
 | `check_layout` | Whether one contract's code keeps another's storage layout. |
 | `emit` | An event. |

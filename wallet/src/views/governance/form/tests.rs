@@ -102,7 +102,7 @@ fn every_shape() -> Vec<Change> {
         Change::TokenFunctions(vec!["balance_of".to_string(), "transfer".to_string()]),
         Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32]), Address::Ed25519([2; 32])], threshold: 2, approval_epochs: 64, quorum_permille: 500 }),
         Change::EvmSpec { spec: chainv4::params::vm::EvmSpec::Osaka, from: 5_000 },
-        Change::Dex(chainv4::params::vm::DexSettings { fee_bps: 25 }),
+        Change::Dex(chainv4::params::vm::DexSettings { tiers: [5, 25, 100, 0], protocol_permille: 100 }),
         Change::Anchoring(chainv4::params::anchoring::AnchorSettings::OFF),
         Change::Anchoring(chainv4::params::anchoring::AnchorSettings {
             bitcoin: true,

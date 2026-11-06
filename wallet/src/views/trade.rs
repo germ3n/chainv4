@@ -58,6 +58,7 @@ enum Read {
     Token0([u8; 20]),
     Token1([u8; 20]),
     Reserves([u8; 20]),
+    Fee([u8; 20]),
     Held([u8; 20]),
     Supply([u8; 20]),
 }
@@ -72,6 +73,8 @@ struct EvmDex {
     pair_count: u64,
     tokens: HashMap<[u8; 20], ([u8; 20], [u8; 20])>,
     reserves: HashMap<[u8; 20], (u256, u256)>,
+    /// Each pair's fee tier, fixed when it opened.
+    fees: HashMap<[u8; 20], u32>,
 }
 
 pub struct TradeState {
@@ -284,6 +287,11 @@ impl TradeState {
                     evm.reserves.insert(pair, (zero, one));
                 }
             }
+            Read::Fee(pair) => {
+                if let Some(fee) = number_word(&output, 0).and_then(|fee| u32::try_from(fee).ok()) {
+                    evm.fees.insert(pair, fee);
+                }
+            }
             Read::Held(pair) => {
                 if let Some(held) = number_word(&output, 0) {
                     self.held.insert(Address::Evm(pair).to_string(), held);
@@ -336,8 +344,9 @@ impl TradeState {
                     .filter_map(|pair| {
                         let (zero, one) = self.evm.tokens.get(pair).filter(|(zero, one)| *zero != [0; 20] && *one != [0; 20])?;
                         let (held0, held1) = self.evm.reserves.get(pair)?;
+                        let fee_bps = *self.evm.fees.get(pair)?;
 
-                        Some(DexPool { a: coin(*zero), b: coin(*one), reserve_a: *held0, reserve_b: *held1, share: Address::Evm(*pair) })
+                        Some(DexPool { a: coin(*zero), b: coin(*one), fee_bps, reserve_a: *held0, reserve_b: *held1, share: Address::Evm(*pair), venue: chainv4::dex::Venue::Evm })
                     })
                     .collect()
             }
@@ -412,6 +421,7 @@ fn refresh(ctx: &mut Ctx, state: &mut TradeState, time: f64) {
                 if !state.evm.tokens.contains_key(&pair) {
                     state.read(ctx, pair, calldata("token0()", none, &[]), Read::Token0(pair));
                     state.read(ctx, pair, calldata("token1()", none, &[]), Read::Token1(pair));
+                    state.read(ctx, pair, calldata("fee()", none, &[]), Read::Fee(pair));
                 }
 
                 state.read(ctx, pair, calldata("getReserves()", none, &[]), Read::Reserves(pair));
@@ -741,7 +751,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
         let mut to = state.to.filter(|to| assets.contains(to)).unwrap_or_else(|| *assets.iter().find(|asset| **asset != state.from).unwrap_or(&COIN));
         let amount = parse_amount(ctx, &state.from, &state.amount);
         let same = state.from == to;
-        let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount, ctx.dex_fee_bps));
+        let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount));
         let held = held_of(ctx, state.sender, &state.from);
         let wide = ui.available_width() >= SIDE_BY_SIDE;
         let mut flip = false;
@@ -830,8 +840,8 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
             });
             detail(ui, &palette, "Fee", |ui| {
                 ui.label(match route.middle {
-                    None => format!("{}, {}", percent_of(ctx.dex_fee_bps), shown(ctx, &from, fee_of(amount, ctx.dex_fee_bps))),
-                    Some(_) => format!("{} at each of 2 pools", percent_of(ctx.dex_fee_bps)),
+                    None => format!("{}, {}", percent_of(route.fee_bps), shown(ctx, &from, fee_of(amount, route.fee_bps))),
+                    Some((_, second)) => format!("{} then {}, at 2 pools", percent_of(route.fee_bps), percent_of(second)),
                 });
             });
             detail(ui, &palette, "Minimum received", |ui| {
@@ -840,7 +850,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
             detail(ui, &palette, "Route", |ui| {
                 let route = match route.middle {
                     None => format!("{paid} → {got}"),
-                    Some(middle) => format!("{paid} → {} → {got}", symbol(ctx, &middle)),
+                    Some((middle, _)) => format!("{paid} → {} → {got}", symbol(ctx, &middle)),
                 };
                 ui.label(theme::arrowed(ui, &route, egui::TextStyle::Body, palette.soft));
             });
@@ -867,7 +877,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
         if chainv4_ui::widgets::primary_wide(ui, &palette, label, goes && me.is_some()).clicked()
             && let (Some(amount), Some(me), Some(route)) = (amount, me, &route)
         {
-            *prepared = swap(ctx, state, me, amount, to, route.middle, least_out(route.out, slippage(state)));
+            *prepared = swap(ctx, state, me, amount, to, route, least_out(route.out, slippage(state)));
         }
     });
 }
@@ -890,7 +900,7 @@ fn approve_input(spender: [u8; 20], amount: u256) -> Vec<u8> {
 }
 
 /// The trade itself, on the venue shown.
-fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, middle: Option<Address>, least: u256) -> Option<Prepared> {
+fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, route: &chainv4::dex::TradeRoute, least: u256) -> Option<Prepared> {
     let what = format!("Trade {} for {}", symbol(ctx, &state.from), symbol(ctx, &to));
 
     match state.venue {
@@ -898,11 +908,15 @@ fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, m
             let mut args = vec![
                 TxCallArgumentType::Address(state.from),
                 TxCallArgumentType::Address(to),
+                TxCallArgumentType::I64(i64::from(route.fee_bps)),
                 TxCallArgumentType::U256(amount),
                 TxCallArgumentType::U256(least),
                 TxCallArgumentType::I64((ctx.now + ctx.settings.trade_deadline_ms()) as i64),
             ];
-            args.extend(middle.map(TxCallArgumentType::Address));
+
+            if let Some((middle, fee)) = route.middle {
+                args.extend([TxCallArgumentType::Address(middle), TxCallArgumentType::I64(i64::from(fee))]);
+            }
             let coin = if state.from == COIN { amount } else { u256::ZERO };
 
             Some(native_call(me, dex(ctx)?, "swap", args, coin, what))
@@ -914,13 +928,24 @@ fn swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, m
                 Address::Evm(token) => Some(*token),
                 _ => None,
             };
-            let path = AbiValue::Array([Some(state.from), middle, Some(to)].into_iter().flatten().map(|asset| token(&asset).map(AbiValue::Address)).collect::<Option<Vec<_>>>()?);
+            let path = AbiValue::Array([Some(state.from), route.middle.map(|(middle, _)| middle), Some(to)].into_iter().flatten().map(|asset| token(&asset).map(AbiValue::Address)).collect::<Option<Vec<_>>>()?);
+            let fees = AbiValue::Array([Some(route.fee_bps), route.middle.map(|(_, fee)| fee)].into_iter().flatten().map(|fee| AbiValue::Uint(u256::from(fee))).collect());
+            let tiers = AbiType::Array(Box::new(AbiType::Uint(256)));
             let (recipient, deadline) = (AbiValue::Address(evm_address(&me)), AbiValue::Uint(u256::from((ctx.now + ctx.settings.trade_deadline_ms()) / 1_000)));
             let addresses = AbiType::Array(Box::new(AbiType::Address));
             let (input, value) = match (state.from == COIN, to == COIN) {
-                (true, _) => (calldata("swapExactDEVForTokens(uint256,address[],address,uint256)", &[AbiType::Uint(256), addresses, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(least), path, recipient, deadline]), amount),
-                (_, true) => (calldata("swapExactTokensForDEV(uint256,uint256,address[],address,uint256)", &[AbiType::Uint(256), AbiType::Uint(256), addresses, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(amount), AbiValue::Uint(least), path, recipient, deadline]), u256::ZERO),
-                _ => (calldata("swapExactTokensForTokens(uint256,uint256,address[],address,uint256)", &[AbiType::Uint(256), AbiType::Uint(256), addresses, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(amount), AbiValue::Uint(least), path, recipient, deadline]), u256::ZERO),
+                (true, _) => (
+                    calldata("swapExactDEVForTokens(uint256,address[],uint256[],address,uint256)", &[AbiType::Uint(256), addresses, tiers, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(least), path, fees, recipient, deadline]),
+                    amount,
+                ),
+                (_, true) => (
+                    calldata("swapExactTokensForDEV(uint256,uint256,address[],uint256[],address,uint256)", &[AbiType::Uint(256), AbiType::Uint(256), addresses, tiers, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(amount), AbiValue::Uint(least), path, fees, recipient, deadline]),
+                    u256::ZERO,
+                ),
+                _ => (
+                    calldata("swapExactTokensForTokens(uint256,uint256,address[],uint256[],address,uint256)", &[AbiType::Uint(256), AbiType::Uint(256), addresses, tiers, AbiType::Address, AbiType::Uint(256)], &[AbiValue::Uint(amount), AbiValue::Uint(least), path, fees, recipient, deadline]),
+                    u256::ZERO,
+                ),
             };
 
             Some(evm_call(me, router(ctx)?, input, value, what))
@@ -1019,7 +1044,7 @@ fn pool_panel(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool
             }
 
             if theme::primary(ui, &palette, "Add", true).clicked() {
-                *prepared = add(ctx, state, me, &pool.a, &pool.b, amount_a, amount_b);
+                *prepared = add(ctx, state, me, &pool.a, &pool.b, pool.fee_bps, amount_a, amount_b);
             }
         });
     }
@@ -1063,7 +1088,16 @@ fn pool_panel(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool
 }
 
 /// Adding to a pair, opening it if it is new: at the slippage allowed below what is offered.
-fn add(ctx: &Ctx, state: &TradeState, me: Address, a: &Address, b: &Address, amount_a: u256, amount_b: u256) -> Option<Prepared> {
+/// The tier a new pool opens at here: 0.3% where the chain offers it, else its first tier.
+fn opening_tier(dex: &chainv4::params::vm::DexSettings) -> u32 {
+    match dex.offers(chainv4::dex::DEFAULT_FEE_BPS) {
+        true => chainv4::dex::DEFAULT_FEE_BPS,
+        false => dex.offered().first().copied().unwrap_or(chainv4::dex::DEFAULT_FEE_BPS),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add(ctx: &Ctx, state: &TradeState, me: Address, a: &Address, b: &Address, fee: u32, amount_a: u256, amount_b: u256) -> Option<Prepared> {
     let slip = slippage(state);
     let what = format!("Add to {} / {}", symbol(ctx, a), symbol(ctx, b));
 
@@ -1073,6 +1107,7 @@ fn add(ctx: &Ctx, state: &TradeState, me: Address, a: &Address, b: &Address, amo
             let args = vec![
                 TxCallArgumentType::Address(*a),
                 TxCallArgumentType::Address(*b),
+                TxCallArgumentType::I64(i64::from(fee)),
                 TxCallArgumentType::U256(amount_a),
                 TxCallArgumentType::U256(amount_b),
                 TxCallArgumentType::U256(least_out(amount_a, slip)),
@@ -1088,16 +1123,16 @@ fn add(ctx: &Ctx, state: &TradeState, me: Address, a: &Address, b: &Address, amo
             let (input, value) = match (a, b) {
                 (coin, Address::Evm(token)) | (Address::Evm(token), coin) if *coin == COIN => {
                     let (amount_token, amount_coin) = if *a == COIN { (amount_b, amount_a) } else { (amount_a, amount_b) };
-                    let types = [AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
-                    let values = [AbiValue::Address(*token), n(amount_token), n(least_out(amount_token, slip)), n(least_out(amount_coin, slip)), recipient, deadline];
+                    let types = [AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
+                    let values = [AbiValue::Address(*token), n(u256::from(fee)), n(amount_token), n(least_out(amount_token, slip)), n(least_out(amount_coin, slip)), recipient, deadline];
 
-                    (calldata("addLiquidityDEV(address,uint256,uint256,uint256,address,uint256)", &types, &values), amount_coin)
+                    (calldata("addLiquidityDEV(address,uint256,uint256,uint256,uint256,address,uint256)", &types, &values), amount_coin)
                 }
                 (Address::Evm(token_a), Address::Evm(token_b)) => {
-                    let types = [AbiType::Address, AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
-                    let values = [AbiValue::Address(*token_a), AbiValue::Address(*token_b), n(amount_a), n(amount_b), n(least_out(amount_a, slip)), n(least_out(amount_b, slip)), recipient, deadline];
+                    let types = [AbiType::Address, AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
+                    let values = [AbiValue::Address(*token_a), AbiValue::Address(*token_b), n(u256::from(fee)), n(amount_a), n(amount_b), n(least_out(amount_a, slip)), n(least_out(amount_b, slip)), recipient, deadline];
 
-                    (calldata("addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)", &types, &values), u256::ZERO)
+                    (calldata("addLiquidity(address,address,uint256,uint256,uint256,uint256,uint256,address,uint256)", &types, &values), u256::ZERO)
                 }
                 _ => return None,
             };
@@ -1115,6 +1150,7 @@ fn remove(ctx: &Ctx, state: &TradeState, me: Address, pool: &DexPool, shares: u2
             let args = vec![
                 TxCallArgumentType::Address(pool.a),
                 TxCallArgumentType::Address(pool.b),
+                TxCallArgumentType::I64(i64::from(pool.fee_bps)),
                 TxCallArgumentType::U256(shares),
                 TxCallArgumentType::U256(least_a),
                 TxCallArgumentType::U256(least_b),
@@ -1129,14 +1165,14 @@ fn remove(ctx: &Ctx, state: &TradeState, me: Address, pool: &DexPool, shares: u2
             let input = match (pool.a, pool.b) {
                 (coin, Address::Evm(token)) | (Address::Evm(token), coin) if coin == COIN => {
                     let (least_token, least_coin) = if pool.a == COIN { (least_b, least_a) } else { (least_a, least_b) };
-                    let types = [AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
+                    let types = [AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
 
-                    calldata("removeLiquidityDEV(address,uint256,uint256,uint256,address,uint256)", &types, &[AbiValue::Address(token), n(shares), n(least_token), n(least_coin), recipient, deadline])
+                    calldata("removeLiquidityDEV(address,uint256,uint256,uint256,uint256,address,uint256)", &types, &[AbiValue::Address(token), n(u256::from(pool.fee_bps)), n(shares), n(least_token), n(least_coin), recipient, deadline])
                 }
                 (Address::Evm(a), Address::Evm(b)) => {
-                    let types = [AbiType::Address, AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
+                    let types = [AbiType::Address, AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Uint(256), AbiType::Address, AbiType::Uint(256)];
 
-                    calldata("removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)", &types, &[AbiValue::Address(a), AbiValue::Address(b), n(shares), n(least_a), n(least_b), recipient, deadline])
+                    calldata("removeLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)", &types, &[AbiValue::Address(a), AbiValue::Address(b), n(u256::from(pool.fee_bps)), n(shares), n(least_a), n(least_b), recipient, deadline])
                 }
                 _ => return None,
             };
@@ -1198,7 +1234,7 @@ fn create(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, prepared: &mut Option<
                 }
 
                 if theme::primary(ui, &palette, "Open it", true).clicked() {
-                    *prepared = add(ctx, state, me, &a, &b, amount_a, amount_b);
+                    *prepared = add(ctx, state, me, &a, &b, opening_tier(&ctx.dex_settings), amount_a, amount_b);
                 }
             });
         });
@@ -1250,12 +1286,19 @@ fn prices(events: &[Value], pool: &DexPool, decimals_a: u8, decimals_b: u8) -> V
         .iter()
         .filter_map(|event| {
             let data: Vec<String> = event["data"].as_array()?.iter().map(text).collect();
-            let [a, b, reserve_a, reserve_b] = data.as_slice() else {
-                return None;
+            // The tier last, from Sync events since tiers; before, every pool was the one tier.
+            let (a, b, reserve_a, reserve_b, fee) = match data.as_slice() {
+                [a, b, reserve_a, reserve_b, fee] => (a, b, reserve_a, reserve_b, fee.parse().ok()?),
+                [a, b, reserve_a, reserve_b] => (a, b, reserve_a, reserve_b, pool.fee_bps),
+                _ => return None,
             };
             let (a, b): (Address, Address) = (a.parse().ok()?, b.parse().ok()?);
             let (reserve_a, reserve_b) = (u256::from_str_radix(reserve_a, 10).ok()?, u256::from_str_radix(reserve_b, 10).ok()?);
-            let synced = DexPool { a, b, reserve_a, reserve_b, share: pool.share };
+            let synced = DexPool { a, b, fee_bps: fee, reserve_a, reserve_b, share: pool.share, venue: pool.venue };
+
+            if synced.fee_bps != pool.fee_bps {
+                return None;
+            }
 
             if !synced.pairs(&pool.a, &pool.b) {
                 return None;

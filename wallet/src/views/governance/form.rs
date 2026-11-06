@@ -344,6 +344,10 @@ fn line_value(line: Line, text: &str, env: &Env) -> Result<Value, String> {
             Some(why) => Err(why),
             None => Ok(Value::String(text.to_string())),
         },
+        Line::Tier => match whole(text) {
+            Some(bps @ 1..=1000) => Ok(json!(bps)),
+            _ => Err("Hundredths of a percent, 1 to 1,000: 30 is 0.3%.".to_string()),
+        },
         _ => Ok(Value::String(text.to_string())),
     }
 }
@@ -1121,6 +1125,7 @@ fn list(ui: &mut Ui, palette: &theme::Palette, spec: &Spec, line: Line, draft: &
         Line::Price => (price_hint, false),
         Line::Account => ("ed25519:0x…", true),
         Line::Path => ("anchoring.enforce", true),
+        Line::Tier => ("30", false),
     };
 
     for (index, typed) in lines.iter_mut().enumerate() {

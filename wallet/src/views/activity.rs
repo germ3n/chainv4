@@ -957,7 +957,7 @@ mod tests {
             lights: &mut lights,
             #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
             walletconnect: None,
-            dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
+            dex_settings: chainv4::params::vm::DexSettings::DEFAULT,
         };
         let mut returned = None;
         let mut draw = Some(draw);

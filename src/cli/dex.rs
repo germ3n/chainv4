@@ -1,16 +1,18 @@
 //! `chainv4 dex`: the chain's DEXes from the command line. deploy sets them up, contracts/lua/dex.lua
 //! with its share token template, or with --evm the EVM's WDEV, DexFactory and DexRouter, from
-//! sources built into the binary. pools lists them, quote prices a trade through the best route,
-//! and swap, add and remove send what the wallet's Trade page sends: to the native DEX the chain's
-//! directory names, or else the node, or --dex; with --evm to the router found the same way, or
-//! --router. Each approves a token only when what the DEX may move of it already is short.
+//! sources built into the binary; deploy-router sets up contracts/lua/router.lua, which trades
+//! across both. pools lists them with their fee tiers, quote prices a trade through the best route,
+//! at any tiers, and swap, add and remove send what the wallet's Trade page sends: to the native DEX
+//! the chain's directory names, or else the node, or --dex; with --evm to the router found the same
+//! way, or --router; with --split through router.lua, divided between both. Each approves a token
+//! only when what the DEX may move of it already is short.
 
 use {
     super::send::{SendArgs, TlsArgs, TxArgs, agent, ok, send},
     super::{CliResult, deployed_at, parse_amount, signer},
     crate::abi::{AbiType, AbiValue, decode_values, encode_values, evm_address},
     crate::crypto::hasher::Hasher,
-    crate::dex::{COIN, DexPool, add_amounts, best_route, least_out},
+    crate::dex::{COIN, DexPool, Venue, add_amounts, best_route, best_split, least_out},
     crate::structs::address::Address,
     crate::structs::hash::HashType,
     crate::structs::hex::{from_hex, to_hex},
@@ -22,6 +24,7 @@ use {
 
 const DEX_LUA: &str = include_str!("../../contracts/lua/dex.lua");
 const LP_TOKEN_LUA: &str = include_str!("../../contracts/lua/lp_token.lua");
+const ROUTER_LUA: &str = include_str!("../../contracts/lua/router.lua");
 const WDEV_BIN: &str = include_str!("../../contracts/evm/WDEV.bin");
 const FACTORY_BIN: &str = include_str!("../../contracts/evm/DexFactory.bin");
 const ROUTER_BIN: &str = include_str!("../../contracts/evm/DexRouter.bin");
@@ -49,6 +52,9 @@ pub struct DexArgs {
     /// chain's directory names as dex_router, or else the node's --dex-router.
     #[arg(long, global = true)]
     pub router: Option<String>,
+    /// router.lua, which trades across both DEXes, for swap --split: contract:0x….
+    #[arg(long, global = true)]
+    pub split_router: Option<Address>,
 }
 
 #[derive(clap::Subcommand)]
@@ -56,7 +62,10 @@ pub enum DexAction {
     /// Deploys and sets up a DEX, printing where: the native one, dex.lua and its share token
     /// template; or with --evm, WDEV, the factory and the router.
     Deploy,
-    /// Lists the pools: their assets, what they hold of each, and their share tokens.
+    /// Deploys and sets up router.lua, which trades across both DEXes at once, naming the native
+    /// DEX and the EVM's router as the other commands find them.
+    DeployRouter,
+    /// Lists the pools: their assets, fee tiers, what they hold of each, and their share tokens.
     Pools,
     /// What a trade would pay now, through the best route, one pool or two.
     Quote {
@@ -82,6 +91,10 @@ pub enum DexAction {
         /// than the quote by more.
         #[arg(long, default_value_t = 0.5)]
         slippage: f64,
+        /// Divides the trade between both DEXes as pays the most, through router.lua
+        /// (--split-router), in one transaction.
+        #[arg(long)]
+        split: bool,
     },
     /// Adds to a pool at most these amounts: the largest pair at the pool's ratio that fits both,
     /// worked out from what it holds and said before it is sent, as Uniswap V2's router does. A new
@@ -102,6 +115,9 @@ pub enum DexAction {
         /// at least the pair worked out, less this, or nothing.
         #[arg(long, default_value_t = 0.5)]
         slippage: f64,
+        /// The pool's fee tier, in hundredths of a percent: one the chain offers for a new pool.
+        #[arg(long, default_value_t = crate::dex::DEFAULT_FEE_BPS)]
+        fee: u32,
     },
     /// Takes shares out of a pool, for its part of each asset. On the EVM, the router takes the
     /// shares, approved first when what it may move already is short.
@@ -113,6 +129,9 @@ pub enum DexAction {
         /// The shares, in their smallest units.
         #[arg(value_parser = parse_amount)]
         shares: u256,
+        /// The pool's fee tier, in hundredths of a percent.
+        #[arg(long, default_value_t = crate::dex::DEFAULT_FEE_BPS)]
+        fee: u32,
     },
 }
 
@@ -145,41 +164,104 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
             println!("share token template {template}");
             println!("dex {contract}");
         }
+        DexAction::DeployRouter => {
+            let me = signer(dex.args.key.as_deref())?.public().address();
+            let contract = dex.deploy_lua(&me, "router.lua", ROUTER_LUA)?;
+            let (native, router, wdev) = (dex.native()?, dex.router()?, Address::Evm(dex.wdev()?));
+            dex.call(contract, "setup", u256::ZERO, [native, router, wdev].map(TxCallArgumentType::Address).to_vec())?;
+            println!("router {contract}, trading across {native} and {router}");
+        }
         DexAction::Pools => {
             for pool in dex.pools()? {
-                println!("{} / {}: {} and {}, shares {}", pool.a, pool.b, pool.reserve_a, pool.reserve_b, pool.share);
+                println!("{} / {} at {} bps: {} and {}, shares {}", pool.a, pool.b, pool.fee_bps, pool.reserve_a, pool.reserve_b, pool.share);
             }
         }
         DexAction::Quote { from, to, amount } => {
             let (from, to) = (asset(from)?, asset(to)?);
-            let route = best_route(&dex.pools()?, &from, &to, *amount, dex.fee_bps()?).ok_or("no pool, nor two, trades these")?;
-            println!("{} out, price impact {:.2}%", route.out, f64::from(route.impact) / 100.0);
+            let route = best_route(&dex.pools()?, &from, &to, *amount).ok_or("no pool, nor two, trades these")?;
+            println!("{} out, price impact {:.2}%, through the {} bps pool", route.out, f64::from(route.impact) / 100.0, route.fee_bps);
 
-            if let Some(middle) = route.middle {
-                println!("through {middle}");
+            if let Some((middle, fee)) = route.middle {
+                println!("then through {middle}, at {fee} bps");
             }
         }
-        DexAction::Swap { from, to, amount, slippage } => {
+        DexAction::Swap { from, to, amount, slippage, split: true } => {
             let (from, to) = (asset(from)?, asset(to)?);
-            let route = best_route(&dex.pools()?, &from, &to, *amount, dex.fee_bps()?).ok_or("no pool, nor two, trades these")?;
+            let pools = [dex.pools_on(false)?, dex.pools_on(true)?].concat();
+            // Both listings name the coin and ERC-20s alike, so an asset is its own on the EVM.
+            let split = best_split(&pools, &from, &to, *amount, |asset| (*asset == COIN || matches!(asset, Address::Evm(_))).then_some(*asset)).ok_or("neither DEX trades these")?;
+            let least = least_out(split.out, percent(*slippage)?);
+            let router = dex.args.split_router.ok_or("--split needs --split-router, router.lua's address: chainv4 dex deploy-router")?;
+            let zero = TxCallArgumentType::U256(u256::ZERO);
+            let (native_amount, fee, middle, middle_fee) = match &split.native {
+                Some((part, route)) => (TxCallArgumentType::U256(*part), TxCallArgumentType::I64(i64::from(route.fee_bps)), route.middle.map_or(TxCallArgumentType::Nil, |(middle, _)| TxCallArgumentType::Address(middle)), route.middle.map_or(TxCallArgumentType::Nil, |(_, fee)| TxCallArgumentType::I64(i64::from(fee)))),
+                None => (zero.clone(), TxCallArgumentType::I64(i64::from(crate::dex::DEFAULT_FEE_BPS)), TxCallArgumentType::Nil, TxCallArgumentType::Nil),
+            };
+            let (evm_amount, evm_route) = match &split.evm {
+                Some((part, route)) => {
+                    let path = [Some(from), route.middle.map(|(middle, _)| middle), Some(to)].into_iter().flatten().map(|asset| dex.token(&asset).map(AbiValue::Address)).collect::<CliResult<Vec<_>>>()?;
+                    let fees = [Some(route.fee_bps), route.middle.map(|(_, fee)| fee)].into_iter().flatten().map(|fee| AbiValue::Uint(u256::from(fee))).collect();
+                    let encoded = encode_values(&[AbiType::Array(Box::new(AbiType::Address)), AbiType::Array(Box::new(AbiType::Uint(256)))], &[AbiValue::Array(path), AbiValue::Array(fees)])?;
+
+                    (TxCallArgumentType::U256(*part), TxCallArgumentType::Bytes(encoded))
+                }
+                None => (zero, TxCallArgumentType::Bytes(Vec::new())),
+            };
+            let args = vec![
+                TxCallArgumentType::Address(from),
+                TxCallArgumentType::Address(to),
+                TxCallArgumentType::U256(*amount),
+                TxCallArgumentType::U256(least),
+                TxCallArgumentType::I64(deadline as i64),
+                native_amount,
+                fee,
+                middle,
+                middle_fee,
+                evm_amount,
+                evm_route,
+            ];
+            dex.approve_for(&from, *amount, router)?;
+            dex.call(router, "route", if from == COIN { *amount } else { u256::ZERO }, args)?;
+            println!(
+                "traded {} natively and {} on the EVM, for at least {least}, quoted {}",
+                split.native.as_ref().map_or(u256::ZERO, |(part, _)| *part),
+                split.evm.as_ref().map_or(u256::ZERO, |(part, _)| *part),
+                split.out
+            );
+        }
+        DexAction::Swap { from, to, amount, slippage, .. } => {
+            let (from, to) = (asset(from)?, asset(to)?);
+            let route = best_route(&dex.pools()?, &from, &to, *amount).ok_or("no pool, nor two, trades these")?;
             let least = least_out(route.out, percent(*slippage)?);
             dex.approve(&from, *amount)?;
 
             match dex.args.evm {
                 false => {
-                    let mut args = vec![TxCallArgumentType::Address(from), TxCallArgumentType::Address(to), TxCallArgumentType::U256(*amount), TxCallArgumentType::U256(least), TxCallArgumentType::I64(deadline as i64)];
-                    args.extend(route.middle.map(TxCallArgumentType::Address));
+                    let mut args = vec![
+                        TxCallArgumentType::Address(from),
+                        TxCallArgumentType::Address(to),
+                        TxCallArgumentType::I64(i64::from(route.fee_bps)),
+                        TxCallArgumentType::U256(*amount),
+                        TxCallArgumentType::U256(least),
+                        TxCallArgumentType::I64(deadline as i64),
+                    ];
+
+                    if let Some((middle, fee)) = route.middle {
+                        args.extend([TxCallArgumentType::Address(middle), TxCallArgumentType::I64(i64::from(fee))]);
+                    }
+
                     dex.call(dex.native()?, "swap", if from == COIN { *amount } else { u256::ZERO }, args)?;
                 }
                 true => {
                     let me = signer(dex.args.key.as_deref())?.public().address();
-                    let path = [Some(from), route.middle, Some(to)].into_iter().flatten().map(|asset| dex.token(&asset)).collect::<CliResult<Vec<_>>>()?;
+                    let path = [Some(from), route.middle.map(|(middle, _)| middle), Some(to)].into_iter().flatten().map(|asset| dex.token(&asset)).collect::<CliResult<Vec<_>>>()?;
                     let path = format!("[{}]", path.iter().map(|token| format!("\"{}\"", to_hex(token))).collect::<Vec<_>>().join(","));
+                    let fees = format!("[{}]", [Some(route.fee_bps), route.middle.map(|(_, fee)| fee)].into_iter().flatten().map(|fee| fee.to_string()).collect::<Vec<_>>().join(","));
                     let (me, deadline) = (to_hex(&evm_address(&me)), (deadline / 1_000).to_string());
                     let (function, args, value) = match (from == COIN, to == COIN) {
-                        (true, _) => ("swapExactDEVForTokens(uint256,address[],address,uint256)", vec![least.to_string(), path, me, deadline], *amount),
-                        (_, true) => ("swapExactTokensForDEV(uint256,uint256,address[],address,uint256)", vec![amount.to_string(), least.to_string(), path, me, deadline], u256::ZERO),
-                        _ => ("swapExactTokensForTokens(uint256,uint256,address[],address,uint256)", vec![amount.to_string(), least.to_string(), path, me, deadline], u256::ZERO),
+                        (true, _) => ("swapExactDEVForTokens(uint256,address[],uint256[],address,uint256)", vec![least.to_string(), path, fees, me, deadline], *amount),
+                        (_, true) => ("swapExactTokensForDEV(uint256,uint256,address[],uint256[],address,uint256)", vec![amount.to_string(), least.to_string(), path, fees, me, deadline], u256::ZERO),
+                        _ => ("swapExactTokensForTokens(uint256,uint256,address[],uint256[],address,uint256)", vec![amount.to_string(), least.to_string(), path, fees, me, deadline], u256::ZERO),
                     };
                     dex.evm_call(dex.router()?, function, args, value)?;
                 }
@@ -187,9 +269,9 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
 
             println!("traded for at least {least}, quoted {}", route.out);
         }
-        DexAction::Add { a, b, amount_a, amount_b, slippage } => {
+        DexAction::Add { a, b, amount_a, amount_b, slippage, fee } => {
             let (a, b, slip) = (asset(a)?, asset(b)?, percent(*slippage)?);
-            let held = dex.pools()?.into_iter().find(|pool| pool.pairs(&a, &b)).and_then(|pool| pool.facing(&a));
+            let held = dex.pools()?.into_iter().find(|pool| pool.pairs(&a, &b) && pool.fee_bps == *fee).and_then(|pool| pool.facing(&a));
             let plan = plan_add(held, *amount_a, *amount_b, slip)?;
             println!("{}", plan.said(&a, &b, *amount_a, *amount_b, *slippage));
             dex.approve(&a, *amount_a)?;
@@ -203,7 +285,13 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
             match dex.args.evm {
                 false => {
                     let coin = if a == COIN { *amount_a } else if b == COIN { *amount_b } else { u256::ZERO };
-                    let args = [a, b].map(TxCallArgumentType::Address).into_iter().chain([*amount_a, *amount_b, least_a, least_b].map(TxCallArgumentType::U256)).chain([TxCallArgumentType::I64(deadline as i64)]).collect();
+                    let args = [a, b]
+                        .map(TxCallArgumentType::Address)
+                        .into_iter()
+                        .chain([TxCallArgumentType::I64(i64::from(*fee))])
+                        .chain([*amount_a, *amount_b, least_a, least_b].map(TxCallArgumentType::U256))
+                        .chain([TxCallArgumentType::I64(deadline as i64)])
+                        .collect();
                     dex.call(dex.native()?, "add_liquidity", coin, args)?;
                 }
                 true => {
@@ -212,37 +300,50 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
 
                     match (a == COIN, b == COIN) {
                         (false, false) => {
-                            let args = vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), amount_a.to_string(), amount_b.to_string(), least_a.to_string(), least_b.to_string(), me, deadline];
-                            dex.evm_call(dex.router()?, "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)", args, u256::ZERO)?;
+                            let args = vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), fee.to_string(), amount_a.to_string(), amount_b.to_string(), least_a.to_string(), least_b.to_string(), me, deadline];
+                            dex.evm_call(dex.router()?, "addLiquidity(address,address,uint256,uint256,uint256,uint256,uint256,address,uint256)", args, u256::ZERO)?;
                         }
                         _ => {
                             let (token, amount_token, amount_coin, least_token, least_coin) = if a == COIN { (b, *amount_b, *amount_a, least_b, least_a) } else { (a, *amount_a, *amount_b, least_a, least_b) };
-                            let args = vec![to_hex(&dex.token(&token)?), amount_token.to_string(), least_token.to_string(), least_coin.to_string(), me, deadline];
-                            dex.evm_call(dex.router()?, "addLiquidityDEV(address,uint256,uint256,uint256,address,uint256)", args, amount_coin)?;
+                            let args = vec![to_hex(&dex.token(&token)?), fee.to_string(), amount_token.to_string(), least_token.to_string(), least_coin.to_string(), me, deadline];
+                            dex.evm_call(dex.router()?, "addLiquidityDEV(address,uint256,uint256,uint256,uint256,address,uint256)", args, amount_coin)?;
                         }
                     }
                 }
             }
         }
-        DexAction::Remove { a, b, shares } => {
+        DexAction::Remove { a, b, shares, fee } => {
             let (a, b) = (asset(a)?, asset(b)?);
 
             match dex.args.evm {
                 false => {
-                    let args = vec![TxCallArgumentType::Address(a), TxCallArgumentType::Address(b), TxCallArgumentType::U256(*shares), TxCallArgumentType::U256(u256::ZERO), TxCallArgumentType::U256(u256::ZERO), TxCallArgumentType::I64(deadline as i64)];
+                    let args = vec![
+                        TxCallArgumentType::Address(a),
+                        TxCallArgumentType::Address(b),
+                        TxCallArgumentType::I64(i64::from(*fee)),
+                        TxCallArgumentType::U256(*shares),
+                        TxCallArgumentType::U256(u256::ZERO),
+                        TxCallArgumentType::U256(u256::ZERO),
+                        TxCallArgumentType::I64(deadline as i64),
+                    ];
                     dex.call(dex.native()?, "remove_liquidity", u256::ZERO, args)?;
                 }
                 true => {
-                    let pool = dex.pools()?.into_iter().find(|pool| pool.pairs(&a, &b)).ok_or("no such pair")?;
+                    let pool = dex.pools()?.into_iter().find(|pool| pool.pairs(&a, &b) && pool.fee_bps == *fee).ok_or("no such pair")?;
                     let me = to_hex(&evm_address(&signer(dex.args.key.as_deref())?.public().address()));
                     let deadline = (deadline / 1_000).to_string();
                     dex.approve(&pool.share, *shares)?;
 
                     match (a == COIN, b == COIN) {
-                        (false, false) => dex.evm_call(dex.router()?, "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)", vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), shares.to_string(), "0".into(), "0".into(), me, deadline], u256::ZERO)?,
+                        (false, false) => dex.evm_call(
+                            dex.router()?,
+                            "removeLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)",
+                            vec![to_hex(&dex.token(&a)?), to_hex(&dex.token(&b)?), fee.to_string(), shares.to_string(), "0".into(), "0".into(), me, deadline],
+                            u256::ZERO,
+                        )?,
                         _ => {
                             let token = if a == COIN { b } else { a };
-                            dex.evm_call(dex.router()?, "removeLiquidityDEV(address,uint256,uint256,uint256,address,uint256)", vec![to_hex(&dex.token(&token)?), shares.to_string(), "0".into(), "0".into(), me, deadline], u256::ZERO)?;
+                            dex.evm_call(dex.router()?, "removeLiquidityDEV(address,uint256,uint256,uint256,uint256,address,uint256)", vec![to_hex(&dex.token(&token)?), fee.to_string(), shares.to_string(), "0".into(), "0".into(), me, deadline], u256::ZERO)?;
                         }
                     }
                 }
@@ -404,11 +505,6 @@ impl Dex {
         Ok(at)
     }
 
-    /// The DEX's fee in force, as the node says, which both DEXes charge: what a quote takes off.
-    fn fee_bps(&self) -> CliResult<u32> {
-        Ok(self.status()?["dex_fee_bps"].as_u64().and_then(|bps| u32::try_from(bps).ok()).unwrap_or(crate::dex::DEFAULT_FEE_BPS))
-    }
-
     fn status(&self) -> CliResult<Value> {
         ok(self.agent.get(format!("{}/status", self.node)).call())
     }
@@ -478,6 +574,15 @@ impl Dex {
     /// Approves the DEX to move a token, when what it may move already is short of amount: a native
     /// token by its approve, an ERC-20 at the native DEX's EVM address or the router's. Nothing for
     /// the coin. An allowance that cannot be read is taken as none.
+    /// Approves a contract to move a token, as approve does the DEX in use: router.lua, for a split.
+    fn approve_for(&self, asset: &Address, amount: u256, spender: Address) -> CliResult<()> {
+        match asset {
+            asset if *asset == COIN => Ok(()),
+            Address::Evm(_) => self.evm_call(*asset, "approve(address,uint256)", vec![to_hex(&evm_address(&spender)), amount.to_string()], u256::ZERO),
+            token => self.call(*token, "approve", u256::ZERO, vec![TxCallArgumentType::Address(spender), TxCallArgumentType::U256(amount)]),
+        }
+    }
+
     fn approve(&self, asset: &Address, amount: u256) -> CliResult<()> {
         if *asset == COIN {
             return Ok(());
@@ -524,7 +629,12 @@ impl Dex {
 
     /// The pools of the DEX in use, the EVM's with WDEV as the coin.
     fn pools(&self) -> CliResult<Vec<DexPool>> {
-        match self.args.evm {
+        self.pools_on(self.args.evm)
+    }
+
+    /// The pools of one DEX: the native one's, or the EVM's, with WDEV as the coin.
+    fn pools_on(&self, evm: bool) -> CliResult<Vec<DexPool>> {
+        match evm {
             false => {
                 let dex = self.native()?;
                 let count = self.native_read(&dex, "pool_count", json!([]))?.first().and_then(|count| count.parse::<u64>().ok()).unwrap_or(0);
@@ -551,8 +661,12 @@ impl Dex {
                         ([AbiValue::Address(zero)], [AbiValue::Address(one)]) => (*zero, *one),
                         _ => continue,
                     };
+                    let [AbiValue::Uint(fee)] = self.read(pair, "fee()", &[], &[], "(uint256)")?[..] else {
+                        continue;
+                    };
                     if let [AbiValue::Uint(held0), AbiValue::Uint(held1), _] = self.read(pair, "getReserves()", &[], &[], "(uint112,uint112,uint32)")?[..] {
-                        pools.push(DexPool { a: coin(token0), b: coin(token1), reserve_a: held0, reserve_b: held1, share: Address::Evm(pair) });
+                        let fee_bps = u32::try_from(fee).unwrap_or(u32::MAX);
+                        pools.push(DexPool { a: coin(token0), b: coin(token1), fee_bps, reserve_a: held0, reserve_b: held1, share: Address::Evm(pair), venue: Venue::Evm });
                     }
                 }
 

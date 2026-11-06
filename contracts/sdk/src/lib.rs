@@ -135,6 +135,15 @@ pub fn transfer(to: &Address, amount: [u8; 32]) -> Result<(), String> {
     }
 }
 
+/// Burns coin from this contract's own balance, out of the supply. Kept only if the call
+/// succeeds; fails when the contract holds less.
+pub fn burn(amount: [u8; 32]) -> Result<(), String> {
+    match unsafe { sys::burn(amount.as_ptr()) } {
+        0 => Ok(()),
+        _ => Err(String::from_utf8_lossy(&result()).into_owned()),
+    }
+}
+
 /// Calls an exported function on another contract, whichever engine runs it. Its writes are
 /// kept only if it succeeds; its fuel comes out of this call's.
 ///

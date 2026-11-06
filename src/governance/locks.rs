@@ -155,7 +155,7 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
         "upgrade" => &["least", "from"],
         "governance" => &["type", "members", "threshold", "approval_epochs", "quorum_permille"],
         "evm_spec" => &["spec", "from"],
-        "dex" => &["fee_bps"],
+        "dex" => &["tiers", "protocol_permille"],
         "anchoring" => &["bitcoin", "ethereum", "enforce", "relay", "btc_start.header", "btc_start.height", "btc_start.network", "eth_relay", "eth_start.root", "eth_start.network", "depth", "every", "reward"],
         "bootnodes" | "name" | "token_functions" | "switch_finality" | "locks" | "engines" => &[],
         _ => return None,
