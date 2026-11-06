@@ -1030,6 +1030,7 @@ impl Wallet {
 
         // The multisig the Multisig page shows, for its policy to be proven too.
         self.chain.wanted_policies = self.views.multisig.selected().map(str::to_string).into_iter().collect();
+        self.chain.wanted_claims = self.views.mining.wanted_claims();
 
         // Contract reads go at the block the light client checked last, to be proven there.
         self.node.proving = self.chain.client.as_ref().map(|client| client.tip().id().to_string());

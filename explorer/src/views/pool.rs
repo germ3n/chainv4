@@ -21,6 +21,8 @@ pub struct PoolPage {
     /// The miner looked up, its address as the node writes it.
     miner: Option<String>,
     trouble: Option<String>,
+    /// The miner and the tip its claim's entries were last asked for at.
+    proving: Option<(String, String)>,
 }
 
 impl PoolPage {
@@ -270,6 +272,7 @@ fn lookup(ui: &mut Ui, ctx: &mut Ctx, page: &mut PoolPage) {
         match payout_address(page.typed.trim()) {
             Ok(address) => {
                 ctx.api.ask(Ask::PoolMiner(address.clone()));
+                ctx.api.ask(Ask::PoolClaim(address.clone()));
                 page.miner = Some(address);
                 page.trouble = None;
             }
@@ -311,12 +314,126 @@ fn lookup(ui: &mut Ui, ctx: &mut Ctx, page: &mut PoolPage) {
         });
     });
 
+    // Its newest claim, checked against the chain: the root it is under and what was claimed.
+    if let Some(proof) = claim_proof(ctx, page, &miner) {
+        ui.add_space(4.0);
+        let (text, color) = match proof {
+            ClaimProof::Waiting => ("The node's figures until the light client proves its claim.".to_string(), palette.muted),
+            ClaimProof::Pays { earned, claimed, pays, height, final_ } => {
+                let agrees = earned.to_string() == standing.earned && claimed.to_string() == standing.claimed && pays.to_string() == standing.claimable;
+                let said = format!(
+                    "Its newest claim, proven at block {}{}: earned {}, claimed {}, so {} to claim. Only which claim is the pool's newest is the pool's word.",
+                    format::thousands(&height.to_string()),
+                    if final_ { ", final" } else { "" },
+                    ctx.coins(&earned.to_string()),
+                    ctx.coins(&claimed.to_string()),
+                    ctx.coins(&pays.to_string())
+                );
+
+                match agrees {
+                    true => (said, palette.good),
+                    false => (format!("{said} The node's figures above say otherwise."), palette.warn),
+                }
+            }
+            ClaimProof::Refused(why) => (format!("Its claim does not hold on chain: {why}. It pays nothing, whatever the node says."), palette.bad),
+        };
+        ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
+    }
+
     ui.add_space(8.0);
     widgets::caps(ui, &palette, "Its workers");
     workers(ui, look, &books.workers);
     ui.add_space(8.0);
     widgets::caps(ui, &palette, "Blocks that paid it");
     blocks_list(ui, ctx, &books.blocks, Some(standing.to.as_str()));
+}
+
+/// What the chain says a miner's newest claim pays.
+enum ClaimProof {
+    Waiting,
+    Pays { earned: chainv4::structs::u256::u256, claimed: chainv4::structs::u256::u256, pays: chainv4::structs::u256::u256, height: u64, final_: bool },
+    Refused(String),
+}
+
+/// A claim as GET /pool/claim/{address} gives it.
+fn claim_of(value: &serde_json::Value, hash: chainv4::structs::hash::HashType) -> Option<chainv4::registry::pools::PoolClaim> {
+    use chainv4::structs::{address::Address, hash::Hash, hex::from_hex, u256::u256};
+
+    let address = |name: &str| value[name].as_str()?.parse::<Address>().ok();
+    let hash_of = |text: &str| Hash::from_bytes(hash, &from_hex(text)?);
+
+    Some(chainv4::registry::pools::PoolClaim {
+        pool: address("pool")?,
+        height: value["height"].as_u64()?,
+        block: hash_of(value["block"].as_str()?)?,
+        to: address("to")?,
+        earned: u256::from_str_radix(value["earned"].as_str()?, 10).ok()?,
+        index: value["index"].as_u64()?,
+        count: value["count"].as_u64()?,
+        path: value["path"].as_array()?.iter().map(|step| hash_of(step.as_str()?)).collect::<Option<Vec<_>>>()?,
+    })
+}
+
+/// Asks for a claim's two entries at the light client's tip, once per tip, and checks what came:
+/// None while the node gave no claim, or the light client follows nothing yet.
+fn claim_proof(ctx: &mut Ctx, page: &mut PoolPage, miner: &str) -> Option<ClaimProof> {
+    use chainv4::db::{Column, StateProof};
+    use chainv4::registry::pools::Pools;
+    use chainv4::structs::hex::{from_hex, to_hex};
+
+    let hash = ctx.light.hash()?;
+    let claim = match claim_of(ctx.store.pool_claims.get(miner)?, hash) {
+        Some(claim) => claim,
+        None => return Some(ClaimProof::Refused("the node's claim does not read".to_string())),
+    };
+    let tip = ctx.light.tip_block()?;
+    let keys = [Pools::root_key(claim.height), Pools::claimed_key(&claim.pool, &claim.to)];
+
+    if page.proving.as_ref() != Some(&(miner.to_string(), tip.clone())) {
+        for key in &keys {
+            let ask = Ask::Proof { column: Column::Pools.name().to_string(), key: to_hex(key), block: Some(tip.clone()) };
+            ctx.light.fetch(&ask);
+            ctx.api.ask(ask);
+        }
+
+        page.proving = Some((miner.to_string(), tip));
+    }
+
+    let client = ctx.light.client()?;
+    let mut entries = Vec::new();
+
+    for key in &keys {
+        let Some(Ok(answer)) = ctx.light.fetched(Column::Pools.name(), &to_hex(key)) else {
+            return Some(ClaimProof::Waiting);
+        };
+        let checked = (|| {
+            let block = chainv4::structs::hash::Hash::from_bytes(hash, &from_hex(answer["block"].as_str()?)?)?;
+            let held = match answer["value"].as_str() {
+                Some(text) => Some(from_hex(text)?),
+                None => None,
+            };
+            let proof: StateProof = wincode::deserialize(&from_hex(answer["proof"].as_str()?)?).ok()?;
+
+            Some((client.check_state(&block, Column::Pools, key, held.as_deref(), &proof), held))
+        })();
+
+        match checked {
+            Some((Ok(assurance), held)) => entries.push((assurance, held)),
+            Some((Err(err), _)) => return Some(ClaimProof::Refused(format!("the node's proof does not check: {err}"))),
+            None => return Some(ClaimProof::Refused("the node's proof does not read".to_string())),
+        }
+    }
+
+    let root = entries[0].1.as_deref().map(|bytes| Pools::decode_root(bytes).ok_or("a root that does not decode")).transpose();
+    let claimed = entries[1].1.as_deref().map_or(Some(chainv4::structs::u256::u256::ZERO), Pools::decode_claimed);
+    let (Ok(root), Some(claimed)) = (root, claimed) else {
+        return Some(ClaimProof::Refused("an entry that does not decode".to_string()));
+    };
+
+    Some(match claim.pays(root.as_ref(), claimed, hash) {
+        Ok((earned, claimed, pays)) => ClaimProof::Pays { earned, claimed, pays, height: entries[0].0.height.min(entries[1].0.height), final_: entries[0].0.final_ && entries[1].0.final_ },
+        Err(why) => ClaimProof::Refused(why.to_string()),
+    })
 }
 
 /// A miner's workers on the pool: their hashrate, shares, and the difficulty each is set.
@@ -415,5 +532,27 @@ mod tests {
     fn payout_addresses_read_as_the_node_writes_them() {
         assert!(payout_address("not an address").is_err());
         assert!(payout_address("0x52908400098527886E0F7030069857D2E4169EE7").unwrap().starts_with("secp256k1:"));
+    }
+
+    #[test]
+    fn a_claim_reads_as_the_node_writes_it_and_holds_under_its_root() {
+        use chainv4::crypto::merkle;
+        use chainv4::registry::pools::{PoolRoot, claim_leaf};
+        use chainv4::structs::{address::Address, hash::HashType, u256::u256};
+
+        let hash = HashType::default_chain();
+        let (pool, miner) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
+        let leaves = [claim_leaf(hash, &miner, u256::new(70)), claim_leaf(hash, &pool, u256::new(1))];
+        let path = merkle::audit_path(hash, &leaves, 0);
+        let value = serde_json::json!({
+            "pool": pool.to_string(), "height": 9, "block": chainv4::structs::hash::Hash::zero(hash).to_string(), "to": miner.to_string(),
+            "earned": "70", "index": 0, "count": 2, "path": path.iter().map(ToString::to_string).collect::<Vec<_>>(), "hash": hash.name(),
+        });
+        let claim = claim_of(&value, hash).unwrap();
+        let root = PoolRoot { pool, root: merkle::root(hash, &leaves), count: 2 };
+
+        assert_eq!((claim.height, claim.earned, claim.path.len()), (9, u256::new(70), 1));
+        assert_eq!(claim.pays(Some(&root), u256::new(20), hash).unwrap(), (u256::new(70), u256::new(20), u256::new(50)));
+        assert!(claim_of(&serde_json::json!({ "pool": pool.to_string() }), hash).is_none(), "half a claim");
     }
 }

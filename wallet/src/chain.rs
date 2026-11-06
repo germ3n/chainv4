@@ -70,6 +70,10 @@ enum Target {
     Policy(String),
     /// Governance's locks.
     Locks,
+    /// The root a pool's block committed to, by its height.
+    PoolRoot(u64),
+    /// What a miner has claimed from a pool, by the pool's and the miner's addresses as text.
+    PoolClaimed { pool: String, miner: String },
 }
 
 /// An NFT a page shows, for its ownership to be proven: a token of an NFT collection, or a
@@ -319,6 +323,13 @@ pub struct Chain {
     pub policies: HashMap<String, Proven<Option<chainv4::registry::multisig::MultisigPolicy>>>,
     /// The multisigs whose policies a page wants proven, as the app last said.
     pub wanted_policies: Vec<String>,
+    /// Pools' roots, proven, by height: None for a height whose block holds none.
+    pub pool_roots: HashMap<u64, Proven<Option<chainv4::registry::pools::PoolRoot>>>,
+    /// What miners have claimed from pools, proven, by pool and miner as text.
+    pub pool_claimed: HashMap<(String, String), Proven<u256>>,
+    /// The claims a page wants proven, as the app last said: the pool, the miner and the height of
+    /// the root the claim is under.
+    pub wanted_claims: Vec<(String, String, u64)>,
     /// Governance's locks, proven: none at all on a chain that set none.
     pub locks: Option<Proven<Vec<String>>>,
     /// The lowest height a receipt landed at below every header the client holds: what it takes
@@ -532,6 +543,18 @@ impl Chain {
             }
         }
         targets.push((Column::Validators, FEDERATION_KEY.to_vec(), Target::Federation, vec![tip]));
+
+        // A pool's claim a page shows: the root it is under, and what its miner claimed, so what
+        // it pays rests on no node's word.
+        for (pool, miner, height) in &self.wanted_claims {
+            use chainv4::registry::pools::Pools;
+
+            targets.push((Column::Pools, Pools::root_key(*height), Target::PoolRoot(*height), vec![tip]));
+
+            if let (Ok(parsed_pool), Ok(parsed_miner)) = (pool.parse::<Address>(), miner.parse::<Address>()) {
+                targets.push((Column::Pools, Pools::claimed_key(&parsed_pool, &parsed_miner), Target::PoolClaimed { pool: pool.clone(), miner: miner.clone() }, vec![tip]));
+            }
+        }
 
         wanted.extend(self.not_proven_yet(&blocks, targets));
         wanted.extend(more);
@@ -1111,6 +1134,17 @@ impl Chain {
                             .map(|bytes| wincode::deserialize(&bytes).map_err(|_| "a multisig's policy that does not decode"))
                             .transpose()?;
                         self.policies.insert(multisig, Proven { value: policy, assurance });
+                    }
+                    Target::PoolRoot(height) => {
+                        let root = held.map(|bytes| chainv4::registry::pools::Pools::decode_root(&bytes).ok_or("a pool's root that does not decode")).transpose()?;
+                        self.pool_roots.insert(height, Proven { value: root, assurance });
+                    }
+                    Target::PoolClaimed { pool, miner } => {
+                        let claimed = match held {
+                            Some(bytes) => chainv4::registry::pools::Pools::decode_claimed(&bytes).ok_or("a claimed total that does not decode")?,
+                            None => u256::ZERO,
+                        };
+                        self.pool_claimed.insert((pool, miner), Proven { value: claimed, assurance });
                     }
                     Target::Locks => {
                         let locks = match held {

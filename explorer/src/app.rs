@@ -338,6 +338,9 @@ impl Explorer {
                                 Ask::PoolMiner(address) if failure.status == 404 => {
                                     self.store.pool_miners.remove(address);
                                 }
+                                Ask::PoolClaim(address) if failure.status == 404 => {
+                                    self.store.pool_claims.remove(address);
+                                }
                                 // An older node, which has no releases to relay.
                                 Ask::Release if failure.status == 404 => {
                                     // It has none to relay, which takes back nothing seen before.
@@ -457,6 +460,9 @@ impl Explorer {
                 if let Some(books) = parse(value) {
                     store.pool_miners.insert(address, books);
                 }
+            }
+            Ask::PoolClaim(address) => {
+                store.pool_claims.insert(address, value.clone());
             }
             Ask::Name(name) => {
                 if let Some(found) = parse::<crate::model::NameView>(value) {
@@ -811,7 +817,7 @@ impl Explorer {
             View::Overview => vec![Ask::Anchors],
             View::Account(address) => [Ask::Account(address.clone()), Ask::AccountNames { address: address.clone(), cursor: None }, Ask::AccountMultisigs { address: address.clone(), cursor: None }].into_iter().chain(self.light.prove(address)).collect(),
             View::Name(name) => vec![Ask::Name(name.clone())],
-            View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().map(|miner| Ask::PoolMiner(miner.to_string()))).collect(),
+            View::Pool => [Ask::Pool].into_iter().chain(self.pool.miner().into_iter().flat_map(|miner| [Ask::PoolMiner(miner.to_string()), Ask::PoolClaim(miner.to_string())])).collect(),
             // The newest decisions and rejections, the light client's proof of each one read, and
             // each voter's votes, for its turnout.
             View::Governance => {

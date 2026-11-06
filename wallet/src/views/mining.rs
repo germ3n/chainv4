@@ -70,6 +70,19 @@ pub struct MiningState {
 }
 
 impl MiningState {
+    /// The claim the page shows, for the light client to prove the two entries it rests on: its
+    /// pool, its miner and the height of its root.
+    pub fn wanted_claims(&self) -> Vec<(String, String, u64)> {
+        let Some((_, Ok(value))) = &self.claim else {
+            return Vec::new();
+        };
+
+        match (value["pool"].as_str(), value["to"].as_str(), value["height"].as_u64()) {
+            (Some(pool), Some(to), Some(height)) => vec![(pool.to_string(), to.to_string(), height)],
+            _ => Vec::new(),
+        }
+    }
+
     /// The wallet's node's answer to something this page asked: it counts only while the pool is
     /// asked there, not at a node of its own.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, Failure>) {
@@ -308,24 +321,50 @@ fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Va
             Some(Ok(value)) => value,
         };
         let number = |name: &str| value[name].as_str().unwrap_or("0").to_string();
+        let hash = ctx.chain.client.as_ref().map(|client| client.params().hash);
+        let proven = hash.and_then(|hash| claim_of(value, from, hash).ok()).map(|(claim, _)| proven_claim(ctx.chain, &claim, hash.expect("there is a client")));
+
+        // Whether the pool's node said other figures than the chain holds.
+        let differs = matches!(&proven, Some(ProvenClaim::Pays { claimed, pays, .. }) if number("claimed") != claimed.to_string() || number("claimable") != pays.to_string());
+
+        // What the chain says, once proven: the figures, in place of the node's.
+        let (earned, claimed, claimable) = match &proven {
+            Some(ProvenClaim::Pays { earned, claimed, pays, .. }) => (earned.to_string(), claimed.to_string(), pays.to_string()),
+            _ => (number("earned"), number("claimed"), number("claimable")),
+        };
 
         super::row(ui, &palette, "Earned", |ui| {
-            ui.label(RichText::new(ctx.amount(None, &number("earned"))).color(palette.ink));
+            ui.label(RichText::new(ctx.amount(None, &earned)).color(palette.ink));
         });
         super::row(ui, &palette, "Claimed", |ui| {
-            ui.label(ctx.amount(None, &number("claimed")));
+            ui.label(ctx.amount(None, &claimed));
         });
         super::row(ui, &palette, "Claimable", |ui| {
-            ui.label(RichText::new(ctx.amount(None, &number("claimable"))).color(palette.good).size(16.0));
+            ui.label(RichText::new(ctx.amount(None, &claimable)).color(palette.good).size(16.0));
         });
         super::row(ui, &palette, "Pool", |ui| super::address(ui, &palette, value["pool"].as_str().unwrap_or("?")));
-        note(
-            ui,
-            &format!(
-                "As the pool's node says, from the claims its block {} committed to. Earned is all the pool has credited this address; a claim pays it less what was claimed before, from the pool's escrow.",
-                value["height"].as_u64().map_or_else(|| "?".to_string(), |height| format::thousands(&height.to_string()))
+        let block = value["height"].as_u64().map_or_else(|| "?".to_string(), |height| format::thousands(&height.to_string()));
+
+        match &proven {
+            Some(ProvenClaim::Pays { at, final_, .. }) => {
+                ui.label(RichText::new(format!(
+                    "Proven at block {}{}: the claim's path leads to the root the pool's block {block} committed to, and what was claimed is the chain's. Only which of the pool's claims is its newest is its word.",
+                    format::thousands(&at.to_string()),
+                    if *final_ { ", final" } else { "" }
+                )).small().color(palette.good));
+
+                if differs {
+                    ui.colored_label(palette.warn, "The pool's node said other figures than the chain holds: these are the chain's.");
+                }
+            }
+            Some(ProvenClaim::Refused(why)) => {
+                ui.colored_label(palette.bad, format!("The pool's claim does not hold on chain: {why}. It would pay nothing; trust none of these figures."));
+            }
+            Some(ProvenClaim::Waiting) | None => note(
+                ui,
+                &format!("As the pool's node says, from the claims its block {block} committed to, until the light client proves them. Earned is all the pool has credited this address; a claim pays it less what was claimed before, from the pool's escrow."),
             ),
-        );
+        }
         ui.add_space(8.0);
 
         let Some(hash) = ctx.chain.client.as_ref().map(|client| client.params().hash) else {
@@ -470,6 +509,31 @@ fn pool_node(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState) {
 
 /// The claim a pool's answer describes, to send or keep, with what it would pay now: none for an
 /// answer about another address than the one asked about.
+/// What a pool's claim pays by the chain: the root at its height and what its miner claimed, both
+/// proven at the light client's tip.
+enum ProvenClaim {
+    Waiting,
+    Pays { earned: u256, claimed: u256, pays: u256, at: u64, final_: bool },
+    Refused(String),
+}
+
+fn proven_claim(chain: &crate::chain::Chain, claim: &PoolClaim, hash: HashType) -> ProvenClaim {
+    let (Some(root), Some(claimed)) = (chain.pool_roots.get(&claim.height), chain.pool_claimed.get(&(claim.pool.to_string(), claim.to.to_string()))) else {
+        return ProvenClaim::Waiting;
+    };
+
+    match claim.pays(root.value.as_ref(), claimed.value, hash) {
+        Ok((earned, claimed_total, pays)) => ProvenClaim::Pays {
+            earned,
+            claimed: claimed_total,
+            pays,
+            at: root.assurance.height.min(claimed.assurance.height),
+            final_: root.assurance.final_ && claimed.assurance.final_,
+        },
+        Err(why) => ProvenClaim::Refused(why.to_string()),
+    }
+}
+
 fn claim_of(value: &Value, miner: &Address, hash: HashType) -> Result<(PoolClaim, u256), String> {
     let to: Address = value["to"].as_str().and_then(|text| text.parse().ok()).ok_or("it names no miner")?;
 
@@ -619,6 +683,45 @@ fn kept_claims(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, from: &Addre
 
         ui.label(RichText::new("None of the kept claims holds on this chain: the blocks they name were undone.").color(palette.muted));
     });
+}
+
+#[cfg(test)]
+mod proven_tests {
+    use {
+        super::*,
+        chainv4::crypto::merkle,
+        chainv4::light::Assurance,
+        chainv4::registry::pools::{PoolRoot, claim_leaf},
+    };
+
+    fn at(height: u64, final_: bool) -> Assurance {
+        Assurance { block: Hash::zero(HashType::default_chain()), height, final_ }
+    }
+
+    #[test]
+    fn a_claim_pays_by_the_root_and_the_claimed_total_proven_and_is_refused_by_a_root_it_is_not_under() {
+        let hash = HashType::default_chain();
+        let (pool, miner) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
+        let leaves = [claim_leaf(hash, &miner, u256::new(900)), claim_leaf(hash, &pool, u256::new(5))];
+        let claim = PoolClaim { pool, height: 12, block: Hash::zero(hash), to: miner, earned: u256::new(900), index: 0, count: 2, path: merkle::audit_path(hash, &leaves, 0) };
+        let mut chain = crate::chain::Chain::default();
+
+        assert!(matches!(proven_claim(&chain, &claim, hash), ProvenClaim::Waiting), "nothing proven yet");
+
+        chain.pool_roots.insert(12, crate::chain::Proven { value: Some(PoolRoot { pool, root: merkle::root(hash, &leaves), count: 2 }), assurance: at(20, true) });
+        chain.pool_claimed.insert((pool.to_string(), miner.to_string()), crate::chain::Proven { value: u256::new(300), assurance: at(21, false) });
+
+        match proven_claim(&chain, &claim, hash) {
+            ProvenClaim::Pays { earned, claimed, pays, at, final_ } => assert_eq!((earned, claimed, pays, at, final_), (u256::new(900), u256::new(300), u256::new(600), 20, false)),
+            _ => panic!("it pays"),
+        }
+
+        // The block undone for another, whose root the claim is not under: it pays nothing.
+        chain.pool_roots.insert(12, crate::chain::Proven { value: Some(PoolRoot { pool, root: leaves[1], count: 2 }), assurance: at(22, true) });
+        assert!(matches!(proven_claim(&chain, &claim, hash), ProvenClaim::Refused(why) if why.contains("path")));
+        chain.pool_roots.insert(12, crate::chain::Proven { value: None, assurance: at(22, true) });
+        assert!(matches!(proven_claim(&chain, &claim, hash), ProvenClaim::Refused(why) if why.contains("no mining pool's root")));
+    }
 }
 
 #[cfg(test)]

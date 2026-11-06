@@ -257,6 +257,8 @@ pub struct Store {
     pub pool: Option<crate::model::PoolView>,
     /// The pool's books for one miner each, by its payout address.
     pub pool_miners: HashMap<String, crate::model::PoolView>,
+    /// Miners' newest claims on the pool, as the node gives them, by address.
+    pub pool_claims: HashMap<String, serde_json::Value>,
     /// The node's release, as it last answered; None before then, and for an older node, which
     /// has none to give.
     pub release: Option<crate::model::NodeRelease>,

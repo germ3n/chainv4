@@ -849,9 +849,14 @@ connected for it with its hashrate.
 - **Which node:** the wallet's own, unless **Pool's node** names another's HTTP API, kept in
   settings as `pool_node`. Only the pool is asked there; the claim goes through the wallet's node,
   so the pool must be on the same chain.
-- **Trust:** the pool's numbers are shown as its node says them. A claim rests on nothing it says
-  but the fee: the chain checks the path against the root the pool's block committed to, and a
-  path that does not hold fails and moves nothing.
+- **Trust:** the claim is proven before its figures are believed. The light client proves the
+  two entries it rests on at its tip: the root the pool's block committed to (`Column::Pools`, by
+  its height) and what the address claimed from the pool. The claim's Merkle path must lead from
+  its leaf, the address and all it earned, to that root. Earned, claimed and claimable then show
+  as the chain holds them, "proven at block N", with a warning when the pool's node said other
+  figures, and a claim the chain does not hold says it pays nothing. Only which of the pool's
+  claims is its newest stays the pool's word. Until the proofs come, the node's figures show,
+  said to be its. The chain checks the path again when the claim is sent.
 - **Nothing yet:** a node with no pool says so, and so does a pool that owes the address nothing
   yet. A pool credits what it owes once its blocks are final, so earnings show a while after the
   blocks are found.

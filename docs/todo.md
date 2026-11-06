@@ -212,9 +212,9 @@ offline; these would make that hold up as a treasury.
   apps the port and what it takes, `GET /mining/ws` carries it over a WebSocket; the wallet's
   Mining page mines on the GPU or CPU, natively over TCP and in the browser on WebGPU or Web
   Workers, phones only in the foreground and on the charger. See [Mining alone](consensus.md#mining-alone).
-- [ ] **Mining pools: next.** The wallet's claim figures come from the pool's node; proving what an
-  address claimed (the pools column) and the root a block holds, through the light client, would
-  leave only the leaf to the pool's word. A pool's node keeps four claim trees in memory, which a
+- [ ] **Mining pools: next.** Done 2026-11-06: the wallet's Mining page and the explorer's Pool
+  page prove a claim's root and what was claimed through the light client (`PoolClaim::pays`),
+  leaving only which claim is newest to the pool's word. A pool's node keeps four claim trees in memory, which a
   pool of millions of miners would want on disk. A share chain among the pool's own nodes, as
   P2Pool keeps, would take the split out of one node's hands altogether.
 - [x] **A decoded transaction as the tx page shows one.** The node's JSON for a transaction is

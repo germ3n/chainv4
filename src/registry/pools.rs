@@ -136,6 +136,26 @@ impl<'a> Pools<'a> {
         Pools { state, hash }
     }
 
+    #[document(parent = "Pools", summary = "The key in Column::Pools of the root of the block at a height: what an app proves to check a claim under it.")]
+    pub fn root_key(height: u64) -> Vec<u8> {
+        root_key(height)
+    }
+
+    #[document(parent = "Pools", summary = "The key in Column::Pools of what a miner has claimed from a pool: what an app proves to show what a claim pays now.")]
+    pub fn claimed_key(pool: &Address, miner: &Address) -> Vec<u8> {
+        claimed_key(pool, miner)
+    }
+
+    #[document(parent = "Pools", summary = "A root's entry, as Column::Pools keeps it, read: None for one that does not decode.")]
+    pub fn decode_root(bytes: &[u8]) -> Option<PoolRoot> {
+        wincode::deserialize(bytes).ok()
+    }
+
+    #[document(parent = "Pools", summary = "What a miner claimed from a pool, as Column::Pools keeps it, read: None for one that does not decode.")]
+    pub fn decode_claimed(bytes: &[u8]) -> Option<u256> {
+        wincode::deserialize::<Claimed>(bytes).ok().map(|claimed| claimed.total)
+    }
+
     #[document(parent = "Pools", summary = "Keeps the root a pool's block, at this height, committed to.")]
     pub fn commit(&self, height: u64, root: PoolRoot) {
         self.state.put_value(Column::Pools, root_key(height), &root);
@@ -236,6 +256,21 @@ impl PoolClaim {
         };
 
         root.pool == self.pool && root.count == self.count && merkle::verify(&root.root, &claim_leaf(hash, &self.to, self.earned), index, count, &self.path)
+    }
+
+    #[document(
+        parent = "PoolClaim",
+        summary = "What the claim pays now, from the two entries it rests on, proven: the root at its height, None when the chain holds none there, and what the miner has claimed from the pool. Only which claim is the pool's newest is left to the pool's word.",
+        returns = "What it earned, what was claimed, and what it pays, or why it pays nothing.",
+    )]
+    pub fn pays(&self, root: Option<&PoolRoot>, claimed: u256, hash: HashType) -> Result<(u256, u256, u256), ClaimError> {
+        let root = root.ok_or(ClaimError::NoRoot)?;
+
+        if !self.holds(root, hash) {
+            return Err(ClaimError::BadPath);
+        }
+
+        Ok((self.earned, claimed, self.earned.saturating_sub(claimed)))
     }
 }
 
@@ -379,6 +414,31 @@ mod tests {
         assert_eq!(pools.claimed(&pool, &alice), Ok(u256::new(500)));
         assert_eq!(Accounts::new(&state).get(&escrow).unwrap().balance, u256::new(400));
         assert_eq!(Accounts::new(&state).get(&alice).unwrap().balance, u256::new(500));
+    }
+
+    #[test]
+    fn a_claim_pays_by_the_two_entries_an_app_proves_read_back_from_where_they_are_kept() {
+        let hash = HashType::default_chain();
+        let state = state();
+        let pools = Pools::new(&state, hash);
+        let (pool, alice) = (Address::Ed25519([1; 32]), Address::Ed25519([2; 32]));
+        let leaves = [claim_leaf(hash, &alice, u256::new(300))];
+        let root = PoolRoot { pool, root: merkle::root(hash, &leaves), count: 1 };
+        pools.commit(4, root);
+        Accounts::new(&state).credit(&pool_escrow(&pool, hash), u256::new(1_000)).unwrap();
+        pools.claim(4, &alice, u256::new(300), 0, &[]).unwrap();
+
+        // The entries as an app gets them with a proof: by their keys, decoded.
+        let kept_root = state.get(Column::Pools, &Pools::root_key(4)).unwrap().and_then(|bytes| Pools::decode_root(&bytes));
+        let kept_claimed = state.get(Column::Pools, &Pools::claimed_key(&pool, &alice)).unwrap().and_then(|bytes| Pools::decode_claimed(&bytes));
+        assert_eq!((kept_root, kept_claimed), (Some(root), Some(u256::new(300))));
+        assert_eq!(Pools::root_key(4).len(), 9);
+
+        let saved = PoolClaim { pool, height: 4, block: Hash::zero(hash), to: alice, earned: u256::new(300), index: 0, count: 1, path: Vec::new() };
+        assert_eq!(saved.pays(Some(&root), u256::new(100), hash), Ok((u256::new(300), u256::new(100), u256::new(200))));
+        assert_eq!(saved.pays(Some(&root), u256::new(300), hash), Ok((u256::new(300), u256::new(300), u256::ZERO)));
+        assert_eq!(saved.pays(None, u256::ZERO, hash), Err(ClaimError::NoRoot));
+        assert_eq!(PoolClaim { earned: u256::new(301), ..saved }.pays(Some(&root), u256::ZERO, hash), Err(ClaimError::BadPath));
     }
 
     #[test]

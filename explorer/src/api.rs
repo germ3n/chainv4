@@ -113,6 +113,8 @@ pub enum Ask {
     Pool,
     /// The same, for one miner by its payout address, with its workers.
     PoolMiner(String),
+    /// A miner's newest claim on the pool, with its Merkle path: what the Pool page proves.
+    PoolClaim(String),
     /// The newest release the node took, as signed, and where the node stands against it.
     Release,
     /// Governance: who approves, the changes being approved, and every setting in force.
@@ -165,6 +167,7 @@ impl Ask {
             Ask::Faucet(_) => "/faucet".to_string(),
             Ask::Pool => "/pool".to_string(),
             Ask::PoolMiner(address) => format!("/pool/{address}"),
+            Ask::PoolClaim(address) => format!("/pool/claim/{address}"),
             Ask::Release => "/release".to_string(),
             Ask::Governance => "/governance".to_string(),
             Ask::Decisions { before: Some(before) } => format!("/governance/history?before={before}&limit={DECISION_PAGE}"),
@@ -291,6 +294,7 @@ impl Ask {
             | Ask::Faucet(_)
             | Ask::Pool
             | Ask::PoolMiner(_)
+            | Ask::PoolClaim(_)
             | Ask::Governance
             | Ask::Decisions { .. }
             | Ask::Rejections { .. }
@@ -729,6 +733,7 @@ mod tests {
             Ask::Faucet("{}".to_string()),
             Ask::Pool,
             Ask::PoolMiner(text()),
+            Ask::PoolClaim(text()),
             Ask::Release,
             Ask::Governance,
             Ask::Decisions { before: None },
