@@ -118,7 +118,7 @@ impl Node {
         }
 
         if let Some((peer, asked, request)) = ask {
-            snapshot.asking = Some((peer, asked));
+            snapshot.asking.insert(peer, asked);
             self.send(NetCommand::Request { peer, request });
 
             return Ok(());

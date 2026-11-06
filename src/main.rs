@@ -289,6 +289,10 @@ struct NodeArgs {
     /// block: it sends fewer blocks, and the peer asks again from there. 1 MiB to 32 MiB.
     #[arg(long, default_value_t = chainv4::net::SYNC_BATCH_BYTES, value_parser = clap::value_parser!(u64).range(1024 * 1024..=chainv4::net::MOST_SYNC_BATCH_BYTES))]
     sync_batch_bytes: u64,
+    /// How many peers a long catch-up fetches blocks from at once, a batch each, imported in order:
+    /// 1 to 16. Near the tip it fetches from one.
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u64).range(1..=16))]
+    sync_peers: u64,
     /// Which development chain to run: pow, mined by anyone; authority, where the built-in
     /// development key produces every block; rotating, where the authority finality signers
     /// produce in turn, the development key being the one signer; or staked, where the FFG
@@ -889,6 +893,7 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             bytes: args.mempool_bytes,
         })
         .sync_batch_bytes(args.sync_batch_bytes)
+        .sync_peers(args.sync_peers as usize)
         .tuning(tuned.node())
         .ahead(tuned.ahead());
 
@@ -1148,6 +1153,7 @@ mod tests {
         assert_eq!(args.state_history, chainv4::node::Span::Blocks(chainv4::chain::DEFAULT_STATE_HISTORY));
         assert_eq!((args.prune_blocks, args.key_passphrase_file), (None, None), "every block kept, as before");
         assert_eq!((args.gapped_for, args.mempool_bytes), (None, chainv4::mempool::MempoolLimits::DEFAULT.bytes));
+        assert_eq!(args.sync_peers, 4);
         #[cfg(feature = "updates")]
         assert_eq!(args.update_every, chainv4::node::CHECK_EVERY_MS);
         assert!(args.tune.is_empty());
@@ -1166,6 +1172,8 @@ mod tests {
         assert!(parse(&["--prune-blocks", "50000", "--archive"]).is_err(), "an archive keeps every block");
         assert_eq!(parse(&["--mempool-bytes", "64MiB", "--gapped-for", "5m"]).map(|args| (args.mempool_bytes, args.gapped_for)), Ok((64 << 20, Some(chainv4::node::Span::Ms(300_000)))));
         assert_eq!(parse(&["--mempool-bytes", "2GiB"]).unwrap().mempool_bytes, 2 << 30);
+        assert_eq!(parse(&["--sync-peers", "1"]).unwrap().sync_peers, 1);
+        assert!(parse(&["--sync-peers", "0"]).is_err() && parse(&["--sync-peers", "17"]).is_err());
         assert_eq!(parse(&["--mempool-bytes", "3000000"]).unwrap().mempool_bytes, 3_000_000);
         for refused in ["1KiB", "65GiB", "256MB", "lots"] {
             assert!(parse(&["--mempool-bytes", refused]).is_err(), "{refused}");

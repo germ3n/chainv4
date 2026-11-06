@@ -8,7 +8,7 @@ use {
     super::{Column, DbError, Path, PartContents, StatePart, State, StateTree},
     crate::structs::hash::{Hash, HashType},
     r#macro::document,
-    std::collections::{BTreeSet, VecDeque},
+    std::collections::{BTreeMap, BTreeSet, VecDeque},
     std::fmt,
 };
 
@@ -22,8 +22,9 @@ pub struct SnapshotWalk {
     root: Hash,
     /// Positions still to bring in line, with the hash the pivot's tree has there.
     waiting: VecDeque<(u16, Path, Hash)>,
-    /// The position asked for and not answered yet.
-    asked: Option<(u16, Path, Hash)>,
+    /// The positions asked for and not answered yet, with the hash the pivot's tree has at each:
+    /// several at once, each of another peer, as positions out at once never overlap.
+    asked: BTreeMap<(u16, Path), Hash>,
     /// Entries taken so far, for what the walk reports.
     taken: u64,
 }
@@ -61,7 +62,7 @@ impl SnapshotWalk {
         SnapshotWalk {
             root,
             waiting: VecDeque::from([(0, [0; 32], root)]),
-            asked: None,
+            asked: BTreeMap::new(),
             taken: 0,
         }
     }
@@ -78,23 +79,24 @@ impl SnapshotWalk {
 
     #[document(
         parent = "SnapshotWalk",
-        summary = "The next position to ask a peer for, skipping every one the node's own tree holds the same already; None once nothing is left, or while an answer is still awaited.",
+        summary = "The next position to ask a peer for, skipping every one the node's own tree holds the same already; None once nothing is left to ask for now, though answers may still be awaited. Asked again before an answer, it gives another position, for another peer: positions out at once never overlap.",
         params = { local = "The node's own state tree, as everything taken so far left it." },
     )]
     pub fn next(&mut self, local: &StateTree) -> Result<Option<(u16, Path)>, DbError> {
-        if self.asked.is_some() {
-            return Ok(None);
-        }
-
         while let Some((depth, prefix, expected)) = self.waiting.pop_front() {
             if local.subtree_hash(depth, &prefix)? != expected {
-                self.asked = Some((depth, prefix, expected));
+                self.asked.insert((depth, prefix), expected);
 
                 return Ok(Some((depth, prefix)));
             }
         }
 
         Ok(None)
+    }
+
+    #[document(parent = "SnapshotWalk", summary = "How many positions are asked and not answered yet.")]
+    pub fn out(&self) -> usize {
+        self.asked.len()
     }
 
     #[document(
@@ -110,11 +112,7 @@ impl SnapshotWalk {
         returns = "Unasked for an answer to another position, Invalid for one that does not check: ask another peer.",
     )]
     pub fn take(&mut self, layer: &State, hash: HashType, depth: u16, prefix: Path, part: StatePart) -> Result<(), WalkError> {
-        let Some((asked_depth, asked_prefix, _)) = self.asked else {
-            return Err(WalkError::Unasked);
-        };
-
-        if (asked_depth, asked_prefix) != (depth, prefix) {
+        if !self.asked.contains_key(&(depth, prefix)) {
             return Err(WalkError::Unasked);
         }
 
@@ -122,7 +120,7 @@ impl SnapshotWalk {
             return Err(WalkError::Invalid);
         }
 
-        self.asked = None;
+        self.asked.remove(&(depth, prefix));
 
         match part.contents {
             PartContents::Branch { left, right } => {
@@ -159,17 +157,27 @@ impl SnapshotWalk {
 
     #[document(
         parent = "SnapshotWalk",
-        summary = "Gives back the position asked, to ask it of another peer: the one asked failed, or left.",
+        summary = "Gives back every position asked, to ask them again: the pivot moved.",
     )]
     pub fn retry(&mut self) {
-        if let Some(asked) = self.asked.take() {
-            self.waiting.push_front(asked);
+        for ((depth, prefix), expected) in std::mem::take(&mut self.asked).into_iter().rev() {
+            self.waiting.push_front((depth, prefix, expected));
+        }
+    }
+
+    #[document(
+        parent = "SnapshotWalk",
+        summary = "Gives back one position asked, to ask it of another peer: the one asked failed, left, or sent what does not check.",
+    )]
+    pub fn give_back(&mut self, depth: u16, prefix: Path) {
+        if let Some(expected) = self.asked.remove(&(depth, prefix)) {
+            self.waiting.push_front((depth, prefix, expected));
         }
     }
 
     #[document(parent = "SnapshotWalk", summary = "Whether nothing is left to ask, nor awaited.")]
     pub fn done(&self) -> bool {
-        self.asked.is_none() && self.waiting.is_empty()
+        self.asked.is_empty() && self.waiting.is_empty()
     }
 }
 
@@ -305,5 +313,51 @@ mod tests {
         walk.retry();
 
         assert_eq!(walk.next(&StateTree::new(&State::new(node), hash())).unwrap(), Some((depth, prefix)), "asked again");
+    }
+
+    #[test]
+    fn a_walk_keeps_several_positions_out_answered_in_any_order() {
+        let peer = holding(&entries(0..500, 1));
+        let root = StateTree::new(&State::new(peer.clone()), hash()).root().unwrap();
+        let node = Arc::new(MemoryDb::default());
+        let mut walk = SnapshotWalk::new(root);
+        let (mut most, mut round) = (0, 0);
+
+        loop {
+            // Up to three out at once, as from three peers, distinct each.
+            let mut out = Vec::new();
+
+            while out.len() < 3
+                && let Some(position) = walk.next(&StateTree::new(&State::new(node.clone()), hash())).unwrap()
+            {
+                assert!(!out.contains(&position));
+                out.push(position);
+            }
+
+            if out.is_empty() {
+                break;
+            }
+
+            most = most.max(walk.out());
+            round += 1;
+
+            // One peer fails every third round: its position goes back, and comes out again later.
+            if round % 3 == 0 && out.len() > 1 {
+                let (depth, prefix) = out.remove(0);
+                walk.give_back(depth, prefix);
+            }
+
+            for (depth, prefix) in out.into_iter().rev() {
+                let part = StateTree::new(&State::new(peer.clone()), hash()).part(depth, &prefix, 32).unwrap().unwrap();
+                let layer = State::new(node.clone());
+                walk.take(&layer, hash(), depth, prefix, part).unwrap();
+                StateTree::new(&layer, hash()).follow().unwrap();
+                node.commit(layer.take_changes()).unwrap();
+            }
+        }
+
+        assert_eq!(most, 3);
+        assert!(walk.done());
+        assert_eq!(stored_root(&*node, hash()).unwrap(), root, "the node holds what the peer does");
     }
 }

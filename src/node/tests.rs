@@ -1497,7 +1497,8 @@ fn a_node_starting_at_a_checkpoint_fetches_nothing_below_it_and_holds_it_final()
     use crate::chain::{BlockError, ImportError};
     use crate::structs::vote::Checkpoint;
 
-    let (mut producer, mut producer_net) = node(true);
+    let (producer, mut producer_net) = node(true);
+    let mut producer = producer;
     let authority = DevAuthority::dev_keypair();
     let blocks = 60;
 
@@ -2248,4 +2249,191 @@ fn a_sync_request_counts_in_its_peer_s_share_until_it_is_answered() {
     node.step(LATER).unwrap();
     assert_eq!(node.backlog.waiting(), 0);
     assert!(sent(&mut net).iter().any(|command| matches!(command, NetCommand::Respond { id: 1, .. })));
+}
+
+#[test]
+fn a_long_catch_up_fetches_from_several_peers_at_once_and_imports_in_order() {
+    let (mut source, _source_net) = pow_node();
+
+    for _ in 0..600 {
+        let block = mine_on(&source, source.chain().tip(), 1);
+        source.chain.import(&block, LATER).unwrap();
+    }
+
+    let blocks: Vec<Block> = (1..=600).map(|height| source.chain().block_at(height).unwrap().unwrap()).collect();
+    let (mut node, mut net) = pow_node();
+    let peers: Vec<PeerId> = (0..3).map(|_| PeerId::random()).collect();
+    let status = SyncResponse::Status { genesis: node.chain().genesis(), tip: blocks[599].id(), height: 600, work: source.chain().tip_work(), justified: 0 };
+
+    for peer in &peers {
+        net.events.send(NetEvent::PeerUp { peer: *peer, address: Multiaddr::empty() }).unwrap();
+        net.events.send(NetEvent::Response { peer: *peer, response: status.clone() }).unwrap();
+    }
+
+    let asked = |net: &mut FakeNet| -> Vec<(PeerId, u64, u32)> {
+        sent(net)
+            .into_iter()
+            .filter_map(|command| match command {
+                NetCommand::Request { peer, request: SyncRequest::Blocks { from, count } } => Some((peer, from, count)),
+                _ => None,
+            })
+            .collect()
+    };
+    let answer = |net: &mut FakeNet, (peer, from, count): (PeerId, u64, u32)| {
+        let batch = blocks[from as usize - 1..(from as usize - 1 + count as usize).min(600)].to_vec();
+        net.events.send(NetEvent::Response { peer, response: SyncResponse::Blocks(batch) }).unwrap();
+    };
+
+    // First one batch, from one peer, to find where the chains meet.
+    node.step(LATER).unwrap();
+    let first = asked(&mut net);
+    assert_eq!(first.len(), 1, "{first:?}");
+    answer(&mut net, first[0]);
+    node.step(LATER).unwrap();
+
+    // Then a batch out to each peer at once, distinct heights each.
+    let mut out = asked(&mut net);
+    assert_eq!(out.len(), 3, "{out:?}");
+    let mut who: Vec<PeerId> = out.iter().map(|(peer, _, _)| *peer).collect();
+    who.sort();
+    who.dedup();
+    assert_eq!(who.len(), 3, "one each");
+    assert!(out.windows(2).all(|pair| pair[0].1 + u64::from(pair[0].2) <= pair[1].1), "{out:?}");
+
+    // Answered last first, they still go in in order, and the rest follow until the tip.
+    let mut rounds = 0;
+
+    while node.chain().tip().height < 600 && rounds < 50 {
+        for request in out.drain(..).rev() {
+            answer(&mut net, request);
+            node.step(LATER).unwrap();
+        }
+
+        out = asked(&mut net);
+        rounds += 1;
+    }
+
+    assert_eq!(node.chain().tip().height, 600);
+    assert_eq!(node.chain().tip().id(), blocks[599].id());
+    assert_eq!(node.sync.in_flight(), (0, 0), "nothing out and nothing held");
+}
+
+#[test]
+fn a_peer_that_fails_mid_catch_up_has_its_batch_asked_of_another() {
+    let (mut source, _source_net) = pow_node();
+
+    for _ in 0..400 {
+        let block = mine_on(&source, source.chain().tip(), 1);
+        source.chain.import(&block, LATER).unwrap();
+    }
+
+    let blocks: Vec<Block> = (1..=400).map(|height| source.chain().block_at(height).unwrap().unwrap()).collect();
+    let (mut node, mut net) = pow_node();
+    let peers: Vec<PeerId> = (0..2).map(|_| PeerId::random()).collect();
+    let status = SyncResponse::Status { genesis: node.chain().genesis(), tip: blocks[399].id(), height: 400, work: source.chain().tip_work(), justified: 0 };
+
+    for peer in &peers {
+        net.events.send(NetEvent::PeerUp { peer: *peer, address: Multiaddr::empty() }).unwrap();
+        net.events.send(NetEvent::Response { peer: *peer, response: status.clone() }).unwrap();
+    }
+
+    let asked = |net: &mut FakeNet| -> Vec<(PeerId, u64, u32)> {
+        sent(net)
+            .into_iter()
+            .filter_map(|command| match command {
+                NetCommand::Request { peer, request: SyncRequest::Blocks { from, count } } => Some((peer, from, count)),
+                _ => None,
+            })
+            .collect()
+    };
+    let answer = |net: &mut FakeNet, (peer, from, count): (PeerId, u64, u32)| {
+        let batch = blocks[from as usize - 1..(from as usize - 1 + count as usize).min(400)].to_vec();
+        net.events.send(NetEvent::Response { peer, response: SyncResponse::Blocks(batch) }).unwrap();
+    };
+
+    node.step(LATER).unwrap();
+    let first = asked(&mut net);
+    answer(&mut net, first[0]);
+    node.step(LATER).unwrap();
+    let out = asked(&mut net);
+    assert_eq!(out.len(), 2, "{out:?}");
+
+    // The one asked for the lower batch fails: that batch goes to the other once it answers.
+    let (failed, kept) = (out[0], out[1]);
+    net.events.send(NetEvent::RequestFailed { peer: failed.0, error: "timed out".to_string() }).unwrap();
+    node.step(LATER).unwrap();
+    answer(&mut net, kept);
+    node.step(LATER).unwrap();
+    let again = asked(&mut net);
+    assert!(again.iter().any(|(peer, from, _)| *peer == kept.0 && *from == failed.1), "{again:?}");
+}
+
+#[test]
+fn a_snapshot_takes_its_state_from_every_peer_serving_the_pivot_at_once() {
+    use crate::db::stored_root;
+
+    let (mut producer, mut producer_net) = node(true);
+    let authority = DevAuthority::dev_keypair();
+    let blocks = 60;
+
+    for slot in 1..=blocks {
+        if slot % 2 == 0 {
+            let to = Keypair::generate(authority.public().key_type()).unwrap().public().address();
+            let tx = Tx::Transfer { from: authority.public().address(), to, amount: Amount::U128(u128::from(slot)) };
+            producer.submit(SignedTx::sign(tx, slot / 2 - 1, FeeOffer::NONE, &authority, &producer.chain().genesis())).unwrap();
+        }
+
+        producer.step(SLOT * slot).unwrap();
+    }
+
+    sent(&mut producer_net);
+    // Few entries an answer, so the state takes many positions to walk.
+    let mut producer = producer.tuning(NodeTuning { sync_entries: 2, ..NodeTuning::DEFAULT });
+    let (mut late, mut late_net) = node(false);
+    assert!(late.sync_from_snapshot(None).unwrap());
+
+    // Two peers, both the producer behind them: whatever either is asked, the producer answers.
+    let (first, second, late_peer) = (PeerId::random(), PeerId::random(), PeerId::random());
+
+    for peer in [first, second] {
+        late_net.events.send(NetEvent::PeerUp { peer, address: Multiaddr::empty() }).unwrap();
+    }
+
+    late.step(SLOT * blocks).unwrap();
+    let (mut most_at_once, mut rounds) = (0, 0);
+
+    loop {
+        let requests: Vec<(PeerId, SyncRequest)> = sent(&mut late_net)
+            .into_iter()
+            .filter_map(|command| match command {
+                NetCommand::Request { peer, request } => Some((peer, request)),
+                _ => None,
+            })
+            .collect();
+
+        if requests.is_empty() || rounds > 10_000 {
+            break;
+        }
+
+        let state_peers: HashSet<PeerId> = requests.iter().filter(|(_, request)| matches!(request, SyncRequest::State { .. })).map(|(peer, _)| *peer).collect();
+        most_at_once = most_at_once.max(state_peers.len());
+
+        for (peer, request) in requests {
+            producer_net.events.send(NetEvent::Request { peer: late_peer, id: 1, request }).unwrap();
+            producer.step(SLOT * blocks).unwrap();
+
+            for answer in sent(&mut producer_net) {
+                if let NetCommand::Respond { response, .. } = answer {
+                    late_net.events.send(NetEvent::Response { peer, response }).unwrap();
+                }
+            }
+        }
+
+        late.step(SLOT * blocks).unwrap();
+        rounds += 1;
+    }
+
+    assert_eq!(most_at_once, 2, "state asked of both at once");
+    assert_eq!(late.chain().tip().id(), producer.chain().tip().id());
+    assert_eq!(stored_root(&**late.chain().db(), late.chain().hash()).unwrap(), late.chain().tip().state_root);
 }

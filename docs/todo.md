@@ -892,9 +892,11 @@ with.
 - [x] **`chainv4 light` still keeps nothing between runs.** Done 2026-11-06: `.chainv4/light/<genesis
   id>.bin`, or `--state FILE`, and `--fresh`. Was: it followed from genesis, or from
   `--checkpoint`, each time.
-- [ ] **Snapshots come from one peer at a time,** and a pivot only stays servable for
-  `max_reorg_depth` blocks. Asking several peers at once, and frozen snapshots kept by serving
-  nodes, would suit large states.
+- [x] **Snapshots come from one peer at a time.** Done 2026-11-06: the state walk takes a position a
+  peer from every peer serving the pivot, up to `--sync-peers`, and moves the pivot only once none
+  serves it.
+- [ ] **A pivot only stays servable for `max_reorg_depth` blocks.** Frozen snapshots kept by serving
+  nodes would suit large states, whose walk outlasts the window.
 - [x] **Signing offline.** The wallet installs as an online wallet or an offline signer that makes
   no requests; an online one holds watch-only wallets beside ones with keys. Pairing, requests and
   signed transactions travel as QR codes read off photos, or as text.
@@ -978,8 +980,8 @@ with.
   block that does not connect. While any peer's chain holds more work, it asks the heaviest one
   for the next 128 blocks and imports them in order, side branches and reorgs included. When a
   batch does not connect, the chains split earlier, so it steps a batch further back.
-- [ ] **Sync uses one peer at a time.** Batches are fetched one after another from a single peer;
-  downloading from several peers at once would be faster for long catch-ups.
+- [x] **Sync uses one peer at a time.** Done 2026-11-06: a long catch-up fetches batches from up to
+  `--sync-peers` peers at once, imported in order.
 - [x] **Blocks gossiped ahead of the tip are held.** Done 2026-11-04. Up to 32 (`ahead.*`), 4 a peer,
   16 MiB, 2 minutes, each checked as far as it can be without its parent and counted in its peer's
   backlog share; they go in as soon as the parent lands. See [Sync](node.md#sync).

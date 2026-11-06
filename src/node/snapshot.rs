@@ -20,7 +20,7 @@ use {
     crate::structs::vote::Checkpoint,
     libp2p::PeerId,
     r#macro::document,
-    std::collections::HashSet,
+    std::collections::{HashMap, HashSet},
 };
 
 #[document(
@@ -46,10 +46,13 @@ pub(super) struct SnapshotSync {
     /// the client's figures lack.
     checkpoint: Option<(Hash, u256)>,
     phase: Phase,
-    /// The peer asked, and what, while its answer is outstanding.
-    asking: Option<(PeerId, Asked)>,
+    /// What each peer was asked, while its answer is outstanding: one peer at a time, but while
+    /// taking state, when each peer that serves the pivot takes a position of its own.
+    asking: HashMap<PeerId, Asked>,
     /// Peers that sent something that did not check: never asked again.
     distrusted: HashSet<PeerId>,
+    /// Peers that said they no longer serve the pivot: the pivot moves up once all have.
+    unserved: HashSet<PeerId>,
     /// How many times the pivot moved up.
     moves: u32,
     /// Picking the checkpoint by the anchors peers show, while the node starts by them.
@@ -100,8 +103,9 @@ impl SnapshotSync {
                 Some(_) => Phase::Checkpoint,
                 None => Phase::Headers,
             },
-            asking: None,
+            asking: HashMap::new(),
             distrusted: HashSet::new(),
+            unserved: HashSet::new(),
             moves: 0,
             #[cfg(feature = "anchoring")]
             anchored: None,
@@ -143,12 +147,10 @@ impl SnapshotSync {
 
     /// Stops waiting on a peer that left or failed: what it was asked goes to another.
     pub(super) fn forget(&mut self, peer: PeerId) {
-        if self.asking.is_some_and(|(asked, _)| asked == peer) {
-            self.asking = None;
-
-            if let Phase::State { walk, .. } = &mut self.phase {
-                walk.retry();
-            }
+        if let Some(asked) = self.asking.remove(&peer)
+            && let (Asked::State { depth, prefix }, Phase::State { walk, .. }) = (asked, &mut self.phase)
+        {
+            walk.give_back(depth, prefix);
         }
     }
 
@@ -214,7 +216,13 @@ impl Node {
             return Ok(());
         };
 
-        if snapshot.asking.is_some() {
+        // Taking state, every peer serving the pivot may have a position of its own out; anything
+        // else is asked of one peer at a time.
+        if matches!(snapshot.phase, Phase::State { .. }) {
+            return self.snapshot_state_next();
+        }
+
+        if !snapshot.asking.is_empty() {
             return Ok(());
         }
 
@@ -252,27 +260,58 @@ impl Node {
                 LightRequest::Finality { from, .. } => (Asked::Finality { from }, SyncRequest::Finality { from, count: MAX_SYNC_FINALITY }),
             },
             Phase::Block { pivot } => (Asked::Block, SyncRequest::Blocks { from: *pivot, count: 1 }),
-            Phase::State { pivot, .. } => {
-                let block = snapshot.light().sealed_at(*pivot).expect("a checked header").id();
-                let snapshot = self.sync.snapshot.as_mut().expect("still taking one");
-                let Phase::State { pivot, walk } = &mut snapshot.phase else { unreachable!("taking state") };
-
-                match self.chain.snapshot_next(walk)? {
-                    Some((depth, prefix)) => (Asked::State { depth, prefix }, SyncRequest::State { block, depth, prefix }),
-                    None if walk.done() => {
-                        log::info!("[node] took {} entries of state at height {pivot}; fetching the block", walk.taken());
-                        let pivot = *pivot;
-                        snapshot.phase = Phase::Block { pivot };
-
-                        (Asked::Block, SyncRequest::Blocks { from: pivot, count: 1 })
-                    }
-                    None => return Ok(()),
-                }
-            }
+            Phase::State { .. } => unreachable!("taken above"),
         };
 
-        self.sync.snapshot.as_mut().expect("still taking one").asking = Some((peer, asked));
+        self.sync.snapshot.as_mut().expect("still taking one").asking.insert(peer, asked);
         self.send(NetCommand::Request { peer, request });
+
+        Ok(())
+    }
+
+    /// While taking state: a position of the walk out to each peer that serves the pivot and has
+    /// nothing out, up to --sync-peers of them, the heaviest first; once the walk is done, the
+    /// pivot's block, of one.
+    fn snapshot_state_next(&mut self) -> Result<(), NodeError> {
+        let most = self.sync.most.max(1);
+        let snapshot = self.sync.snapshot.as_ref().expect("taking one");
+        let Phase::State { pivot, .. } = &snapshot.phase else { unreachable!("taking state") };
+        let (pivot, block) = (*pivot, snapshot.light().sealed_at(*pivot).expect("a checked header").id());
+        let mut free: Vec<(u256, PeerId)> = self
+            .sync
+            .peers
+            .iter()
+            .filter(|(id, chain)| chain.height >= pivot && !snapshot.distrusted.contains(id) && !snapshot.unserved.contains(id) && !snapshot.asking.contains_key(id))
+            .map(|(id, chain)| (chain.work, *id))
+            .collect();
+        free.sort_by(|a, b| b.cmp(a));
+
+        for (_, peer) in free {
+            let snapshot = self.sync.snapshot.as_mut().expect("taking one");
+
+            if snapshot.asking.len() >= most {
+                break;
+            }
+
+            let Phase::State { walk, .. } = &mut snapshot.phase else { unreachable!("taking state") };
+
+            match self.chain.snapshot_next(walk)? {
+                Some((depth, prefix)) => {
+                    snapshot.asking.insert(peer, Asked::State { depth, prefix });
+                    self.send(NetCommand::Request { peer, request: SyncRequest::State { block, depth, prefix } });
+                }
+                None if walk.done() && snapshot.asking.is_empty() => {
+                    log::info!("[node] took {} entries of state at height {pivot}; fetching the block", walk.taken());
+                    snapshot.phase = Phase::Block { pivot };
+                    snapshot.asking.insert(peer, Asked::Block);
+                    self.send(NetCommand::Request { peer, request: SyncRequest::Blocks { from: pivot, count: 1 } });
+
+                    break;
+                }
+                // Nothing to ask for now: what is out may bring more.
+                None => break,
+            }
+        }
 
         Ok(())
     }
@@ -282,7 +321,7 @@ impl Node {
         let Some(snapshot) = self.sync.snapshot.as_mut() else {
             return Ok(());
         };
-        let Some((_, asked)) = snapshot.asking.filter(|(asked, _)| *asked == peer) else {
+        let Some(asked) = snapshot.asking.remove(&peer) else {
             log::debug!("[node] ignored an answer {peer} sent unasked");
 
             return Ok(());
@@ -291,24 +330,19 @@ impl Node {
         match (asked, response) {
             #[cfg(feature = "anchoring")]
             (Asked::Anchors, SyncResponse::Anchors(answer)) => {
-                snapshot.asking = None;
                 self.take_anchors(peer, answer);
             }
             #[cfg(feature = "anchoring-btc")]
             (Asked::BtcHeaders { from }, SyncResponse::BtcHeaders(headers)) => {
-                snapshot.asking = None;
                 self.take_btc_headers(peer, from, headers, now);
             }
             (Asked::Checkpoint, SyncResponse::Checkpoint(answer)) => {
-                snapshot.asking = None;
                 self.take_checkpoint(peer, answer)?;
             }
             (Asked::Headers { from }, SyncResponse::Headers(headers)) => {
-                snapshot.asking = None;
                 self.take_headers(peer, from, headers, now);
             }
             (Asked::Finality { from }, SyncResponse::Finality(steps)) => {
-                snapshot.asking = None;
 
                 if let Err(err) = snapshot.light_mut().deliver_finality(from, steps) {
                     log::warn!("[node] {peer} sent finality that does not check: {err}; asking others");
@@ -316,23 +350,39 @@ impl Node {
                 }
             }
             (Asked::State { depth, prefix }, SyncResponse::State(part)) => {
-                snapshot.asking = None;
                 let from_checkpoint = snapshot.starts_at_checkpoint();
                 let Phase::State { pivot, walk } = &mut snapshot.phase else {
                     return Ok(());
                 };
 
+                // Peers that might still serve the pivot, besides this one.
+                let pivot_height = *pivot;
+                let others = self
+                    .sync
+                    .peers
+                    .iter()
+                    .any(|(id, chain)| *id != peer && chain.height >= pivot_height && !snapshot.distrusted.contains(id) && !snapshot.unserved.contains(id));
+
                 match part {
-                    // The peer no longer serves the pivot: move it up, and walk again from there,
-                    // which skips everything already right. From a checkpoint there is no going
-                    // back to running every block, so it keeps trying.
+                    // This peer no longer serves the pivot: another may still, and takes the
+                    // position.
+                    None if others => {
+                        log::info!("[node] {peer} no longer serves state at height {pivot}; asking others");
+                        walk.give_back(depth, prefix);
+                        snapshot.unserved.insert(peer);
+                    }
+                    // None does any more: move it up, and walk again from there, which skips
+                    // everything already right. From a checkpoint there is no going back to
+                    // running every block, so it keeps trying.
                     None if snapshot.moves >= MAX_MOVES && !from_checkpoint => {
                         log::warn!("[node] peers serve no pivot for long: syncing by running blocks instead");
                         self.sync.snapshot = None;
                     }
                     None => {
-                        log::info!("[node] {peer} no longer serves state at height {pivot}; moving the pivot up");
+                        log::info!("[node] peers no longer serve state at height {pivot}; moving the pivot up");
                         walk.retry();
+                        snapshot.asking.clear();
+                        snapshot.unserved.clear();
                         snapshot.moves += 1;
                         snapshot.phase = Phase::Headers;
                         snapshot.light_mut().refresh();
@@ -340,17 +390,16 @@ impl Node {
                     Some(part) => match self.chain.take_snapshot_part(walk, depth, prefix, part) {
                         Ok(()) => {}
                         Err(WalkError::Db(err)) => return Err(NodeError::Db(err)),
-                        Err(WalkError::Unasked) => walk.retry(),
+                        Err(WalkError::Unasked) => walk.give_back(depth, prefix),
                         Err(WalkError::Invalid) => {
                             log::warn!("[node] {peer} sent state that does not check against the pivot's root; asking others");
-                            walk.retry();
+                            walk.give_back(depth, prefix);
                             snapshot.distrusted.insert(peer);
                         }
                     },
                 }
             }
             (Asked::Block, SyncResponse::Blocks(blocks)) => {
-                snapshot.asking = None;
                 let Phase::Block { pivot } = snapshot.phase else {
                     return Ok(());
                 };
@@ -364,10 +413,13 @@ impl Node {
                     }
                 }
             }
-            // An answer of the wrong kind is no answer.
-            (_, _) => {
-                snapshot.asking = None;
+            // An answer of the wrong kind is no answer: a position it was asked goes to another.
+            (asked, _) => {
                 snapshot.distrusted.insert(peer);
+
+                if let (Asked::State { depth, prefix }, Phase::State { walk, .. }) = (asked, &mut snapshot.phase) {
+                    walk.give_back(depth, prefix);
+                }
             }
         }
 

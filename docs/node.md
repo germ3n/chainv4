@@ -319,6 +319,7 @@ and keep in step for what a line of flags holds.
 | `--update-every T` | 1h | 1m to 7d | How often the node looks for releases. |
 | `--snapshot-depth N` | 16 | 1 to half `max_reorg_depth` | How far below the best tip `--snapshot` takes its state; see [Syncing from a snapshot](#syncing-from-a-snapshot). |
 | `--underpriced-for N` or `T` | 32 blocks | 1 to 100,000 blocks | How long an offer under the base price waits before the mempool drops it. A time is turned into blocks at the chain's block time as the node starts. |
+| `--sync-peers N` | 4 | 1 to 16 | How many peers a long catch-up fetches block batches, and a snapshot its state, from at once. |
 | `--gapped-for N` or `T` | 64 blocks | 1 to 100,000 blocks | How long a transaction waits behind a missing nonce of its sender's before the mempool drops it, in blocks or as a time, as `--underpriced-for`. |
 | `--mempool-bytes N` | 256MiB | 1 MiB to 64 GiB | What the mempool's transactions may take, encoded, added up: bytes, or with KiB, MiB or GiB. |
 | `--state-history N` or `T` | 10,000 blocks | at least 1 | As before, now also as a time, such as `14h`, turned into blocks the same way. |
@@ -653,7 +654,14 @@ A node catches up from its peers on its own (`src/node/sync.rs`).
    - it imports them in order, side blocks and reorgs included;
    - when a batch does not connect, the chains split earlier, so it asks again a batch further
      back;
-   - one request is in flight at a time.
+   - near the tip, and until a batch of the heaviest peer's connects, one request is in flight
+     at a time;
+   - on a long catch-up, more than two batches behind, batches of the heights after go out to up
+     to `--sync-peers` peers at once (4 by default, 1 to 16), one batch each, to any peer that
+     claims all of it, the heaviest first, a few batches ahead at most. What arrives ahead of the
+     next height the chain needs is held and goes in in order; a batch whose peer fails or leaves
+     is asked of another, and a peer that answers with blocks that do not fit counts against it as
+     before.
 3. **Justifications.** Once nobody holds more work, the node asks a peer ahead of it on
    justification for the justifications it lacks, at most 64 at a time. It checks each before it
    counts, and they may finalize checkpoints here or move the chain to a justified branch.
@@ -723,8 +731,10 @@ the tip. Then it syncs the rest as usual.
    of whatever main-chain block it is asked for, so peers need not agree on the depth, and one
    that no longer holds the pivot moves it as below. A chain shorter than twice the depth (32 by
    default) is synced by running its blocks instead.
-3. **State.** It walks the pivot's state tree down from the root (`SnapshotWalk`), a position at a
-   time:
+3. **State.** It walks the pivot's state tree down from the root (`SnapshotWalk`), a position a
+   peer: each peer that holds the pivot and has nothing out takes a position of its own, up to
+   `--sync-peers` at once, the heaviest first, as positions out together never overlap. One whose
+   peer fails or leaves goes back to be asked of another:
    - **What it gets:** a peer answers with the position's entries, when there are at most 512, or
      else with its two halves' hashes, to ask for one at a time.
    - **Checked first:** every part is checked against the pivot's state root before it is kept.
@@ -732,8 +742,8 @@ the tip. Then it syncs the rest as usual.
      that sends one that does not is never asked again.
    - **Skipping:** any subtree whose hash matches what the node holds already is skipped.
 4. **Moving the pivot.** If a peer can no longer serve the pivot, because the chain moved past
-   the state it keeps, the node fetches the headers since, picks a newer pivot and walks
-   again. The walk skips every subtree that did not change, so it only fetches what did. After 8
+   the state it keeps, its position goes to another peer that may. Once none does, the node
+   fetches the headers since, picks a newer pivot and walks again. The walk skips every subtree that did not change, so it only fetches what did. After 8
    moves it gives up on the snapshot and syncs by running blocks.
 5. **Installing.** Once the tree is the pivot's, it fetches the pivot block itself, checks its
    body against the header, and makes it the tip (`Chain::install_snapshot`):
@@ -833,8 +843,8 @@ cores runs blocks slower, and links slower than a laptop's loopback carry fewer 
   floods of requests. Floods of transactions and votes are bounded by the
   [backlog](#the-gossip-backlog), which disconnects a peer that keeps going over its share, but
   there is no peer scoring or banning yet.
-- **Sync uses one peer at a time,** snapshots included, and blocks gossiped ahead of the tip are
-  dropped and fetched again by sync.
+- **A long catch-up uses several peers,** `--sync-peers` of them, for block batches and for a
+  snapshot's state; headers, finality and everything near the tip come from one at a time.
 - **A snapshot node keeps no history before its pivot:** headers, justifications and light
   updates only, no bodies, receipts or events (see [Syncing from a snapshot](#syncing-from-a-snapshot)).
 - **Stopping is between steps.** Ctrl-C or SIGTERM sets a flag the loop checks after each step,

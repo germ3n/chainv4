@@ -770,6 +770,15 @@ impl Node {
 
     #[document(
         parent = "Node",
+        summary = "How many peers a long catch-up fetches block batches from at once, 1 to 16: what --sync-peers sets, SYNC_PEERS unless set. 1 fetches one batch at a time, as from one peer.",
+    )]
+    pub fn sync_peers(mut self, most: usize) -> Node {
+        self.sync.most = most.clamp(1, 16);
+        self
+    }
+
+    #[document(
+        parent = "Node",
         summary = "Sets what an operator tuned of the loop: what it serves syncing peers at most, events a pass, the template refresh, payouts mining alone, peers remembered and the snapshot's depth. NodeTuning::DEFAULT unless set. Each sync cap is held to its protocol maximum, and the snapshot's depth to half max_reorg_depth.",
         see_also = "NodeTuning",
     )]
