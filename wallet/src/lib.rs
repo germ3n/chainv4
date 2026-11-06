@@ -18,6 +18,8 @@ mod history;
 mod keys;
 #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
 mod light;
+#[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+mod walletconnect;
 mod lock;
 mod metamask;
 #[cfg(feature = "mining")]

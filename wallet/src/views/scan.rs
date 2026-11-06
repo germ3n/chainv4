@@ -39,6 +39,8 @@ pub struct Scan {
     error: Option<String>,
     /// The camera, while it is open.
     live: Option<Live>,
+    /// A WalletConnect code read, wc:…, for whoever reads those to take.
+    plain: Option<String>,
 }
 
 /// The camera open, what shows of it, and what searches its frames.
@@ -305,6 +307,12 @@ impl Scan {
     }
 
     /// Says why what was read will not do.
+    /// A WalletConnect code read, once.
+    #[cfg_attr(not(all(feature = "walletconnect", not(target_arch = "wasm32"))), allow(dead_code))]
+    pub fn take_plain(&mut self) -> Option<String> {
+        self.plain.take()
+    }
+
     pub fn fail(&mut self, why: String) {
         self.error = Some(why);
     }
@@ -318,6 +326,15 @@ impl Scan {
     /// Bitcoin wallet's. Gives the message once it is all in.
     fn read_text(&mut self, text: &str) -> Option<Message> {
         self.error = None;
+
+        // A site's WalletConnect code is plain text: kept for the page that pairs with it.
+        if text.trim().starts_with("wc:") {
+            self.plain = Some(text.trim().to_string());
+            self.live = None;
+
+            return None;
+        }
+
         let read = match airgap::is_ur(text) {
             true => self.assembly.add(text).and_then(|done| done.map(|(kind, bytes)| Message::from_ur(&kind, &bytes)).transpose()),
             false => Err("not a code of this wallet's, MetaMask's or a Bitcoin wallet's: those start ur:".to_string()),

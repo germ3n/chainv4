@@ -2060,6 +2060,19 @@ voting finality it now goes back to the checkpoint and follows the node from the
   rename the new binary over the old one; whatever runs keeps the old one in memory until it
   restarts.
 
+## WalletConnect
+
+The wallet speaks WalletConnect v2 itself (`wallet/src/walletconnect.rs`); there is no Rust SDK.
+What it follows is the sign client's own source (2.x): HKDF-SHA256 with no salt and no info over
+the X25519 secret, the topic the SHA-256 of the key, type 0 envelopes in padded base64, the relay's
+JWT signed EdDSA with the key as `did:key:z…` (`0xed01` and the key in base58), and the tags and
+lifetimes of `ENGINE_RPC_OPTS`. Newer reference clients publish proposals and approvals with relay
+methods of their own (`wc_proposeSession`, `wc_approveSession`); the wallet uses plain
+`irn_publish` for both messages, which the relay delivers the same, and after subscribing to a
+topic asks `irn_batchFetchMessages` for what waits there, as a proposal is sent before the wallet
+pairs. The wss:// client is the mining worker's (`chainv4::mining::wss::open_sized`,
+`worker::connect_to`), so the wallet's `walletconnect` feature turns on `chainv4/worker`.
+
 ## Kyoto's gossip monitor
 
 The wallet hears pending Bitcoin payments through Kyoto's `subscribe_to_gossip`, which opens a

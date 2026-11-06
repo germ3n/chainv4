@@ -23,6 +23,8 @@ use {
 #[derive(Default)]
 pub struct SettingsState {
     reading: super::reading::ReadingState,
+    #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+    walletconnect: super::walletconnect::WalletConnectForm,
     /// The node being typed, and a genesis id to trust instead.
     node: Option<String>,
     genesis: String,
@@ -146,6 +148,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SettingsState) {
         network_use(ui, ctx);
         super::reading::card(ui, ctx, &mut state.reading);
         super::dapp::settings(ui, ctx);
+        #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+        super::walletconnect::card(ui, ctx, &mut state.walletconnect);
         #[cfg(feature = "dex")]
         trade(ui, ctx);
         #[cfg(feature = "swap")]

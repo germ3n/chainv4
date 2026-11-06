@@ -951,6 +951,8 @@ mod tests {
             node_stops: None,
             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
             lights: &mut lights,
+            #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+            walletconnect: None,
             dex_fee_bps: chainv4::params::vm::DexSettings::DEFAULT.fee_bps,
         };
         let mut returned = None;

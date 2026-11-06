@@ -61,7 +61,7 @@ minicbor = { version = "2", default-features = false, features = ["alloc"] }
 default = ["store", "mining"]
 # All an app store takes: every default feature but mining. --store on the build scripts builds with
 # this alone: cargo build --no-default-features --features store.
-store = ["swap", "dex", "nft", "bridge", "bitcoin-light"]
+store = ["swap", "dex", "nft", "bridge", "bitcoin-light", "walletconnect"]
 # Mining from this device, on its GPU or CPU, and in the browser on WebGPU or Web Workers: the Mine
 # card, crate::miner, and what they rest on. Off for the app stores, which take no app that mines;
 # what a pool owes and claiming it stay, as claiming is not mining.
@@ -81,6 +81,10 @@ bridge = ["swap", "chainv4/bridge", "chainv4-ui/bridge"]
 # own peers, through Kyoto (the bip157 crate), for swaps' HTLCs and the accounts' Bitcoin
 # addresses. The browser, which opens no raw connections, goes without.
 bitcoin-light = ["dep:bip157", "dep:bitcoin"]
+# Sites on the desktop and Android through WalletConnect v2, which have no extension: a relay over
+# wss:// (chainv4's own client, through the proxy), X25519 and ChaCha20-Poly1305 between the wallet
+# and the site. Off until Settings names a project.
+walletconnect = ["chainv4/worker", "dep:curve25519-dalek", "dep:bs58", "dep:base64"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Contract reads run here over the state the node proves (chainv4_ui::rerun), with the chain's own
@@ -93,6 +97,9 @@ ron = "0.12.2"
 # the CPU: wgpu on Vulkan, Metal or DX12.
 chainv4-gpu = { path = "../gpu", optional = true }
 bip157 = { version = "0.8.0", optional = true }
+curve25519-dalek = { version = "=5.0.0", optional = true }
+bs58 = { version = "=0.5.1", optional = true }
+base64 = { version = "=0.23.1", optional = true }
 bitcoin = { version = "0.32.8", default-features = false, features = ["std"], optional = true }
 
 # glow everywhere but iOS: eframe builds with a renderer only.

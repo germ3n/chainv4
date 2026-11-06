@@ -280,7 +280,9 @@ fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
 }
 
 /// A connection to an address, directly or through the proxy.
-pub(crate) fn connect_to(at: &str, proxy: Option<&str>) -> Result<TcpStream, String> {
+/// A connection to host:port, through a SOCKS5 proxy (socks5h://host:port) when one is given, which
+/// then resolves the name. What the worker reaches its node by, and the wallet a WalletConnect relay.
+pub fn connect_to(at: &str, proxy: Option<&str>) -> Result<TcpStream, String> {
     if let Some(proxy) = proxy {
         return through(proxy, at);
     }

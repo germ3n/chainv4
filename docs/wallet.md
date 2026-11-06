@@ -1647,6 +1647,30 @@ offline signer.
     Pasting the signer's code as text, or opening a photo of it, works too.
 - **Connected sites** are listed under Settings, **Sites**, each with **Disconnect**. A site may
   disconnect itself with `wallet_revokePermissions`.
+
+**WalletConnect, on the desktop and Android,** which have no extension: a site shows a WalletConnect
+code, and the wallet connects to it through a relay. Sites ask exactly what they ask through the
+extension, each waiting for you over the page as above: connecting, sending, `personal_sign`,
+`eth_signTypedData_v4`, switching chains and adding tokens.
+- **Turning it on:** Settings, **WalletConnect**, takes a project id from cloud.reown.com, which
+  Reown's relay needs, and optionally another relay. Empty, WalletConnect is off: nothing is built
+  into the app. It runs while the wallet is open and follows a chain.
+- **Connecting a site:** **Connect a site**, then scan the site's code or paste it (`wc:…`). The
+  site's request to connect shows as a connect does, naming the site by the URL it gives itself,
+  "as it says": WalletConnect carries no proof of where a site is. A site that requires another
+  chain is turned down at once.
+- **What the relay sees:** which topics the wallet listens to, and when; nothing said in them. Each
+  pairing and session has its key, X25519 between the wallet and the site, and every message is
+  sealed with ChaCha20-Poly1305. The relay is reached over wss://, its certificate checked, through
+  the wallet's proxy when one is set (SOCKS5; an HTTP proxy cannot carry it), with a token the
+  wallet signs with a key it makes afresh each time it connects.
+- **Sessions** last a week, and are sealed with the accounts, so they come back once the wallet is
+  unlocked again. Settings lists them, each with **Disconnect**; a site may end one itself. When
+  the wallet switches chains, each session moves with it, and its site hears `chainChanged`.
+- **What it does not do:** an account a send or signature names must be one the session sees, and
+  `eth_sign` and the like are refused, as through the extension. With Settings reading from
+  checked blocks, what needs the node is answered "the wallet says it needs asking", as it is for
+  the extension.
 - **Never:** `eth_sign`, `eth_signTransaction` and the older typed data versions, which sign what
   cannot be read, are refused with 4200.
 

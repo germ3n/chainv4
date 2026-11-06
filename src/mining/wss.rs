@@ -162,9 +162,15 @@ fn tls_failure(host: &str, err: &std::io::Error) -> String {
 /// Opens the node's WebSocket over a connection already made to it, and runs it on a thread of its
 /// own, as one TLS session cannot be read and written from two threads at once.
 pub fn open(stream: TcpStream, target: &Target, ca_cert: Option<&[u8]>) -> Result<Lines, String> {
+    open_sized(stream, target, ca_cert, MOST_LINE as usize)
+}
+
+/// The same for messages of up to most bytes: what another service over wss://, such as a
+/// WalletConnect relay, sends.
+pub fn open_sized(stream: TcpStream, target: &Target, ca_cert: Option<&[u8]>, most: usize) -> Result<Lines, String> {
     let tls = tls_over(stream, &target.host, ca_cert)?;
     let request = target.url.as_str().into_client_request().map_err(|err| format!("{}: {err}", target.url))?;
-    let config = WebSocketConfig::default().max_message_size(Some(MOST_LINE as usize)).max_frame_size(Some(MOST_LINE as usize));
+    let config = WebSocketConfig::default().max_message_size(Some(most)).max_frame_size(Some(most));
     let (socket, _) = tungstenite::client::client_with_config(request, tls, Some(config)).map_err(|err| match err {
         HandshakeError::Failure(tungstenite::Error::Http(answer)) => match answer.status().as_u16() {
             404 => format!("{} is no mining WebSocket: the node takes no workers, or this is not the node", target.url),

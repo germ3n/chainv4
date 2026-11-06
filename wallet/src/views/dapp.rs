@@ -45,6 +45,9 @@ pub struct DappState {
     answered: HashSet<u64>,
     /// The biometric check before signing, with the request it is for.
     confirming: Option<(u64, Check)>,
+    /// Answers given, for WalletConnect to take to their sites: the extension hears them as they
+    /// are given.
+    pub outbox: Vec<(u64, dapp::Answer)>,
 }
 
 struct Shown {
@@ -100,9 +103,19 @@ impl DappState {
                 }),
                 Err((id, why)) => {
                     self.answered.insert(id);
-                    dapp::answer(id, Err((-32602, why)));
+                    self.reply(id, Err((-32602, why)));
                 }
             }
+        }
+    }
+
+    /// Gives a site its answer: the extension at once, WalletConnect from the outbox.
+    pub fn reply(&mut self, id: u64, answer: dapp::Answer) {
+        dapp::answer(id, answer.clone());
+
+        // The browser has no WalletConnect to take it.
+        if cfg!(not(target_arch = "wasm32")) {
+            self.outbox.push((id, answer));
         }
     }
 
@@ -132,7 +145,7 @@ impl DappState {
                 let id = shown.request.id;
                 self.answered.insert(id);
                 self.shown.retain(|shown| shown.request.id != id);
-                dapp::answer(id, Ok(hash));
+                self.reply(id, Ok(hash));
             }
             (SEND, Err(why)) => {
                 shown.sending = false;
@@ -224,7 +237,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
     for (id, answer) in settled {
         state.answered.insert(id);
         state.shown.retain(|shown| shown.request.id != id);
-        dapp::answer(id, answer);
+        state.reply(id, answer);
     }
 
     if state.shown.is_empty() {
@@ -488,7 +501,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut DappState) -> bool {
     if let Some((id, answer)) = done {
         state.answered.insert(id);
         state.shown.retain(|shown| shown.request.id != id);
-        dapp::answer(id, answer);
+        state.reply(id, answer);
     }
 
     true

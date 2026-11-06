@@ -1784,8 +1784,12 @@ with.
   EIP-1193 provider, announced by EIP-6963, once Settings let sites ask: reads go to the node,
   connecting, sending as an Ethereum transaction, `personal_sign` and `eth_signTypedData_v4` are
   approved in the wallet. See [Wallet](wallet.md#sites).
-- [ ] **Sites on the desktop and Android apps,** which have no extension: WalletConnect would bring
-  them.
+- [x] **Sites on the desktop and Android apps,** which have no extension. Done 2026-11-06:
+  WalletConnect v2, spoken by the wallet itself (`walletconnect`): pairing by a scanned or pasted
+  code, sessions sealed with the accounts, requests through the same approval as the extension's,
+  the relay over wss:// through the proxy, off until Settings names a project. Not yet tried
+  against Reown's relay with a project id: the protocol is tested against the reference client's
+  formats, a simulated site and RFC 7748's vectors. See [Wallet](wallet.md#sites).
 - [x] **wallet_watchAsset and several chains for sites.** Done 2026-11-06: a switch to a chain the
   wallet followed before connects to its node once you say so, any other is 4902; watched ERC-20s,
   ERC-721s and ERC-1155 ids on this chain's EVM show on Overview, read over proven state by the

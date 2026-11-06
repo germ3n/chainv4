@@ -96,6 +96,11 @@ pub struct Book {
     /// Whether a signer keeps no such history.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub signed_off: bool,
+    /// Its WalletConnect sessions with sites, each with the key that reads and seals what passes
+    /// in it: sealed with the rest, as whoever holds a key can answer the site as this wallet.
+    /// Kept as written (walletconnect::Session), so a build without WalletConnect keeps them too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub walletconnect: Vec<serde_json::Value>,
 }
 
 /// One thing a signer signed, as it read then: for looking back, never to act on. It holds no key

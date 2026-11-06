@@ -36,6 +36,8 @@ mod swaps;
 #[cfg(feature = "dex")]
 mod trade;
 mod watched;
+#[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+pub mod walletconnect;
 
 use {
     crate::app::{Coin, Role, Settings},
@@ -207,6 +209,9 @@ pub struct Ctx<'a> {
     /// The Bitcoin light clients running, and what they found.
     #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
     pub lights: &'a mut crate::light::Lights,
+    /// WalletConnect, while it runs.
+    #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+    pub walletconnect: Option<&'a crate::walletconnect::WalletConnect>,
 }
 
 impl Ctx<'_> {
@@ -915,6 +920,8 @@ pub(crate) mod drawn {
                 node_stops: None,
                 #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
                 lights: &mut lights,
+                #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+                walletconnect: None,
             };
             draw(ui, &mut ctx);
         });

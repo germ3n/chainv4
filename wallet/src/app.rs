@@ -201,6 +201,11 @@ pub struct Settings {
     /// Tokens sites asked the wallet to show (wallet_watchAsset), each by the genesis id of the
     /// chain whose EVM it lives on.
     pub watched: Vec<(String, crate::dapp::Watched)>,
+    /// The WalletConnect project id sites are reached under, from cloud.reown.com: empty, and
+    /// WalletConnect is off.
+    pub wc_project: String,
+    /// The WalletConnect relay: empty for Reown's.
+    pub wc_relay: String,
     /// The IPFS gateway ipfs:// URIs are fetched through, ending in a slash.
     pub ipfs_gateway: String,
     /// The multisigs the Multisig page follows, by address: those made here, and those added.
@@ -336,6 +341,8 @@ impl Default for Settings {
             bitcoin_depth: 3,
             nft_media: false,
             watched: Vec::new(),
+            wc_project: String::new(),
+            wc_relay: String::new(),
             // chainv4::nft::DEFAULT_GATEWAY, which a build without NFTs has no copy of.
             ipfs_gateway: "https://ipfs.io/ipfs/".to_string(),
             multisigs: Vec::new(),
@@ -527,6 +534,9 @@ pub struct Wallet {
     /// The Bitcoin light clients the settings ask for.
     #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
     lights: crate::light::Lights,
+    /// WalletConnect, while Settings names a project and the wallet is open.
+    #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+    walletconnect: Option<crate::walletconnect::WalletConnect>,
     wake: egui::Context,
     asked_status: Option<f64>,
     asked_history: f64,
@@ -639,6 +649,8 @@ impl Wallet {
                 kept: creation.storage.and_then(|storage| eframe::get_value(storage, BITCOIN_KEY)).unwrap_or_default(),
                 ..Default::default()
             },
+            #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+            walletconnect: None,
             wake: creation.egui_ctx.clone(),
             asked_status: None,
             asked_history: 0.0,
@@ -764,6 +776,11 @@ impl Wallet {
         self.reading.close(&mut self.chain, &mut self.settings.checked, self.active);
         self.vault = None;
         self.book = Book::default();
+        // Its sessions' keys go with the accounts.
+        #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+        {
+            self.walletconnect = None;
+        }
         self.holders.clear();
         self.views = views::States::default();
         self.lock = Lock::start(&self.settings);
@@ -1141,6 +1158,13 @@ impl Wallet {
     /// Tells the browser extension what the wallet is, for the sites it answers, and takes what
     /// they ask, once the wallet is open. Nothing outside the extension.
     fn sites(&mut self) {
+        #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+        self.walletconnect();
+
+        // Natively, what was answered is WalletConnect's to take, or no one's.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.views.dapp.outbox.clear();
+
         if !crate::dapp::available() || self.settings.role() != Role::Online {
             return;
         }
@@ -1160,6 +1184,66 @@ impl Wallet {
             }
         } else if unlocked {
             self.views.dapp.take(crate::dapp::pending());
+        }
+    }
+
+    /// WalletConnect kept running while it may: a project named, the wallet open and online, on a
+    /// chain it follows. Its sites' requests go to the approval as the extension's do, the answers
+    /// back, and its sessions are sealed with the accounts as they change.
+    #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+    fn walletconnect(&mut self) {
+        use crate::walletconnect::{RELAY, Session, WalletConnect};
+
+        let project = self.settings.wc_project.trim().to_string();
+        let relay = match self.settings.wc_relay.trim() {
+            "" => RELAY.to_string(),
+            relay => relay.to_string(),
+        };
+        let proxy = chainv4_ui::net::Proxy::parse(&self.settings.proxy).ok().map(|proxy| proxy.as_str().to_string());
+        let chain = self.chain.genesis.map(|genesis| chainv4::crypto::ethereum::chain_id(&genesis));
+        let may = !project.is_empty() && matches!(self.lock, Lock::Open) && self.settings.role() == Role::Online;
+
+        let (Some(chain), true) = (chain, may) else {
+            self.walletconnect = None;
+
+            return;
+        };
+        let wanted = (project.clone(), relay.clone(), proxy.clone());
+
+        if self.walletconnect.as_ref().is_some_and(|running| running.started_with != wanted) {
+            self.walletconnect = None;
+        }
+
+        let running = self.walletconnect.get_or_insert_with(|| {
+            let sessions = self.book.walletconnect.iter().filter_map(|session| serde_json::from_value::<Session>(session.clone()).ok()).collect();
+
+            WalletConnect::start(&project, &relay, proxy, sessions, chain, self.wake.clone())
+        });
+        running.follow(chain);
+
+        for (id, answer) in self.views.dapp.outbox.drain(..) {
+            running.answer(id, answer);
+        }
+
+        // What needs the node, with the node not asked, is answered so at once.
+        let pending = running.pending();
+
+        if self.settings.read_blocks {
+            for request in pending.iter().filter(|request| request["method"] != "eth_requestAccounts") {
+                if let Some(id) = request["id"].as_u64() {
+                    running.answer(id, Err((4200, format!("the wallet says {}", crate::node::NEEDS_ASKING))));
+                }
+            }
+        }
+
+        self.views.dapp.take(running.pending());
+
+        if let Some(sessions) = running.changed() {
+            self.book.walletconnect = sessions.iter().filter_map(|session| serde_json::to_value(session).ok()).collect();
+
+            if let Err(error) = self.store() {
+                log::warn!("could not seal the WalletConnect sessions: {error}");
+            }
         }
     }
 
@@ -1681,6 +1765,8 @@ impl eframe::App for Wallet {
                             node_stops: self.updates.stops(),
                             #[cfg(all(feature = "bitcoin-light", not(target_arch = "wasm32")))]
                             lights: &mut self.lights,
+                            #[cfg(all(feature = "walletconnect", not(target_arch = "wasm32")))]
+                            walletconnect: self.walletconnect.as_ref(),
                         };
                         views::show(ui, &mut ctx, &mut self.views);
                     });
