@@ -1357,6 +1357,10 @@ voting finality it now goes back to the checkpoint and follows the node from the
 
 ## Bridges in the apps
 
+- **A Bitcoin deposit can be for any address.** The deposit address is made for one recipient, of
+  any scheme, and anyone may mint it: the wallet's **Deposit to** picks another of the account's
+  addresses or takes one typed, and the CLI's `bridge btc address RECIPIENT` and `deposit … RECIPIENT`
+  always did.
 - **The mining handshake covers the hello.** A worker's name, payout and whether it mines alone are
   under the MACs, so a worker and node of different `mining/` versions do not talk. An open port's
   token is public, so someone on the path can still make those MACs: serve it over wss://, or keep

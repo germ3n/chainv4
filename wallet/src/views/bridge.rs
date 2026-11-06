@@ -100,6 +100,32 @@ pub struct BridgeState {
     /// What Esplora proved, for the next frame to take.
     looked: Arc<Mutex<Vec<Result<Proof, String>>>>,
     found: Option<Result<Proof, String>>,
+    /// Who a Bitcoin deposit mints wBTC to: one of the account's addresses, of any scheme, or
+    /// another typed; None for the address picked above, which sends.
+    deposit_to: DepositTo,
+    /// Another address typed for a deposit to mint to.
+    deposit_typed: String,
+}
+
+/// Who a Bitcoin deposit is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DepositTo {
+    /// The address picked above, which sends the mint.
+    #[default]
+    Picked,
+    /// Another of the account's addresses.
+    Own(Address),
+    /// Any address typed: another wallet's, a MetaMask account's, a contract's.
+    Other,
+}
+
+/// The address a deposit mints to, from what was chosen: None for one typed that does not read.
+pub fn deposit_recipient(to: DepositTo, typed: &str, me: Address) -> Option<Address> {
+    match to {
+        DepositTo::Picked => Some(me),
+        DepositTo::Own(address) => Some(address),
+        DepositTo::Other => typed.trim().parse().ok(),
+    }
 }
 
 impl Default for BridgeState {
@@ -125,6 +151,8 @@ impl Default for BridgeState {
             vout: "0".to_string(),
             looked: Arc::default(),
             found: None,
+            deposit_to: DepositTo::Picked,
+            deposit_typed: String::new(),
         }
     }
 }
@@ -750,9 +778,41 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
     let network_name = relay.and_then(|relay| state.read(ctx, &relay, "network_name", json!([]))).and_then(|answer| answer.ok()?.first().map(text));
     // Regtest's addresses are bcrt1…, not the test networks' tb1…; until the relay says, a test network's.
     let network = network_name.as_deref().and_then(BtcNetwork::from_name).unwrap_or(BtcNetwork::Test);
-    let output = deposit_output(&me, chain_id, &gateway, federation);
-    let deposit_address = network.address(&output);
     let mut prepared = None;
+
+    // Who it mints to: any of the account's addresses, whatever its scheme, or any address at all.
+    // The mint is sent, and its fee paid, by the address picked above; the gateway mints to whoever
+    // the deposit address was made for.
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "Deposit to");
+        let own = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
+        let shown = match state.deposit_to {
+            DepositTo::Picked => super::from::label(ctx, &me),
+            DepositTo::Own(address) => super::from::label(ctx, &address),
+            DepositTo::Other => "Another address…".to_string(),
+        };
+        egui::ComboBox::from_id_salt("deposit-to").selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
+            for address in &own {
+                let choice = if *address == me { DepositTo::Picked } else { DepositTo::Own(*address) };
+                ui.selectable_value(&mut state.deposit_to, choice, super::from::label(ctx, address));
+            }
+
+            ui.selectable_value(&mut state.deposit_to, DepositTo::Other, "Another address…");
+        });
+
+        if state.deposit_to == DepositTo::Other {
+            ui.add(egui::TextEdit::singleline(&mut state.deposit_typed).hint_text("ed25519:0x…, secp256k1:0x…, edblake:0x…, bc1q…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+        }
+    });
+
+    let Some(recipient) = deposit_recipient(state.deposit_to, &state.deposit_typed, me) else {
+        ui.label(RichText::new("Type the address the deposit is for: an address of any scheme this chain has.").color(palette.soft));
+
+        return None;
+    };
+    let output = deposit_output(&recipient, chain_id, &gateway, federation);
+    let deposit_address = network.address(&output);
+    let ours = ctx.holder().is_some_and(|holder| holder.addresses().contains(&recipient));
     let mint = |proof: &Proof, vout: u32| {
         let args = vec![
             TxCallArgumentType::Bytes(proof.block.clone()),
@@ -762,7 +822,7 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
             TxCallArgumentType::Bytes(proof.coinbase.clone()),
             TxCallArgumentType::Bytes(proof.coinbase_path.clone()),
             TxCallArgumentType::U64(u64::from(vout)),
-            TxCallArgumentType::Address(me),
+            TxCallArgumentType::Address(recipient),
             TxCallArgumentType::U64(federation.version),
         ];
         native_call(me, gateway, "deposit", args, u256::ZERO, "Mint wBTC for a deposit".to_string())
@@ -770,7 +830,11 @@ fn bitcoin(ui: &mut Ui, ctx: &mut Ctx, state: &mut BridgeState, directory: &Dire
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Deposit bitcoin");
-        ui.label(RichText::new(format!("Pay this address from any Bitcoin wallet. Once it is buried deep enough, show it here, and its value is minted as wBTC to {} {}: each of the account's addresses has a deposit address of its own.", super::scheme(&me), format::short(&me.to_string()))).color(palette.soft));
+        ui.label(RichText::new(format!("Pay this address from any Bitcoin wallet. Once it is buried deep enough, show it here, and its value is minted as wBTC to {} {}: every address has a deposit address of its own.", super::scheme(&recipient), format::short(&recipient.to_string()))).color(palette.soft));
+
+        if !ours {
+            ui.label(RichText::new("Not this wallet's: its Bitcoin light client watches only its own accounts' deposit addresses, so show a deposit to it through Esplora below. Anyone may mint it, and it goes to that address whoever sends the mint.").small().color(palette.warn));
+        }
         ui.add_space(6.0);
         super::receive::qr(ui, &deposit_address, 200.0);
         chainv4_ui::widgets::copy_on_click(ui, &palette, egui::Label::new(theme::mono(deposit_address.as_str()).color(palette.ink)), &deposit_address);

@@ -1184,10 +1184,15 @@ light client:
   says so, and refunded once it was; those are the federation's own steps, so it offers no delivery.
 - **From an EVM chain:** letting Gateway.sol take it, then sending, signed there with the
   account's Ethereum key, or by the offline signer. It arrives as the federation signs it.
-- **Bitcoin:** the picked address's deposit address, with its QR code, computed here from the
-  federation, the chain's id and the gateway the directory names, so it holds on this chain alone.
-  Each of the account's addresses has its own, and what is paid to it is minted to that address.
-  The light client watches every address's deposit address, of every account, whichever is picked.
+- **Bitcoin:** **Deposit to** picks who the wBTC is minted to: the address picked above, any other
+  of the account's, of any scheme (its Ethereum key's secp256k1 address, EdBlake, Bitcoin), or
+  **Another address…**, any address at all, typed: another wallet's, a MetaMask account's, a
+  contract's. The page shows that address's deposit address, with its QR code, computed here from
+  the federation, the chain's id and the gateway the directory names, so it holds on this chain
+  alone. Every address has its own, and what is paid to it is minted to that address, whoever
+  sends the mint, which the address picked above does and pays for. The light client watches every
+  deposit address of every account, whichever is picked; one for another wallet's address it does
+  not, so the page says to show that deposit through Esplora.
   A payment to it, found by the wallet's own [Bitcoin light client](#bitcoin-followed-by-the-wallet-itself)
   and deep enough, is minted as wBTC by its proof from the block it came in; without the light
   client, by Esplora's proof of a transaction typed in. Addresses are written for the Bitcoin the

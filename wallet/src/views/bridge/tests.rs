@@ -172,3 +172,51 @@ fn the_bridge_offers_every_address_and_shows_the_deposit_address_of_the_one_pick
         }
     }
 }
+
+#[test]
+fn a_deposit_mints_to_any_of_the_account_s_addresses_or_any_address_typed() {
+    use chainv4::registry::federation::Federation;
+
+    let federation = DecidedFederation {
+        version: 0,
+        federation: Federation {
+            signers: [21u8, 22, 23].iter().map(|byte| chainv4::crypto::secp256k1::public_key(&[*byte; 32]).unwrap()).collect(),
+            threshold: 2,
+            chain_depth: 20,
+            evm_depth: 12,
+            bitcoin_depth: 2,
+            btc: None,
+        },
+    };
+    let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height: 1, final_: true };
+    let mut book = crate::views::drawn::two_phrases();
+    let mut holders = crate::keys::open(&book).unwrap();
+    let mine = holders[0].addresses();
+    let secp = *mine.iter().find(|address| matches!(address, Address::Secp256k1(_))).expect("an account from words has a secp256k1 key");
+    let elsewhere: Address = Address::Secp256k1([0x42; 20]);
+    let gateway = Address::Contract([7; 32]);
+
+    // What is chosen decides who it is for, and a typed one must read.
+    assert_eq!(deposit_recipient(DepositTo::Picked, "", mine[0]), Some(mine[0]));
+    assert_eq!(deposit_recipient(DepositTo::Own(secp), "", mine[0]), Some(secp));
+    assert_eq!(deposit_recipient(DepositTo::Other, &format!(" {elsewhere} "), mine[0]), Some(elsewhere));
+    assert_eq!(deposit_recipient(DepositTo::Other, "not an address", mine[0]), None);
+
+    for (to, typed, scheme, warned) in [(DepositTo::Own(secp), String::new(), "ethereum", false), (DepositTo::Other, elsewhere.to_string(), "ethereum", true)] {
+        let mut world = crate::views::drawn::following(&holders);
+        world.chain.directory = Some(crate::chain::Proven { value: Some(Directory { btc_gateway: Some(gateway), ..Directory::default() }), assurance });
+        world.chain.federation = Some(crate::chain::Proven { value: Some(federation.clone()), assurance });
+        let chain_id = chainv4::crypto::ethereum::chain_id(world.chain.genesis.as_ref().unwrap());
+        let mut state = BridgeState { way: Way::Bitcoin, deposit_to: to, deposit_typed: typed, ..BridgeState::default() };
+        let mut send = SendState::default();
+        let mut draw = |ui: &mut Ui, ctx: &mut Ctx| show(ui, ctx, &mut state, &mut send);
+        let said = crate::views::drawn::said_in(&mut world, &mut book, &mut holders, (1200.0, 4_000.0), &mut draw);
+        let recipient = deposit_recipient(to, &elsewhere.to_string(), mine[0]).unwrap();
+        let address = BtcNetwork::Test.address(&deposit_output(&recipient, chain_id, &gateway, &federation));
+
+        assert!(said.contains("DEPOSIT TO"), "{said}");
+        assert!(said.to_lowercase().contains(&format!("minted as wbtc to {scheme}")), "{said}");
+        assert!(said.contains(&address), "the deposit address of the one chosen: {address} in {said}");
+        assert_eq!(said.contains("Not this wallet's"), warned, "{said}");
+    }
+}
