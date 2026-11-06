@@ -4069,6 +4069,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 [[package]]
 name = "luau0-src"
 version = "0.23.0+luau745"
+source = "git+https://github.com/germ3n/luau-src-rs#3fad1fbb5470696ef35be086c18dc3ccd8462da6"
 dependencies = [
  "cc",
 ]
@@ -4172,6 +4173,7 @@ dependencies = [
 [[package]]
 name = "mlua"
 version = "0.12.2"
+source = "git+https://github.com/germ3n/mlua?branch=main#46bc6e2ec9054ffe6a60805913ff3980c12cadb6"
 dependencies = [
  "bstr",
  "either",
@@ -4185,6 +4187,7 @@ dependencies = [
 [[package]]
 name = "mlua-sys"
 version = "0.13.0"
+source = "git+https://github.com/germ3n/mlua?branch=main#46bc6e2ec9054ffe6a60805913ff3980c12cadb6"
 dependencies = [
  "cc",
  "cfg-if",

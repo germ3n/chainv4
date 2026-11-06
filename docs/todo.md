@@ -794,10 +794,9 @@ with.
   float, so `/` makes fractions, which only fail once they would leave.
 - [ ] **Ship the forks' upstream merge.** On 2026-11-05 germ3n/luau-src-rs and germ3n/mlua were
   merged with upstream on their `upstream-merge` branches: Luau 0.653 to 0.745, mlua 0.10.2 to
-  0.12.2. The whole-number rule above is on the Luau one. chainv4's `lua-upstream` branch builds on
-  them through a temporary `[patch]` of local paths. To ship it:
-  - push both branches, after the owner says so;
-  - point Cargo.lock at the pushed commits and drop the `[patch]`;
+  0.12.2. The whole-number rule above is on the Luau one. On 2026-11-06 both were pushed and
+  fast-forwarded onto the forks' `main` (luau-src-rs 3fad1fb, mlua 46bc6e2), and chainv4's
+  `lua-upstream` branch locks those commits with no `[patch]`. Left to ship it:
   - merge into master;
   - regenesis, as contract results and fuel change.
 

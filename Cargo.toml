@@ -197,9 +197,3 @@ tungstenite = { version = "0.29.0", default-features = false, features = ["hands
 [build-dependencies]
 wiki = { path = "wiki" }
 
-# TEMPORARY: the forks' upstream-merge branches, until they are pushed
-[patch."https://github.com/germ3n/mlua"]
-mlua = { path = "../mlua" }
-mlua-sys = { path = "../mlua/mlua-sys" }
-[patch."https://github.com/germ3n/luau-src-rs"]
-luau0-src = { path = "../luau-src-rs" }
