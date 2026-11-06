@@ -180,11 +180,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, send: &mut Send
         theme::card(ui, &palette, |ui| {
             theme::caps(ui, &palette, "Address");
             egui::ComboBox::from_id_salt("mining-from")
-                .selected_text(format!("{} · {}", super::scheme(&from), format::short(&from.to_string())))
+                .selected_text(super::from::label(ctx, &from))
                 .width(ui.available_width())
                 .show_ui(ui, |ui| {
                     for address in &addresses {
-                        ui.selectable_value(&mut state.from, Some(*address), format!("{} · {}", super::scheme(address), format::short(&address.to_string())));
+                        ui.selectable_value(&mut state.from, Some(*address), super::from::label(ctx, address));
                     }
                 });
         });

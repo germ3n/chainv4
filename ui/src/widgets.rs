@@ -279,6 +279,64 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &
     changed
 }
 
+/// A choice of a few, one of them on, on one line however narrow: `segmented` where it fits, and
+/// where it does not, each option an equal share of the width, its text smaller as far as it must
+/// be, so no option sits alone on a second line. Whether the choice changed.
+pub fn segmented_fit<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &mut T, options: &[(T, &str)]) -> bool {
+    let size = button_size(ui);
+    let padding = ui.spacing().button_padding.x;
+    let natural = natural_widths(ui, options);
+    let room = ui.available_width() - 2.0;
+
+    if natural.iter().sum::<f32>() <= room {
+        return segmented(ui, palette, current, options);
+    }
+
+    let share = room / options.len().max(1) as f32;
+    let widest = natural.iter().copied().fold(0.0_f32, f32::max);
+    // As small as the widest needs to fit its share, and no smaller than a small label.
+    let text = (size * (share - 2.0 * padding).max(1.0) / (widest - 2.0 * padding).max(1.0)).clamp(10.5, size);
+    let radius = ui.visuals().widgets.inactive.corner_radius;
+    let mut changed = false;
+
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        Frame::new().stroke(Stroke::new(1.0, palette.line)).corner_radius(radius).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (value, name) in options {
+                    let on = *current == *value;
+                    let label = match on {
+                        true => strong(*name, text).color(palette.on_accent),
+                        false => RichText::new(*name).size(text).color(palette.soft),
+                    };
+                    let button = egui::Button::new(label).fill(if on { palette.accent } else { Color32::TRANSPARENT }).stroke(Stroke::NONE).corner_radius(radius);
+
+                    if ui.add_sized([share, ui.spacing().interact_size.y], button).clicked() && !on {
+                        *current = *value;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    });
+
+    changed
+}
+
+/// How wide each option of a `segmented` choice is drawn at its full size.
+fn natural_widths<T>(ui: &Ui, options: &[(T, &str)]) -> Vec<f32> {
+    let font = FontId::new(button_size(ui), FontFamily::Name(SEMIBOLD.into()));
+    let padding = ui.spacing().button_padding.x;
+
+    options.iter().map(|(_, name)| ui.fonts_mut(|fonts| fonts.layout_no_wrap(name.to_string(), font.clone(), Color32::WHITE).size().x) + 2.0 * padding).collect()
+}
+
+/// How wide a `segmented` choice is at its full size, its frame included.
+pub fn segmented_width<T>(ui: &Ui, options: &[(T, &str)]) -> f32 {
+    natural_widths(ui, options).iter().sum::<f32>() + 2.0
+}
+
 /// A choice of more than one row may hold: `segmented` on as many rows as the width there is takes,
 /// the options in their order, so none runs off a phone's screen. Whether the choice changed.
 pub fn segmented_rows<T: Copy + PartialEq>(ui: &mut Ui, palette: &Palette, current: &mut T, options: &[(T, &str)]) -> bool {
@@ -648,15 +706,24 @@ pub fn bytes_said(count: u64) -> String {
 /// `pending` the smaller cap waiting for that yes. Says whether the cap changed.
 pub fn reading_cap(ui: &mut Ui, palette: &Palette, set: &mut u64, offered: &[(u64, &str)], held: u64, pending: &mut Option<u64>) -> bool {
     let mut picked = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Keeps at most").color(palette.soft));
+    let mut chosen = *set;
+    let label = RichText::new("Keeps at most").color(palette.soft);
+    let beside = ui.fonts_mut(|fonts| fonts.layout_no_wrap("Keeps at most".to_string(), TextStyle::Body.resolve(ui.style()), Color32::WHITE).size().x) + ui.spacing().item_spacing.x;
 
-        for (cap, words) in offered {
-            if ui.selectable_label(*set == *cap, *words).clicked() && *set != *cap {
-                picked = Some(*cap);
+    // Beside its label where both fit, and under it on a phone, as wide as the screen.
+    if beside + segmented_width(ui, offered) <= ui.available_width() {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if segmented_fit(ui, palette, &mut chosen, offered) {
+                picked = Some(chosen);
             }
+        });
+    } else {
+        ui.label(label);
+        if segmented_fit(ui, palette, &mut chosen, offered) {
+            picked = Some(chosen);
         }
-    });
+    }
 
     match picked {
         Some(cap) if cap < held => *pending = Some(cap),

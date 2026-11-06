@@ -1,7 +1,8 @@
 //! What a person types that must not linger: a password, seed words, a private key. Typed keeps
 //! it in room made up front, so typing never moves it and leaves an unwiped copy behind, and
 //! wipes it as it drops; secret draws its field without the undo history egui would keep of it.
-//! What egui lays out to draw a shown secret, and what the system swaps out, are beyond reach.
+//! What egui lays out to draw a shown secret is wiped as it is freed, by the apps' allocator
+//! (src/wipe.rs); what the system swaps out is beyond reach.
 
 use {egui::Ui, zeroize::{Zeroize, Zeroizing}};
 

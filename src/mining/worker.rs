@@ -294,9 +294,13 @@ fn connect(config: &WorkerConfig) -> Result<TcpStream, String> {
     connect_to(&at, config.proxy.as_deref())
 }
 
-/// A connection to an address, directly or through the proxy.
-/// A connection to host:port, through a SOCKS5 proxy (socks5h://host:port) when one is given, which
-/// then resolves the name. What the worker reaches its node by, and the wallet a WalletConnect relay.
+#[document(
+    summary = "A connection to host:port, through a SOCKS5 proxy when one is given, which then resolves the name: what the worker reaches its node by, and the wallet a WalletConnect relay.",
+    category = "Mining",
+    params = { at = "Where to connect, host:port.", proxy = "A SOCKS5 proxy, socks5h://host:port, such as Tor's; None to connect directly." },
+    returns = "The connection, or why it could not be made.",
+    see_also = "WorkerConfig",
+)]
 pub fn connect_to(at: &str, proxy: Option<&str>) -> Result<TcpStream, String> {
     if let Some(proxy) = proxy {
         return through(proxy, at);

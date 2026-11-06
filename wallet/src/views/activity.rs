@@ -162,8 +162,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ActivityState) {
     let problem = state.filter.problem(|text| text.parse::<Address>().is_ok());
     filters::controls(ui, &palette, &mut state.filter, Offered { coin: &ctx.coin.symbol, tokens: &tokens }, problem.as_deref());
     ui.add_space(2.0);
-    theme::segmented(ui, &palette, &mut state.kind, &[(Kind::All, "All"), (Kind::Waiting, "Waiting"), (Kind::Failed, "Failed")]);
-    theme::segmented(ui, &palette, &mut state.oldest_first, &[(false, "Newest first"), (true, "Oldest first")]);
+    // Which and in what order, on one line where it fits.
+    ui.horizontal_wrapped(|ui| {
+        theme::segmented(ui, &palette, &mut state.kind, &[(Kind::All, "All"), (Kind::Waiting, "Waiting"), (Kind::Failed, "Failed")]);
+        ui.add_space(6.0);
+        theme::segmented(ui, &palette, &mut state.oldest_first, &[(false, "Newest first"), (true, "Oldest first")]);
+    });
     ui.add(egui::TextEdit::singleline(&mut state.search).hint_text("Search: a transaction, an address, a contract, what it did").desired_width(f32::INFINITY));
     ui.add_space(8.0);
 

@@ -36,8 +36,15 @@ mod views;
 
 /// The wallet, for eframe to run. It talks to this node, or else to the one it talked to last, or
 /// else to the fallback. Its wallets are kept under this folder of the app's, or, in a browser, which
+/// Every block freed is wiped first, as it may have held words or a key: what egui laid out to show
+/// them, or the text it copied as they were typed (chainv4_ui::wipe).
+#[cfg(feature = "wipe-freed")]
+#[global_allocator]
+static WIPING: chainv4_ui::wipe::Wiping = chainv4_ui::wipe::Wiping::system();
+
 /// has none, in eframe's storage.
 pub fn wallet(creation: &eframe::CreationContext, node: Option<String>, fallback: &str, folder: Option<std::path::PathBuf>) -> Box<dyn eframe::App> {
+    chainv4_ui::wipe::no_dumps();
     Box::new(app::Wallet::new(creation, node, fallback, folder))
 }
 

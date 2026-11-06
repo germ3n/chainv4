@@ -3,7 +3,7 @@
 //! wraps everywhere.
 
 pub use chainv4_ui::layout::section_gap;
-pub use chainv4_ui::widgets::{arrowed, beside, caps, dot, end_row, fitted, mono, page_card as card, pill, primary, quiet, reload, retry, rule, segmented, segmented_rows, strong, title};
+pub use chainv4_ui::widgets::{arrowed, beside, caps, dot, end_row, fitted, mono, page_card as card, pill, primary, quiet, reload, retry, rule, segmented, segmented_fit, segmented_rows, strong, title};
 pub use chainv4_ui::{DARK, DISPLAY as SERIF, LIGHT, Palette, SEMIBOLD, install_fonts};
 use {chainv4_ui::Density, egui::Ui};
 

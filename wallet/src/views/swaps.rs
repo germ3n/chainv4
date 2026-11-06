@@ -392,17 +392,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SwapsState, send: &mut SendS
         return;
     }
 
-    ui.horizontal_wrapped(|ui| {
-        let count = ctx.book.swaps.len();
-        let yours = if count == 0 { "Your swaps".to_string() } else { format!("Your swaps ({count})") };
+    let count = ctx.book.swaps.len();
+    let yours = if count == 0 { "Your swaps".to_string() } else { format!("Your swaps ({count})") };
 
-        for (section, name) in [(Section::Swaps, yours.as_str()), (Section::Offer, "Make an offer"), (Section::Answer, "Answer an offer")] {
-            if ui.selectable_label(state.section == section, name).clicked() {
-                state.section = section;
-                state.trouble = None;
-            }
-        }
-    });
+    if theme::segmented_fit(ui, &palette, &mut state.section, &[(Section::Swaps, yours.as_str()), (Section::Offer, "Make an offer"), (Section::Answer, "Answer an offer")]) {
+        state.trouble = None;
+    }
     theme::section_gap(ui);
 
     match state.section {

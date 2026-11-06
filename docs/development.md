@@ -114,10 +114,15 @@ take by path. They share one look, with the crate holding all of it, so a change
   picks: the wallet is `COMFORTABLE`, the explorer `COMPACT`, tighter but with the same corners.
   `apply` sets egui's style from them.
 - **`widgets`:** the pieces pages are built from: `title` and `title_with`, `card` and `page_card`,
-  which keeps the section gap below it, `caps`, pills, buttons, `flagged_label`, `status_dot` and
+  which keeps the section gap below it, `caps`, pills, buttons, `segmented`, `segmented_fit` (one
+  row however narrow, the options sharing it evenly), `segmented_rows`, `group_heading`,
+  `flagged` and `flagged_label` (monospace, so `--` never joins into a dash), `status_dot` and
   `copy_on_click`, which copies a label's text when it is clicked and says Copied for a moment; and
   the frame around them: `bar_frame`, `sidebar_name`, `bar_name`, `nav_entry`, `tabs` and
   `folded_foot`. `fast_resume_switch` and `fast_resumed` say the same of fast resume in both apps.
+- **`wipe`:** `Wiping`, the apps' global allocator, which zeroes each block freed or moved;
+  `let_go` and `letting_go`, which have egui free what it laid out for pages just dropped; and
+  `no_dumps` (see [Wallet](wallet.md#keys)).
 - **`layout`:** `NARROW`, the 640 points below which an app lays out for a phone, `SHORT`, the 560
   points below which a sidebar's foot folds to a line, the sidebar's and the page's margins, and
   `suit_touch`, which turns off selecting text on a touch screen so a swipe that starts on text
@@ -339,3 +344,11 @@ loopback, and drive them as people do. They take minutes and need outside progra
 
 Each keeps its nodes' logs in a folder under the system's temp folder, left there when it fails
 and named in the failure.
+
+**Screenshots of every page,** for looking the apps over rather than testing them:
+`SHOTS_DIR=/some/folder cargo test --test shots -- --ignored --nocapture` in `wallet/` or
+`explorer/`, after `cargo build` at the root. Each starts a node, restores the wallet from the
+public Hardhat words or opens the explorer, and writes `APP-WIDTHxHEIGHT-PAGE.png` for every page
+at a desktop's 1280×800 and a phone's 390×844, through egui_kittest's wgpu renderer (its `snapshot`
+feature). Pages are pressed in a tall window so the sidebar shows them all, and the explorer's run
+opens a folded group to reach its page.

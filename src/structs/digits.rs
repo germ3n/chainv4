@@ -1,11 +1,13 @@
 //! Numbers as people type them, with `_` between digits to group them: 1_000_000, 0xff_ff.
 
-use std::borrow::Cow;
+use {r#macro::document, std::borrow::Cow};
 
-/// The text without its `_` separators, each of which must stand between two digits, hex digits
-/// after 0x: None for one that does not, such as _1, 1_, 1__0, 1_.5 or 0x_ff, so a slip is
-/// refused rather than read as some other number. Whatever else the text holds is left for the
-/// parser after.
+#[document(
+    summary = "The text without its `_` separators, each of which must stand between two digits, hex digits after 0x: what the CLI's amounts, coins, spans and typed numbers are read through, so 1_000_000 and 0xff_ff read as 1000000 and 0xffff. Whatever else the text holds is left for the parser after.",
+    category = "Primitives",
+    params = { text = "A number as typed." },
+    returns = "The text ungrouped, borrowed when it has no `_`; None for a separator that does not stand between two digits, such as _1, 1_, 1__0, 1_.5 or 0x_ff, so a slip is refused rather than read as some other number.",
+)]
 pub fn ungrouped(text: &str) -> Option<Cow<'_, str>> {
     if !text.contains('_') {
         return Some(Cow::Borrowed(text));

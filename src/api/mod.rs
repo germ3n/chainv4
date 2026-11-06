@@ -3183,8 +3183,13 @@ async fn call_evm(api: Api, body: Value) -> Answer {
     Ok(Json(answer))
 }
 
-/// An EVM read's outcome as POST /call answers it: what it returned, or why it failed and what a
-/// revert returned.
+#[document(
+    summary = "An EVM read's outcome as POST /call answers it, given input: what it returned, as 0x hex, and the gas it used; or why it failed, with what a revert returned.",
+    category = "Node",
+    params = { ran = "What the read did." },
+    returns = "The answer's JSON.",
+    see_also = "run_proven_evm",
+)]
 pub fn evm_answer(ran: &crate::vm::evm::EvmRan) -> Value {
     match &ran.result {
         Ok(crate::vm::evm::EvmReturned::Output(output)) => json!({ "status": "returned", "output": to_hex(output), "error": Value::Null, "gas_used": ran.gas_used }),

@@ -62,7 +62,13 @@ eframe = { version = "0.37.0", default-features = false, features = ["android-na
 # A workspace of its own: egui and the browser crates never meet the node's lockfile.
 # The end-to-end test drives the whole app headlessly, through what accesskit sees of it.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dev-dependencies]
-egui_kittest = { version = "=0.37.0", features = ["eframe"] }
+egui_kittest = { version = "=0.37.0", features = ["eframe", "wgpu", "snapshot"] }
+
+[features]
+default = ["wipe-freed"]
+# Every block of memory zeroed as it is freed or moved, the copies egui makes of a pasted key with
+# it (chainv4_ui::wipe): a write over everything freed, for a build that would rather be faster.
+wipe-freed = []
 
 [workspace]
 

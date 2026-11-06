@@ -99,7 +99,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &mut String, state: &mut Settin
             });
             facts.row("updates", |ui| {
                 let (color, text) = super::network::updates(&palette, streaming);
-                ui.label(RichText::new(text).color(color));
+                ui.add(egui::Label::new(chainv4_ui::widgets::flagged(ui, &text, egui::TextStyle::Body, color)).wrap());
             });
 
             // The node's report: what it hides from this explorer, and whether it took the token.

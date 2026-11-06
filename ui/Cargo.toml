@@ -20,6 +20,10 @@ chainv4 = { path = "..", default-features = false, features = ["sha256", "blake3
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 wincode = { version = "0.6.3", optional = true }
 
+# Refusing core files, and on Linux and Android making the process undumpable (src/wipe.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
 # Talking to a node: ureq on the desktop and Android, where a proxy set in an app is the only way
 # out, SOCKS5 included; the browser's fetch in the browser, where its own proxy settings apply.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

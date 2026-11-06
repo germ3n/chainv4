@@ -122,13 +122,36 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Accounts, "Accounts"),
             (Page::Settings, "Settings"),
         ],
-        Role::Signer => &[
-            (Page::Sign, "Sign"),
-            (Page::Pair, "Pair"),
-            (Page::Receive, "Receive"),
-            (Page::Accounts, "Accounts"),
-            (Page::Settings, "Settings"),
+        Role::Signer => SIGNER_PAGES,
+    }
+}
+
+/// An offline signer's pages, all of them tabs.
+const SIGNER_PAGES: &[(Page, &str)] = &[(Page::Sign, "Sign"), (Page::Pair, "Pair"), (Page::Receive, "Receive"), (Page::Accounts, "Accounts"), (Page::Settings, "Settings")];
+
+/// The sidebar's pages in groups under a heading, each folding, as the explorer's do: an online
+/// wallet's. An offline signer's few pages go in one list, unheaded.
+pub fn groups(role: Role) -> &'static [(&'static str, &'static [(Page, &'static str)])] {
+    match role {
+        Role::Online => &[
+            ("Wallet", &[(Page::Overview, "Overview"), (Page::Send, "Send"), (Page::Receive, "Receive"), (Page::Activity, "Activity"), (Page::Batch, "Batch")]),
+            (
+                "Markets",
+                &[
+                    #[cfg(feature = "dex")]
+                    (Page::Trade, "Trade"),
+                    #[cfg(feature = "swap")]
+                    (Page::Swaps, "Swaps"),
+                    #[cfg(feature = "bridge")]
+                    (Page::Bridge, "Bridge"),
+                    #[cfg(feature = "nft")]
+                    (Page::Nfts, "NFTs"),
+                ],
+            ),
+            ("Chain", &[(Page::Names, "Names"), (Page::Mining, MINING_NAME), (Page::Multisig, "Multisig"), (Page::Governance, "Governance"), (Page::Contracts, "Contracts")]),
+            ("Manage", &[(Page::Accounts, "Accounts"), (Page::Settings, "Settings")]),
         ],
+        Role::Signer => &[("", SIGNER_PAGES)],
     }
 }
 
@@ -456,7 +479,15 @@ pub fn fast_resumed(chain: &Chain) -> Option<String> {
 /// show on a tap, and it is hollow when something is wrong.
 pub fn light_dot(ui: &mut Ui, palette: &Palette, chain: &Chain, down: Option<&Failure>) {
     let (color, text, detail) = following(palette, chain, down);
-    chainv4_ui::widgets::status_dot(ui, palette, color, down.is_some() || chain.trouble.is_some(), &format!("{text}. {detail}"));
+    chainv4_ui::widgets::status_dot(ui, palette, color, down.is_some() || chain.trouble.is_some(), &format!("{text}. {}", capitalized(&detail)));
+}
+
+/// The text with its first letter a capital: a reason, written as errors are, made to start a
+/// sentence.
+pub(crate) fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 /// The light client's state in a word or two, as the dot says it.
@@ -972,6 +1003,34 @@ mod tests {
 
         assert_eq!(reached, pages, "the sidebar's pages, whatever the features");
         assert_eq!(tabs(Role::Online).len(), 5);
+    }
+
+    #[test]
+    fn the_sidebars_groups_hold_every_page_each_once() {
+        for role in [Role::Online, Role::Signer] {
+            let mut grouped: Vec<String> = groups(role).iter().flat_map(|(_, pages)| pages.iter().map(|(page, _)| format!("{page:?}"))).collect();
+            let mut pages: Vec<String> = nav(role).iter().map(|(page, _)| format!("{page:?}")).collect();
+            grouped.sort();
+            pages.sort();
+
+            assert_eq!(grouped, pages, "{role:?}, whatever the features");
+        }
+
+        assert_eq!(groups(Role::Online).iter().map(|(heading, _)| *heading).collect::<Vec<_>>(), ["Wallet", "Markets", "Chain", "Manage"]);
+    }
+
+    #[test]
+    fn more_lists_its_pages_under_the_sidebars_headings_each_once() {
+        let listed: Vec<Page> = more::grouped().iter().flat_map(|(_, pages)| pages.iter().map(|(page, _, _)| *page)).collect();
+        let mut sorted: Vec<String> = listed.iter().map(|page| format!("{page:?}")).collect();
+        let mut all: Vec<String> = more::PAGES.iter().map(|(page, _, _)| format!("{page:?}")).collect();
+        sorted.sort();
+        all.sort();
+        assert_eq!(sorted, all, "every page under More, once");
+
+        let headings: Vec<&str> = more::grouped().iter().map(|(heading, _)| *heading).collect();
+        assert_eq!(headings, ["Wallet", "Markets", "Chain", "Manage"], "the sidebar's, in its order");
+        assert_eq!(listed[0], Page::Batch, "the Wallet group's one page the tabs leave");
     }
 
     #[test]

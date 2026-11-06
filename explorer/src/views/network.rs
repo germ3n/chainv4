@@ -141,7 +141,7 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
             });
             facts.row("updates", |ui| {
                 let (color, text) = updates(&palette, streaming);
-                ui.label(RichText::new(text).color(color));
+                ui.add(egui::Label::new(chainv4_ui::widgets::flagged(ui, &text, egui::TextStyle::Body, color)).wrap());
             });
 
             let status = ctx.store.status.as_ref();

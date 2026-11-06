@@ -570,6 +570,16 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   `chainv4_ui::secret::secret` drops egui's undo history of the field each frame; the vault's JSON
   is counted first and written into room of exactly its size. Use both for any new secret field,
   in the wallet or the explorer, whose pasted key and key file are wiped the same way.
+- **And all freed memory, in the apps.** The wallet and the explorer run on
+  `chainv4_ui::wipe::Wiping`, a global allocator that zeroes each block it frees and always moves a
+  block to realloc it, wiping the old one, as a system realloc may move a block, even to shrink it,
+  and free the old one as it was. That is what reaches egui's copies: a layout cache, accesskit's
+  text, key events. The zeros are written, then the pointer goes through `black_box` and a compiler
+  fence, or LLVM would drop them as stores to memory about to be freed. The wallet calls
+  `wipe::let_go` as it locks and `wipe::letting_go` each frame, so egui frees the layouts of the
+  pages it dropped within three frames. A new app sharing `chainv4_ui` that holds secrets declares
+  the allocator too, behind its own `wipe-freed` feature; a test allocator (the explorer's counting
+  one) replaces it under `cfg(test)`. `wipe::no_dumps` refuses core files.
 - **A vault's `phrase` is null, an object or a list, and the list is a fence.** One phrase is
   written as it always was, its `name` left out, so older builds read it byte for byte. Two or more
   are a list, always, even with no account from the second: an older build's `Option<Words>` reads

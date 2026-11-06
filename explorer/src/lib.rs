@@ -58,8 +58,16 @@ static ALLOCATOR: counting::Counting = counting::Counting;
 
 /// The explorer, for eframe to run. It talks to this node, or else to the one it talked to last,
 /// or else to the fallback. What it reads of a chain, when told to, is kept under this folder of the
+/// Every block freed is wiped first, as it may have held words or a key: what egui laid out to show
+/// them, or the text it copied as they were typed (chainv4_ui::wipe). Tests count allocations
+/// with their own.
+#[cfg(all(feature = "wipe-freed", not(test)))]
+#[global_allocator]
+static WIPING: chainv4_ui::wipe::Wiping = chainv4_ui::wipe::Wiping::system();
+
 /// app's, or, in a browser, which has none, in IndexedDB.
 pub fn explorer(creation: &eframe::CreationContext, node: Option<String>, fallback: &str, folder: Option<std::path::PathBuf>) -> Box<dyn eframe::App> {
+    chainv4_ui::wipe::no_dumps();
     Box::new(app::Explorer::new(creation, node, fallback, folder))
 }
 

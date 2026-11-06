@@ -52,11 +52,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut ReceiveState) {
 
             if addresses.len() > 1 {
                 ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    for index in 0..addresses.len() {
-                        ui.selectable_value(&mut state.shown, index, numbered(&addresses, index));
-                    }
-                });
+                let names: Vec<String> = (0..addresses.len()).map(|index| numbered(&addresses, index)).collect();
+                let options: Vec<(usize, &str)> = names.iter().enumerate().map(|(index, name)| (index, name.as_str())).collect();
+                // A few fit a line; more than four take what rows they need.
+                match options.len() {
+                    0..=4 => theme::segmented_fit(ui, &palette, &mut state.shown, &options),
+                    _ => theme::segmented_rows(ui, &palette, &mut state.shown, &options),
+                };
             }
 
             ui.add_space(10.0);

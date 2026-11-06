@@ -220,8 +220,25 @@ copy of a key biometrics keep, Java's on Android included. So are the copies mad
 - **the vault as it seals:** its JSON is written into room made to its size, never grown;
 - **a swap's secret,** kept in the vault, wiped as its record drops.
 
-What egui lays out to draw words that are shown, what the browser or the OS hold of what was typed,
-such as a keyboard's own buffer, and memory the system swaps to disk, are out of reach.
+**And what egui makes of them.** egui copies text it shows or is typed: a layout of each run of
+glyphs, the job it laid out, accesskit's tree for screen readers and the key events that brought
+it. Each is freed in its turn, and freed memory keeps what it held until something writes over it.
+So the wallet's allocator (`chainv4_ui::wipe::Wiping`) zeroes every block as it is freed, and the
+old block of each one moved, in every build: the desktop, Android, iOS and the browser. Locking has
+egui let go at once: the text fields' states and egui's caches are dropped, and a few more frames
+are drawn, since egui frees a layout once a frame goes by without it. The words a locked wallet
+showed are then gone from its memory, not merely freed. It costs a write over everything freed,
+a little CPU; a build that would rather be faster leaves out the default `wipe-freed` feature
+(`--no-default-features --features store` keeps it, as the app stores take it).
+
+**No crash dumps.** As it starts, the wallet sets its core-file limit to nothing, and on Linux and
+Android makes itself undumpable, so a crash never writes its memory, keys and all, to disk, and
+another process of the same user cannot read it. Android then writes no tombstone of a native
+crash; a Rust panic still goes to logcat.
+
+What the browser or the OS hold of what was typed, such as a keyboard's own buffer, and memory the
+system swaps to disk, are out of reach: macOS encrypts its swap, and Android's is compressed RAM,
+but a Linux or Windows swap file may be neither.
 
 **Locking:** the Lock button, or 15 minutes without input. Settings changes the time, or turns it
 off.
@@ -1493,9 +1510,17 @@ is its own (see [The ui crate](development.md#the-ui-crate)).
   keyboard. Below 640 points wide, as on a phone, the sidebar gives way to a bar
   on top with the account, the status dot and Lock, and five tabs along the bottom, evenly
   spaced and always in the same place: Home, Send, Receive, Activity and More. More lists every
-  other page, each with a line on what it is for, and its tab stays marked while one of them shows.
-  An offline signer, with five pages in all, has them as its tabs and no More. The sidebar, on a
-  wide screen, lists all the pages. A card's row puts its label above what it says on a narrow
+  other page, each with a line on what it is for, under the sidebar's headings, and its tab stays
+  marked while one of them shows. An offline signer, with five pages in all, has them as its tabs
+  and no More. The sidebar, on a wide screen, lists all the pages in four groups, as the explorer's
+  does: **Wallet** (Overview, Send, Receive, Activity, Batch), **Markets** (Trade, Swaps, Bridge,
+  NFTs), **Chain** (Names, Mining, Multisig, Governance, Contracts) and **Manage** (Accounts,
+  Settings). A heading's tap folds its group, remembered in the settings; the page showing stays
+  listed in a folded group. A build without a page's feature leaves it out of its group. An
+  offline signer's pages have no headings. A choice of a few that would not fit a row, such as
+  Swaps' sections or Receive's addresses, shares the width evenly with its text a little smaller
+  (`widgets::segmented_fit`) rather than putting one option alone on a second line; Receive with more
+  than four addresses takes rows. A card's row puts its label above what it says on a narrow
   screen, and text wraps everywhere, in rows too, so nothing is cut off at the screen's edge. A row
   with a button or a value at its end keeps that where it is, however long the text beside it
   (`chainv4_ui::widgets::end_row`). Cards stand one gap apart on every page, `layout::SECTION`,

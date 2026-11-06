@@ -438,14 +438,14 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
             // A browser reaches the port only through its node's WebSocket.
             #[cfg(not(target_arch = "wasm32"))]
             super::row(ui, &palette, "Other port", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut ctx.settings.mine_port).hint_text("host:port or wss://…, empty for the node's").font(egui::TextStyle::Monospace).desired_width(260.0));
+                ui.add(egui::TextEdit::singleline(&mut ctx.settings.mine_port).hint_text("host:port or wss://…, empty for the node's").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
             });
 
             let said = mining.as_ref().filter(|_| ctx.settings.mine_port.trim().is_empty() || cfg!(target_arch = "wasm32"));
 
             if !said.is_some_and(|mining| mining["open"] == true) {
                 super::row(ui, &palette, "Token", |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut ctx.settings.mine_token).password(true).hint_text("the port's token").desired_width(260.0));
+                    ui.add(egui::TextEdit::singleline(&mut ctx.settings.mine_token).password(true).hint_text("the port's token").desired_width(f32::INFINITY));
                 });
             }
 
@@ -458,9 +458,20 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
                 ctx.settings.mine_solo = true;
             }
 
-            super::row(ui, &palette, "Mine", |ui| {
-                ui.add_enabled_ui(pool, |ui| ui.selectable_value(&mut ctx.settings.mine_solo, false, "In the pool"));
-                ui.add_enabled_ui(solo, |ui| ui.selectable_value(&mut ctx.settings.mine_solo, true, "Alone"));
+            super::row(ui, &palette, "Mine", |ui| match (pool, solo) {
+                (true, true) => {
+                    theme::segmented(ui, &palette, &mut ctx.settings.mine_solo, &[(false, "In the pool"), (true, "Alone")]);
+                }
+                // The one way the port takes, said rather than offered.
+                (true, false) => {
+                    ui.label(RichText::new("In the pool").color(palette.ink));
+                }
+                (false, true) => {
+                    ui.label(RichText::new("Alone").color(palette.ink));
+                }
+                (false, false) => {
+                    ui.label(RichText::new("For the node").color(palette.ink));
+                }
             });
 
             match (solo, pool, ctx.settings.mine_solo) {
@@ -472,11 +483,13 @@ pub(super) fn card(ui: &mut Ui, ctx: &mut Ctx, state: &mut Rig, from: &Address, 
                 }
             }
 
-            super::row(ui, &palette, "On", |ui| {
-                ui.selectable_value(&mut ctx.settings.mine_gpu, false, "CPU");
-                ui.add_enabled_ui(!gpus.is_empty(), |ui| ui.selectable_value(&mut ctx.settings.mine_gpu, true, "GPU"))
-                    .response
-                    .on_disabled_hover_text(NO_GPU);
+            super::row(ui, &palette, "On", |ui| match gpus.is_empty() {
+                false => {
+                    theme::segmented(ui, &palette, &mut ctx.settings.mine_gpu, &[(false, "CPU"), (true, "GPU")]);
+                }
+                true => {
+                    ui.label(RichText::new("CPU").color(palette.ink)).on_hover_text(NO_GPU);
+                }
             });
 
             if ctx.settings.mine_gpu && !gpus.is_empty() {

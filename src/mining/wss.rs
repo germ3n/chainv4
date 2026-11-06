@@ -10,6 +10,7 @@
 
 use {
     super::protocol::MOST_LINE,
+    r#macro::document,
     rustls::pki_types::{CertificateDer, ServerName, pem::PemObject},
     rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned},
     serde_json::Value,
@@ -34,23 +35,40 @@ const QUEUED: usize = 1024;
 /// The most of GET /mining's answer that is read: far more than it says.
 const MOST_ANSWER: u64 = 64 * 1024;
 
-/// A worker's connection to the port once it is up: lines to send, and lines as they come.
+#[document(
+    summary = "A worker's connection to the mining port once it is up, over wss:// or tls://: lines to send, and lines as they come, each a message of the port's protocol, carried by a thread of its own.",
+    category = "Mining",
+    see_also = "open, open_tls",
+)]
 pub struct Lines {
+    #[document(summary = "Lines to send: a full queue waits, as a full TCP connection would.")]
     pub out: mpsc::SyncSender<String>,
+    #[document(summary = "Lines as they come, or why the connection ended.")]
     pub came: mpsc::Receiver<Result<String, String>>,
 }
 
-/// Where a wss:// address leads: its host, its port, and itself for the request.
+#[document(
+    summary = "Where a wss:// address, or a node's API, leads: its host, its port, and itself for the request.",
+    category = "Mining",
+    see_also = "Target::parse, Target::of_api, open",
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
+    #[document(summary = "The host, an IPv6 address without its brackets: the name the certificate is checked against.")]
     pub host: String,
+    #[document(summary = "The port: as given, or 443 for wss:// and https://, 80 for http://.")]
     pub port: u16,
+    #[document(summary = "The address itself, for the request.")]
     pub url: String,
 }
 
 impl Target {
-    /// Reads wss://host[:port][/path]: the host without an IPv6 address's brackets, and 443 unless
-    /// told. Anything but wss:// is refused, ws:// by name, as it is no better than TCP.
+    #[document(
+        parent = "Target",
+        summary = "Reads wss://host[:port][/path], 443 unless told. Anything but wss:// is refused, ws:// by name, as it is no better than TCP.",
+        params = { url = "The address." },
+        returns = "Where it leads, or why it is not a wss:// address.",
+    )]
     pub fn parse(url: &str) -> Result<Target, String> {
         if url.starts_with("ws://") {
             return Err(format!("{url} is a WebSocket without TLS, which protects nothing: give wss://"));
@@ -62,8 +80,12 @@ impl Target {
         Ok(Target { host, port, url: url.to_string() })
     }
 
-    /// Reads a node's API, http://host[:port] or https://, as where to connect to ask it, and whether
-    /// that is over TLS.
+    #[document(
+        parent = "Target",
+        summary = "Reads a node's API, http://host[:port] or https://, as where to connect to ask it.",
+        params = { api = "The node's API." },
+        returns = "Where it leads and whether that is over TLS, or why it is not http:// or https://.",
+    )]
     pub fn of_api(api: &str) -> Result<(Target, bool), String> {
         let (rest, port, tls) = match (api.strip_prefix("https://"), api.strip_prefix("http://")) {
             (Some(rest), _) => (rest, 443, true),
@@ -75,7 +97,7 @@ impl Target {
         Ok((Target { host, port, url: api.to_string() }, tls))
     }
 
-    /// Where to connect, host:port, as a proxy or the system is asked for it.
+    #[document(parent = "Target", summary = "Where to connect, host:port, an IPv6 address in brackets, as a proxy or the system is asked for it.")]
     pub fn address(&self) -> String {
         match self.host.contains(':') {
             true => format!("[{}]:{}", self.host, self.port),
@@ -159,14 +181,24 @@ fn tls_failure(host: &str, err: &std::io::Error) -> String {
     }
 }
 
-/// Opens the node's WebSocket over a connection already made to it, and runs it on a thread of its
-/// own, as one TLS session cannot be read and written from two threads at once.
+#[document(
+    summary = "Opens the node's WebSocket, GET /mining/ws behind TLS, over a connection already made to it, and runs it on a thread of its own, as one TLS session cannot be read and written from two threads at once. The certificate is always checked against the host's name.",
+    category = "Mining",
+    params = { stream = "The connection, made directly or through a proxy.", target = "Where it leads.", ca_cert = "A PEM certificate to trust besides the Mozilla roots, as --ca-cert gives it, for a node with one of its own." },
+    returns = "The connection's lines, or why TLS or the WebSocket did not come up.",
+    see_also = "open_sized, open_tls, Lines",
+)]
 pub fn open(stream: TcpStream, target: &Target, ca_cert: Option<&[u8]>) -> Result<Lines, String> {
     open_sized(stream, target, ca_cert, MOST_LINE as usize)
 }
 
-/// The same for messages of up to most bytes: what another service over wss://, such as a
-/// WalletConnect relay, sends.
+#[document(
+    summary = "Opens a WebSocket as open does, for messages of up to most bytes: what another service over wss://, such as a WalletConnect relay, sends.",
+    category = "Mining",
+    params = { stream = "The connection.", target = "Where it leads.", ca_cert = "A PEM certificate to trust besides the Mozilla roots.", most = "The longest message taken, in bytes." },
+    returns = "The connection's lines, or why it did not come up.",
+    see_also = "open",
+)]
 pub fn open_sized(stream: TcpStream, target: &Target, ca_cert: Option<&[u8]>, most: usize) -> Result<Lines, String> {
     let tls = tls_over(stream, &target.host, ca_cert)?;
     let request = target.url.as_str().into_client_request().map_err(|err| format!("{}: {err}", target.url))?;
@@ -239,8 +271,13 @@ fn pump<S: Read + Write>(mut socket: WebSocket<S>, to_send: &mpsc::Receiver<Stri
     }
 }
 
-/// The mining port's protocol over TLS alone, tls://host:port: its lines over a connection already
-/// made to the port, the certificate checked as wss:// checks it, on a thread of its own.
+#[document(
+    summary = "The mining port's protocol over TLS alone, tls://host:port, on a node started with --mining-cert: its lines over a connection already made to the port, the certificate checked as wss:// checks it, on a thread of its own.",
+    category = "Mining",
+    params = { stream = "The connection to the port.", host = "The name the certificate is checked against.", ca_cert = "A PEM certificate to trust besides the Mozilla roots." },
+    returns = "The connection's lines, or why TLS did not come up.",
+    see_also = "open, terminate, MiningPort",
+)]
 pub fn open_tls(stream: TcpStream, host: &str, ca_cert: Option<&[u8]>) -> Result<Lines, String> {
     let tls = tls_over(stream, host, ca_cert)?;
     tls.sock.set_read_timeout(Some(POLL)).map_err(|err| err.to_string())?;
@@ -307,8 +344,13 @@ fn pump_lines<S: Read + Write>(mut stream: S, to_send: &mpsc::Receiver<String>, 
     }
 }
 
-/// What a mining port serves TLS with: the certificate chain and its key, from PEM files, as
-/// --mining-cert and --mining-key give them. rustls on ring, as the clients are.
+#[document(
+    summary = "What a mining port serves TLS with, from the PEM files --mining-cert and --mining-key give: the certificate chain and its key, on rustls with ring, as the clients are.",
+    category = "Mining",
+    params = { cert_pem = "The certificate chain, PEM.", key_pem = "Its private key, PEM." },
+    returns = "The server's configuration, or why the files do not read or do not go together.",
+    see_also = "terminate, MiningPort",
+)]
 pub fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::ServerConfig>, String> {
     use rustls::pki_types::PrivateKeyDer;
 
@@ -329,12 +371,20 @@ pub fn server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::Serv
     Ok(Arc::new(config))
 }
 
-/// How long a connection is given to open with TLS before it is taken for plain: a TLS client sends
-/// its hello at once, while the mining port speaks first to a plain one, which waits for it.
+#[document(
+    summary = "How long a connection to the mining port is given to open with TLS before it is taken for plain, 1.5 s: a TLS client sends its hello at once, while the port speaks first to a plain one, which waits for it.",
+    category = "Mining",
+    see_also = "opens_with_tls",
+)]
 pub const TLS_HELLO_WAIT: Duration = Duration::from_millis(1_500);
 
-/// Whether a connection opens with TLS: its first byte, within TLS_HELLO_WAIT, is a handshake
-/// record's, 0x16, which no line of the mining protocol starts with. Silence is a plain worker.
+#[document(
+    summary = "Whether a connection opens with TLS: its first byte, within wait, is a handshake record's, 0x16, which no line of the mining protocol starts with. Silence is a plain worker. The byte is peeked, not read.",
+    category = "Mining",
+    params = { stream = "The connection just accepted.", wait = "How long to wait for a first byte: TLS_HELLO_WAIT." },
+    returns = "Whether it is TLS, or why the connection could not be read.",
+    see_also = "TLS_HELLO_WAIT, terminate",
+)]
 pub fn opens_with_tls(stream: &TcpStream, wait: Duration) -> Result<bool, String> {
     let mut first = [0u8; 1];
     stream.set_read_timeout(Some(wait.min(TLS_HELLO_WAIT))).map_err(|err| err.to_string())?;
@@ -350,8 +400,13 @@ pub fn opens_with_tls(stream: &TcpStream, wait: Duration) -> Result<bool, String
     Ok(opens)
 }
 
-/// Ends TLS from a worker here: the handshake, then a thread carrying the bytes between it and the
-/// stream returned, one end of a loopback pair, which the port then serves as any plain connection.
+#[document(
+    summary = "Ends TLS from a worker on the mining port: the handshake, then a thread carrying the bytes between it and the stream returned, one end of a loopback pair, which the port serves as any plain connection, the worker's address and limits kept.",
+    category = "Mining",
+    params = { stream = "The connection, which opened with TLS.", config = "What the port serves TLS with.", handshake = "How long the handshake may take." },
+    returns = "The plain end, or why the handshake failed.",
+    see_also = "opens_with_tls, server_config, open_tls",
+)]
 pub fn terminate(stream: TcpStream, config: &Arc<rustls::ServerConfig>, handshake: Duration) -> Result<TcpStream, String> {
     let connection = rustls::ServerConnection::new(config.clone()).map_err(|err| err.to_string())?;
     let mut tls = StreamOwned::new(connection, stream);
@@ -414,8 +469,13 @@ fn carry(mut tls: StreamOwned<rustls::ServerConnection, TcpStream>, mut plain: T
     let _ = plain.shutdown(std::net::Shutdown::Both);
 }
 
-/// What a node says of its mining port, GET /mining, asked over a connection already made to it: over
-/// TLS for an https:// node, whose certificate is checked as the WebSocket's is.
+#[document(
+    summary = "What a node says of its mining port, GET /mining, asked over a connection already made to it: over TLS for an https:// node, whose certificate is checked as the WebSocket's is.",
+    category = "Mining",
+    params = { stream = "The connection to the node's API.", host = "Its host.", port = "Its port.", tls = "Whether it is https://.", ca_cert = "A PEM certificate to trust besides the Mozilla roots." },
+    returns = "The answer's JSON, or why it could not be asked or read.",
+    see_also = "Target::of_api",
+)]
 pub fn ask_mining(stream: TcpStream, host: &str, port: u16, tls: bool, ca_cert: Option<&[u8]>) -> Result<Value, String> {
     let name = if host.contains(':') { format!("[{host}]") } else { host.to_string() };
     let host_header = match (tls, port) {

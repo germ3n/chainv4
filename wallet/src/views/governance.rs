@@ -1503,16 +1503,10 @@ fn standing_words(change: &Change, coin: &Coin) -> String {
         Change::Bootnodes(bootnodes) if bootnodes.is_empty() => "None".to_string(),
         Change::Bootnodes(bootnodes) => format!("{} bootnode{}: {}", bootnodes.len(), plural(bootnodes.len() as u64), bootnodes.join(", ")),
         Change::Names(settings) => format!("A year of a name by its length: {}; {} of grace, at most {} year{} ahead", name_prices(change, coin), millis(settings.grace_ms), settings.max_years, plural(u64::from(settings.max_years))),
-        Change::SwitchFinality { epoch, config } => format!("{} from epoch {epoch}", capitalized(&stated(&Change::Finality(config.clone()), coin).replacen("Finality: ", "", 1))),
+        Change::SwitchFinality { epoch, config } => format!("{} from epoch {epoch}", super::capitalized(&stated(&Change::Finality(config.clone()), coin).replacen("Finality: ", "", 1))),
         Change::Directory(_) => stated(change, coin).replacen("Directory: announce ", "Announced: ", 1).replacen("Announced: nothing", "Nothing announced", 1),
         change => stated(change, coin),
     }
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-
-    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 /// What each length of name costs a year.

@@ -83,12 +83,14 @@ pub fn chart(ui: &mut Ui, look: Look, series: &Series, height: f32) {
     let limit = series.limit.filter(|(limit, _)| highest >= limit * 0.2);
     let top = limit.map_or(highest, |(limit, _)| highest.max(limit));
     let ceiling = ceiling(top);
-    let font = FontId::monospace(10.0);
+    // Proportional: at this size a monospace B reads as an 8, so 1B looked like 18.
+    let font = FontId::proportional(10.5);
     let label_width = [ceiling, ceiling / 2.0]
         .iter()
         .map(|value| ui.fonts_mut(|fonts| fonts.layout_no_wrap(short(*value), font.clone(), palette.muted).size().x))
         .fold(0.0, f32::max);
-    let plot = Rect::from_min_max(pos2(rect.left() + label_width + 6.0, rect.top() + 6.0), pos2(rect.right() - 2.0, rect.bottom() - 2.0));
+    // Room above and below for half a label, as the top and the nothing line are labelled at their middles.
+    let plot = Rect::from_min_max(pos2(rect.left() + label_width + 6.0, rect.top() + 7.0), pos2(rect.right() - 2.0, rect.bottom() - 7.0));
 
     // The scale: lines at nothing, half and the ceiling, labelled on the left.
     for fraction in [0.0, 0.5, 1.0] {

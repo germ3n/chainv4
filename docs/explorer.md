@@ -670,6 +670,10 @@ The send page needs a key, as `chainv4 keygen` writes it, or the development key
 - **A sealed key file** (`keygen --seal`, see [Sealed key files](crypto.md#sealed-key-files)),
   pasted or picked: it waits in the key field for its passphrase, then **Use it**. The passphrase
   and the key's text are wiped once used.
+- **What egui made of it:** the explorer's allocator zeroes every block of memory as it is freed,
+  so the copies egui makes of a key as it is pasted and laid out are wiped as they go, and a crash
+  writes no core file, as in the wallet (see [Wallet](wallet.md#keys)). The default `wipe-freed`
+  feature; leaving it out makes a faster build.
 
 **Where the key stays:**
 - **The key itself:** it stays in the window, and is never saved.

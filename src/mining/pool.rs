@@ -416,6 +416,7 @@ impl Pool {
             hash = "The chain's work hash, from genesis.",
             port = "Where workers connect, the token they share with the node, and the protocol name.",
             found = "Called with the block id and its seal when a worker's nonce checks.",
+            db = "The node's database, which keeps the claim trees the pool's blocks committed to, Column::PoolTrees; None keeps them in memory alone.",
         },
         returns = "The pool, or why the port did not open.",
     )]

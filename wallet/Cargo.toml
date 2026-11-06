@@ -61,11 +61,15 @@ minicbor = { version = "2", default-features = false, features = ["alloc"] }
 default = ["store", "mining"]
 # All an app store takes: every default feature but mining. --store on the build scripts builds with
 # this alone: cargo build --no-default-features --features store.
-store = ["swap", "dex", "nft", "bridge", "bitcoin-light", "walletconnect"]
+store = ["swap", "dex", "nft", "bridge", "bitcoin-light", "walletconnect", "wipe-freed"]
 # Mining from this device, on its GPU or CPU, and in the browser on WebGPU or Web Workers: the Mine
 # card, crate::miner, and what they rest on. Off for the app stores, which take no app that mines;
 # what a pool owes and claiming it stay, as claiming is not mining.
 mining = ["chainv4/worker", "chainv4/gpu-mining", "dep:chainv4-gpu"]
+# Every block of memory zeroed as it is freed or moved, the copies egui makes of words shown or
+# typed with it (chainv4_ui::wipe): a write over everything freed, for a build that would rather be
+# faster.
+wipe-freed = []
 # Atomic swaps between this chain, Bitcoin and EVM chains: the Swaps page, and the offline signer
 # signing a swap's Bitcoin side.
 swap = ["chainv4/swap"]
@@ -135,7 +139,7 @@ eframe = { version = "0.37.0", default-features = false, features = ["android-na
 
 # The end-to-end tests drive the whole app headlessly, through what accesskit sees of it.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dev-dependencies]
-egui_kittest = { version = "=0.37.0", features = ["eframe"] }
+egui_kittest = { version = "=0.37.0", features = ["eframe", "wgpu", "snapshot"] }
 
 # A workspace of its own, as the explorer is: egui and the browser crates never meet the node's
 # lockfile.

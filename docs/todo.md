@@ -233,11 +233,16 @@ offline; these would make that hold up as a treasury.
   token and when, read through the index with a bound per request, and both apps offer them.
 - [x] **Retry and pull to refresh.** Every request has a time limit, what failed says so with Retry, a page
   pulled from its top or Reload asks again, in both apps.
-- [ ] **Polish the explorer and the wallet (owner, 2026-11-06: "a polish pass going thru every page").**
+- [x] **Polish the explorer and the wallet (owner, 2026-11-06: "a polish pass going thru every page").**
   Every page of both apps, run for real, on the desktop and in the Android emulator: what each page
   says and in what order, empty and loading states, what is hard to find or to read, controls that
   are easy to miss (the Bridge page's From box was one), spacing and fit on a phone, and the tools
   the explorer still lacks. Screenshots of each page before and after, and a list of what changed.
+  Done 2026-11-06: the wallet's sidebar in four groups and More under the same headings; choices
+  that share a row evenly (`segmented_fit`) on Swaps, Receive and the reading cap; Reload in the top
+  bar; the account picker truncated; the explorer's titles given room under its bar, its charts'
+  scale readable (1B no longer read as 18) and never clipped, `--` flags in monospace; the status
+  dot's reason starting with a capital. Screenshots by `tests/shots.rs` in both apps.
 - [x] **The directory: governance, or an admin key.** A chain with governance sets it by
   `Change::Directory`; one without may name a `directory_admin` in genesis, which sets it with
   `Tx::SetDirectory` and hands the role on or renounces it with `Tx::HandDirectory`. Genesis
@@ -1963,8 +1968,11 @@ with.
   drop, locking included; BIP39's own and `Phrase::parse`'s copies; typed fields with room made up
   front and no undo history; the vault's JSON written into room of its size; the explorer's pasted
   key and key file. See [Wallet](wallet.md#keys).
-- [ ] **What egui lays out to show the words,** its text layout cache, and memory the system swaps
-  out are not wiped; a locked page of shown words keeps the glyph runs until egui drops them.
+- [x] **What egui lays out to show the words,** its text layout cache, and memory the system swaps
+  out are not wiped; a locked page of shown words keeps the glyph runs until egui drops them. Done
+  2026-11-06: both apps' allocator, `chainv4_ui::wipe::Wiping`, zeroes every block freed or moved,
+  locking has egui free its layouts within three frames, and the apps refuse crash dumps. Swap
+  stays out of reach.
 - [x] **The wallet proves only the registry's first page of tokens,** 100 by symbol, as the
   explorer's holdings do. Stale: since cb57b89 the wallet follows
   every page of the registry to the end, and proves each token's entry and balances.

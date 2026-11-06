@@ -201,6 +201,8 @@ pub struct Settings {
     /// Tokens sites asked the wallet to show (wallet_watchAsset), each by the genesis id of the
     /// chain whose EVM it lives on.
     pub watched: Vec<(String, crate::dapp::Watched)>,
+    /// The sidebar's groups folded, by heading.
+    pub folded: std::collections::HashSet<String>,
     /// The WalletConnect project id sites are reached under, from cloud.reown.com: empty, and
     /// WalletConnect is off.
     pub wc_project: String,
@@ -341,6 +343,7 @@ impl Default for Settings {
             bitcoin_depth: 3,
             nft_media: false,
             watched: Vec::new(),
+            folded: std::collections::HashSet::new(),
             wc_project: String::new(),
             wc_relay: String::new(),
             // chainv4::nft::DEFAULT_GATEWAY, which a build without NFTs has no copy of.
@@ -784,6 +787,8 @@ impl Wallet {
         self.holders.clear();
         self.views = views::States::default();
         self.lock = Lock::start(&self.settings);
+        // What egui laid out of those pages, the words if they were shown, freed and so wiped.
+        chainv4_ui::wipe::let_go(&self.wake);
 
         // Biometrics show by themselves as the app starts, not as it locks: whoever locked it, or
         // left it, may be gone.
@@ -1396,6 +1401,9 @@ impl Wallet {
 
                 ui.add_space(18.0);
                 ui.horizontal(|ui| {
+                    // Three to a line in the sidebar's width, none of them wrapping its word.
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.spacing_mut().button_padding.x = 8.0;
                     let theme_name = if app.settings.light_theme { "Dark" } else { "Light" };
 
                     if theme::quiet(ui, &palette, theme_name).clicked() {
@@ -1450,10 +1458,32 @@ impl Wallet {
                     ui.add_space(gap(ui, 18.0));
                 }
 
-                for &(page, name) in views::nav(app.settings.role()) {
-                    if chainv4_ui::widgets::nav_entry(ui, &palette, name, app.page == page).clicked() {
-                        app.page = page;
+                for &(group, pages) in views::groups(app.settings.role()) {
+                    if pages.is_empty() {
+                        continue;
                     }
+
+                    // A group folded keeps the page showing listed, so where you are stays in view.
+                    let folded = app.settings.folded.contains(group);
+
+                    if !group.is_empty() && chainv4_ui::widgets::group_heading(ui, &palette, group, folded).clicked() {
+                        match folded {
+                            true => app.settings.folded.remove(group),
+                            false => app.settings.folded.insert(group.to_string()),
+                        };
+                    }
+
+                    for &(page, name) in pages {
+                        if folded && app.page != page {
+                            continue;
+                        }
+
+                        if chainv4_ui::widgets::nav_entry(ui, &palette, name, app.page == page).clicked() {
+                            app.page = page;
+                        }
+                    }
+
+                    ui.add_space(gap(ui, 14.0));
                 }
             },
         );
@@ -1508,7 +1538,7 @@ impl Wallet {
             return;
         };
         let mut chosen = current.id();
-        egui::ComboBox::from_id_salt("account").selected_text(current.name.clone()).width(width).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("account").selected_text(current.name.clone()).width(width).truncate().show_ui(ui, |ui| {
             for holder in &self.holders {
                 ui.selectable_value(&mut chosen, holder.id(), &holder.name);
             }
@@ -1524,6 +1554,9 @@ impl Wallet {
     fn top_bar(&mut self, ui: &mut Ui) {
         let palette = self.palette;
         ui.horizontal(|ui| {
+            // Buttons no wider than their words, so the account keeps its room.
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().button_padding.x = 8.0;
             // A long name is cut short, leaving the account and Lock their room.
             let name = self.settings.chain_name(self.name.as_deref());
             let room = ui.available_width() * 0.45;
@@ -1532,14 +1565,27 @@ impl Wallet {
             if self.settings.role() != Role::Signer {
                 views::light_dot(ui, &palette, &self.chain, self.node.down());
             }
+            let mut reload = false;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::quiet(ui, &palette, "Lock").clicked() {
                     self.lock();
                 }
 
+                // A narrow window a mouse is on has no sidebar to reload from, nor a finger to
+                // pull with: its Reload sits here, out of the page's way.
+                if self.settings.role() != Role::Signer && !chainv4_ui::layout::touch(ui.ctx()) {
+                    let node = &self.node;
+                    let working = self.reloading.working(ui.input(|input| input.time), |ask| node.asking(ask));
+                    reload = theme::reload(ui, &palette, working);
+                }
+
                 let width = (ui.available_width() - 8.0).clamp(90.0, 180.0);
                 self.account_picker(ui, width);
             });
+
+            if reload {
+                self.reload(ui.input(|input| input.time));
+            }
         });
     }
 
@@ -1595,6 +1641,7 @@ impl eframe::App for Wallet {
             storage.flush();
         }
 
+        chainv4_ui::wipe::letting_go(ui.ctx());
         let time = ui.input(|input| input.time);
         let now = now_ms();
         self.take(now, time);
@@ -1724,12 +1771,6 @@ impl eframe::App for Wallet {
                     ui.add_space(if narrow { 18.0 } else { 34.0 });
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         self.updates.banner(ui, &palette, &self.settings, &self.wake);
-
-                        // A narrow window a mouse is on has no sidebar to reload from, nor a finger
-                        // to pull with.
-                        if online && narrow && !chainv4_ui::layout::touch(ui.ctx()) {
-                            reload |= theme::reload(ui, &palette, working);
-                        }
 
                         // What failed or took too long, whichever page asked: said on every page,
                         // as a wallet's pages all rest on the node.

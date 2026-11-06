@@ -1359,7 +1359,8 @@ impl eframe::App for Explorer {
             }
         }
 
-        let margin = egui::Margin::symmetric(layout::page_margin(narrow), if narrow { 14 } else { 4 });
+        // Room above a page's title, under the header bar, on a desktop as on a phone.
+        let margin = egui::Margin::symmetric(layout::page_margin(narrow), 14);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.paper).inner_margin(margin))
             .show(ui, |ui| {
