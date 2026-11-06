@@ -257,6 +257,7 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                     signer: chainv4::crypto::keypair::PublicKey::Ed25519([0; 32]),
                     coin: airgap::Shown { symbol: String::new(), decimals: 0 },
                     token: None,
+                    collection: None,
                     genesis: bundle.genesis,
                 });
                 let trouble = refused.or(trouble);
@@ -419,6 +420,7 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         signer: key.unwrap_or(chainv4::crypto::keypair::PublicKey::Ed25519([0; 32])),
         coin: airgap::Shown { symbol: "units".to_string(), decimals: 0 },
         token: None,
+        collection: None,
         genesis: bundle.genesis,
     };
     let described = airgap::describe(&request);
@@ -936,7 +938,7 @@ mod batch_tests {
                 let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
                 Step::Review {
-                    request: Box::new(Request { tx: Tx::Batch { steps: vec![pay; 3] }, nonce: 4, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis: Hash::zero(HashType::default_chain()) }),
+                    request: Box::new(Request { tx: Tx::Batch { steps: vec![pay; 3] }, nonce: 4, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, collection: None, genesis: Hash::zero(HashType::default_chain()) }),
                     trouble: None,
                 }
             });
@@ -976,7 +978,7 @@ mod batch_tests {
             let tx = Tx::EvmCall { to: Address::Evm([0xab; 20]), value: Amount::U128(2_000_000_000_000_000_000), input: vec![0x12, 0x34, 0x56, 0x78, 0x9a] };
             let key = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
-            Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis: Hash::zero(HashType::default_chain()) }), trouble: None }
+            Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer: key, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, collection: None, genesis: Hash::zero(HashType::default_chain()) }), trouble: None }
         });
         let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
 
@@ -1010,7 +1012,7 @@ mod batch_tests {
         let from = holders[0].addresses()[0];
         let signer = holders[0].public(&from).unwrap();
         let tx = Tx::Transfer { from, to: Address::Ed25519([9; 32]), amount: Amount::U128(1) };
-        let request = Request { tx, nonce: 0, fee: fee(), signer, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis };
+        let request = Request { tx, nonce: 0, fee: fee(), signer, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, collection: None, genesis };
         let mut state = SignState { step: Step::Review { request: Box::new(request), trouble: None }, ..SignState::default() };
         let mut world = drawn::World::default();
         world.settings.signer_chain = yours;
@@ -1065,7 +1067,7 @@ mod batch_tests {
                 let tx = Tx::Transfer { from: from[0], to: Address::Ed25519([9; 32]), amount: Amount::U128(1) };
                 let signer = chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public();
 
-                Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, genesis: Hash::zero(HashType::default_chain()) }), trouble: None }
+                Step::Review { request: Box::new(Request { tx, nonce: 0, fee: fee(), signer, coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 }, token: None, collection: None, genesis: Hash::zero(HashType::default_chain()) }), trouble: None }
             });
             let sign = shown.iter().rfind(|(text, _)| text == "Sign").unwrap().1.top();
 
@@ -1102,6 +1104,7 @@ mod batch_tests {
                 signer: chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public(),
                 coin: airgap::Shown { symbol: "DEV".to_string(), decimals: 18 },
                 token: None,
+                collection: None,
                 genesis: Hash::zero(HashType::default_chain()),
             };
             let trouble = airgap::refused(&refused);

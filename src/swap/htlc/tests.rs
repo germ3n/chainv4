@@ -218,7 +218,7 @@ fn members() -> (Vec<crate::crypto::mnemonic::Seed>, crate::crypto::bitcoin::psb
     .iter()
     .map(|words| Phrase::parse(words).unwrap().seed(""))
     .collect();
-    let wallet = crate::crypto::bitcoin::psbt::MultisigWallet { threshold: 2, xpubs: seeds.iter().map(|seed| seed.multisig_account(1)).collect(), network: Network::Test };
+    let wallet = crate::crypto::bitcoin::psbt::MultisigWallet { threshold: 2, xpubs: seeds.iter().map(|seed| seed.multisig_account(1, 0)).collect(), network: Network::Test };
 
     (seeds, wallet)
 }
@@ -226,8 +226,8 @@ fn members() -> (Vec<crate::crypto::mnemonic::Seed>, crate::crypto::bitcoin::psb
 /// A member's signing, by the path its key sits at.
 #[cfg(feature = "mnemonic")]
 fn sign_as(psbt: &mut crate::crypto::bitcoin::psbt::Psbt, seed: &crate::crypto::mnemonic::Seed) -> usize {
-    psbt.sign_multisig(seed.multisig_account(1).fingerprint, |path| match *path {
-        [_, coin, _, _, chain, index] => match seed.multisig_key(coin & !(1 << 31), chain, index).private() {
+    psbt.sign_multisig(seed.multisig_account(1, 0).fingerprint, |path| match *path {
+        [_, coin, _, _, chain, index] => match seed.multisig_key(coin & !(1 << 31), 0, chain, index).private() {
             crate::crypto::keypair::PrivateKey::Bitcoin(secret) => Some(*secret),
             _ => None,
         },

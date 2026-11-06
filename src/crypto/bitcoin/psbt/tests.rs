@@ -20,13 +20,13 @@ fn seeds() -> Vec<Seed> {
 }
 
 fn wallet(seeds: &[Seed], network: Network) -> MultisigWallet {
-    MultisigWallet { threshold: 2, xpubs: seeds.iter().map(|seed| seed.multisig_account(network.coin())).collect(), network }
+    MultisigWallet { threshold: 2, xpubs: seeds.iter().map(|seed| seed.multisig_account(network.coin(), 0)).collect(), network }
 }
 
 /// What a member's words sign with, at a path below its multisig account.
 fn secret(seed: &Seed) -> impl Fn(&[u32]) -> Option<[u8; 32]> + '_ {
     move |path| match *path {
-        [_, coin, _, _, chain, index] => match seed.multisig_key(coin - HARDENED, chain, index).private() {
+        [_, coin, _, _, chain, index] => match seed.multisig_key(coin - HARDENED, 0, chain, index).private() {
             PrivateKey::Bitcoin(secret) => Some(*secret),
             _ => None,
         },
@@ -60,8 +60,8 @@ fn two_of_three_members_sign_apart_and_the_combined_psbt_finishes() {
     let mut alice = psbt.clone();
     let mut carol = psbt.clone();
 
-    assert_eq!(alice.sign_multisig(seeds[0].multisig_account(1).fingerprint, secret(&seeds[0])).unwrap(), 1);
-    assert_eq!(carol.sign_multisig(seeds[2].multisig_account(1).fingerprint, secret(&seeds[2])).unwrap(), 1);
+    assert_eq!(alice.sign_multisig(seeds[0].multisig_account(1, 0).fingerprint, secret(&seeds[0])).unwrap(), 1);
+    assert_eq!(carol.sign_multisig(seeds[2].multisig_account(1, 0).fingerprint, secret(&seeds[2])).unwrap(), 1);
     assert_eq!(alice.sign_multisig([0xde, 0xad, 0xbe, 0xef], secret(&seeds[1])).unwrap(), 0, "no key at another seed's fingerprint");
     assert_eq!(alice.multisig_progress(), vec![(1, 2)]);
     assert!(alice.finish_multisig().unwrap_err().contains("1 of the 2"));
@@ -152,8 +152,8 @@ fn bitcoin_core_derives_the_descriptor_s_addresses_and_takes_a_two_of_three_spen
 
     let mut psbt = spend(&wallet, id, vout, 100_000, p2wsh(&[0x51]));
     let mut bob = psbt.clone();
-    psbt.sign_multisig(seeds[0].multisig_account(1).fingerprint, secret(&seeds[0])).unwrap();
-    bob.sign_multisig(seeds[1].multisig_account(1).fingerprint, secret(&seeds[1])).unwrap();
+    psbt.sign_multisig(seeds[0].multisig_account(1, 0).fingerprint, secret(&seeds[0])).unwrap();
+    bob.sign_multisig(seeds[1].multisig_account(1, 0).fingerprint, secret(&seeds[1])).unwrap();
 
     // Bitcoin Core reads our PSBT and finds what it is: a P2WSH multisig input with its members.
     let decoded: serde_json::Value = serde_json::from_str(&node.cli(&["decodepsbt", &psbt.to_base64()]).unwrap()).unwrap();

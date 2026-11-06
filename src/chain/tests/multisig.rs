@@ -395,7 +395,7 @@ fn a_multisig_reaches_here_evm_alone_bitcoin_alone_or_both() {
     let keys = [of_scheme(KeyType::Ed25519, 61), of_scheme(KeyType::Bitcoin, 62)];
     // Each member's account key on Bitcoin is its own words', apart from its key here, a bitcoin:
     // one too, which derives elsewhere.
-    let xpub = |words: &str| Phrase::parse(words).unwrap().seed("").multisig_account(0);
+    let xpub = |words: &str| Phrase::parse(words).unwrap().seed("").multisig_account(0, 0);
     let xpubs = [xpub("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"), xpub("legal winner thank year wave sausage worth useful legal winner thank yellow")];
 
     for (bitcoin, evm) in [(false, false), (false, true), (true, false), (true, true)] {

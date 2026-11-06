@@ -215,7 +215,7 @@ fn a_multisig_swaps_with_its_keys_at_the_swap_s_index_and_its_members_sign_the_c
     .iter()
     .map(|words| Phrase::parse(words).unwrap().seed(""))
     .collect();
-    let members: Vec<Value> = seeds.iter().map(|seed| json!({ "key": "ed25519:0x00", "bitcoin": xpub_text(&seed.multisig_account(1), Network::Test), "evm": "0x11" })).collect();
+    let members: Vec<Value> = seeds.iter().map(|seed| json!({ "key": "ed25519:0x00", "bitcoin": xpub_text(&seed.multisig_account(1, 0), Network::Test), "evm": "0x11" })).collect();
     let policy = json!({ "members": members, "threshold": 2, "testnet": true });
     let wallet = super::super::multisig::bitcoin::wallet_of(&policy).unwrap();
     let multisig = Address::Multisig([4; 32]);

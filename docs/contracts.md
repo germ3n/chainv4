@@ -643,7 +643,8 @@ chainv4 send deploy --lua contracts/lua/names/names.lua
 - **Mistakes name their file.** `send` and `layout` compile the bundle before sending, so a
   syntax error reads `lib/checks.lua:3: …`, and the explorer places a failed deploy's error the
   same way. An error a call raises later names the line of the source on chain, which the
-  explorer shows.
+  explorer shows; `send … call --source main.lua` puts the contract's files together again and
+  names the file and line it came from instead, `lib/checks.lua:3: too much`.
 - **The 128 KiB limit** is the bundle's.
 - **Whole lines only.** The include is a line of its own, and any such line is replaced, even
   inside a long string or a `--[[ ]]` comment.

@@ -392,11 +392,11 @@ mod tests {
             .iter()
             .map(|words| Phrase::parse(words).unwrap().seed(""))
             .collect();
-        let members: Vec<Value> = seeds.iter().map(|seed| json!({ "key": "ed25519:0x00", "bitcoin": xpub_text(&seed.multisig_account(1), Network::Test), "evm": "0x11" })).collect();
+        let members: Vec<Value> = seeds.iter().map(|seed| json!({ "key": "ed25519:0x00", "bitcoin": xpub_text(&seed.multisig_account(1, 0), Network::Test), "evm": "0x11" })).collect();
         let wallet = wallet_of(&json!({ "members": members, "threshold": 2, "testnet": true })).unwrap();
 
         assert_eq!((wallet.threshold, wallet.network), (2, Network::Test));
-        assert_eq!(wallet.xpubs, seeds.iter().map(|seed| seed.multisig_account(1)).collect::<Vec<_>>());
+        assert_eq!(wallet.xpubs, seeds.iter().map(|seed| seed.multisig_account(1, 0)).collect::<Vec<_>>());
         assert!(wallet_of(&json!({ "members": [{ "key": "ed25519:0x00", "bitcoin": null }], "threshold": 1 })).is_none(), "no xpubs, no side on Bitcoin");
 
         let mut state = BitcoinState::default();

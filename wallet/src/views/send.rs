@@ -582,6 +582,21 @@ fn draft(ctx: &Ctx, state: &SendState) -> Result<(Draft, String), String> {
 /// What Send says while the chain to sign for is not known.
 const NO_CHAIN: &str = "The wallet cannot sign yet: a signature holds on one chain alone, and the light client has not said which chain this node is on. It starts once the node answers.";
 
+/// The NFT or multi-token collection a call goes to, as the light client proved the registry names
+/// it, for the offline signer to show: none for a call to anything else.
+fn named_collection(ctx: &Ctx, tx: &Tx) -> Option<crate::airgap::NamedCollection> {
+    let Tx::ContractCall { to, .. } = tx else {
+        return None;
+    };
+    let collection = ctx.chain.collections.get(&to.to_string())?.value.clone();
+
+    Some(crate::airgap::NamedCollection {
+        name: collection.name.unwrap_or_default(),
+        symbol: collection.symbol.unwrap_or_default(),
+        multi: collection.kind == chainv4::registry::collections::CollectionKind::Multi,
+    })
+}
+
 /// The draft of a transaction, and the body of POST /offer for its probe, at the next nonce.
 #[allow(clippy::too_many_arguments)]
 fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx, coin: u256, token: Option<Shown>, to: String, what: String, proven_nonce: u64) -> Result<(Draft, String), String> {
@@ -701,6 +716,8 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
             _ => super::row(ui, &palette, "To", |ui| super::address(ui, &palette, &draft.to)),
         }
 
+        // The collection a call goes to, for the offline signer to name it.
+        let collection = named_collection(ctx, &draft.tx);
         let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
         let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
         // It would have to sign one opaque hash for all the steps, which the chain refuses anyway.
@@ -756,6 +773,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                                 decimals: ctx.coin.decimals,
                             },
                             token: draft.token.clone(),
+                            collection: collection.clone(),
                             genesis,
                         };
                         state.step = Step::Offline {

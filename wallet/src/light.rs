@@ -73,9 +73,9 @@ impl Net {
         let at = |height: u32, hash: &str| HashCheckpoint::new(height, hash.parse::<BlockHash>().expect("a block hash"));
 
         match self {
-            Net::Main => at(972_410, "00000000000000000001ba187a086ecd0029f8ac4bc7b445822216850844a9ce"),
-            Net::Testnet4 => at(156_773, "00000000baa17a29b67eee43bc811378946e986c7d1eb6d27709fb94558decb2"),
-            Net::Signet => at(327_246, "0000000d7f613dec13839b557f17143517390267746543e9340a7588c0695526"),
+            Net::Main => at(973_809, "00000000000000000001853eaf845ea57e5cd16b693abb500d80277165679034"),
+            Net::Testnet4 => at(158_428, "00000000d24712a2fdd8b6e09d4fd29b4b587df0c9bdb3c6aac8da41a63b8045"),
+            Net::Signet => at(328_672, "00000014a1cf12b1be3726ea22ed1f156e720d4de55d0ba64cee524db857a59a"),
             Net::Regtest => HashCheckpoint::from_genesis(Network::Regtest),
         }
     }

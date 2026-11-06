@@ -1228,6 +1228,10 @@ with.
 - [ ] **Per-account Bitcoin multisig xpubs.** Every account of one phrase names the same BIP48
   xpub, at account 0', so two of them cannot be members of one multisig on Bitcoin. Deriving at
   m/48'/coin'/n'/2' for account n would let them, once the offline signer signs there too.
+  Found 2026-11-06: `BitcoinXpub` in a policy keeps no account, and descriptors and PSBT paths
+  write `0'`, so naming account n's xpub needs an `account` field in it: a change to chain state,
+  for the consensus batches. The library and the signers take any account already
+  (`Seed::multisig_account(coin, account)`, the signer reading it from the path).
 - [x] **Wallet pages send from any of the account's addresses, and read NFTs' transfers as NFTs.** Done
   2026-11-03. The review read every `transfer(to, n)` with no coin as a token's, so sending an NFT
   showed its id as "n units of the token". Steps now read a call by what the light client proved its
@@ -1244,11 +1248,13 @@ with.
   so one sent between the account's addresses no longer drops off the page. The node and both
   example collections write and prove every scheme's holders alike, a bitcoin `bc1q…` too (a test in
   each engine now says so). No node or contract change.
-- [ ] **The offline signer names the collection of an NFT it signs for.** It knows only the token the
+- [x] **The offline signer names the collection of an NFT it signs for.** It knows only the token the
   sender names in its request, so an NFT's transfer shows there as a call to a contract it does not
   know, honestly but bare. The request could carry the collection, the sender's word as its token
   is, which changes the airgap format; and the NFTs page could prove `tokens_of`'s ids rather than
-  ask a node for them, which a node may leave short.
+  ask a node for them, which a node may leave short. Done 2026-11-06 for the
+  name: the request carries the collection after its encoding, only when there is one. Left: the
+  NFTs page proving `tokens_of`'s ids rather than ask a node for them.
 
 - [x] **Stuck Bitcoin releases are voted down by the signers' own passes.** Done 2026-11-01. One signer could
   propose a release the others refuse, and only a threshold of votes cancels one, with nothing voting. In
@@ -1727,8 +1733,8 @@ with.
   back down once confirmed.
 - [x] **No migration exists yet.** Stale: format 9 came with the first; formats before 8 stay
   unmigratable.
-- [ ] **Errors a call raises name the bundle's lines.** Only deploys are placed back in their files;
-  `chainv4 send call` could do the same when given the contract's files.
+- [x] **Errors a call raises name the bundle's lines.** Done 2026-11-06: `chainv4 send --source FILE`
+  places a call's error back in the file it came from, as a deploy's are.
 - [x] **Ethereum wallets sign for chainv4.** A transaction's EIP-712 typed form, salted with the
   genesis id, is a signature nodes take: MetaMask and the hardware wallets it drives sign for the
   browser wallet, and `chainv4 send --eip712` signs it with a key of its own.
@@ -1785,6 +1791,7 @@ with.
 - [ ] **The Bitcoin light client: next.** Unconfirmed payments from the peers' mempools (Kyoto's
   gossip monitor), further keys' testnet addresses, checkpoints refreshed each release, and Send
   paying from the accounts' Bitcoin coins.
+  Done 2026-11-06: checkpoints refreshed each release (`scripts/btc-checkpoints.sh`).
 - [ ] **A Bitcoin SPV light client as a contract,** checking headers and merkle proofs with
   `sha256d` exposed to contracts, for proving Bitcoin deposits on chainv4.
 - [ ] **Swaps with more chains.** The swap contracts know a hash and a deadline alone, so any chain

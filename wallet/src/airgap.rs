@@ -94,6 +94,36 @@ pub struct Request {
     /// short of it, and one read by a signer from before has bytes left over: refused either way,
     /// with nothing read out of place.
     pub genesis: Hash,
+    /// The NFT or multi-token collection a call goes to, as the sender's registry names it: the
+    /// sender's word, as a token is. Not in the encoding above: written after it, and only when
+    /// there is one, so a request without one reads in a signer from before as it always did, and
+    /// one with one is refused there, having bytes left over.
+    #[wincode(skip)]
+    pub collection: Option<NamedCollection>,
+}
+
+/// A collection as a request names it for the signer.
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct NamedCollection {
+    pub name: String,
+    pub symbol: String,
+    /// Whether it is a multi-token collection, whose transfers carry an amount, rather than an
+    /// NFT collection.
+    pub multi: bool,
+}
+
+/// A request from its bytes: its encoding, then, if anything is left, the collection it names,
+/// whole.
+fn request(bytes: &[u8]) -> Result<Request, String> {
+    let mut request: Request = wincode::deserialize(bytes).map_err(|_| "a code that does not decode".to_string())?;
+    let body = wincode::serialize(&request).map_err(|_| "a code that does not decode".to_string())?;
+    let rest = bytes.strip_prefix(body.as_slice()).ok_or("a code that does not decode")?;
+
+    if !rest.is_empty() {
+        request.collection = Some(whole::<NamedCollection>(rest).map_err(|_| "a code with more in it than it should hold".to_string())?);
+    }
+
+    Ok(request)
 }
 
 /// One of the three messages, a request MetaMask shows for its QR hardware wallet to sign, or a
@@ -134,7 +164,13 @@ impl Message {
     pub fn bytes(&self) -> Vec<u8> {
         match self {
             Message::Pair(pairing) => wincode::serialize(pairing),
-            Message::Sign(request) => wincode::serialize(request),
+            Message::Sign(request) => wincode::serialize(request).map(|mut bytes| {
+                if let Some(collection) = &request.collection {
+                    bytes.extend(wincode::serialize(collection).expect("a collection always encodes"));
+                }
+
+                bytes
+            }),
             Message::Signed(signed) => wincode::serialize(signed),
             Message::Multisig(bundle) => wincode::serialize(bundle),
             Message::MetaMask(request) => return request.to_cbor().expect("a request read always writes back"),
@@ -155,7 +191,7 @@ impl Message {
     pub fn from_ur(kind: &str, bytes: &[u8]) -> Result<Message, String> {
         match kind {
             PAIR_TYPE => whole::<Pairing>(bytes).map(Message::Pair),
-            SIGN_TYPE => whole::<Request>(bytes).map(Message::Sign),
+            SIGN_TYPE => request(bytes).map(Message::Sign),
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
             MULTISIG_TYPE => whole::<chainv4::registry::multisig::MultisigBundle>(bytes).map(|bundle| Message::Multisig(Box::new(bundle))),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
@@ -387,6 +423,18 @@ pub fn describe(request: &Request) -> Described {
     let shown = |raw: u256, asset: &Shown| (format::amount(&raw.to_string(), asset.decimals, &asset.symbol), raw.to_string());
     let (kind, what, to, token) = match &request.tx {
         Tx::Transfer { to, amount, .. } => (format!("Send {}", coin.symbol), Some(shown(amount.to_u256(), coin)), Some(to.to_string()), None),
+        // An NFT's, or a multi-token amount's, as the sender names the collection.
+        Tx::ContractCall { to: contract, func, amount, data } if amount.to_u256() == u256::ZERO && request.collection.is_some() && sends_from_collection(func, data, request.collection.as_ref()).is_some() => {
+            let collection = request.collection.as_ref().expect("looked");
+            let (recipient, id, units) = sends_from_collection(func, data, Some(collection)).expect("looked");
+            let symbol = crate::steps::plain(&collection.symbol);
+            let what = match units {
+                Some(units) => (format!("{units} of {symbol} #{id}"), units.to_string()),
+                None => (format!("{symbol} #{id}"), "1".to_string()),
+            };
+
+            (format!("Send {} from {}", if units.is_some() { "items" } else { "an NFT" }, crate::steps::plain(&collection.name)), Some(what), Some(recipient.to_string()), Some(contract.to_string()))
+        }
         // A token's transfer only as the sender names its token: the same call to an NFT collection
         // sends an id, which no amount is to be read from.
         Tx::ContractCall { to: contract, func, amount, data } if is_token_transfer(func, amount.to_u256(), data) && request.token.is_some() => {
@@ -479,6 +527,19 @@ pub(crate) fn name_detail(name: &str, action: &NameAction) -> String {
         NameAction::Text { key, value: Some(value) } => format!("{name}: {key} = {value}"),
         NameAction::Text { key, value: None } => format!("{name}: clear {key}"),
         NameAction::Subname { label, owner } => format!("{label}.{name}, owned by {owner}"),
+    }
+}
+
+/// Whom an NFT or multi-token transfer, as the NFTs page makes one, sends to, which id, and for a
+/// multi-token one how many: transfer or safe_transfer, to, id and amount.
+fn sends_from_collection(func: &chainv4::structs::hash::Hash, data: &[TxCallArgumentType], collection: Option<&NamedCollection>) -> Option<(chainv4::structs::address::Address, u256, Option<u256>)> {
+    let collection = collection?;
+    let named = [b"transfer".as_slice(), b"safe_transfer".as_slice()].iter().any(|name| *func == Hasher::digest(HashType::Xxh3_64, name));
+
+    match (named, collection.multi, data) {
+        (true, false, [TxCallArgumentType::Address(to), TxCallArgumentType::U256(id)]) => Some((*to, *id, None)),
+        (true, true, [TxCallArgumentType::Address(to), TxCallArgumentType::U256(id), TxCallArgumentType::U256(units)]) => Some((*to, *id, Some(*units))),
+        _ => None,
     }
 }
 

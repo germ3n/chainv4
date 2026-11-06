@@ -81,7 +81,7 @@ fn a_member_names_an_xpub_an_evm_address_both_or_neither() {
     let xpub = {
         let seed = crate::crypto::mnemonic::Phrase::parse("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap().seed("");
 
-        crate::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(0), crate::crypto::bitcoin::tx::Network::Main)
+        crate::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(0, 0), crate::crypto::bitcoin::tx::Network::Main)
     };
 
     for line in [key.clone(), format!("{key},,0x{}", "11".repeat(20))] {
@@ -559,6 +559,7 @@ mod send {
                 anyway: false,
                 genesis: None,
                 eip712: false,
+                source: None,
                 max_price: None,
                 tip: None,
                 multisig: None,
@@ -739,12 +740,14 @@ mod send {
         let sent = send(SendArgs {
             key: Some(key),
             eip712: true,
+            source: None,
             ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(9) })
         });
 
         // Typed data is Ethereum's: an Ed25519 key cannot sign it.
         let refused = send(SendArgs {
             eip712: true,
+            source: None,
             ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(1) })
         });
         let node = running.stop();
@@ -991,7 +994,7 @@ mod send {
         .collect();
         let members = seeds.iter().enumerate().map(|(at, seed)| {
             let key = seed.key(crate::crypto::keypair::KeyType::Ed25519, 0).public();
-            let xpub = xpub_text(&seed.multisig_account(1), Network::Test);
+            let xpub = xpub_text(&seed.multisig_account(1, 0), Network::Test);
 
             crate::cli::send::parse_member(&format!("{key},{xpub},0x{}", format!("{:02x}", 0x31 + at).repeat(20))).unwrap()
         }).collect();
@@ -1006,7 +1009,7 @@ mod send {
         running.stop();
 
         assert_eq!((wallet.threshold, wallet.network), (2, Network::Test), "a tpub made it a testnet multisig");
-        assert_eq!(descriptor(2, &wallet.xpubs, Network::Test, 0), descriptor(2, &seeds.iter().map(|seed| seed.multisig_account(1)).collect::<Vec<_>>(), Network::Test, 0));
+        assert_eq!(descriptor(2, &wallet.xpubs, Network::Test, 0), descriptor(2, &seeds.iter().map(|seed| seed.multisig_account(1, 0)).collect::<Vec<_>>(), Network::Test, 0));
 
         // Two members sign their copies, one combines them, and it finishes.
         let utxos = [Utxo { txid: [9; 32], vout: 1, coin: MultisigCoin { value: 50_000, chain: 0, index: 0 } }];
@@ -1160,6 +1163,27 @@ mod send {
 
         // What was refused was never sent: the account sent the two that went, and nothing else.
         assert_eq!(crate::registry::Accounts::new(&node.chain().state()).get(&dev.public().address()).unwrap().nonce, 2);
+    }
+
+    #[test]
+    fn a_call_that_fails_names_the_file_and_line_of_the_contract_s_source_when_given_it() {
+        let dir = TempDir::new("call-lines");
+        fs::create_dir_all(dir.0.join("lib")).unwrap();
+        let main = dir.0.join("main.lua");
+        fs::write(&main, "local M = {}\n--@include \"lib/checks.lua\"\n\nfunction M.spend(by)\n    check(by)\n    return by\nend\n\nreturn M\n").unwrap();
+        fs::write(dir.0.join("lib/checks.lua"), "local function check(by)\n    if by > 10 then\n        error(\"too much\")\n    end\nend\n").unwrap();
+        let running = Running::start(true);
+        let deployer = DevAuthority::dev_keypair().public().address();
+        let contract = deployed_at(&deployer, 0, crate::structs::hash::HashType::default_chain());
+        let spend = |by: i64| TxArgs::Call { to: contract, function: "spend".to_string(), amount: u256::ZERO, args: vec![TxCallArgumentType::I64(by)] };
+
+        send(running.args(TxArgs::Deploy { lua: Some(main.clone()), wasm: None, evm: None, constructor: None, constructor_args: Vec::new() })).unwrap();
+        let bare = send(running.args(spend(50))).unwrap_err().to_string();
+        let named = send(SendArgs { source: Some(main), ..running.args(spend(50)) }).unwrap_err().to_string();
+        running.stop();
+
+        assert!(named.contains("lib/checks.lua:3") && named.contains("too much"), "{named}");
+        assert!(!bare.contains("lib/checks.lua"), "without it, the bundle's line: {bare}");
     }
 
     #[test]
@@ -1835,7 +1859,7 @@ mod send {
         let members = seeds.iter().enumerate().map(|(at, seed)| {
             let key = seed.key(crate::crypto::keypair::KeyType::Ed25519, 0).public();
 
-            crate::cli::send::parse_member(&format!("{key},{},0x{}", xpub_text(&seed.multisig_account(1), Network::Test), format!("{:02x}", 0x41 + at).repeat(20))).unwrap()
+            crate::cli::send::parse_member(&format!("{key},{},0x{}", xpub_text(&seed.multisig_account(1, 0), Network::Test), format!("{:02x}", 0x41 + at).repeat(20))).unwrap()
         }).collect();
         send(running.args(TxArgs::CreateMultisig { members, threshold: 2 })).unwrap();
         let account = crate::structs::address::multisig_address(&DevAuthority::dev_keypair().public().address(), 0, crate::structs::hash::HashType::default_chain());

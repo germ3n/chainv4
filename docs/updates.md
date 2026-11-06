@@ -68,6 +68,9 @@ or the file `CHAINV4_RELEASE_KEYS` names at build time, which a build pipeline u
 
 ## Publishing a release
 
+Before building the apps for one, refresh the wallet's Bitcoin checkpoints, so a new install's
+light client scans a week rather than months: `scripts/btc-checkpoints.sh`, then commit the diff.
+
 ```sh
 chainv4 release new --out site/releases --base-url https://example.org/releases \
   --product chainv4 --version 0.2.0 --notes "mining pools" \

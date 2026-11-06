@@ -68,6 +68,10 @@ pub struct SendArgs {
     /// rather than chainv4's own. A secp256k1 key alone signs typed data.
     #[arg(long)]
     pub eip712: bool,
+    /// The Lua contract's entry file a call goes to, for an error it raises to name the line of the
+    /// file it came from, as a deploy's do, rather than the bundle's.
+    #[arg(long, value_name = "FILE")]
+    pub source: Option<PathBuf>,
     /// The most it pays per gas, in the smallest unit. Defaults to twice the base price plus the
     /// tip under a base fee, and to the lowest bid when senders bid.
     #[arg(long, value_parser = parse_amount)]
@@ -616,6 +620,18 @@ fn typed(_: &Hash, _: Tx, _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedT
 }
 
 pub fn send(args: SendArgs) -> CliResult<()> {
+    // An error a call to a Lua contract raises names the bundle's line; given the contract's files,
+    // the file and line it came from instead.
+    let source = args.source.as_deref().map(lua_bundle).transpose()?;
+    let sent = send_named(args);
+
+    match (sent, source) {
+        (Err(err), Some(bundle)) => Err(bundle.explain(&err.to_string()).into()),
+        (sent, _) => sent,
+    }
+}
+
+fn send_named(args: SendArgs) -> CliResult<()> {
     if let Some(account) = args.multisig {
         return super::multisig::propose(args, account);
     }

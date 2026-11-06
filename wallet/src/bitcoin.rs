@@ -129,13 +129,13 @@ fn plan(psbt: &Psbt, seeds: &[&Seed]) -> Result<(Review, Vec<Vec<Signing>>), Str
                 (false, _) => return Err(format!("input {n} names more than one of this wallet's keys")),
             };
             let shown = path_text(&path);
-            let (network, chain, number, multisig) = match (bip84(&path), bip48(&path)) {
-                (Some((network, chain, number)), _) => (network, chain, number, false),
-                (None, Some((network, chain, number))) => (network, chain, number, true),
-                _ => return Err(format!("input {n} asks for a key at {shown}, where this signer holds none: it signs at m/84'/0'/0' and m/84'/1'/0', and multisigs' at m/48'/0'/0'/2' and m/48'/1'/0'/2'")),
+            let (network, account, chain, number, multisig) = match (bip84(&path), bip48(&path)) {
+                (Some((network, chain, number)), _) => (network, 0, chain, number, false),
+                (None, Some((network, account, chain, number))) => (network, account, chain, number, true),
+                _ => return Err(format!("input {n} asks for a key at {shown}, where this signer holds none: it signs at m/84'/0'/0' and m/84'/1'/0', and multisigs' at m/48'/0'/n'/2' and m/48'/1'/n'/2', any account n")),
             };
             let held = match multisig {
-                true => seed.multisig_key(network.coin(), chain, number),
+                true => seed.multisig_key(network.coin(), account, chain, number),
                 false => seed.bitcoin_key(network.coin(), chain, number),
             };
 
@@ -167,7 +167,7 @@ fn plan(psbt: &Psbt, seeds: &[&Seed]) -> Result<(Review, Vec<Vec<Signing>>), Str
             networks.push(network);
             multisigs |= multisig;
             let (code, swapped) = swap.map_or((shared, shared_swap), |(code, swapped)| (Some(code), Some(swapped)));
-            signing[which].push(Signing { index, network, chain, number, multisig, key, value: output.value, code });
+            signing[which].push(Signing { index, network, account, chain, number, multisig, key, value: output.value, code });
             // Two of a wallet's seeds may both be a multisig's members: the review names the first.
             spent.swap = spent.swap.or(swapped);
             spent.yours.get_or_insert(shown);
@@ -189,12 +189,12 @@ fn plan(psbt: &Psbt, seeds: &[&Seed]) -> Result<(Review, Vec<Vec<Signing>>), Str
             // Change back to any of the wallet's seeds, whichever of them signs the inputs.
             for (fingerprint, seed) in &seeds {
                 // Change back to a multisig this seed is a member of: its script, holding this key.
-                if let Some((at, chain, number)) = bip48(&path).filter(|_| from == *fingerprint) {
+                if let Some((at, account, chain, number)) = bip48(&path).filter(|_| from == *fingerprint) {
                     networks.push(at);
                     let script = find(pairs, &[OUT_WITNESS_SCRIPT]).unwrap_or_default();
                     let holds = parse_multisig_script(script).is_some_and(|(_, keys)| keys.contains(&key));
 
-                    if public(&seed.multisig_key(at.coin(), chain, number).public()) == key && holds && output.script == p2wsh(script) {
+                    if public(&seed.multisig_key(at.coin(), account, chain, number).public()) == key && holds && output.script == p2wsh(script) {
                         yours = Some(format!("{}, the multisig's", path_text(&path)));
                     }
 
@@ -289,7 +289,7 @@ impl Signs for Psbt {
 
         for (seed, input) in seeds.iter().zip(signing).flat_map(|(seed, inputs)| inputs.into_iter().map(move |input| (*seed, input))) {
             let keypair = match input.multisig {
-                true => seed.multisig_key(input.network.coin(), input.chain, input.number),
+                true => seed.multisig_key(input.network.coin(), input.account, input.chain, input.number),
                 false => seed.bitcoin_key(input.network.coin(), input.chain, input.number),
             };
             let PrivateKey::Bitcoin(secret) = keypair.private() else {
@@ -316,9 +316,11 @@ impl Signs for Psbt {
 struct Signing {
     index: usize,
     network: Network,
+    /// The account a multisig member's key is of, at m/48'/coin'/account'/2'; 0 for any other.
+    account: u32,
     chain: u32,
     number: u32,
-    /// Whether the key is a multisig member's, at m/48'/coin'/0'/2'/chain/number.
+    /// Whether the key is a multisig member's, at m/48'/coin'/account'/2'/chain/number.
     multisig: bool,
     key: [u8; 33],
     value: u64,
@@ -476,12 +478,12 @@ fn public(key: &PublicKey) -> [u8; 33] {
     }
 }
 
-/// Where a multisig member's key of this seed's sits: m/48'/coin'/0'/2'/chain/index, BIP48's for
-/// native segwit multisig, chain 0 or 1, on one of the networks.
-fn bip48(path: &[u32]) -> Option<(Network, u32, u32)> {
+/// Where a multisig member's key of this seed's sits: m/48'/coin'/account'/2'/chain/index, BIP48's
+/// for native segwit multisig, any account, chain 0 or 1, on one of the networks.
+fn bip48(path: &[u32]) -> Option<(Network, u32, u32, u32)> {
     match *path {
-        [purpose, coin, account, script, chain, index] if purpose == 48 | HARDENED && coin >= HARDENED && account == HARDENED && script == 2 | HARDENED && chain < 2 && index < HARDENED => {
-            Some((Network::from_coin(coin - HARDENED)?, chain, index))
+        [purpose, coin, account, script, chain, index] if purpose == 48 | HARDENED && coin >= HARDENED && account >= HARDENED && script == 2 | HARDENED && chain < 2 && index < HARDENED => {
+            Some((Network::from_coin(coin - HARDENED)?, account - HARDENED, chain, index))
         }
         _ => None,
     }

@@ -651,8 +651,12 @@ shows as **Send NFT #id**, with the collection, its id and the recipient, and no
 multi-token one, `transfer(to, id, n)` as **Send n of #id**, with how many. To a contract proven as
 neither, the same call shows as the call it is, its numbers unnamed, and says the contract is
 neither a token nor a collection the chain lists. Batch steps and the offline signer read calls the
-same way; the offline signer knows only the token the sender names, so an NFT's transfer shows
-there as a call to a contract it does not know.
+same way. The offline signer knows only what the sender names: a token, or the collection the
+light client proved the registry lists, which the request carries after its encoding, so it shows
+**Send an NFT from Test Pixels**, `PIX #7`, or **Send items from Test Items**, `12 of ITEM #3`,
+both the sender's word as a token's symbol is. A request naming no collection is byte for byte
+what it always was, and a signer from before reads it; one naming a collection is refused there,
+as having bytes left over, rather than shown wrong.
 
 **From:** each address holds its own coin, tokens and NFTs, so every page that sends has the same
 From picker (`views/from.rs`): the account's addresses, each by its scheme, its address short and
@@ -1268,7 +1272,9 @@ claim's secret is read, and spends go out to Bitcoin's peers.
 
 **Syncing:**
 - a first sync starts from a checkpoint built into the app, a block a week or so before its
-  build, and takes some minutes and a few tens of megabytes;
+  build, and takes some minutes and a few tens of megabytes; `scripts/btc-checkpoints.sh` refreshes
+  them before a release, each block's hash checked with a second explorer where there is one
+  (main and signet; testnet4 has mempool.space alone), and `--check` says how old they are;
 - later syncs pick up from where the last one got to, which the wallet keeps between runs, apart
   from the settings;
 - **Scan again** forgets what it found and starts from the checkpoint, for an account added with

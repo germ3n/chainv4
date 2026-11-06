@@ -386,7 +386,7 @@ fn the_signer_signs_its_part_of_a_multisig_spend_and_sees_its_change_come_back()
     let ours = seed();
     let other = Phrase::parse("legal winner thank year wave sausage worth useful legal winner thank yellow").unwrap().seed("");
     let third = Phrase::parse("letter advice cage absurd amount doctor acoustic avoid letter advice cage above").unwrap().seed("");
-    let wallet = MultisigWallet { threshold: 2, xpubs: [&ours, &other, &third].iter().map(|seed| seed.multisig_account(1)).collect(), network: Network::Test };
+    let wallet = MultisigWallet { threshold: 2, xpubs: [&ours, &other, &third].iter().map(|seed| seed.multisig_account(1, 0)).collect(), network: Network::Test };
     let change = p2wsh(&chainv4::crypto::bitcoin::multisig::witness_script(2, &wallet.xpubs, 1, 0).unwrap());
     let tx = Transaction {
         version: 2,

@@ -1097,7 +1097,7 @@ pub(super) fn other_chains(holder: &Holder, seed: Option<&chainv4::crypto::mnemo
         _ => None,
     });
     let network = network(testnet);
-    let xpub = seed.filter(|_| holder.number().is_some()).map(|seed| chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(network.coin()), network));
+    let xpub = seed.filter(|_| holder.number().is_some()).map(|seed| chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(network.coin(), 0), network));
 
     (evm, xpub)
 }
@@ -1256,7 +1256,7 @@ mod tests {
         ];
         let holders = crate::keys::open(&book).unwrap();
         let line = |holder: &crate::keys::Holder| member_line_of(holder, &holder.publics[0], crate::keys::seed_of(&book, holder), false);
-        let xpub = |words: &Words| chainv4::crypto::bitcoin::multisig::xpub_text(&words.seed().unwrap().multisig_account(0), network(false));
+        let xpub = |words: &Words| chainv4::crypto::bitcoin::multisig::xpub_text(&words.seed().unwrap().multisig_account(0, 0), network(false));
 
         assert!(line(&holders[1]).contains(&xpub(&book.phrases[1])), "the other words' xpub, for their account");
         assert!(!line(&holders[1]).contains(&xpub(&book.phrases[0])));

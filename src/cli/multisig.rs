@@ -598,9 +598,9 @@ pub(super) fn review_psbt(path: &Path, yes: bool, input: &mut dyn std::io::BufRe
 #[cfg(all(feature = "bitcoin", feature = "mnemonic"))]
 pub(super) fn sign_file(path: &Path, seed: &crate::crypto::mnemonic::Seed) -> CliResult<()> {
     let mut psbt = read_psbt(path)?;
-    let fingerprint = seed.multisig_account(0).fingerprint;
+    let fingerprint = seed.multisig_account(0, 0).fingerprint;
     let signed = psbt.sign_multisig(fingerprint, |path| match *path {
-        [_, coin, _, _, chain, index] => match seed.multisig_key(coin & !(1 << 31), chain, index).private() {
+        [_, coin, account, _, chain, index] => match seed.multisig_key(coin & !(1 << 31), account & !(1 << 31), chain, index).private() {
             crate::crypto::keypair::PrivateKey::Bitcoin(secret) => Some(*secret),
             _ => None,
         },

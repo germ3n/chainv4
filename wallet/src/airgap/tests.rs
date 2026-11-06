@@ -43,6 +43,7 @@ fn transfer(key: &Keypair) -> Request {
             decimals: 18,
         },
         token: None,
+        collection: None,
         genesis: chain(),
     }
 }
@@ -444,4 +445,49 @@ fn a_long_message_reads_off_a_camera_from_any_parts_enough() {
     // A frame with no code in it, or a part cut off, reads as nothing.
     assert_eq!(code_in_frame(640, 480, &vec![150; 640 * 480]), None);
     assert_eq!(code_in_frame(640, 480, &[0; 10]), None, "a frame shorter than it says");
+}
+
+#[test]
+fn a_request_names_its_collection_after_its_encoding_and_only_when_it_has_one() {
+    let key = Keypair::from_seed([5; 32]);
+    let plain = transfer(&key);
+    let nft = Request {
+        tx: Tx::ContractCall {
+            to: Address::Contract([0x22; 32]),
+            func: Hasher::digest(HashType::Xxh3_64, b"safe_transfer"),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Address(someone(0xcd)), TxCallArgumentType::U256(u256::new(7))],
+        },
+        collection: Some(NamedCollection { name: "Test Pixels".to_string(), symbol: "PIX".to_string(), multi: false }),
+        ..transfer(&key)
+    };
+
+    // Without one, the very bytes a request always had: a signer from before reads it.
+    assert_eq!(Message::Sign(plain.clone()).bytes(), wincode::serialize(&plain).unwrap());
+    assert_eq!(Message::from_ur(SIGN_TYPE, &Message::Sign(plain.clone()).bytes()), Ok(Message::Sign(plain)));
+
+    // With one, it comes after, and reads back whole; a signer from before refuses it.
+    let bytes = Message::Sign(nft.clone()).bytes();
+    assert_eq!(Message::from_ur(SIGN_TYPE, &bytes), Ok(Message::Sign(nft.clone())));
+    assert!(whole::<Request>(&bytes).is_err(), "as a signer from before reads it: bytes left over");
+    assert!(Message::from_ur(SIGN_TYPE, &[bytes.as_slice(), &[0]].concat()).is_err(), "and nothing past the collection");
+
+    // The signer says what it sends: the collection's name, the symbol and the id.
+    let said = describe(&nft);
+    assert_eq!(said.kind, "Send an NFT from Test Pixels");
+    assert_eq!(said.what, Some(("PIX #7".to_string(), "1".to_string())));
+    assert_eq!(said.to, Some(someone(0xcd).to_string()));
+
+    let items = Request {
+        tx: Tx::ContractCall {
+            to: Address::Contract([0x23; 32]),
+            func: Hasher::digest(HashType::Xxh3_64, b"transfer"),
+            amount: Amount::U128(0),
+            data: vec![TxCallArgumentType::Address(someone(0xcd)), TxCallArgumentType::U256(u256::new(3)), TxCallArgumentType::U256(u256::new(12))],
+        },
+        collection: Some(NamedCollection { name: "Test Items".to_string(), symbol: "ITEM".to_string(), multi: true }),
+        ..transfer(&key)
+    };
+    assert_eq!(describe(&items).what, Some(("12 of ITEM #3".to_string(), "12".to_string())));
+    assert_eq!(describe(&items).kind, "Send items from Test Items");
 }

@@ -358,6 +358,7 @@ mod tests {
             signer: key.public(),
             coin: Shown { symbol: "DEV".to_string(), decimals: 18 },
             token: None,
+            collection: None,
             genesis: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()),
         };
         let described = airgap::describe(&request);

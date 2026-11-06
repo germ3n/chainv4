@@ -736,13 +736,13 @@ mod tests {
     fn xpub(testnet: bool) -> String {
         let network = network(testnet);
 
-        xpub_text(&seed("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").multisig_account(network.coin()), network)
+        xpub_text(&seed("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about").multisig_account(network.coin(), 0), network)
     }
 
     fn other_xpub(testnet: bool) -> String {
         let network = network(testnet);
 
-        xpub_text(&seed("legal winner thank year wave sausage worth useful legal winner thank yellow").multisig_account(network.coin()), network)
+        xpub_text(&seed("legal winner thank year wave sausage worth useful legal winner thank yellow").multisig_account(network.coin(), 0), network)
     }
 
     fn rows(keys: &[u8]) -> Vec<Row> {
