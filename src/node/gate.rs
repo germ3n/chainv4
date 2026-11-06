@@ -211,13 +211,27 @@ impl Gate {
         // The cheap checks first: a transaction that cannot pay, whose nonce is used or is too far
         // ahead is turned away before any signature is verified. The verifier skips the verify for
         // such a one too, so checked is None and the fallback here never runs for it.
-        let next = Mempool::affordable(&tx, &state, fees.as_deref())?;
+        let (next, balance) = Mempool::affordable(&tx, &state, fees.as_deref())?;
         self.limits().reaches(tx.nonce, next)?;
 
         let checked = checked.unwrap_or_else(|| tx.verify_on(&self.genesis));
         Mempool::backed(&tx, checked, &self.genesis, &state)?;
 
-        self.mempool().insert(tx, next, fees.as_deref())
+        let mut mempool = self.mempool();
+        let inserted = mempool.insert(tx, next, balance, fees.as_deref());
+        let left = mempool.take_left();
+        drop(mempool);
+        self.tell_left(left);
+
+        inserted
+    }
+
+    /// Tells subscribers what left the mempool other than by landing, and why.
+    pub(super) fn tell_left(&self, left: Vec<crate::mempool::Left>) {
+        for gone in left {
+            log::debug!("[node] {} left the mempool: {}", gone.tx.id(self.hash), gone.why.as_str());
+            self.publish(|| NodeEvent::Left(Arc::new(gone)));
+        }
     }
 
     /// Whether a transaction could be admitted on the tip's state as it stands, signatures aside:
@@ -230,7 +244,7 @@ impl Gate {
 
         let fees = self.fees.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
-        Mempool::affordable(tx, &State::new(self.db.clone()), fees.as_deref()).is_ok_and(|next| self.limits().reaches(tx.nonce, next).is_ok())
+        Mempool::affordable(tx, &State::new(self.db.clone()), fees.as_deref()).is_ok_and(|(next, _)| self.limits().reaches(tx.nonce, next).is_ok())
     }
 
     fn publish(&self, event: impl FnOnce() -> NodeEvent) {

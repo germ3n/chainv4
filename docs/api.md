@@ -777,6 +777,7 @@ and JSON data:
 | `reorganized` | The ids taken off (`undone`, newest first), and the summaries put on (`applied`, oldest first). |
 | `justified`, `finalized` | The checkpoint: `epoch` and `block`. |
 | `queued` | A transaction that joined the mempool. |
+| `left` | A transaction that left the mempool other than by landing: `{"id", "sender", "nonce", "why"}`, why being `pushed out`, `replaced`, `underpriced too long`, `gapped too long` or `cannot pay`. |
 | `peer_up`, `peer_down` | The peer's `id`, and for `peer_up` its `address`. |
 | `lagged` | The client fell too far behind and missed `missed` events: read the chain again. |
 

@@ -1404,7 +1404,13 @@ impl Node {
     /// offered too little for too long leave it.
     fn prune_mempool(&self) -> Result<(), NodeError> {
         self.gate.set_fees(self.chain.shared_fees());
-        let dropped = self.gate.mempool().prune(&self.chain.state(), self.chain.fees(), self.chain.next_base_price())?;
+        let (dropped, left) = {
+            let mut mempool = self.gate.mempool();
+            let dropped = mempool.prune(&self.chain.state(), self.chain.fees(), self.chain.next_base_price())?;
+
+            (dropped, mempool.take_left())
+        };
+        self.gate.tell_left(left);
 
         if dropped > 0 {
             log::debug!("[node] dropped {dropped} transactions that cannot pay, offer too little or wait behind a nonce nobody sent");

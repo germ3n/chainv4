@@ -100,7 +100,8 @@ sender's go in order.
   (`Mempool::add_checked`), after the [backlog](#the-gossip-backlog) had room for it;
 - that the nonce is not used yet, and is at most `--max-nonce-gap` past the account's at the tip;
 - on a chain with fees, that the gas limit could fit a block, the price could be taken and the
-  sender can pay (see [Fees](fees.md));
+  sender can pay its fee reserve, the gas limit at its max price, on top of those of its
+  transactions waiting already, one it replaces aside (see [Fees](fees.md));
 - that the sender is under its share, and that there is room, or a worse offer to push out.
 
 The cheap ones, the nonce, its gap and whether the sender can pay, come before the signature, so a
@@ -114,6 +115,9 @@ flood of transactions that would be refused anyway costs no verifies.
 | `--mempool-per-sender N` | 64 | What one sender may have waiting: more than a wallet or a bridge signer sends between blocks, under a thousandth of the mempool. |
 | `--max-nonce-gap N` | 64 | How far past the account's nonce at the tip a nonce may be, so a sender's full share fits in a row with one to spare. 0 takes only the next. |
 | `--replace-bump-percent N` | 10 | How much a replacement must raise both its max price and its tip, as Ethereum's nodes ask. |
+| `--mempool-bytes N` | 256MiB | What the waiting transactions may take, encoded, added up: bytes, or with KiB, MiB or GiB. Full by bytes is full, as by count. |
+| `--underpriced-for N` or `T` | 32 blocks | How long an offer under the base price waits before it is dropped. |
+| `--gapped-for N` or `T` | 64 blocks | How long a transaction waits behind a missing nonce of its sender's before it is dropped. |
 
 Every sender counts, `Tx::Ethereum`'s too: its nonce is its sender's account nonce, as any
 other's.
@@ -129,17 +133,24 @@ without fees there is no price to raise, so nothing is replaced.
 its highest, which could not go before it anyway: a sender whose share is spent behind a gap can
 still send the nonce they all wait on. One after them all is refused.
 
-**When it is full,** a newcomer that can run in turn, its nonce the account's next or right after
-one of its sender's that can, pushes out the transaction lowest in this order, with the rest of
-its sender's after it, which could not run without it:
+**When it is full,** by count or by bytes, a newcomer that can run in turn, its nonce the
+account's next or right after one of its sender's that can, pushes out the transactions lowest in
+this order, each with the rest of its sender's after it, which could not run without it, until it
+fits:
 1. one that waits behind a gap before one that can run;
 2. then the least paid, at the base price the last block left;
 3. then a sender's highest nonce, so a run loses its end before its middle.
 
-It never pushes out any sender's next transaction, which its whole run waits on, nor one of its
-own sender's below it. A newcomer that pays no more than the lowest, or that waits behind a gap
-itself, is refused: one behind a gap could otherwise empty the mempool of transactions that run,
-for some that never do.
+A sender's next transaction goes as any other when it pays least, and its run with it, so a pool
+full of cheap next transactions, one a sender, still makes room for a better offer. It never pushes
+out one of the newcomer's own sender's below it. A newcomer that pays no more than what it would
+push out, that waits behind a gap itself, or that is bigger than the whole mempool, is refused,
+and nothing goes for it: one behind a gap could otherwise empty the mempool of transactions that
+run, for some that never do.
+
+**What left** other than by landing is told on [`GET /stream`](api.md#get-stream) as `left`, with
+why: `pushed out`, `replaced`, `underpriced too long`, `gapped too long` or `cannot pay`. What
+landed, or lost its nonce to another, leaves untold, as its block tells.
 
 **What each refusal says,** for a wallet to act on: `POST /txs` answers 400 for a nonce too far
 ahead, 409 for a replacement that raises too little, 429 for a sender at its share and 503 for a
@@ -308,6 +319,8 @@ and keep in step for what a line of flags holds.
 | `--update-every T` | 1h | 1m to 7d | How often the node looks for releases. |
 | `--snapshot-depth N` | 16 | 1 to half `max_reorg_depth` | How far below the best tip `--snapshot` takes its state; see [Syncing from a snapshot](#syncing-from-a-snapshot). |
 | `--underpriced-for N` or `T` | 32 blocks | 1 to 100,000 blocks | How long an offer under the base price waits before the mempool drops it. A time is turned into blocks at the chain's block time as the node starts. |
+| `--gapped-for N` or `T` | 64 blocks | 1 to 100,000 blocks | How long a transaction waits behind a missing nonce of its sender's before the mempool drops it, in blocks or as a time, as `--underpriced-for`. |
+| `--mempool-bytes N` | 256MiB | 1 MiB to 64 GiB | What the mempool's transactions may take, encoded, added up: bytes, or with KiB, MiB or GiB. |
 | `--state-history N` or `T` | 10,000 blocks | at least 1 | As before, now also as a time, such as `14h`, turned into blocks the same way. |
 | `--prune-blocks N` or `T` | off: every block kept | at least 1; not with `--archive` | Keeps the bodies of only this many blocks below the finalized checkpoint, never within `max_reorg_depth` of the tip, in blocks or as a time such as `7d`. See [Pruning](storage.md#pruning). |
 | `--key-passphrase-file PATH` | none | a readable file | The passphrase of the node's [sealed key files](crypto.md#sealed-key-files); else `CHAINV4_KEY_PASSPHRASE_FILE`, else asked on a terminal. |

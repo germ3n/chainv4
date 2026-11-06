@@ -3593,3 +3593,19 @@ fn a_pruned_block_answers_its_header_and_a_pruned_transaction_says_where_bodies_
     assert_eq!(status, 200, "{block}");
     assert_eq!(block["txs"].as_array().map(Vec::len), Some(1), "{block}");
 }
+
+#[cfg(feature = "stream")]
+#[test]
+fn a_transaction_leaving_the_mempool_streams_as_left_with_why() {
+    use crate::mempool::{Left, LeftWhy};
+
+    let key = DevAuthority::dev_keypair();
+    let tx = SignedTx::sign(Tx::Burn { from: key.public().address(), amount: Amount::U128(1) }, 7, FeeOffer::NONE, &key, &free().block().id());
+    let hash = free().hash;
+    let event = crate::node::NodeEvent::Left(Arc::new(Left { tx: tx.clone(), why: LeftWhy::Underpriced }));
+    let reward = crate::chain::RewardSchedule { genesis: free().reward, decided: None };
+    let (name, value) = json::node_event(&event, hash, &reward, super::sharing::Sharing::default());
+
+    assert_eq!(name, "left");
+    assert_eq!(value, serde_json::json!({ "id": tx.id(hash).to_string(), "sender": key.public().address().to_string(), "nonce": 7, "why": "underpriced too long" }));
+}

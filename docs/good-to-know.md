@@ -25,6 +25,10 @@ other pages explain each part in full; this one is the short list to keep in min
 
 ## Running a chain
 
+- **A sender's waiting transactions share its balance.** The mempool adds up the fee reserves, gas
+  limit times max price, of all a sender has waiting: one more past its balance is `cannot pay`,
+  however many it sent before were each payable alone. And a full mempool pushes out the least paid
+  whoever's next it is, with that sender's later ones.
 - **A pruning node cannot sync others from genesis.** With `--prune-blocks`, blocks below
   `bodies_from` keep their headers alone: peers sync their bodies from another node, or start from
   a snapshot, and their transactions are not found there. Pruning never comes undone.

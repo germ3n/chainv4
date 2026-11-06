@@ -339,6 +339,12 @@ pub fn node_event(event: &crate::node::NodeEvent, hash: HashType, reward: &crate
         NodeEvent::Justified(checkpoint) => ("justified", self::checkpoint(checkpoint)),
         NodeEvent::Finalized(checkpoint) => ("finalized", self::checkpoint(checkpoint)),
         NodeEvent::Queued(tx) => ("queued", signed_tx(tx, hash)),
+        NodeEvent::Left(left) => ("left", json!({
+            "id": left.tx.id(hash).to_string(),
+            "sender": left.tx.sender().to_string(),
+            "nonce": left.tx.nonce,
+            "why": left.why.as_str(),
+        })),
         NodeEvent::PeerUp { peer, address } => ("peer_up", json!({
             "id": if sharing.hides(ReportField::PeerIds) { String::new() } else { peer.to_string() },
             "address": if sharing.hides(ReportField::PeerAddresses) { String::new() } else { address.to_string() },

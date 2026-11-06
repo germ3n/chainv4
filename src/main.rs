@@ -276,6 +276,15 @@ struct NodeArgs {
     /// time as the node starts. 1 to 100,000 blocks.
     #[arg(long)]
     underpriced_for: Option<chainv4::node::Span>,
+    /// How long a transaction may wait behind a missing nonce of its sender's before the mempool
+    /// drops it: in blocks, 64 unless given, or as a time, such as 5m. 1 to 100,000 blocks.
+    #[arg(long)]
+    gapped_for: Option<chainv4::node::Span>,
+    /// The most bytes the mempool's transactions may take, encoded, added up: in bytes, or with
+    /// KiB, MiB or GiB, such as 256MiB, the default. Full, a transaction that can run and pays more
+    /// pushes out the least paid; one that pays no more is refused. 1 MiB to 64 GiB.
+    #[arg(long, default_value = "256MiB", value_parser = parse_bytes)]
+    mempool_bytes: u64,
     /// The most bytes of blocks this node answers a syncing peer's request with, past its first
     /// block: it sends fewer blocks, and the peer asks again from there. 1 MiB to 32 MiB.
     #[arg(long, default_value_t = chainv4::net::SYNC_BATCH_BYTES, value_parser = clap::value_parser!(u64).range(1024 * 1024..=chainv4::net::MOST_SYNC_BATCH_BYTES))]
@@ -852,6 +861,15 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("--underpriced-for is {underpriced} blocks at {block_ms} ms a block: give 1 to 100,000 blocks").into());
     }
 
+    let gapped = match args.gapped_for {
+        Some(span) => span.blocks(block_ms),
+        None => u64::from(chainv4::mempool::MAX_GAPPED_BLOCKS),
+    };
+
+    if !(1..=100_000).contains(&gapped) {
+        return Err(format!("--gapped-for is {gapped} blocks at {block_ms} ms a block: give 1 to 100,000 blocks").into());
+    }
+
     let state_history = args.state_history.blocks(block_ms);
 
     if state_history == 0 {
@@ -867,6 +885,8 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
             nonce_gap: args.max_nonce_gap,
             replace_bump: args.replace_bump_percent,
             underpriced_blocks: underpriced as u32,
+            gapped_blocks: gapped as u32,
+            bytes: args.mempool_bytes,
         })
         .sync_batch_bytes(args.sync_batch_bytes)
         .tuning(tuned.node())
@@ -1090,6 +1110,25 @@ fn evm_bytes(text: &str) -> Result<[u8; 20], String> {
     }
 }
 
+/// A size in bytes, or with KiB, MiB or GiB after it, such as 256MiB: 1 MiB to 64 GiB.
+fn parse_bytes(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let (number, unit) = text.find(|c: char| !c.is_ascii_digit()).map_or((text, ""), |at| text.split_at(at));
+    let scale: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kib" => 1 << 10,
+        "mib" => 1 << 20,
+        "gib" => 1 << 30,
+        other => return Err(format!("{other} is not a unit: give bytes, KiB, MiB or GiB")),
+    };
+    let bytes = number.parse::<u64>().ok().and_then(|number| number.checked_mul(scale)).ok_or_else(|| format!("{text} is not a size, such as 256MiB"))?;
+
+    match (1 << 20..=64 << 30).contains(&bytes) {
+        true => Ok(bytes),
+        false => Err(format!("{text} is outside 1 MiB to 64 GiB")),
+    }
+}
+
 #[cfg(all(test, feature = "node", feature = "http"))]
 mod tests {
     use {super::*, clap::Parser};
@@ -1108,6 +1147,7 @@ mod tests {
         assert_eq!((args.max_peers_in, args.api_max_page, args.snapshot_depth, args.underpriced_for), (None, None, None, None));
         assert_eq!(args.state_history, chainv4::node::Span::Blocks(chainv4::chain::DEFAULT_STATE_HISTORY));
         assert_eq!((args.prune_blocks, args.key_passphrase_file), (None, None), "every block kept, as before");
+        assert_eq!((args.gapped_for, args.mempool_bytes), (None, chainv4::mempool::MempoolLimits::DEFAULT.bytes));
         #[cfg(feature = "updates")]
         assert_eq!(args.update_every, chainv4::node::CHECK_EVERY_MS);
         assert!(args.tune.is_empty());
@@ -1124,6 +1164,12 @@ mod tests {
         assert_eq!(parse(&["--prune-blocks", "7d"]).unwrap().prune_blocks, Some(chainv4::node::Span::Ms(7 * 86_400_000)));
         assert_eq!(parse(&["--prune-blocks", "50000"]).unwrap().prune_blocks, Some(chainv4::node::Span::Blocks(50_000)));
         assert!(parse(&["--prune-blocks", "50000", "--archive"]).is_err(), "an archive keeps every block");
+        assert_eq!(parse(&["--mempool-bytes", "64MiB", "--gapped-for", "5m"]).map(|args| (args.mempool_bytes, args.gapped_for)), Ok((64 << 20, Some(chainv4::node::Span::Ms(300_000)))));
+        assert_eq!(parse(&["--mempool-bytes", "2GiB"]).unwrap().mempool_bytes, 2 << 30);
+        assert_eq!(parse(&["--mempool-bytes", "3000000"]).unwrap().mempool_bytes, 3_000_000);
+        for refused in ["1KiB", "65GiB", "256MB", "lots"] {
+            assert!(parse(&["--mempool-bytes", refused]).is_err(), "{refused}");
+        }
 
         let http = parse(&["--http", "127.0.0.1:0", "--http-rate", "20", "--api-max-page", "50", "--suggest-multiplier", "3"]).unwrap();
         assert_eq!((http.http_rate, http.api_max_page, http.suggest_multiplier), (20, Some(50), 3));

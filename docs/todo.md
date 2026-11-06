@@ -153,6 +153,24 @@ offline; these would make that hold up as a treasury.
 
 ### Consensus
 
+- [ ] **A fork schedule (owner, 2026-11-06).** Today a change to what blocks compute, such as the
+  Lua whole-number rule, a fuel table or what a signature covers, takes a new genesis, as nothing
+  tells a node which rules a past block ran under. Instead, a schedule of named forks, each with the
+  height or epoch it takes effect from: in genesis, and added to by governance, as
+  `Change::Upgrade` already stops nodes older than a version before a height. Blocks below a fork
+  run the rules before it and blocks from it the rules after, so a node replays history under each
+  block's own rules, and a live chain takes consensus changes without a regenesis. What it takes:
+  - every consensus rule looked up by height where it applies: the engines and their versions (two
+    Luau builds side by side, or the fork's rule behind a flag the VM is given per block), fuel
+    tables, the transaction encoding and what is signed, the fee schedule, the limits;
+  - each fork shipped in a release that knows it, with `Change::Upgrade` naming that release as the
+    least version from the fork's height, so nodes that do not know it stop rather than split;
+  - tests replaying a chain across a fork, and nodes on both sides of it;
+  - `GET /status` and the explorer listing the forks passed and those scheduled, and docs listing
+    each fork and what it changed.
+
+  The Ethereum anchoring fork table is a small precedent. Batches 11 to 15, the consensus ones,
+  could ship as the first scheduled fork rather than another regenesis.
 - [x] **Mining pools.** `--pool` on the mining port: shares at a difficulty set for each worker's
   hashrate, PPLNS over the latest blocks' worth, each block sending its miners' share to the
   pool's escrow and committing to a Merkle root over every miner's earnings, which each claims
@@ -1161,7 +1179,8 @@ with.
     unset, and `operator` shows the flags as given. The wallet, explorer and CLI already took the
     directory first, so the apps are unchanged; Docker's `SWAP_CONTRACT`, `DEX_CONTRACT` and
     `DEX_ROUTER` still pass the flags.
-- [ ] **The mempool, still open.**
+- [x] **The mempool, still open.** Done 2026-11-06: reserves summed per sender, `--mempool-bytes`,
+  a sender's next pushed out when it pays least, `left` on `/stream`, and `--gapped-for`.
   - The fee reserve is checked per transaction, not summed over a sender's waiting ones: a key
     with enough for one can hold its share of 64, each needing all of its balance. Summing them,
     as the audit suggests, would refuse a 65th's worth sooner.

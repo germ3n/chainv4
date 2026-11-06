@@ -158,16 +158,16 @@ each fee is the base part, and the rest of a bid goes to the producer.
 The mempool admits a transaction only when:
 - its gas limit covers its intrinsic cost and fits a block;
 - its max price is at least the pricing's floor;
-- its sender can cover the reserve now.
+- its sender can cover the reserve now, on top of the reserves of its transactions waiting already.
 
 Producers take the best-paying transactions first. The priority is what a transaction pays above
 the base price, per gas: its tip under a base fee, its bid above the minimum under bids. Each
 sender's transactions still go in nonce order, and one whose offer is under the next block's
 base price stops its sender's run: the builder is never handed what it would skip.
 
-After each block, the mempool drops what can no longer pay: a transaction whose sender's funds
-went since it was admitted goes at once, and one under the base price goes after 32 blocks of
-that in a row (see [Node](node.md#the-mempool)).
+After each block, the mempool drops what can no longer pay: a sender's reserves are added up in
+nonce order, and those its funds no longer cover go at once, from its highest nonce down; one under
+the base price goes after 32 blocks of that in a row (see [Node](node.md#the-mempool)).
 
 ## Sending with fees
 

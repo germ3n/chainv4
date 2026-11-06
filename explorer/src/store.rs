@@ -472,6 +472,21 @@ impl Store {
         }
     }
 
+    /// A transaction that left the node's mempool other than by landing: off the list of what
+    /// waits, and out of its count.
+    pub fn left(&mut self, id: &str) {
+        if let Some(mempool) = &mut self.mempool
+            && let Some(at) = mempool.txs.iter().position(|waiting| waiting.id == id)
+        {
+            mempool.txs.remove(at);
+            mempool.count = mempool.count.saturating_sub(1);
+        }
+
+        if let Some(node) = &mut self.node {
+            node.mempool.count = node.mempool.count.saturating_sub(1);
+        }
+    }
+
     /// A node report: the latest, and its hashrate kept for the chart.
     pub fn node_report(&mut self, node: NodeView, now: u64) {
         match &node.mining {

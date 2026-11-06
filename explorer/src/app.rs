@@ -616,6 +616,13 @@ impl Explorer {
                         store.live(now, "tx", text);
                     }
                 }
+                // Pushed out, replaced, or dropped for waiting too long: no longer waiting.
+                "left" => {
+                    if let (Some(id), Some(why)) = (data["id"].as_str(), data["why"].as_str()) {
+                        store.left(id);
+                        store.live(now, "left", format!("{}: {why}", format::short(id)));
+                    }
+                }
                 "peer_up" | "peer_down" => {
                     if let Some(change) = parse::<PeerChange>(data) {
                         let text = format::short(&change.id);
@@ -1660,6 +1667,7 @@ pub(crate) mod tests {
 
         explorer.news(News::Event { name: "block".to_string(), data: summary.clone() }, 1, 1.0);
         explorer.news(News::Event { name: "queued".to_string(), data: json!({}) }, 1, 1.0);
+        explorer.news(News::Event { name: "left".to_string(), data: json!({ "id": "0xabc", "why": "pushed out" }) }, 1, 1.0);
 
         assert_eq!(explorer.store.top(), None, "not taken");
         assert!(explorer.store.feed.is_empty());
@@ -1671,6 +1679,10 @@ pub(crate) mod tests {
         explorer.news(News::Event { name: "block".to_string(), data: summary }, 1, 1.0);
         assert_eq!(explorer.store.top(), Some(99));
         assert_eq!(explorer.store.feed.len(), 1);
+
+        // What left the mempool says so in the feed.
+        explorer.news(News::Event { name: "left".to_string(), data: json!({ "id": "0xabc", "why": "pushed out" }) }, 1, 1.0);
+        assert_eq!(explorer.store.feed.len(), 2);
     }
 
     #[test]

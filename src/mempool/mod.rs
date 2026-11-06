@@ -12,7 +12,7 @@ use {
     r#macro::document,
     std::cmp::Reverse,
     std::collections::btree_map::Entry,
-    std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
     std::fmt,
 };
 
@@ -23,9 +23,13 @@ use {
 )]
 pub struct Mempool {
     txs: BTreeMap<(Address, u64), Waiting>,
-    /// Every waiting transaction but each sender's next, the first to go first: what a full
-    /// mempool pushes out to make room. A sender's next is left out, as its whole run waits on it.
+    /// Every waiting transaction, the first to go first: what a full mempool pushes out to make
+    /// room, a sender's next among them, with the rest of its run, which waits on it.
     evictable: BTreeSet<Slot>,
+    /// What every waiting transaction takes, encoded, added up.
+    bytes: u64,
+    /// What left other than by landing since the node last took it, and why: for GET /stream.
+    left: Vec<Left>,
     /// The nonce at the tip of each sender with anything waiting, as last read: which of its
     /// transactions is its next, and which can run in a row after it.
     nonces: HashMap<Address, u64>,
@@ -39,9 +43,56 @@ pub struct Mempool {
 /// before its middle.
 type Slot = (bool, u256, Reverse<u64>, Address);
 
+#[document(
+    summary = "A transaction that left the mempool other than by landing, and why: what GET /stream's left event says.",
+    category = "Node",
+    see_also = "Mempool::take_left, LeftWhy",
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct Left {
+    #[document(summary = "The transaction.")]
+    pub tx: SignedTx,
+    #[document(summary = "Why it left.")]
+    pub why: LeftWhy,
+}
+
+#[document(summary = "Why a transaction left the mempool other than by landing.", category = "Node", see_also = "Left")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeftWhy {
+    #[document(summary = "A full mempool, by count or bytes, pushed it out for one that pays more, or its sender's share for one of its own at a lower nonce.")]
+    PushedOut,
+    #[document(summary = "Its sender replaced it at its nonce with one that raised both prices.")]
+    Replaced,
+    #[document(summary = "It offered less than the base price for MempoolLimits::underpriced_blocks blocks in a row.")]
+    Underpriced,
+    #[document(summary = "It waited behind a missing nonce of its sender's for MempoolLimits::gapped_blocks blocks in a row.")]
+    Gapped,
+    #[document(summary = "Its sender can no longer cover it, with the fees of its transactions before it.")]
+    CannotPay,
+}
+
+impl LeftWhy {
+    #[document(parent = "LeftWhy", summary = "How GET /stream says it: pushed out, replaced, underpriced too long, gapped too long or cannot pay.")]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LeftWhy::PushedOut => "pushed out",
+            LeftWhy::Replaced => "replaced",
+            LeftWhy::Underpriced => "underpriced too long",
+            LeftWhy::Gapped => "gapped too long",
+            LeftWhy::CannotPay => "cannot pay",
+        }
+    }
+}
+
+/// The most departures kept for the node to take, past which the oldest go untold: a node always
+/// takes them after each insert and prune, so this bounds only a mempool nobody asks.
+const MOST_LEFT: usize = 4_096;
+
 /// A transaction waiting for a block, and how long it has waited unable to go in.
 struct Waiting {
     tx: SignedTx,
+    /// What it takes, encoded.
+    bytes: u64,
     /// Blocks in a row whose base price its offer was under, so a producer could not take it.
     underpriced: u32,
     /// Blocks in a row a missing nonce before it kept it from running.
@@ -89,16 +140,22 @@ pub struct MempoolLimits {
     pub replace_bump: u32,
     #[document(summary = "How many blocks in a row a transaction may offer less than the base price before it is dropped: MAX_UNDERPRICED_BLOCKS by default. --underpriced-for takes it in blocks, or as a time turned into blocks at the chain's block time as the node starts.")]
     pub underpriced_blocks: u32,
+    #[document(summary = "How many blocks in a row a transaction may wait behind a missing nonce of its sender's before it is dropped: MAX_GAPPED_BLOCKS by default. --gapped-for takes it in blocks or as a time, as --underpriced-for does.")]
+    pub gapped_blocks: u32,
+    #[document(summary = "The most bytes the waiting transactions may take, encoded, added up: 256 MiB by default, --mempool-bytes. Past it, as past the count, a newcomer that pays more pushes out the least paid.")]
+    pub bytes: u64,
 }
 
 impl MempoolLimits {
-    #[document(parent = "MempoolLimits", summary = "The defaults: 50,000 in all, 64 per sender, 64 nonces ahead, a 10% bump to replace and MAX_UNDERPRICED_BLOCKS blocks under the base price.")]
+    #[document(parent = "MempoolLimits", summary = "The defaults: 50,000 and 256 MiB in all, 64 per sender, 64 nonces ahead, a 10% bump to replace, MAX_UNDERPRICED_BLOCKS blocks under the base price and MAX_GAPPED_BLOCKS behind a gap.")]
     pub const DEFAULT: MempoolLimits = MempoolLimits {
         capacity: 50_000,
         per_sender: 64,
         nonce_gap: 64,
         replace_bump: 10,
         underpriced_blocks: MAX_UNDERPRICED_BLOCKS,
+        gapped_blocks: MAX_GAPPED_BLOCKS,
+        bytes: 256 * 1024 * 1024,
     };
 
     #[document(
@@ -167,13 +224,13 @@ pub enum MempoolError {
     TooFarAhead { next: u64, most: u64 },
     #[document(summary = "Its sender has most waiting already, and this one's nonce comes after them all: wait for some to land.")]
     TooMany { most: usize },
-    #[document(summary = "The mempool is full, and this one pays no more than anything it could push out, or cannot run until a nonce of its sender's that is missing arrives.")]
+    #[document(summary = "The mempool is full, by count or bytes, and this one pays no more than what it could push out, cannot run until a nonce of its sender's that is missing arrives, or is bigger than the whole mempool.")]
     Full,
     #[document(summary = "Its gas limit does not cover its intrinsic cost, or is more than a block holds.")]
     BadGasLimit,
     #[document(summary = "Its max price is under the least base price any block can have.")]
     PriceTooLow,
-    #[document(summary = "The sender cannot cover its gas limit at its max price.")]
+    #[document(summary = "The sender cannot cover its gas limit at its max price, with those of its transactions waiting already.")]
     CannotPay,
     #[document(summary = "The node is still taking its state from a snapshot, so it cannot check transactions yet.")]
     Syncing,
@@ -195,7 +252,7 @@ impl fmt::Display for MempoolError {
             MempoolError::Full => write!(f, "mempool full: offer a higher tip to take the place of one that pays less"),
             MempoolError::BadGasLimit => write!(f, "gas limit under its intrinsic cost, or over the block gas limit"),
             MempoolError::PriceTooLow => write!(f, "max price under the least base price"),
-            MempoolError::CannotPay => write!(f, "the sender cannot pay for its gas limit"),
+            MempoolError::CannotPay => write!(f, "the sender cannot pay for its gas limit, with those of its transactions waiting already"),
             MempoolError::Syncing => write!(f, "the node is still syncing its state from a snapshot"),
             MempoolError::Db(err) => write!(f, "{err}"),
             MempoolError::Multisig(err) => write!(f, "{err}"),
@@ -224,6 +281,8 @@ impl Mempool {
         Mempool {
             txs: BTreeMap::new(),
             evictable: BTreeSet::new(),
+            bytes: 0,
+            left: Vec::new(),
             nonces: HashMap::new(),
             limits,
             base: u256::ZERO,
@@ -248,6 +307,25 @@ impl Mempool {
     #[document(parent = "Mempool", summary = "The transactions waiting, by sender and then nonce.")]
     pub fn iter(&self) -> impl Iterator<Item = &SignedTx> {
         self.txs.values().map(|waiting| &waiting.tx)
+    }
+
+    #[document(parent = "Mempool", summary = "What the waiting transactions take, encoded, added up.")]
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    #[document(parent = "Mempool", summary = "What left other than by landing since this was last asked, oldest first: pushed out, replaced, or dropped by prune, each with why. A node publishes them on GET /stream.")]
+    pub fn take_left(&mut self) -> Vec<Left> {
+        std::mem::take(&mut self.left)
+    }
+
+    /// Notes a transaction that left, for take_left.
+    fn tell(&mut self, tx: SignedTx, why: LeftWhy) {
+        if self.left.len() >= MOST_LEFT {
+            self.left.remove(0);
+        }
+
+        self.left.push(Left { tx, why });
     }
 
     #[document(parent = "Mempool", summary = "Whether nothing is waiting.")]
@@ -305,9 +383,9 @@ impl Mempool {
         },
     )]
     pub fn add_checked(&mut self, tx: SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<(), MempoolError> {
-        let next = Mempool::check(&tx, checked, genesis, state, fees)?;
+        let (next, balance) = Mempool::check(&tx, checked, genesis, state, fees)?;
 
-        self.insert(tx, next, fees)
+        self.insert(tx, next, balance, fees)
     }
 
     #[document(
@@ -320,10 +398,10 @@ impl Mempool {
             state = "The state at the tip.",
             fees = "The chain's fees, if it has any.",
         },
-        returns = "Its sender's nonce at the tip, for insert.",
+        returns = "Its sender's nonce and balance at the tip, for insert.",
         see_also = "Mempool::insert",
     )]
-    pub fn check(tx: &SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<u64, MempoolError> {
+    pub fn check(tx: &SignedTx, checked: Result<(), VerifyError>, genesis: &Hash, state: &State, fees: Option<&Fees>) -> Result<(u64, u256), MempoolError> {
         // Cheap state checks first, so a transaction that cannot pay or whose nonce is used is
         // turned away before its signature, and a multisig's members' signatures, are verified.
         let next = Self::affordable(tx, state, fees)?;
@@ -340,10 +418,10 @@ impl Mempool {
             state = "The state at the tip.",
             fees = "The chain's fees, if it has any.",
         },
-        returns = "Its sender's nonce at the tip, which MempoolLimits::reaches and insert go by.",
+        returns = "Its sender's nonce and balance at the tip, which MempoolLimits::reaches and insert go by.",
         see_also = "Mempool::check, Mempool::backed",
     )]
-    pub fn affordable(tx: &SignedTx, state: &State, fees: Option<&Fees>) -> Result<u64, MempoolError> {
+    pub fn affordable(tx: &SignedTx, state: &State, fees: Option<&Fees>) -> Result<(u64, u256), MempoolError> {
         let account = Accounts::new(state).get(&tx.sender())?;
 
         if tx.nonce < account.nonce {
@@ -366,7 +444,7 @@ impl Mempool {
             }
         }
 
-        Ok(account.nonce)
+        Ok((account.nonce, account.balance))
     }
 
     #[document(
@@ -401,22 +479,38 @@ impl Mempool {
 
     #[document(
         parent = "Mempool",
-        summary = "Puts in a transaction that check passed. At a nonce its sender has waiting already, it replaces that one if it raises both prices by the bump, on a chain with fees. Otherwise its nonce must be within the gap of its sender's, and its sender under its share: at its share, a nonce below the others' pushes out the sender's highest. When the mempool is full, a newcomer that can run in turn pushes out the least paid transaction that is not its sender's next, with the rest of that sender's after it, which could not run without it; one that pays no more is refused.",
+        summary = "Puts in a transaction that check passed. On a chain with fees, its sender must cover its fee reserve with those of its transactions waiting already, one it replaces aside. At a nonce its sender has waiting already, it replaces that one if it raises both prices by the bump, on a chain with fees. Otherwise its nonce must be within the gap of its sender's, and its sender under its share: at its share, a nonce below the others' pushes out the sender's highest. When the mempool is full, by count or bytes, a newcomer that can run in turn pushes out the least paid transactions, a sender's next among them, each with the rest of its sender's after it, which could not run without it, until it fits; one that pays no more than what it would push out is refused, and nothing goes.",
         params = {
             tx = "The transaction.",
             next = "Its sender's nonce at the tip, as check found it.",
+            balance = "Its sender's balance at the tip, as check found it.",
             fees = "The chain's fees, if it has any: what offers are weighed by.",
         },
-        see_also = "Mempool::check, MempoolLimits",
+        see_also = "Mempool::check, MempoolLimits, Mempool::take_left",
     )]
-    pub fn insert(&mut self, tx: SignedTx, next: u64, fees: Option<&Fees>) -> Result<(), MempoolError> {
+    pub fn insert(&mut self, tx: SignedTx, next: u64, balance: u256, fees: Option<&Fees>) -> Result<(), MempoolError> {
         let (sender, nonce) = (tx.sender(), tx.nonce);
 
         if nonce < next {
             return Err(MempoolError::Stale);
         }
 
+        // The sender's fees waiting already, the one at this nonce aside, as this one would take
+        // its place: together they must stay within what it holds.
+        if fees.is_some() {
+            let waiting = self
+                .txs
+                .range((sender, 0)..=(sender, u64::MAX))
+                .filter(|((_, at), _)| *at != nonce)
+                .try_fold(u256::ZERO, |sum, (_, waiting)| waiting.tx.fee.reserve().and_then(|reserve| sum.checked_add(reserve)));
+
+            if waiting.zip(tx.fee.reserve()).and_then(|(sum, reserve)| sum.checked_add(reserve)).is_none_or(|total| total > balance) {
+                return Err(MempoolError::CannotPay);
+            }
+        }
+
         let worth = self.worth(&tx.fee, fees);
+        let size = tx_bytes(&tx);
 
         if let Some(old) = self.txs.get(&(sender, nonce)) {
             // Without fees there is no price to raise, and replacing for free would let a sender
@@ -431,7 +525,9 @@ impl Mempool {
 
             // Its place in its sender's run stays, so the run stays whole.
             let old = self.take(sender, nonce).expect("it waits");
-            self.put(sender, nonce, Waiting { tx, underpriced: 0, gapped: old.gapped, worth, runnable: old.runnable });
+            let (gapped, runnable) = (old.gapped, old.runnable);
+            self.tell(old.tx, LeftWhy::Replaced);
+            self.put(sender, nonce, Waiting { tx, bytes: size, underpriced: 0, gapped, worth, runnable });
             self.reindex(sender, next);
 
             return Ok(());
@@ -446,26 +542,37 @@ impl Mempool {
                 // A nonce the others wait on takes the place of the last: the run loses its end,
                 // which could not go before this one anyway.
                 Some(highest) if highest > nonce => {
-                    self.take(sender, highest);
+                    if let Some(gone) = self.take(sender, highest) {
+                        self.tell(gone.tx, LeftWhy::PushedOut);
+                    }
                 }
                 _ => return Err(MempoolError::TooMany { most: self.limits.per_sender }),
             }
         }
 
-        if self.txs.len() >= self.limits.capacity {
-            self.evict_for(sender, nonce, next, worth)?;
-        }
-
-        self.put(sender, nonce, Waiting { tx, underpriced: 0, gapped: 0, worth, runnable: false });
+        self.make_room(sender, nonce, next, worth, size)?;
+        self.put(sender, nonce, Waiting { tx, bytes: size, underpriced: 0, gapped: 0, worth, runnable: false });
         self.reindex(sender, next);
 
         Ok(())
     }
 
-    /// Makes room in a full mempool for a newcomer worth this much, by pushing out the lowest slot
-    /// and the rest of its sender's after it; or refuses it, when it pays no more than that slot
-    /// or could not run anyway.
-    fn evict_for(&mut self, sender: Address, nonce: u64, next: u64, worth: u256) -> Result<(), MempoolError> {
+    /// Makes room for a newcomer worth this much, of this size: in a mempool full by count or
+    /// bytes, by pushing out the lowest slots, each with the rest of its sender's after it, until it
+    /// fits; or refuses it, pushing nothing out, when it pays no more than what it would push out,
+    /// could not run anyway, or would not fit an empty mempool.
+    fn make_room(&mut self, sender: Address, nonce: u64, next: u64, worth: u256, size: u64) -> Result<(), MempoolError> {
+        let (capacity, most) = (self.limits.capacity, self.limits.bytes);
+        let fits = |count: usize, bytes: u64| count < capacity && bytes.saturating_add(size) <= most;
+
+        if fits(self.txs.len(), self.bytes) {
+            return Ok(());
+        }
+
+        if size > most {
+            return Err(MempoolError::Full);
+        }
+
         // Only a newcomer that can run once those before it do may push anything out: one behind
         // a gap could otherwise empty the mempool of transactions that run, for some that never do.
         let runnable = nonce == next || nonce.checked_sub(1).and_then(|before| self.txs.get(&(sender, before))).is_some_and(|before| before.runnable);
@@ -474,19 +581,41 @@ impl Mempool {
             return Err(MempoolError::Full);
         }
 
-        // Never one of the newcomer's own sender's below it, which it needs to run.
-        let Some(&(kept, paid, Reverse(at), victim)) = self.evictable.iter().find(|&&(_, _, Reverse(at), victim)| !(victim == sender && at < nonce)) else {
-            return Err(MempoolError::Full);
-        };
+        let (mut count, mut bytes) = (self.txs.len(), self.bytes);
+        let mut going: Vec<(Address, u64)> = Vec::new();
+        let mut gone: HashSet<(Address, u64)> = HashSet::new();
 
-        if (kept, paid) >= (true, worth) {
+        for &(kept, paid, Reverse(at), victim) in &self.evictable {
+            if fits(count, bytes) {
+                break;
+            }
+
+            // Never one of the newcomer's own sender's below it, which it needs to run.
+            if (victim == sender && at < nonce) || gone.contains(&(victim, at)) {
+                continue;
+            }
+
+            if (kept, paid) >= (true, worth) {
+                return Err(MempoolError::Full);
+            }
+
+            for ((address, at), waiting) in self.txs.range((victim, at)..=(victim, u64::MAX)) {
+                if gone.insert((*address, *at)) {
+                    going.push((*address, *at));
+                    count -= 1;
+                    bytes -= waiting.bytes;
+                }
+            }
+        }
+
+        if !fits(count, bytes) {
             return Err(MempoolError::Full);
         }
 
-        let after: Vec<u64> = self.txs.range((victim, at)..=(victim, u64::MAX)).map(|((_, nonce), _)| *nonce).collect();
-
-        for nonce in after {
-            self.take(victim, nonce);
+        for (victim, at) in going {
+            if let Some(gone) = self.take(victim, at) {
+                self.tell(gone.tx, LeftWhy::PushedOut);
+            }
         }
 
         Ok(())
@@ -498,12 +627,10 @@ impl Mempool {
         fees.map_or(u256::ZERO, |fees| fees.priority(self.base, offer))
     }
 
-    /// Puts a transaction in, slotted for eviction unless it is its sender's next.
+    /// Puts a transaction in, slotted for eviction.
     fn put(&mut self, sender: Address, nonce: u64, waiting: Waiting) {
-        if self.nonces.get(&sender) != Some(&nonce) {
-            self.evictable.insert(waiting.slot(sender, nonce));
-        }
-
+        self.evictable.insert(waiting.slot(sender, nonce));
+        self.bytes += waiting.bytes;
         self.txs.insert((sender, nonce), waiting);
     }
 
@@ -511,6 +638,7 @@ impl Mempool {
     fn take(&mut self, sender: Address, nonce: u64) -> Option<Waiting> {
         let waiting = self.txs.remove(&(sender, nonce))?;
         self.evictable.remove(&waiting.slot(sender, nonce));
+        self.bytes -= waiting.bytes;
 
         if self.txs.range((sender, 0)..=(sender, u64::MAX)).next().is_none() {
             self.nonces.remove(&sender);
@@ -533,9 +661,7 @@ impl Mempool {
                 expected += 1;
             }
 
-            if *nonce != next {
-                self.evictable.insert(waiting.slot(sender, *nonce));
-            }
+            self.evictable.insert(waiting.slot(sender, *nonce));
         }
     }
 
@@ -610,13 +736,13 @@ impl Mempool {
 
     #[document(
         parent = "Mempool",
-        summary = "Brings the mempool in line with a new tip: drops transactions whose nonce is used; on a chain with fees, those that can no longer pay, as their sender's funds went since they were admitted, and those that have offered less than the base price for MempoolLimits::underpriced_blocks blocks in a row; and those that have waited behind a missing nonce for MAX_GAPPED_BLOCKS blocks in a row. An offer under the base price is kept until then, since the base price moves a step a block and may come back down. What waits after a transaction dropped here is kept, behind a gap, so its sender need only send the one again; it goes too if it is not.",
+        summary = "Brings the mempool in line with a new tip: drops transactions whose nonce is used; on a chain with fees, those that can no longer pay, as their sender's funds went since they were admitted, and those that have offered less than the base price for MempoolLimits::underpriced_blocks blocks in a row; and those that have waited behind a missing nonce for MempoolLimits::gapped_blocks blocks in a row. An offer under the base price is kept until then, since the base price moves a step a block and may come back down. What waits after a transaction dropped here is kept, behind a gap, so its sender need only send the one again; it goes too if it is not.",
         params = {
             state = "The state at the new tip.",
             fees = "The chain's fees, if it has any.",
             base = "The base price of the next block: Chain::next_base_price.",
         },
-        returns = "How many were dropped other than for landing: for a sender that cannot pay, an offer under the base price for too long, or a gap that stayed open.",
+        returns = "How many were dropped other than for landing: for a sender that cannot pay, with the fees of its transactions before it, an offer under the base price for too long, or a gap that stayed open; take_left tells which and why.",
     )]
     pub fn prune(&mut self, state: &State, fees: Option<&Fees>, base: u256) -> Result<usize, DbError> {
         let accounts = Accounts::new(state);
@@ -630,14 +756,37 @@ impl Mempool {
             }
         }
 
-        self.txs.retain(|(sender, nonce), _| *nonce >= senders[sender].0);
+        // Landed, or their nonce used by another: they leave untold, as their blocks tell.
+        let landed: Vec<(Address, u64)> = self.txs.keys().filter(|(sender, nonce)| *nonce < senders[sender].0).copied().collect();
+
+        for (sender, nonce) in landed {
+            self.take(sender, nonce);
+        }
+
         let before = self.txs.len();
+        let mut dropped: Vec<((Address, u64), LeftWhy)> = Vec::new();
 
         if let Some(fees) = fees {
             let most = self.limits.underpriced_blocks;
-            self.txs.retain(|(sender, _), waiting| {
-                if waiting.tx.fee.reserve().is_none_or(|reserve| reserve > senders[sender].1) {
-                    return false;
+            // What each sender's kept fees come to so far, in nonce order: one that would take
+            // them past its balance goes, so a run loses its end before its start.
+            let mut reserved: Option<(Address, u256)> = None;
+
+            for ((sender, nonce), waiting) in self.txs.iter_mut() {
+                let sum = match reserved {
+                    Some((address, sum)) if address == *sender => sum,
+                    _ => u256::ZERO,
+                };
+                let total = waiting.tx.fee.reserve().and_then(|reserve| sum.checked_add(reserve));
+
+                match total {
+                    Some(total) if total <= senders[sender].1 => reserved = Some((*sender, total)),
+                    _ => {
+                        reserved = Some((*sender, sum));
+                        dropped.push(((*sender, *nonce), LeftWhy::CannotPay));
+
+                        continue;
+                    }
                 }
 
                 waiting.underpriced = match fees.pricing().price(base, &waiting.tx.fee) {
@@ -645,12 +794,21 @@ impl Mempool {
                     None => waiting.underpriced + 1,
                 };
 
-                waiting.underpriced <= most
-            });
+                if waiting.underpriced > most {
+                    dropped.push(((*sender, *nonce), LeftWhy::Underpriced));
+                }
+            }
+        }
+
+        for ((sender, nonce), why) in std::mem::take(&mut dropped) {
+            if let Some(gone) = self.take(sender, nonce) {
+                self.tell(gone.tx, why);
+            }
         }
 
         // Which can run in turn now, and for how long each that cannot has been kept from it.
         let mut expected: Option<(Address, u64)> = None;
+        let most_gapped = self.limits.gapped_blocks;
 
         for ((sender, nonce), waiting) in self.txs.iter_mut() {
             let next = match expected {
@@ -661,16 +819,20 @@ impl Mempool {
             waiting.gapped = if waiting.runnable { 0 } else { waiting.gapped + 1 };
             waiting.worth = fees.map_or(u256::ZERO, |fees| fees.priority(base, &waiting.tx.fee));
             expected = Some((*sender, next + u64::from(waiting.runnable)));
+
+            if waiting.gapped > most_gapped {
+                dropped.push(((*sender, *nonce), LeftWhy::Gapped));
+            }
         }
 
-        self.txs.retain(|_, waiting| waiting.gapped <= MAX_GAPPED_BLOCKS);
+        for ((sender, nonce), why) in dropped {
+            if let Some(gone) = self.take(sender, nonce) {
+                self.tell(gone.tx, why);
+            }
+        }
+
         self.nonces = self.txs.keys().map(|(sender, _)| (*sender, senders[sender].0)).collect();
-        self.evictable = self
-            .txs
-            .iter()
-            .filter(|((sender, nonce), _)| self.nonces[sender] != *nonce)
-            .map(|((sender, nonce), waiting)| waiting.slot(*sender, *nonce))
-            .collect();
+        self.evictable = self.txs.iter().map(|((sender, nonce), waiting)| waiting.slot(*sender, *nonce)).collect();
 
         Ok(before - self.txs.len())
     }
@@ -809,20 +971,20 @@ mod tests {
         let keypair = keypair();
         let tx = transfer(&keypair, 0);
 
-        assert_eq!(Mempool::check(&tx, Ok(()), &Hash::zero(crate::structs::hash::HashType::default_chain()), &state, None), Ok(0), "the sender's nonce at the tip");
+        assert_eq!(Mempool::check(&tx, Ok(()), &Hash::zero(crate::structs::hash::HashType::default_chain()), &state, None).map(|(next, _)| next), Ok(0), "the sender's nonce at the tip");
         assert!(matches!(Mempool::check(&tx, Err(VerifyError::InvalidSignature), &Hash::zero(crate::structs::hash::HashType::default_chain()), &state, None), Err(MempoolError::Invalid(_))));
 
         let mut mempool = Mempool::new(1);
 
-        assert_eq!(mempool.insert(tx.clone(), 0, None), Ok(()));
-        assert_eq!(mempool.insert(tx, 0, None), Err(MempoolError::Duplicate), "the very same one");
-        assert_eq!(mempool.insert(transfer(&keypair, 1), 0, None), Err(MempoolError::Full));
+        assert_eq!(mempool.insert(tx.clone(), 0, u256::MAX, None), Ok(()));
+        assert_eq!(mempool.insert(tx, 0, u256::MAX, None), Err(MempoolError::Duplicate), "the very same one");
+        assert_eq!(mempool.insert(transfer(&keypair, 1), 0, u256::MAX, None), Err(MempoolError::Full));
 
         let mut roomy = Mempool::new(5);
         let again = transfer(&keypair, 3);
-        roomy.insert(again.clone(), 0, None).unwrap();
+        roomy.insert(again.clone(), 0, u256::MAX, None).unwrap();
 
-        assert_eq!(roomy.insert(again, 0, None), Err(MempoolError::Duplicate));
+        assert_eq!(roomy.insert(again, 0, u256::MAX, None), Err(MempoolError::Duplicate));
     }
 
     #[test]
@@ -1126,30 +1288,79 @@ mod tests {
     }
 
     #[test]
-    fn a_full_mempool_pushes_out_the_least_paid_that_is_not_its_senders_next_with_what_follows_it() {
+    fn a_full_mempool_pushes_out_the_least_paid_its_senders_next_too_with_what_follows_it() {
         let (state, fees, floor, keys) = paying(4);
         let mut mempool = Mempool::new(4);
         mempool.prune(&state, Some(&fees), floor).unwrap();
         let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &genesis(), &state, Some(&fees));
 
-        // Key 0's next pays least of all, but its run waits on it, so it stays; its second and
-        // third, which pays well but cannot go without the second, go together.
         add(&mut mempool, tipping(&keys[0], 0, floor, 1)).unwrap();
         add(&mut mempool, tipping(&keys[0], 1, floor, 2)).unwrap();
         add(&mut mempool, tipping(&keys[0], 2, floor, 90)).unwrap();
         add(&mut mempool, tipping(&keys[1], 0, floor, 50)).unwrap();
+        assert!(mempool.take_left().is_empty());
 
-        assert_eq!(add(&mut mempool, tipping(&keys[2], 0, floor, 2)), Err(MempoolError::Full), "it pays no more than the least");
+        assert_eq!(add(&mut mempool, tipping(&keys[2], 0, floor, 1)), Err(MempoolError::Full), "it pays no more than the least");
+        assert_eq!(waiting(&mempool, &keys), [(0, 0), (0, 1), (0, 2), (1, 0)], "and nothing went for it");
 
+        // Key 0's next pays least of all, so it goes, and its run, which waits on it, with it.
         add(&mut mempool, tipping(&keys[2], 0, floor, 3)).unwrap();
+        assert_eq!(waiting(&mempool, &keys), [(1, 0), (2, 0)]);
+        let left = mempool.take_left();
+        assert_eq!(left.iter().map(|gone| (gone.tx.nonce, gone.why)).collect::<Vec<_>>(), [(0, LeftWhy::PushedOut), (1, LeftWhy::PushedOut), (2, LeftWhy::PushedOut)]);
 
-        assert_eq!(waiting(&mempool, &keys), [(0, 0), (1, 0), (2, 0)]);
+        // Full again, the least paid goes: here key 3's next, for key 2's second.
+        add(&mut mempool, tipping(&keys[3], 0, floor, 2)).unwrap();
+        add(&mut mempool, tipping(&keys[0], 0, floor, 60)).unwrap();
+        add(&mut mempool, tipping(&keys[2], 1, floor, 1_000)).unwrap();
+        assert_eq!(waiting(&mempool, &keys), [(0, 0), (1, 0), (2, 0), (2, 1)]);
+        assert_eq!(mempool.take_left().len(), 1);
+    }
 
-        // Nothing is left to push out but each sender's next.
-        add(&mut mempool, tipping(&keys[3], 0, floor, 1)).unwrap();
+    #[test]
+    fn the_mempool_holds_to_its_bytes_and_a_sender_to_its_balance_over_everything_it_has_waiting() {
+        let (state, fees, floor, keys) = paying(3);
+        let one = tx_bytes(&tipping(&keys[0], 0, floor, 1));
+        let mut mempool = Mempool::with_limits(MempoolLimits { bytes: one * 2, ..MempoolLimits::DEFAULT });
+        mempool.prune(&state, Some(&fees), floor).unwrap();
+        let add = |mempool: &mut Mempool, tx: SignedTx| mempool.add(tx, &genesis(), &state, Some(&fees));
 
-        assert_eq!(add(&mut mempool, tipping(&keys[2], 1, floor, 1_000)), Err(MempoolError::Full));
-        assert_eq!(waiting(&mempool, &keys), [(0, 0), (1, 0), (2, 0), (3, 0)]);
+        add(&mut mempool, tipping(&keys[0], 0, floor, 1)).unwrap();
+        add(&mut mempool, tipping(&keys[1], 0, floor, 5)).unwrap();
+        assert_eq!(mempool.bytes(), one * 2);
+        assert_eq!(add(&mut mempool, tipping(&keys[2], 0, floor, 1)), Err(MempoolError::Full), "full by bytes, and it pays no more");
+        add(&mut mempool, tipping(&keys[2], 0, floor, 9)).unwrap();
+        assert_eq!(waiting(&mempool, &keys), [(1, 0), (2, 0)]);
+        assert_eq!(mempool.bytes(), one * 2);
+
+        // One that would not fit an empty mempool is refused outright.
+        let mut tiny = Mempool::with_limits(MempoolLimits { bytes: one - 1, ..MempoolLimits::DEFAULT });
+        assert_eq!(tiny.add(tipping(&keys[0], 0, floor, 1), &genesis(), &state, Some(&fees)), Err(MempoolError::Full));
+
+        // A sender's fees add up: what it holds covers so many and no more, a replacement taking
+        // the place of what it replaces.
+        let reserve = tipping(&keys[0], 0, floor, 1).fee.reserve().unwrap();
+        let mut sums = Mempool::new(100);
+        sums.prune(&state, Some(&fees), floor).unwrap();
+        let held = reserve * u256::from(3u64);
+        for nonce in 0..3 {
+            sums.insert(tipping(&keys[0], nonce, floor, 1), 0, held, Some(&fees)).unwrap();
+        }
+        assert_eq!(sums.insert(tipping(&keys[0], 3, floor, 1), 0, held, Some(&fees)), Err(MempoolError::CannotPay));
+
+        let dearer = |nonce: u64, times: u64| {
+            let fee = FeeOffer { gas_limit: 100_000, max_price: floor * u256::from(1_000 * times), tip: u256::from(2 * times) };
+            SignedTx::sign(Tx::Burn { from: keys[0].public().address(), amount: Amount::U128(1) }, nonce, fee, &keys[0], &genesis())
+        };
+        assert_eq!(sums.insert(dearer(0, 2), 0, held, Some(&fees)), Err(MempoolError::CannotPay), "a replacement raising its reserve past what is left");
+        assert_eq!(sums.insert(dearer(0, 2), 0, held + reserve, Some(&fees)), Ok(()), "with room for what it adds");
+        assert_eq!(sums.take_left().iter().map(|gone| gone.why).collect::<Vec<_>>(), [LeftWhy::Replaced]);
+
+        // The sender's funds falling, prune keeps what they still cover, from the lowest nonce up.
+        Accounts::new(&state).debit(&keys[0].public().address(), Accounts::new(&state).get(&keys[0].public().address()).unwrap().balance - reserve * u256::from(3u64)).unwrap();
+        sums.prune(&state, Some(&fees), floor).unwrap();
+        assert_eq!(sums.iter().map(|tx| tx.nonce).collect::<Vec<_>>(), [0, 1], "two times the reserve for nonce 0, one for nonce 1");
+        assert_eq!(sums.take_left().iter().map(|gone| (gone.tx.nonce, gone.why)).collect::<Vec<_>>(), [(2, LeftWhy::CannotPay)]);
     }
 
     #[test]
@@ -1192,11 +1403,12 @@ mod tests {
 
         assert_eq!(mempool.len(), 100);
 
-        // And a better offer still finds room, at the end of the flooder's run.
+        // And a better offer still finds room, in place of the least paid: one of those paying 1.
         add(&mut mempool, tipping(&keys[37], 0, floor, 20)).unwrap();
 
         assert_eq!(mempool.len(), 100);
-        assert_eq!(mempool.highest_nonce(&keys[0].public().address()), Some(62));
+        assert_eq!(mempool.highest_nonce(&keys[0].public().address()), Some(63), "the flooder pays more than they did");
+        assert_eq!(keys[1..37].iter().filter(|key| mempool.highest_nonce(&key.public().address()).is_none()).count(), 1);
     }
 
     #[test]

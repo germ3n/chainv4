@@ -31,6 +31,8 @@ pub enum NodeEvent {
     Finalized(Checkpoint),
     #[document(summary = "A transaction joined the mempool.")]
     Queued(Arc<SignedTx>),
+    #[document(summary = "A transaction left the mempool other than by landing, and why: pushed out, replaced, or dropped for offering too little, waiting behind a gap or no longer being paid for, too long.")]
+    Left(Arc<crate::mempool::Left>),
     #[document(summary = "A peer connected.")]
     PeerUp { peer: PeerId, address: Multiaddr },
     #[document(summary = "A peer's last connection closed.")]
