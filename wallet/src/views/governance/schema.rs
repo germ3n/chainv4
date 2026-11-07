@@ -15,6 +15,8 @@ pub enum Cell {
     Key,
     Account,
     Evm,
+    /// An EVM address, or none when left empty.
+    MaybeEvm,
     Amount,
 }
 
@@ -152,7 +154,7 @@ const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, 
 const GOVERNANCES: Options = &[("council", "A council"), ("electorate", "Finality's voters")];
 const EVM_SPECS: Options = &[("shanghai", "Shanghai"), ("cancun", "Cancun"), ("prague", "Prague"), ("osaka", "Osaka")];
 
-const VALIDATOR: &[Column] = &[Column { name: "account", label: "Account", cell: Cell::Account }, Column { name: "voter", label: "Voting key", cell: Cell::Key }, Column { name: "bond", label: "Bond", cell: Cell::Amount }];
+const VALIDATOR: &[Column] = &[Column { name: "account", label: "Account", cell: Cell::Account }, Column { name: "voter", label: "Voting key", cell: Cell::Key }, Column { name: "bond", label: "Bond", cell: Cell::Amount }, Column { name: "attester", label: "Attester, for Ethereum", cell: Cell::MaybeEvm }];
 const SIGNER: &[Column] = &[Column { name: "key", label: "Voting key", cell: Cell::Key }, Column { name: "account", label: "Account", cell: Cell::Account }];
 const EVM_GATEWAY: &[Column] = &[Column { name: "chain_id", label: "Chain id", cell: Cell::Whole }, Column { name: "gateway", label: "Gateway.sol", cell: Cell::Evm }];
 

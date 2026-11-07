@@ -53,6 +53,8 @@ pub struct ValidatorRecord {
     pub withdrawable_from: Option<u64>,
     #[document(summary = "Whether it was caught signing conflicting votes.")]
     pub slashed: bool,
+    #[document(summary = "Its attester: the Ethereum address of the secp256k1 key it attests links with for Ethereum, apart from its voting key, or None. Sets fixed from now on carry it.")]
+    pub attester: Option<[u8; 20]>,
 }
 
 impl Hashable for ValidatorRecord {}
@@ -96,6 +98,8 @@ pub struct Member {
     #[document(summary = "How much its votes weigh: its bond when the set was fixed.")]
     #[wincode(with = "U256Le")]
     pub weight: u256,
+    #[document(summary = "Its attester when the set was fixed, which its votes' attestations must recover to, or None.")]
+    pub attester: Option<[u8; 20]>,
 }
 
 #[document(
@@ -197,6 +201,7 @@ impl<'a> Validators<'a> {
             active_until: None,
             withdrawable_from: None,
             slashed: false,
+            attester: None,
         }, &mut voters);
 
         Ok(())
@@ -229,6 +234,20 @@ impl<'a> Validators<'a> {
         let until = epoch + staking.activation_delay + 1;
         record.active_until = Some(until);
         record.withdrawable_from = Some(until + staking.withdrawal_delay);
+        self.state.put_value(Column::Validators, voter_key(voter), &record);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "staking")]
+    #[document(
+        parent = "Validators",
+        summary = "Sets or clears a validator's attester, for the sets fixed from now on.",
+        panics = "NotBonded, NotYours when account did not bond it.",
+    )]
+    pub fn set_attester(&self, account: &Address, voter: &PublicKey, attester: Option<[u8; 20]>) -> Result<(), RegistryError> {
+        let mut record = self.owned(account, voter)?;
+        record.attester = attester;
         self.state.put_value(Column::Validators, voter_key(voter), &record);
 
         Ok(())
@@ -380,6 +399,7 @@ impl<'a> Validators<'a> {
                     voter,
                     account: record.account,
                     weight: record.bond,
+                    attester: record.attester,
                 });
             }
         }
@@ -678,8 +698,8 @@ mod tests {
     fn two_thirds_is_a_supermajority() {
         let set = ValidatorSet {
             members: vec![
-                Member { voter: voter(1), account: ALICE, weight: u256::new(2) },
-                Member { voter: voter(2), account: BOB, weight: u256::new(1) },
+                Member { voter: voter(1), account: ALICE, weight: u256::new(2), attester: None },
+                Member { voter: voter(2), account: BOB, weight: u256::new(1), attester: None },
             ],
         };
 

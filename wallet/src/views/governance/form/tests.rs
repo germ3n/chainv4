@@ -49,7 +49,7 @@ fn ffg(leak: Option<Leak>) -> FinalityConfig {
         max_validators: 3,
         vote_reward: u256::new(DEV),
         max_proofs_per_block: 4,
-        validators: vec![GenesisValidator { account: address(1), voter: key(1), bond: u256::new(10_000 * DEV) }],
+        validators: vec![GenesisValidator { account: address(1), voter: key(1), bond: u256::new(10_000 * DEV), attester: None }],
         leak,
         slash_permille: None,
     })

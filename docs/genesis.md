@@ -116,7 +116,7 @@ field, they are part of the genesis id.
 { "type": "ffg", "checkpoint_interval": 8, "vote_depth": 2, "min_bond": "100000000000000000000",
   "activation_delay": 2, "withdrawal_delay": 64, "reporter_divisor": 16, "max_validators": 1000,
   "vote_reward": "1000000000000000000", "max_proofs_per_block": 4,
-  "validators": [{ "account": "ed25519:0x…", "voter": "ed25519:0x…", "bond": "10000000000000000000000" }],
+  "validators": [{ "account": "ed25519:0x…", "voter": "ed25519:0x…", "bond": "10000000000000000000000", "attester": "0x…" }],
   "leak": { "after_epochs": 4, "permille": 50 } }
 { "type": "authority", "checkpoint_interval": 8, "vote_depth": 2, "activation_delay": 2, "max_signers": 100,
   "signers": ["ed25519:0x…", { "key": "ed25519:0x…", "account": "ed25519:0x…" }],
@@ -128,6 +128,8 @@ field, they are part of the genesis id.
 What each field means is in [Finality](finality.md). An authority signer is a bare key, which is
 its own account, or a `key` with the `account` that approves changes for it and takes its rewards.
 FFG's `leak` is a later addition: left out, there is none, and a file from before it keeps its id.
+A validator's `attester` is the Ethereum address it [attests for Ethereum](finality.md#attestations-finality-followed-on-ethereum)
+with, or left out for none; a genesis with validators changed its id when the field came in.
 
 ### fees
 

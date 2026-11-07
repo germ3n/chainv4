@@ -15,6 +15,8 @@
 #                    development key
 #   VALIDATOR_KEY    the voting key file: /config/validator.key when there is one, else the
 #                    development key
+#   ATTESTATION_KEY  a secp256k1 key file the validator attests links with for Ethereum, apart
+#                    from its voting key: /config/attestation.key when there is one, else none
 #   REWARD_TO        where mining rewards go
 #   MINE_THREADS     how many threads mine, 1 by default; 0 for none, when workers mine
 #   MINING_TOKEN     the token workers must know: /config/mining.token when there is one. With
@@ -84,6 +86,10 @@ fi
 
 if [ -z "${VALIDATOR_KEY:-}" ] && [ -s "$config/validator.key" ]; then
     VALIDATOR_KEY=$config/validator.key
+fi
+
+if [ -z "${ATTESTATION_KEY:-}" ] && [ -s "$config/attestation.key" ]; then
+    ATTESTATION_KEY=$config/attestation.key
 fi
 
 if [ -z "${MINING_TOKEN:-}" ] && [ -s "$config/mining.token" ]; then
@@ -205,6 +211,7 @@ case "$validate" in
     on)
         set -- "$@" --validate
         if [ -n "${VALIDATOR_KEY:-}" ]; then set -- "$@" --validator-key "$VALIDATOR_KEY"; else development=1; fi
+        if [ -n "${ATTESTATION_KEY:-}" ]; then set -- "$@" --attestation-key "$ATTESTATION_KEY"; fi
         ;;
     off) ;;
     *) echo "[docker] VALIDATE is auto, on or off, not $validate" >&2; exit 1 ;;

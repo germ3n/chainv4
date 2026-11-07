@@ -816,6 +816,7 @@ fn router(api: Api) -> Router {
         .route("/light/checkpoint/{block}", get(light_checkpoint))
         .route("/headers", get(headers))
         .route("/justifications", get(justifications))
+        .route("/attestations", get(attestations))
         .route("/proofs/receipts/{id}", get(receipt_proof))
         .route("/proofs/{column}/{key}", get(state_proof))
         .route("/txs", post(submit))
@@ -2755,6 +2756,103 @@ async fn justifications(Shared(api): Shared<Api>, Query(query): Query<HashMap<St
 
 /// The most justifications one request answers.
 const MAX_PROOF_JUSTIFICATIONS: u64 = 64;
+
+/// The most epochs GET /attestations looks through for one with a justification.
+const ATTESTATION_SCAN: u64 = 1_024;
+
+/// What a relayer shows ChainV4Finality.sol: the first main-chain checkpoint justified after an
+/// epoch, its link, its height and state root, the attesting sets of its epoch and the next, and
+/// the attestations its justification carried that recover to the set's attesters.
+async fn attestations(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    #[cfg(feature = "secp256k1")]
+    {
+        use crate::structs::attestation::{AttestedLink, AttestingSet, word};
+
+        let interval = api
+            .light
+            .finality
+            .and_then(|finality| finality.checkpoint_interval())
+            .ok_or_else(|| ApiError::NotFound("this chain's finality does not vote".to_string()))?;
+        let after = number(&query, "after")?.unwrap_or(0);
+        let top = tip(&*api.db)?.header.height;
+        let state = State::new(api.db.clone());
+        let validators = crate::registry::validators::Validators::new(&state);
+        let set_json = |set: &AttestingSet| {
+            json!({
+                "total": set.total.to_string(),
+                "attesters": set.attesters.iter().map(|(address, _)| to_hex(address)).collect::<Vec<_>>(),
+                "weights": set.attesters.iter().map(|(_, weight)| weight.to_string()).collect::<Vec<_>>(),
+                "hash": to_hex(&set.hash()),
+            })
+        };
+
+        for epoch in after.saturating_add(1)..after.saturating_add(1).saturating_add(ATTESTATION_SCAN) {
+            let Some(height) = epoch.checked_mul(interval).filter(|height| *height <= top) else {
+                break;
+            };
+            let Some(sealed) = stored_header_at(&*api.db, height)? else {
+                break;
+            };
+            let Some(justification) = stored_justification(&*api.db, &sealed.id())? else {
+                continue;
+            };
+            let attesting = |epoch: u64| -> Result<Option<AttestingSet>, ApiError> {
+                Ok(validators.set(epoch)?.map(|set| AttestingSet::of(set.members.iter().map(|member| (member.attester, member.weight)))))
+            };
+            let (Some(set), Some(next)) = (attesting(epoch)?, attesting(epoch + 1)?) else {
+                return Err(ApiError::NotFound(format!("epoch {epoch}'s attesting sets are no longer kept here")));
+            };
+            let genesis = stored_header_at(&*api.db, 0)?.ok_or_else(|| ApiError::Unavailable("the chain has no genesis yet".to_string()))?.id();
+            let link = AttestedLink {
+                chain_id: crate::crypto::ethereum::chain_id(&genesis),
+                source: justification.source,
+                target: justification.target,
+                height: sealed.header.height,
+                state_root: sealed.header.state_root,
+                set: set.hash(),
+                next_set: next.hash(),
+            };
+            let mut signed: Vec<([u8; 20], [u8; 65])> = justification
+                .votes
+                .iter()
+                .filter_map(|vote| vote.attestation.and_then(|attestation| link.attester(&attestation).filter(|attester| set.weight(attester).is_some()).map(|attester| (attester, attestation))))
+                .collect();
+            signed.sort_by_key(|(attester, _)| *attester);
+            signed.dedup_by_key(|(attester, _)| *attester);
+            let weight = signed.iter().fold(u256::ZERO, |sum, (attester, _)| sum.saturating_add(set.weight(attester).unwrap_or_default()));
+            // The source's own height and state root, which a contract deployed from it starts with.
+            let source = stored_header(&*api.db, &justification.source.block)?.map(|sealed| sealed.header);
+
+            return Ok(Json(json!({
+                "chain_id": link.chain_id,
+                "source": {
+                    "epoch": link.source.epoch,
+                    "block": to_hex(&word(&link.source.block)),
+                    "height": source.as_ref().map(|header| header.height),
+                    "state_root": source.as_ref().map(|header| to_hex(&word(&header.state_root))),
+                },
+                "target": { "epoch": link.target.epoch, "block": to_hex(&word(&link.target.block)) },
+                "height": link.height,
+                "state_root": to_hex(&word(&link.state_root)),
+                "digest": to_hex(&link.digest()),
+                "set": set_json(&set),
+                "next_set": set_json(&next),
+                "attestations": signed.iter().map(|(attester, attestation)| json!({ "attester": to_hex(attester), "signature": to_hex(attestation) })).collect::<Vec<_>>(),
+                "weight": weight.to_string(),
+                "enough": set.enough(weight),
+            })));
+        }
+
+        Err(ApiError::NotFound(format!("no checkpoint justified after epoch {after} yet")))
+    }
+
+    #[cfg(not(feature = "secp256k1"))]
+    {
+        let _ = (api, query);
+
+        Err(ApiError::NotFound("this build checks no attestations".to_string()))
+    }
+}
 
 /// A proof of one chain-state entry, or of its absence, against the state root of the tip, or of
 /// the recent main-chain block ?block= names.

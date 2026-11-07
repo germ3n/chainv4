@@ -49,7 +49,9 @@ chainv4_chain`. `docker/compose.sh down -v` removes the certificates' volumes to
 - **`VALIDATE=auto`:** it votes under FFG and authority finality. Or `on`, `off`.
 
 **Its keys:** `docker/config/producer.key` and `validator.key`, as `chainv4 keygen` writes them, or
-`PRODUCER_KEY` and `VALIDATOR_KEY` naming other files. Without them it signs with the development
+`PRODUCER_KEY` and `VALIDATOR_KEY` naming other files; and `attestation.key` (`ATTESTATION_KEY`), a
+secp256k1 key the validator [attests for Ethereum](finality.md#attestations-finality-followed-on-ethereum)
+with, if it does. Without them it signs with the development
 key, whose seed is public, and says so in its log. The node runs as uid 10001: on Linux, make the
 key files readable to it.
 

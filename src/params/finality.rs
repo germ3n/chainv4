@@ -84,6 +84,8 @@ pub struct GenesisValidator {
     #[document(summary = "Its bond, minted at genesis.")]
     #[wincode(with = "U256Le")]
     pub bond: u256,
+    #[document(summary = "Its attester, the Ethereum address it attests links with for Ethereum, or None.")]
+    pub attester: Option<[u8; 20]>,
 }
 
 impl Hashable for GenesisValidator {}

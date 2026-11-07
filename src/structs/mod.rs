@@ -1,6 +1,8 @@
 pub mod block;
 pub mod tx;
 pub mod account;
+#[cfg(feature = "secp256k1")]
+pub mod attestation;
 pub mod address;
 pub mod amount;
 pub mod bech32;

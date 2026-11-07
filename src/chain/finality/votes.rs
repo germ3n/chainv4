@@ -361,6 +361,60 @@ impl<E: Electorate> Votes<E> {
         self.electorate.voters(&chain.state(), target.epoch)
     }
 
+    /// The link as an attestation commits to it, from what this node holds: the target's header,
+    /// and the attesting sets of its epoch and the next, both fixed by the time anyone votes for it.
+    /// None while either is not known here.
+    #[cfg(feature = "secp256k1")]
+    fn link_of(&self, chain: &View, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
+        use crate::structs::attestation::AttestedLink;
+
+        let Some(header) = chain.header(&target.block)? else {
+            return Ok(None);
+        };
+        let attesting = |epoch: u64| self.attesting(chain, epoch);
+        let (Some(set), Some(next)) = (attesting(target.epoch)?, attesting(target.epoch + 1)?) else {
+            return Ok(None);
+        };
+
+        Ok(Some(AttestedLink {
+            chain_id: crate::crypto::ethereum::chain_id(&self.genesis),
+            source,
+            target,
+            height: header.height,
+            state_root: header.state_root,
+            set: set.hash(),
+            next_set: next.hash(),
+        }))
+    }
+
+    /// An epoch's attesting set, from its fixed validator set.
+    #[cfg(feature = "secp256k1")]
+    fn attesting(&self, chain: &View, epoch: u64) -> Result<Option<crate::structs::attestation::AttestingSet>, DbError> {
+        Ok(self.electorate.voters(&chain.state(), epoch)?.map(|voters| crate::structs::attestation::AttestingSet::of(voters.set.members.iter().map(|member| (member.attester, member.weight)))))
+    }
+
+    /// Whether a vote's attestation, if it carries one, is its validator's: it recovers to the
+    /// attester the target epoch's fixed set names for it. A vote without one is as ever.
+    fn check_attestation(&self, chain: &View, vote: &SignedVote, attester: Option<[u8; 20]>) -> Result<(), FinalityError> {
+        let Some(attestation) = vote.attestation else {
+            return Ok(());
+        };
+        let attester = attester.ok_or(FinalityError::Invalid(crate::crypto::verifiable::VerifyError::BadAttestation))?;
+
+        #[cfg(feature = "secp256k1")]
+        {
+            let link = self.link_of(chain, vote.vote.source, vote.vote.target)?.ok_or(FinalityError::Unverifiable("its attestation's sets are not known here"))?;
+
+            if link.attester(&attestation) == Some(attester) {
+                return Ok(());
+            }
+        }
+
+        let _ = (chain, attestation, attester);
+
+        Err(FinalityError::Invalid(crate::crypto::verifiable::VerifyError::BadAttestation))
+    }
+
     /// Remembers a counted vote, to compare its voter's later ones against. Only counted votes
     /// are remembered, so a key that does not vote takes up no room.
     fn remember(&mut self, vote: &SignedVote) {
@@ -475,6 +529,7 @@ impl<E: Electorate> Votes<E> {
             });
         };
         let member = *voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?;
+        self.check_attestation(chain, &vote, member.attester)?;
 
         if let Some(evidence) = self.held_conflict(&vote) {
             self.record(chain, evidence)?;
@@ -529,6 +584,16 @@ impl<E: Electorate> Votes<E> {
 impl<E: Electorate> Finality for Votes<E> {
     fn name(&self) -> &'static str {
         self.electorate.name()
+    }
+
+    #[cfg(feature = "secp256k1")]
+    fn attested_link(&self, chain: &View, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
+        self.link_of(chain, source, target)
+    }
+
+    #[cfg(feature = "secp256k1")]
+    fn attesting_set(&self, chain: &View, epoch: u64) -> Result<Option<crate::structs::attestation::AttestingSet>, DbError> {
+        self.attesting(chain, epoch)
     }
 
     fn checkpoint_interval(&self) -> u64 {
@@ -739,7 +804,9 @@ impl<E: Electorate> Finality for Votes<E> {
             }
 
             signed.map_err(FinalityError::Invalid)?;
-            weight += voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?.weight;
+            let member = voters.set.member(&vote.vote.voter).ok_or(FinalityError::NotValidator)?;
+            self.check_attestation(chain, vote, member.attester)?;
+            weight += member.weight;
             previous = Some(vote.vote.voter);
         }
 

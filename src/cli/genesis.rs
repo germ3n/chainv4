@@ -451,7 +451,8 @@ mod tests {
         // whose headers commit to their payouts too, which moved every block's id; and again for
         // the coin's supply, kept in state from genesis on, which moved every state root; and again
         // for FFG's slash_permille, which every FFG config encodes, set or not; and again for fees'
-        // lua_costs, which every fee config encodes, set or not.
+        // lua_costs, which every fee config encodes, set or not; and again for genesis validators'
+        // attester, which every one encodes, set or not.
         if cfg!(all(
             feature = "blake3",
             feature = "ed25519",
@@ -461,7 +462,7 @@ mod tests {
             feature = "finality-authority",
             feature = "finality-depth"
         )) {
-            assert_eq!(read.block().id().to_string(), "0xf707153c93394fffc2619bbfee37f8945aae0585b7b646b3830a713910178fa8");
+            assert_eq!(read.block().id().to_string(), "0x5ae1e450b662b94a045e5aed53415071af9a8ae81760c4aa6609228008cfe1b6");
         }
 
         // Set, it is part of the chain: the dev chains now have their own ids.

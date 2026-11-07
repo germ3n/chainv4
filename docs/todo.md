@@ -359,11 +359,18 @@ offline; these would make that hold up as a treasury.
      the prover. It is checked by a verifier contract on Ethereum.
   3. **Bridges and light clients by proof:** the gateways and the light client take a proven state root
      in place of the federation's word or a vote count.
-  **Answers (owner, 2026-11-07), all three stages scheduled for later, none started:**
-  - **Stage 1 checks secp256k1 + keccak:** a consensus change, shipped as a fork (the first real
-    one, through the fork schedule): validators also sign a keccak commitment of each checkpoint
-    with a secp256k1 key, so a contract on Ethereum checks finality with `ecrecover`, cheaply. Each
-    validator needs a secp256k1 voting key beside its own.
+  **Stage 1 done 2026-11-07:** validators name an attester (`Tx::SetAttester`, genesis's
+  `attester`), each vote may carry an attestation every node checks, `GET /attestations` gives a
+  relayer the link, its sets and signatures, and ChainV4Finality.sol follows justified and final
+  checkpoints with their state roots (`chainv4 bridge finality-deploy`, `finality-relay`); see
+  [Finality](finality.md#attestations-finality-followed-on-ethereum). It changed the encoding of
+  votes and blocks, so it ships with a new genesis rather than as a fork (owner's pick). Left: deploy
+  it on Sepolia with the regenesis, and stages 2 and 3, asking their questions at their start.
+  **Answers (owner, 2026-11-07):**
+  - **Stage 1 checks secp256k1 + keccak:** validators also sign a keccak commitment of each link
+    with a secp256k1 attester key, apart from their voting key, so a contract on Ethereum checks
+    finality with `ecrecover`, cheaply. First planned as a fork; it rides in votes and blocks, so it
+    came with a new genesis instead.
   - **Stage 2 uses SP1,** Succinct's zkVM: Rust on RISC-V, revm already proven with it.
   - **Proofs are made locally, by hand,** on this Mac by a command; tests run SP1's execute or mock
     mode only, never a GPU. A prover network can come later. SP1's toolchain and Groth16 wrapping
@@ -655,6 +662,17 @@ with.
   stopping with a clear error at that height.
 
 ### Script layer
+
+- [ ] **Unit tests for Lua contracts (owner, 2026-11-07).** `chainv4 test` runs a contract's tests,
+  each `test_*` function on a fresh in-memory chain, with no node or network, and reports each
+  pass or failure with the line it failed at, exiting non-zero for CI. Tests live three ways: in
+  the contract itself, kept out of what is deployed; in `name_test.lua` beside it; and in a
+  `tests/` folder. A `t` library from the start: deploy with init arguments, call as any account
+  with value, expect a failure and its message, assert; the events a call emitted, coin and token
+  balances, the contract's storage; move time and height, and the fuel each call used; call Wasm
+  and EVM contracts; and property tests with random inputs. Still to settle when it starts: how a
+  contract's own tests are kept out of the deployed code. Queued after the validity proofs' first
+  stage.
 
 - [x] **Push the Luau and mlua forks, then drop the local `[patch]`.** Done 2026-11-05: both forks
   are pushed (`germ3n/luau-src-rs` 93df670, `germ3n/mlua` 3832a79), the `[patch]` is gone, and
@@ -1802,6 +1820,27 @@ with.
     against revm's own test vectors.
 - [ ] **Benchmarks across machines,** on the testnet: the same load spread over several nodes on
   separate links, and a long run for disk growth, which nothing prunes yet.
+- [ ] **A benchmark of everything (owner, 2026-11-07).** One suite, run by a command and kept with
+  each release, each result with its spread and the machine it ran on, so a change that slows
+  anything shows before it ships. It takes in `chainv4 bench` and `chainv4 calibrate` as they are,
+  and the item above, and adds:
+  - **Throughput:** transactions a second of each kind (transfers, token calls, Lua, Wasm and EVM
+    calls, batches, multisig), built, imported and gossiped, on one node and across several.
+  - **Blocks:** time to build, import and verify a block by size and by kind, and the parallel
+    runner's speedup by thread count.
+  - **Signatures and hashes:** verifies a second for each key scheme and each chain hash, and EIP-712
+    and member signatures of a multisig.
+  - **Sync and light clients:** from genesis and from a snapshot, by chain length; a light
+    client's walk to the tip, and proving a read.
+  - **Storage:** reads, writes, commits and state proofs by state size, RocksDB against SurrealKV
+    for the SurrealKV pass.
+  - **The API and the apps:** latency of the busiest routes under load, the wallet's and explorer's
+    start and proof checks.
+  - **Attestations on Ethereum:** what ChainV4Finality.sol's submit costs by the number of
+    attesters (3, 10, 50, 100, 300), and where one SP1 proof per update becomes cheaper, which
+    says when stage 2 of the validity proofs should take over from stage 1's signatures.
+  - **SP1 proving:** time and memory to prove a light-client update and a block of native
+    transactions, on this Mac and on a rented GPU, which says whether proving by hand is workable.
 - [x] **An explorer.** `explorer/`, built with egui, for the desktop and, built to WebAssembly,
   the browser. It shows blocks on a map with side branches, transactions with their hops as a
   call tree and a graph, accounts, contracts and tokens, the network, the mempool and finality,

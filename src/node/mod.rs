@@ -195,6 +195,8 @@ pub struct Node {
     asked_status: u64,
     /// The voting key, on a node that validates.
     validator: Option<Keypair>,
+    /// The secp256k1 key the validator attests links with for Ethereum, apart from its voting key.
+    attester: Option<Keypair>,
     /// When the loop first ran; 0 before.
     started: u64,
     /// The tip the chain's bootnodes were last read at, and the ones the network was told.
@@ -658,6 +660,7 @@ impl Node {
             reported: 0,
             asked_status: 0,
             validator: None,
+            attester: None,
             started: 0,
             bootnodes_at: None,
             bootnodes: Vec::new(),
@@ -852,6 +855,16 @@ impl Node {
     )]
     pub fn validate(mut self, voter: Keypair) -> Node {
         self.validator = Some(voter);
+        self
+    }
+
+    #[document(
+        parent = "Node",
+        summary = "Makes the validator attest each link it votes for with a secp256k1 key, for Ethereum: an attestation rides with each vote, from the first epoch whose fixed set names this key's address as the validator's attester. Before then, or once it names another, votes go without one.",
+        params = { attester = "The attester's key: a secp256k1 one, apart from the voting key." },
+    )]
+    pub fn attest(mut self, attester: Keypair) -> Node {
+        self.attester = Some(attester);
         self
     }
 
@@ -1453,7 +1466,8 @@ impl Node {
         };
         // Remembered before it leaves, so a crash can never lead to a conflicting vote.
         self.chain.record_own_vote(&vote)?;
-        let signed = SignedVote::sign(vote, keypair, &self.chain.genesis());
+        let mut signed = SignedVote::sign(vote, keypair, &self.chain.genesis());
+        signed.attestation = self.attestation(&vote)?;
         log::info!("[node] voting for epoch {} from epoch {}", vote.target.epoch, vote.source.epoch);
         self.counters.votes_cast += 1;
         self.send(NetCommand::PublishVote(signed));
@@ -1467,6 +1481,33 @@ impl Node {
                 Ok(())
             }
         }
+    }
+
+    /// This validator's attestation of the link it votes for, when it attests and the target
+    /// epoch's fixed set names its attester's address for it.
+    fn attestation(&self, vote: &crate::structs::vote::Vote) -> Result<Option<[u8; 65]>, NodeError> {
+        #[cfg(feature = "secp256k1")]
+        if let Some(attester) = &self.attester
+            && let crate::crypto::keypair::PrivateKey::Secp256k1(secret) = attester.private()
+        {
+            let address = attester.public().address();
+            let named = self.chain.attested_link(vote.source, vote.target)?;
+            let ours = match address {
+                crate::structs::address::Address::Secp256k1(bytes) => Some(bytes),
+                _ => None,
+            };
+            // FFG's fixed set: authority's signers attest nothing.
+            let registered = crate::registry::validators::Validators::new(&self.chain.state()).set(vote.target.epoch)?.and_then(|set| set.member(&vote.voter).and_then(|member| member.attester));
+
+            return Ok(match (named, ours, registered) {
+                (Some(link), Some(ours), Some(registered)) if ours == registered => Some(link.sign(secret)),
+                _ => None,
+            });
+        }
+
+        let _ = vote;
+
+        Ok(None)
     }
 
     /// Logs what an import did and brings the mempool in line: transactions the main chain now

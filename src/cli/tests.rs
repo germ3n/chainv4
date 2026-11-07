@@ -3214,6 +3214,65 @@ mod send {
         }
     }
 
+    /// A validator attests for Ethereum; ChainV4Finality.sol, deployed and fed by the CLI on this
+    /// chain's own EVM, standing in for Ethereum, follows chainv4's finality by those attestations.
+    #[cfg(all(feature = "bridge", feature = "swap", feature = "evm", feature = "finality-ffg", feature = "secp256k1"))]
+    #[test]
+    fn a_validators_attestations_take_chainv4_finality_sol_along_its_finality() {
+        use crate::cli::bridge::{BridgeAction, BridgeArgs, bridge};
+        use crate::cli::swap::rpc::{Rpc, from_key};
+        use crate::crypto::keypair::{Keypair, PrivateKey};
+        use crate::params::finality::FfgConfig;
+
+        let attester = Keypair::from_private(PrivateKey::Secp256k1([0x51; 32]));
+        let attester_address = from_key(&[0x51; 32]).unwrap();
+        let finality = match FinalityConfig::dev(DevAuthority::dev_keypair().public()) {
+            Some(FinalityConfig::Ffg(config)) => Some(FinalityConfig::Ffg(FfgConfig {
+                validators: config.validators.iter().map(|validator| crate::params::finality::GenesisValidator { attester: Some(attester_address), ..validator.clone() }).collect(),
+                ..config
+            })),
+            other => other,
+        };
+        let running = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), ..genesis }, |node| node.attest(attester.clone()), Default::default());
+        let node = format!("http://{}", running.api);
+        let rpc_url = format!("{node}/rpc");
+        let dir = TempDir::new("finality-relay");
+        let relayer = dir.0.join("relayer.key");
+        fs::write(&relayer, Keypair::from_private(PrivateKey::Secp256k1([0x52; 32])).to_key_file()).unwrap();
+        let relayer_address = from_key(&[0x52; 32]).unwrap();
+        send(running.args(TxArgs::Transfer { to: Address::Secp256k1(relayer_address).into(), amount: u256::from(10u64).pow(20) })).unwrap();
+
+        let args = |action: BridgeAction| BridgeArgs { action, node: node.clone(), tls: Default::default(), key: None, gateway: None, eth_rpc: vec![rpc_url.clone()], evm_key: Some(relayer.clone()), btc_gateway: None, bitcoin: Default::default(), beacon: Default::default(), proxy: Default::default(), eth_auth: Default::default(), evm_gateways: Vec::new(), max_fee_rate: None, cancel_after: crate::bridge::BTC_CANCEL_AFTER_MS, bump_after: crate::registry::federation::BtcPolicy::BUMP_AFTER_MS };
+        let started = std::time::Instant::now();
+
+        // Once the finalized checkpoint has a justified link out of it, the contract starts there.
+        while bridge(args(BridgeAction::FinalityDeploy)).is_err() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "never a link to start from");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        let crate::structs::address::Address::Evm(contract) = crate::vm::evm::create_address(&Address::Secp256k1(relayer_address), 0) else { unreachable!() };
+        let rpc = Rpc::new(crate::cli::send::agent(&Default::default()).unwrap(), &rpc_url);
+        let read = |getter: &str| {
+            let output = rpc.call(&contract, &crate::crypto::secp256k1::keccak(getter.as_bytes())[..4]).unwrap();
+
+            u64::try_from(u256::from_be_bytes(output[..32].try_into().unwrap())).unwrap()
+        };
+        let start = read("justifiedEpoch()");
+
+        // Relayed now and then, it follows: its justified epoch moves on, and so does its final one.
+        while read("finalizedEpoch()") <= start + 1 {
+            assert!(started.elapsed() < std::time::Duration::from_secs(90), "the contract never followed past epoch {start}");
+            bridge(args(BridgeAction::FinalityRelay { contract: crate::structs::hex::to_hex(&contract), every: None })).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+
+        let attested = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/attestations?after={start}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
+        assert_eq!(attested["attestations"][0]["attester"], crate::structs::hex::to_hex(&attester_address));
+        assert_eq!(attested["enough"], true);
+        running.stop();
+    }
+
     /// A transfer refused for good, both ways: voided where it was going, then, once that is final,
     /// refunded where it left, each on the threshold of signers that read both chains for themselves.
     #[cfg(all(feature = "bridge", feature = "swap", feature = "ethereum", feature = "finality-ffg"))]

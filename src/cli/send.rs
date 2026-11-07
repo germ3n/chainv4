@@ -187,6 +187,21 @@ pub enum TxArgs {
         #[arg(long)]
         voter: PublicKey,
     },
+    #[cfg(feature = "staking")]
+    /// Sets a validator's attester, sent from the account that bonded it: the Ethereum address of
+    /// a secp256k1 key, apart from its voting key, that its node attests links with for Ethereum
+    /// (--attestation-key), in sets fixed from now on. none clears it.
+    SetAttester {
+        #[arg(long)]
+        voter: PublicKey,
+        /// The attester's address, 0x and 40 hex digits, or none; or its key file, with
+        /// --attester-key.
+        #[arg(long, required_unless_present = "attester_key")]
+        attester: Option<String>,
+        /// The attester's key file, whose address is named: the key stays where it is.
+        #[arg(long, conflicts_with = "attester")]
+        attester_key: Option<PathBuf>,
+    },
     /// Reports two conflicting votes by one validator, as hex from GET /evidence or the node's log.
     Slash {
         #[arg(long, value_parser = parse_vote)]
@@ -1130,6 +1145,20 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
         TxArgs::Unbond { voter } => Tx::Unbond { voter },
         #[cfg(feature = "staking")]
         TxArgs::Withdraw { voter } => Tx::Withdraw { voter },
+        #[cfg(feature = "staking")]
+        TxArgs::SetAttester { voter, attester, attester_key } => {
+            let attester = match (attester.as_deref(), attester_key) {
+                (Some("none"), _) => None,
+                (Some(text), _) => Some(from_hex(text).and_then(|bytes| bytes.try_into().ok()).ok_or("--attester is 0x and 40 hex digits, or none")?),
+                (None, Some(path)) => match super::signer(Some(&path))?.public().address() {
+                    Address::Secp256k1(bytes) => Some(bytes),
+                    _ => return Err("--attester-key is a secp256k1 key: make one with keygen --scheme secp256k1".into()),
+                },
+                (None, None) => return Err("give --attester or --attester-key".into()),
+            };
+
+            Tx::SetAttester { voter, attester }
+        }
         TxArgs::Slash { first, second } => Tx::Slash { first, second },
         TxArgs::ApproveSigners {
             add,

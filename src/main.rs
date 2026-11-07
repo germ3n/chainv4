@@ -435,6 +435,11 @@ struct NodeArgs {
     /// The voting key file named in the validator's bond, for --validate.
     #[arg(long, requires = "validate")]
     validator_key: Option<std::path::PathBuf>,
+    /// A secp256k1 key file the validator attests links with for Ethereum, apart from its voting
+    /// key, for --validate: its votes carry attestations once a set fixed after
+    /// send set-attester names its address.
+    #[arg(long, requires = "validate")]
+    attestation_key: Option<std::path::PathBuf>,
     /// A file holding the passphrase of the node's key files sealed with keygen --seal: the
     /// producer's, the validator's, the pool's push key and the faucet's. Without one, a sealed key
     /// is read from the file CHAINV4_KEY_PASSPHRASE_FILE names, else asked for on a terminal, and a
@@ -987,6 +992,17 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         let voter = cli::signer_with(args.validator_key.as_deref(), args.key_passphrase_file.as_deref())?;
         log::info!("[node] validating with voting key {}", voter.public());
         node = node.validate(voter);
+
+        if let Some(path) = args.attestation_key.as_deref() {
+            let attester = cli::signer_with(Some(path), args.key_passphrase_file.as_deref())?;
+
+            if attester.public().key_type() != chainv4::crypto::keypair::KeyType::Secp256k1 {
+                return Err("--attestation-key needs a secp256k1 key: Ethereum checks attestations with ecrecover".into());
+            }
+
+            log::info!("[node] attesting for Ethereum as {}", attester.public().address());
+            node = node.attest(attester);
+        }
     }
 
     #[cfg(feature = "stream")]

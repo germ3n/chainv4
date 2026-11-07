@@ -126,6 +126,21 @@ pub trait Finality: Send {
 
     #[document(
         parent = "Finality",
+        summary = "A link as an attestation commits to it, from what this node holds: the target's height and state root and the attesting sets of its epoch and the next. None under finality that does not vote, or while either set is not known here.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    fn attested_link(&self, _chain: &View, _source: Checkpoint, _target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
+        Ok(None)
+    }
+
+    #[document(parent = "Finality", summary = "An epoch's attesting set: None under finality that does not vote, or before it is fixed.")]
+    #[cfg(feature = "secp256k1")]
+    fn attesting_set(&self, _chain: &View, _epoch: u64) -> Result<Option<crate::structs::attestation::AttestingSet>, DbError> {
+        Ok(None)
+    }
+
+    #[document(
+        parent = "Finality",
         summary = "Checks a justification from a peer: its link, its votes, and that they are enough.",
         returns = "false for one this node holds already.",
     )]
@@ -602,6 +617,32 @@ impl Chain {
     pub fn vote_for(&self, voter: &PublicKey) -> Result<Option<Vote>, DbError> {
         match &self.finality {
             Some(finality) => finality.vote_for(&self.view(), voter),
+            None => Ok(None),
+        }
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "A link as an attestation commits to it, for a validator to sign beside its vote or a relayer to show Ethereum: the target's height and state root and the attesting sets of its epoch and the next.",
+        returns = "None under finality that does not vote, or while the target or either set is not known here.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn attested_link(&self, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
+        match &self.finality {
+            Some(finality) => finality.attested_link(&self.view(), source, target),
+            None => Ok(None),
+        }
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "An epoch's attesting set, from its fixed validator set: who attests for Ethereum, with what weight, and the whole set's weight.",
+        returns = "None under finality that does not vote, or before the set is fixed.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn attesting_set(&self, epoch: u64) -> Result<Option<crate::structs::attestation::AttestingSet>, DbError> {
+        match &self.finality {
+            Some(finality) => finality.attesting_set(&self.view(), epoch),
             None => Ok(None),
         }
     }

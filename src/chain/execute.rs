@@ -1092,9 +1092,11 @@ fn run(
         }),
         #[cfg(feature = "staking")]
         Tx::Withdraw { voter } => staking(&|validators, _, epoch| validators.withdraw(&sender, voter, epoch).map(|_| ())),
+        #[cfg(feature = "staking")]
+        Tx::SetAttester { voter, attester } => staking(&|validators, _, _| validators.set_attester(&sender, voter, *attester)),
         // A build without staking opens no chain whose validators bond.
         #[cfg(not(feature = "staking"))]
-        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } => (Err(Failure::NoStaking), Contracted::default()),
+        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::SetAttester { .. } => (Err(Failure::NoStaking), Contracted::default()),
         Tx::Slash { first, second } => {
             let chain = match (&rules.staking, &rules.signers) {
                 (Some(finality), _) => finality.chain,

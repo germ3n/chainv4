@@ -147,6 +147,7 @@ mod voting {
                     account: keypair.public().address(),
                     voter: keypair.public(),
                     bond: u256::new(10),
+                    attester: None,
                 })
                 .collect(),
             leak: None,
@@ -475,6 +476,7 @@ mod voting {
                     ..vote.vote
                 },
                 signature: vote.signature,
+                attestation: None,
             };
             let not_voter = Vote {
                 voter: outsider.public(),
@@ -2902,7 +2904,7 @@ mod voting {
             let mut chain = open(&finality);
             justified_past_a_gap(&mut chain);
             let justification = crate::chain::stored_justification(&*chain.db, &stored_header_at(&*chain.db, 4 * INTERVAL).unwrap().unwrap().id()).unwrap().unwrap();
-            let member = |keypair: &Keypair, weight: u64| crate::registry::validators::Member { voter: keypair.public(), account: keypair.public().address(), weight: u256::new(weight.into()) };
+            let member = |keypair: &Keypair, weight: u64| crate::registry::validators::Member { voter: keypair.public(), account: keypair.public().address(), weight: u256::new(weight.into()), attester: None };
             let trusted = |mut members: Vec<crate::registry::validators::Member>, needed: u64| {
                 members.sort_by_key(|member| member.voter);
 
@@ -3251,6 +3253,9 @@ fn staking_needs_staking() {
         Err(FinalityError::Disabled)
     ));
 }
+
+#[cfg(all(feature = "finality-ffg", feature = "secp256k1", feature = "evm", feature = "abi"))]
+mod attestations;
 
 #[cfg(feature = "finality-depth")]
 mod depth {

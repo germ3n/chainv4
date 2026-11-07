@@ -254,6 +254,41 @@ chainv4 --peer … --validate --validator-key vote.key
 Without `--validator-key`, the node votes with the development key, which is the one validator,
 or signer, of the dev settings.
 
+## Attestations: finality followed on Ethereum
+
+Under FFG a validator may also name an **attester**: the Ethereum address of a secp256k1 key apart
+from its voting key. Its node then signs, beside each vote, an **attestation**: a keccak256
+commitment of the link voted for, which `ecrecover` checks, so a contract on Ethereum follows
+chainv4's finality cheaply (`structs::attestation`, `contracts/evm/ChainV4Finality.sol`).
+
+- **What is signed:** `keccak256(abi.encode(keccak256("chainv4 attestation"), chain id, source
+  epoch, source block, target epoch, target block, the target's height and state root, set, next
+  set))`, each set the hash of an epoch's **attesting set**, `keccak256(abi.encode(total,
+  attesters, weights))`: the members with an attester, by address ascending, each address once with
+  every weight naming it, and the whole set's weight, attesters or not. The set is the target
+  epoch's, which signs it; the next set is the next epoch's, which the contract moves to.
+- **Naming one:** `chainv4 send --key account.key set-attester --voter ed25519:0x… --attester 0x…`
+  (or `--attester-key attest.key`, or `none`), from the account that bonded it, or `attester` on a
+  genesis validator. Sets fixed from then on carry it, so it counts two epochs later.
+- **Signing:** `--attestation-key attest.key` beside `--validate` (Docker:
+  `config/attestation.key`, or `ATTESTATION_KEY`). The node attests only once a fixed set names
+  that key's address for its validator; before then its votes go without.
+- **Checked by every node:** an attestation rides inside the vote, so inside justifications and
+  blocks, and must recover to the attester the target epoch's fixed set names for the vote's
+  validator, or the vote is invalid (`VerifyError::BadAttestation`). A vote without one counts as
+  ever: chainv4's own finality does not need them.
+- **On Ethereum:** `chainv4 bridge finality-deploy --eth-rpc … --evm-key …` deploys
+  ChainV4Finality.sol from the finalized checkpoint; `chainv4 bridge finality-relay 0x… [--every
+  60]` shows it each link justified since, from `GET /attestations`. The contract takes a link
+  signed by attesters of two thirds of the set's whole weight, records the target as justified with
+  its height and state root, marks the source final when the target is the very next epoch, and
+  moves to the next set. It trusts two thirds of the validators, as chainv4's light clients do;
+  nothing else, so anyone may relay. A validator without an attester weighs in the whole but signs
+  nothing there, so two thirds must be reached by those with one.
+
+This is the first stage of the validity proofs in the [todo](todo.md): what the validators sign,
+checked cheaply elsewhere. Later stages prove the blocks themselves.
+
 ## What to keep in mind
 
 - **Set a leak on a chain of value.** Without one, a chain whose voters drop under two thirds

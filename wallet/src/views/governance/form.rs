@@ -362,6 +362,8 @@ fn cell_value(column: &Column, text: &str, env: &Env) -> Result<Value, String> {
         Cell::Key => key(text).map(Value::String),
         Cell::Account => text.parse::<Address>().map(|address| Value::String(address.to_string())).map_err(|_| "An address, such as ed25519:0x and 64 hex digits.".to_string()),
         Cell::Evm => evm(text).map(Value::String),
+        Cell::MaybeEvm if text.trim().is_empty() => Ok(Value::Null),
+        Cell::MaybeEvm => evm(text).map(Value::String),
         Cell::Amount => amount(text, env).map(Value::String),
     }
 }

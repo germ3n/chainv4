@@ -851,6 +851,7 @@ pub fn finality_json(config: &FinalityConfig) -> Value {
                 "account": validator.account.to_string(),
                 "voter": validator.voter.to_string(),
                 "bond": validator.bond.to_string(),
+                "attester": validator.attester.map(|attester| crate::structs::hex::to_hex(&attester)),
             })).collect::<Vec<_>>(),
             });
 
@@ -913,6 +914,11 @@ pub(crate) fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig,
                         account: item.parse("account")?,
                         voter: item.parse::<PublicKey>("voter")?,
                         bond: item.amount("bond")?,
+                        // Added after genesis files were first written: one without it names none.
+                        attester: item
+                            .later_text("attester")?
+                            .map(|text| crate::structs::hex::from_hex(&text).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("finality.validators: {text} is not an Ethereum address")))
+                            .transpose()?,
                     };
                     item.done()?;
 

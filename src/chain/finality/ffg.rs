@@ -42,6 +42,7 @@ impl FfgConfig {
                 account: validator.address(),
                 voter: validator,
                 bond: coins(10_000),
+                attester: None,
             }],
             leak: None,
             slash_permille: None,
@@ -108,6 +109,7 @@ pub(super) fn write_genesis(state: &State, config: &FfgConfig) -> Result<(), DbE
             active_from: 0,
             active_until: None,
             withdrawable_from: None,
+            attester: validator.attester,
             slashed: false,
         }, &mut voters);
     }

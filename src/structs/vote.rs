@@ -73,6 +73,8 @@ pub struct SignedVote {
     pub vote: Vote,
     #[document(summary = "The voter's signature over the vote and the chain's genesis id.")]
     pub signature: Signature,
+    #[document(summary = "Its validator's attestation of the link, for Ethereum: r, s and v over the link's AttestedLink digest, by the attester its validator registered, or None. One that is there must recover to that attester, or the vote is invalid; the vote's own signature does not cover it.")]
+    pub attestation: Option<[u8; 65]>,
 }
 
 impl Hashable for SignedVote {}
@@ -99,6 +101,7 @@ impl SignedVote {
         SignedVote {
             signature: keypair.sign(&signing_bytes(&vote, chain)),
             vote,
+            attestation: None,
         }
     }
 

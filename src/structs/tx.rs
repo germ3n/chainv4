@@ -341,6 +341,13 @@ pub enum Tx {
     )]
     #[wincode(tag = 28)]
     Remove { contract: Address, beneficiary: Address },
+    #[document(
+        summary = "Sets or clears a finality validator's attester: the Ethereum address of a secp256k1 key, apart from its voting key, that attests the links it votes for, so ChainV4Finality.sol on Ethereum follows chainv4's finality. Only the account that bonded it may; sets fixed from then on carry it, and its votes' attestations must recover to it.",
+        params = { voter = "The validator's voting key.", attester = "The attester's address, or None to attest no more." },
+        see_also = "AttestedLink, SignedVote",
+    )]
+    #[wincode(tag = 29)]
+    SetAttester { voter: PublicKey, attester: Option<[u8; 20]> },
 }
 
 #[document(
@@ -815,7 +822,7 @@ impl Verifiable for Tx {
 
                 nonzero(amount)
             }
-            Tx::Unbond { voter } | Tx::Withdraw { voter } => voter.verify(),
+            Tx::Unbond { voter } | Tx::Withdraw { voter } | Tx::SetAttester { voter, .. } => voter.verify(),
             Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(|signer| signer.key.verify()),
             Tx::WithdrawApproval { .. } | Tx::ClearVote { .. } | Tx::SetDirectory { .. } => Ok(()),
             Tx::HandDirectory { to } => to.iter().try_for_each(Verifiable::verify),
@@ -973,6 +980,7 @@ impl Tx {
             | Tx::Bond { .. }
             | Tx::Unbond { .. }
             | Tx::Withdraw { .. }
+            | Tx::SetAttester { .. }
             | Tx::Slash { .. }
             | Tx::ApproveSigners { .. }
             | Tx::WithdrawApproval { .. }

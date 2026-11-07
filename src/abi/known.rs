@@ -44,7 +44,7 @@ const MAX_HELD: usize = 16 << 20;
 const ENTRY_COST: usize = 1 << 10;
 
 /// Every ABI built in, standards first, by what it reads as. Where two fit, the first one says.
-const BUILT_IN: [(&str, &str, bool); 19] = [
+const BUILT_IN: [(&str, &str, bool); 20] = [
     ("ERC-20", include_str!("erc20.json"), true),
     ("ERC-721", include_str!("erc721.json"), true),
     ("ERC-1155 (Items)", include_str!("../../contracts/evm/Items.abi"), false),
@@ -56,6 +56,7 @@ const BUILT_IN: [(&str, &str, bool); 19] = [
     ("WrappedNft", include_str!("../../contracts/evm/WrappedNft.abi"), false),
     ("WrappedMulti", include_str!("../../contracts/evm/WrappedMulti.abi"), false),
     ("Swap.sol", include_str!("../../contracts/evm/Swap.abi"), false),
+    ("ChainV4Finality.sol", include_str!("../../contracts/evm/ChainV4Finality.abi"), false),
     ("DEX router", include_str!("../../contracts/evm/DexRouter.abi"), false),
     ("DEX factory", include_str!("../../contracts/evm/DexFactory.abi"), false),
     ("DEX pair", include_str!("../../contracts/evm/DexPair.abi"), false),

@@ -376,9 +376,9 @@ mod tests {
     /// Three validators weighing 1, 2 and 3, the third bonded by another account.
     fn validators() -> Vec<Member> {
         vec![
-            Member { voter: key(1).public(), account: key(1).public().address(), weight: u256::ONE },
-            Member { voter: key(2).public(), account: key(2).public().address(), weight: u256::from(2u64) },
-            Member { voter: key(3).public(), account: key(9).public().address(), weight: u256::from(3u64) },
+            Member { voter: key(1).public(), account: key(1).public().address(), weight: u256::ONE, attester: None },
+            Member { voter: key(2).public(), account: key(2).public().address(), weight: u256::from(2u64), attester: None },
+            Member { voter: key(3).public(), account: key(9).public().address(), weight: u256::from(3u64), attester: None },
         ]
     }
 
@@ -448,7 +448,7 @@ mod tests {
         let rules = rules(Schedule::Draw);
         let mut shuffled = validators();
         shuffled.reverse();
-        shuffled.push(Member { voter: key(4).public(), account: key(4).public().address(), weight: u256::ZERO });
+        shuffled.push(Member { voter: key(4).public(), account: key(4).public().address(), weight: u256::ZERO, attester: None });
 
         for height in 0..50 {
             assert_eq!(rules.producer_at(&validators(), height, 0), rules.producer_at(&shuffled, height, 0));

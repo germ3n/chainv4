@@ -131,6 +131,8 @@ impl SignerSet {
                     voter: signer.key,
                     account: signer.account,
                     weight: u256::ONE,
+                    // Authority's signers attest nothing: Ethereum follows FFG's validators.
+                    attester: None,
                 })
                 .collect(),
         }

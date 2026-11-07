@@ -9,6 +9,12 @@ The federation, the contracts' crypto, the gateways between chainv4 and EVM chai
 tokens and NFTs, and Bitcoin, through a light client contract, are in; so are the wallet's and the
 explorer's Bridge pages ([Wallet](wallet.md#bridge), [Explorer](explorer.md#pages)).
 
+
+The bridges trust their federation's signers. Apart from them, ChainV4Finality.sol lets an EVM
+chain follow chainv4's finality itself, by the validators' attestations, with nobody's word
+between: see [Finality](finality.md#attestations-finality-followed-on-ethereum). The gateways do
+not read it yet; taking proven state roots in place of the federation's word is a later stage of
+the validity proofs in the [todo](todo.md).
 ## The federation
 
 Who vouches for a deposit made on another chain, and signs what leaves for one, is a federation:

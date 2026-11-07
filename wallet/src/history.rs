@@ -542,6 +542,8 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Bond { .. }, _) => "Bonded a voter".to_string(),
         (Tx::Unbond { .. }, _) => "Unbonded a voter".to_string(),
         (Tx::Withdraw { .. }, _) => "Withdrew a bond".to_string(),
+        (Tx::SetAttester { attester: Some(_), .. }, _) => "Set a validator's attester".to_string(),
+        (Tx::SetAttester { attester: None, .. }, _) => "Cleared a validator's attester".to_string(),
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),

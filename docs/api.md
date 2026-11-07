@@ -396,6 +396,18 @@ The justifications this node holds for main-chain checkpoints from epoch `from` 
 most `count`, at most 64: `{"justifications": ["0x…", …]}`. It stops at the first checkpoint it
 holds none for. 404 on a chain whose finality does not vote.
 
+### `GET /attestations?after=E`
+
+What a relayer shows [ChainV4Finality.sol](finality.md#attestations-finality-followed-on-ethereum):
+the first main-chain checkpoint justified after epoch `after` (0 by default): `chain_id`;
+`source` and `target`, each `epoch` and `block`, the source with its `height` and `state_root`;
+the target's `height` and `state_root`; the `digest` attesters sign; `set` and `next_set`, the
+attesting sets of the target's epoch and the next, each `total`, `attesters`, `weights` and its
+`hash`; `attestations`, each `attester` and `signature`, those the justification carried that
+recover to the set's attesters, by address; their `weight`, and whether it is `enough`, two
+thirds of the set. Words are 32-byte hex, as the contract takes them. 404 when no checkpoint is
+justified after it yet, on a chain whose finality does not vote, and in a build without secp256k1.
+
 ### `GET /proofs/{column}/{key}`
 
 A proof of one chain-state entry against the tip's state root (see

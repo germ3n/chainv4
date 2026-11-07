@@ -97,6 +97,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::Bond { .. } => ("bond", sender),
         Tx::Unbond { .. } => ("unbond", sender),
         Tx::Withdraw { .. } => ("withdraw", sender),
+        Tx::SetAttester { .. } => ("set_attester", sender),
         Tx::Slash { .. } => ("slash", sender),
         Tx::ApproveSigners { .. } => ("approve_signers", sender),
         Tx::WithdrawApproval { .. } => ("withdraw_approval", sender),
