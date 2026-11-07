@@ -238,6 +238,8 @@ fn summary(tx: &Tx) -> String {
         Tx::Withdraw { voter } => format!("withdraw voter {voter}'s bond"),
         Tx::SetAttester { voter, attester: Some(attester) } => format!("set voter {voter}'s attester to {}", crate::structs::hex::to_hex(attester)),
         Tx::SetAttester { voter, attester: None } => format!("clear voter {voter}'s attester"),
+        Tx::SetRestake { voter, on: true, .. } => format!("restake voter {voter}'s rewards"),
+        Tx::SetRestake { voter, on: false, .. } => format!("stop restaking voter {voter}'s rewards"),
         Tx::Slash { .. } => "slash a voter that voted twice".to_string(),
         Tx::ApproveSigners { version, .. } => format!("approve signers version {version}"),
         Tx::WithdrawApproval { version } => format!("withdraw approval of signers version {version}"),

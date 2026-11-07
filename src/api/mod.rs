@@ -1270,7 +1270,7 @@ async fn validators(Shared(api): Shared<Api>) -> Answer {
 
     for voter in validators.voters()? {
         if let Some(record) = validators.get(&voter)? {
-            records.push(json::validator(&voter, &record));
+            records.push(json::validator(&voter, &record, validators.restake(&voter)?));
         }
     }
 
@@ -1369,11 +1369,10 @@ async fn validator(Shared(api): Shared<Api>, Path(voter): Path<String>) -> Answe
         .parse()
         .map_err(|_| ApiError::BadRequest(format!("not a voting key: {voter}")))?;
     let state = State::new(api.db);
-    let record = Validators::new(&state)
-        .get(&voter)?
-        .ok_or_else(|| ApiError::NotFound(format!("no validator has the voting key {voter}")))?;
+    let validators = Validators::new(&state);
+    let record = validators.get(&voter)?.ok_or_else(|| ApiError::NotFound(format!("no validator has the voting key {voter}")))?;
 
-    Ok(Json(json::validator(&voter, &record)))
+    Ok(Json(json::validator(&voter, &record, validators.restake(&voter)?)))
 }
 
 /// Authority finality's signers: those voting in the tip's epoch, the set decided last, and the

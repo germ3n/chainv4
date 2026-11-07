@@ -124,6 +124,7 @@ pub fn tx(transaction: &Tx) -> Value {
         Tx::Unbond { voter } => json!({ "type": "unbond", "voter": voter.to_string() }),
         Tx::Withdraw { voter } => json!({ "type": "withdraw", "voter": voter.to_string() }),
         Tx::SetAttester { voter, attester } => json!({ "type": "set_attester", "voter": voter.to_string(), "attester": attester.map(|attester| crate::structs::hex::to_hex(&attester)) }),
+        Tx::SetRestake { voter, on, cap } => json!({ "type": "set_restake", "voter": voter.to_string(), "on": on, "cap": cap.to_string() }),
         Tx::Slash { first, second } => json!({
             "type": "slash",
             "voter": first.vote.voter.to_string(),

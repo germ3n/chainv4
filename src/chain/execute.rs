@@ -380,6 +380,8 @@ pub enum TxError {
     Multisig(RegistryError),
     #[document(summary = "It takes more bytes than the chain's max_tx_bytes allows, its raw bytes for one Ethereum-signed.")]
     TooBig { bytes: u64, limit: u64 },
+    #[document(summary = "A kind of transaction the chain takes only from a fork on, sent before it: the fork's name.")]
+    BeforeFork(&'static str),
 }
 
 impl fmt::Display for TxError {
@@ -395,6 +397,7 @@ impl fmt::Display for TxError {
             TxError::BlockFull { left } => write!(f, "its gas limit is more than the {left} the block has left"),
             TxError::Multisig(err) => write!(f, "{err}"),
             TxError::TooBig { bytes, limit } => write!(f, "it takes {bytes} bytes, more than the {limit} a transaction may"),
+            TxError::BeforeFork(fork) => write!(f, "the chain takes this kind of transaction from the {fork} fork on"),
         }
     }
 }
@@ -526,6 +529,12 @@ pub(crate) fn execute_authorized(
     // Refused long before here for a block, whose transactions verified; a dry run's did not.
     if let Some(problem) = tx.batch_problem() {
         return Err(ExecuteError::Invalid(TxError::Invalid(problem)));
+    }
+
+    // A kind of transaction a fork brought in is no transaction before the fork, as it is to a
+    // release from before it.
+    if matches!(tx.tx, Tx::SetRestake { .. }) && !rules.vm.forks.has(&crate::params::forks::RESTAKING) {
+        return Err(ExecuteError::Invalid(TxError::BeforeFork(crate::params::forks::RESTAKING.name)));
     }
 
     // A transaction over max_tx_bytes never runs: an Ethereum-signed one by its raw bytes, which
@@ -1082,6 +1091,11 @@ fn run(
         },
         #[cfg(feature = "staking")]
         Tx::Bond { .. } if rules.staking.as_ref().is_some_and(|staking| !staking.bonding) => (Err(Failure::BondingClosed), Contracted::default()),
+        // From the restaking fork, a bond on a validator its sender already bonded adds to it.
+        #[cfg(feature = "staking")]
+        Tx::Bond { voter, amount } if rules.vm.forks.has(&crate::params::forks::RESTAKING) && Validators::new(layer).get(voter).ok().flatten().is_some() => {
+            staking(&|validators, _, _| validators.top_up(&sender, voter, amount.to_u256()))
+        }
         #[cfg(feature = "staking")]
         Tx::Bond { voter, amount } => staking(&|validators, finality, epoch| {
             validators.bond(&sender, voter, amount.to_u256(), epoch, &finality.staking)
@@ -1094,9 +1108,11 @@ fn run(
         Tx::Withdraw { voter } => staking(&|validators, _, epoch| validators.withdraw(&sender, voter, epoch).map(|_| ())),
         #[cfg(feature = "staking")]
         Tx::SetAttester { voter, attester } => staking(&|validators, _, _| validators.set_attester(&sender, voter, *attester)),
+        #[cfg(feature = "staking")]
+        Tx::SetRestake { voter, on, cap } => staking(&|validators, _, _| validators.set_restake(&sender, voter, crate::registry::validators::Restake { on: *on, cap: *cap })),
         // A build without staking opens no chain whose validators bond.
         #[cfg(not(feature = "staking"))]
-        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::SetAttester { .. } => (Err(Failure::NoStaking), Contracted::default()),
+        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::SetAttester { .. } | Tx::SetRestake { .. } => (Err(Failure::NoStaking), Contracted::default()),
         Tx::Slash { first, second } => {
             let chain = match (&rules.staking, &rules.signers) {
                 (Some(finality), _) => finality.chain,

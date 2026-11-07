@@ -179,6 +179,14 @@ offline; these would make that hold up as a treasury.
 
 ### Consensus
 
+- [x] **Restaking (owner, 2026-11-07).** Done 2026-11-08 as the first real fork, `restaking`:
+  a validator's account turns restaking on or off at any time (`Tx::SetRestake`), every reward it
+  earns, vote rewards and staked consensus's block rewards, goes into its bond up to any cap, its
+  weight following at the next fixed set; bonds are topped up by hand with `bond`; and the
+  attestations of justifications blocks carry are checked, which stage 1 of the validity proofs
+  left out. `GET /validators`, the explorer and the wallet show it. See
+  [Finality](finality.md#restaking). Left: schedule it on the devnet and turn it on for every
+  validator (owner: "enable restaking for all nodes next deploy").
 - [x] **A fork schedule (owner, 2026-11-06).** Done 2026-11-07: named forks the release knows
   (`params::forks::FORKS`), in genesis's `forks` or scheduled by governance with `Change::Fork` at
   a height or an epoch's first block, at least a governed lead ahead (a day of blocks by default),

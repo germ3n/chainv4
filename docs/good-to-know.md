@@ -2277,6 +2277,17 @@ contract computes, so they wait for the next regenesis (see the todo).
 - **A wrong attestation is an invalid vote,** in gossip and in blocks alike: a validator whose
   `--attestation-key` is not the attester its set names simply attests nothing.
 
+## Restaking, the first fork
+
+- **It changes nothing before its height.** The release knows the fork; the chain runs by it
+  only once governance schedules it and it passes. A node of the release before stops at it.
+- **Where a reward goes is decided as it is paid,** by the setting standing then. Turning
+  restaking on does not move what was paid before.
+- **Restaked weight comes two epochs later,** with the set fixed then; the bond itself grows at
+  once, so a slash takes from it too.
+- **Mining rewards are not restaked,** under proof of work: they are a miner's, paid to a payout
+  address, which need not be a validator's account at all.
+
 ## Lua contract tests
 
 - **Tests run off chain, their calls on it.** A test's own code is not metered or limited; only

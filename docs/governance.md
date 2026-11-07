@@ -432,8 +432,10 @@ a node replaying history runs each block by its own height's (`params::forks`).
 
 - **A fork is a name its release knows** (`FORKS`), with the code it changes asking whether it is
   in force (`Forks::has`, through `VmRules::forks`, set for every block from its parent's state).
-  This release knows none yet: the machinery stands, tested with a fork that exists in tests
-  alone, and the first real one comes with the next consensus change.
+  This release knows one, `restaking` (see [Finality](finality.md#restaking)): validators' rewards
+  restaked into their bonds when their accounts turn it on, bonds topped up by hand, and the
+  attestations of the justifications blocks carry checked as gossiped ones are. Tests also run
+  a fork that exists in them alone.
 - **Genesis may list forks** (`forks`, see [Genesis](genesis.md)), each its release knows, at a
   height or a finality epoch's first block.
 - **Governance schedules one** at least the chain's lead ahead, a day of its blocks unless it set

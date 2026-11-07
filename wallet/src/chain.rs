@@ -265,6 +265,9 @@ pub struct Chain {
     /// Each Ethereum account's EIP-7702 delegation, proven at the tip: the contract whose code it
     /// runs as its own, or None.
     pub delegations: HashMap<String, Proven<Option<Address>>>,
+    /// The chain's bonded validators, as GET /validators lists them: the node's word, for showing
+    /// an account that bonded one its bond and where its rewards go.
+    pub validators: Vec<serde_json::Value>,
     /// The tokens the registry lists, by address text: the node says which, the proof what.
     pub listed: Vec<String>,
     /// The registry's pages so far, while a listing of it comes in a page at a time: what listed

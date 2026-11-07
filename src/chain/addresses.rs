@@ -124,6 +124,7 @@ fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
         | Tx::Unbond { .. }
         | Tx::Withdraw { .. }
         | Tx::SetAttester { .. }
+        | Tx::SetRestake { .. }
         | Tx::Slash { .. }
         | Tx::ApproveSigners { .. }
         | Tx::WithdrawApproval { .. }

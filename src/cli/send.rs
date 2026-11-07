@@ -188,6 +188,20 @@ pub enum TxArgs {
         voter: PublicKey,
     },
     #[cfg(feature = "staking")]
+    /// Turns restaking of a validator's rewards on or off, sent from the account that bonded it:
+    /// while on, its vote rewards, and its block rewards under staked consensus, go into its
+    /// bond, up to --cap if given. Taken from the chain's restaking fork on.
+    SetRestake {
+        #[arg(long)]
+        voter: PublicKey,
+        /// on or off.
+        #[arg(long, value_parser = ["on", "off"])]
+        restake: String,
+        /// The most the bond grows to by restaking, in the smallest unit; none for no most.
+        #[arg(long, value_parser = parse_amount)]
+        cap: Option<u256>,
+    },
+    #[cfg(feature = "staking")]
     /// Sets a validator's attester, sent from the account that bonded it: the Ethereum address of
     /// a secp256k1 key, apart from its voting key, that its node attests links with for Ethereum
     /// (--attestation-key), in sets fixed from now on. none clears it.
@@ -1151,6 +1165,8 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
         TxArgs::Unbond { voter } => Tx::Unbond { voter },
         #[cfg(feature = "staking")]
         TxArgs::Withdraw { voter } => Tx::Withdraw { voter },
+        #[cfg(feature = "staking")]
+        TxArgs::SetRestake { voter, restake, cap } => Tx::SetRestake { voter, on: restake == "on", cap: cap.unwrap_or(u256::ZERO) },
         #[cfg(feature = "staking")]
         TxArgs::SetAttester { voter, attester, attester_key } => {
             let attester = match (attester.as_deref(), attester_key) {

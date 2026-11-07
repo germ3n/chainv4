@@ -11,6 +11,29 @@ use {
 };
 
 const VOTERS: &[u8] = b"voters";
+/// Where a validator's restake setting is kept, followed by its voting key: apart from its
+/// record, so records from before the restaking fork read as they always did.
+const RESTAKE: &[u8] = b"restake:";
+
+#[document(
+    summary = "A validator's restake setting, from the restaking fork on: whether its rewards go into its bond rather than its account, and the most its bond grows to by them, past which they go to the account again; zero for no most.",
+    category = "Finality",
+    see_also = "Tx::SetRestake, Validators::restake_reward",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Restake {
+    #[document(summary = "Whether its rewards are restaked.")]
+    pub on: bool,
+    #[document(summary = "The most its bond grows to by restaking, or zero for no most.")]
+    #[wincode(with = "U256Le")]
+    pub cap: u256,
+}
+
+impl Hashable for Restake {}
+
+fn restake_key(voter: &PublicKey) -> Vec<u8> {
+    [RESTAKE, &voter.hashable_bytes_with_tag()].concat()
+}
 
 #[document(
     summary = "The staking rules a chain runs under, from its FinalityConfig.",
@@ -239,6 +262,68 @@ impl<'a> Validators<'a> {
         Ok(())
     }
 
+    #[document(parent = "Validators", summary = "A validator's restake setting, or None while its account never set one: its rewards go to the account.")]
+    pub fn restake(&self, voter: &PublicKey) -> Result<Option<Restake>, DbError> {
+        self.state.get_value(Column::Validators, &restake_key(voter))
+    }
+
+    #[cfg(feature = "staking")]
+    #[document(
+        parent = "Validators",
+        summary = "Sets a validator's restake setting, from the account that bonded it.",
+        panics = "NotBonded, NotYours when account did not bond it.",
+    )]
+    pub fn set_restake(&self, account: &Address, voter: &PublicKey, restake: Restake) -> Result<(), RegistryError> {
+        self.owned(account, voter)?;
+        self.state.put_value(Column::Validators, restake_key(voter), &restake);
+
+        Ok(())
+    }
+
+    #[document(
+        parent = "Validators",
+        summary = "Puts as much of a reward into a validator's bond as its restake setting says: all of it while restaking is on, up to its cap if it set one, for a validator still bonded and not slashed. Its weight follows at the next fixed set, as any bond's does.",
+        returns = "What is left for its account: the whole reward while restaking is off.",
+    )]
+    pub fn restake_reward(&self, voter: &PublicKey, reward: u256) -> Result<u256, DbError> {
+        let (Some(restake), Some(mut record)) = (self.restake(voter)?, self.get(voter)?) else {
+            return Ok(reward);
+        };
+
+        if !restake.on || record.slashed || record.bond == u256::ZERO {
+            return Ok(reward);
+        }
+
+        let room = match restake.cap == u256::ZERO {
+            true => reward,
+            false => restake.cap.saturating_sub(record.bond).min(reward),
+        };
+        record.bond = record.bond.saturating_add(room);
+        self.state.put_value(Column::Validators, voter_key(voter), &record);
+
+        Ok(reward - room)
+    }
+
+    #[cfg(feature = "staking")]
+    #[document(
+        parent = "Validators",
+        summary = "Adds to a validator's bond from the account that bonded it, from the restaking fork on: its weight follows at the next fixed set.",
+        panics = "NotBonded, NotYours, AlreadyUnbonding for one leaving or slashed, InsufficientBalance.",
+    )]
+    pub fn top_up(&self, account: &Address, voter: &PublicKey, amount: u256) -> Result<(), RegistryError> {
+        let mut record = self.owned(account, voter)?;
+
+        if record.active_until.is_some() || record.slashed {
+            return Err(RegistryError::AlreadyUnbonding);
+        }
+
+        Accounts::new(self.state).debit(account, amount)?;
+        record.bond = record.bond.saturating_add(amount);
+        self.state.put_value(Column::Validators, voter_key(voter), &record);
+
+        Ok(())
+    }
+
     #[cfg(feature = "staking")]
     #[document(
         parent = "Validators",
@@ -275,6 +360,10 @@ impl<'a> Validators<'a> {
         voters.retain(|known| known != voter);
         self.put_voters(&voters);
         self.state.delete(Column::Validators, voter_key(voter));
+        // Only where there is one, so a withdrawal before the restaking fork changes nothing it did not.
+        if self.restake(voter)?.is_some() {
+            self.state.delete(Column::Validators, restake_key(voter));
+        }
 
         Ok(record.bond)
     }

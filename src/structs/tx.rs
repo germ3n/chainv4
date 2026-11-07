@@ -348,6 +348,18 @@ pub enum Tx {
     )]
     #[wincode(tag = 29)]
     SetAttester { voter: PublicKey, attester: Option<[u8; 20]> },
+    #[document(
+        summary = "Turns restaking of a finality validator's rewards on or off, from the account that bonded it: while on, its vote rewards, and its block rewards under staked consensus, go into its bond rather than the account, up to cap if it is above zero. Taken from the restaking fork on; before it, a block holding one is invalid.",
+        params = { voter = "The validator's voting key.", on = "Whether to restake.", cap = "The most its bond grows to by restaking, or zero for no most." },
+        see_also = "Restake, Validators::restake_reward",
+    )]
+    #[wincode(tag = 30)]
+    SetRestake {
+        voter: PublicKey,
+        on: bool,
+        #[wincode(with = "U256Le")]
+        cap: u256,
+    },
 }
 
 #[document(
@@ -822,7 +834,7 @@ impl Verifiable for Tx {
 
                 nonzero(amount)
             }
-            Tx::Unbond { voter } | Tx::Withdraw { voter } | Tx::SetAttester { voter, .. } => voter.verify(),
+            Tx::Unbond { voter } | Tx::Withdraw { voter } | Tx::SetAttester { voter, .. } | Tx::SetRestake { voter, .. } => voter.verify(),
             Tx::ApproveSigners { signers, .. } => signers.iter().try_for_each(|signer| signer.key.verify()),
             Tx::WithdrawApproval { .. } | Tx::ClearVote { .. } | Tx::SetDirectory { .. } => Ok(()),
             Tx::HandDirectory { to } => to.iter().try_for_each(Verifiable::verify),
@@ -981,6 +993,7 @@ impl Tx {
             | Tx::Unbond { .. }
             | Tx::Withdraw { .. }
             | Tx::SetAttester { .. }
+            | Tx::SetRestake { .. }
             | Tx::Slash { .. }
             | Tx::ApproveSigners { .. }
             | Tx::WithdrawApproval { .. }

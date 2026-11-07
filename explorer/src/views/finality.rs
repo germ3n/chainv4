@@ -223,6 +223,7 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
         "true" => "slashed".to_string(),
         other => format!("slashed {other}"),
     };
+    let rewards: Vec<String> = bonded.iter().map(|validator| restake_text(validator, ctx)).collect();
     let active_text = |validator: &Value| match text(validator, "active_until").as_str() {
         "null" => format!("from epoch {}", text(validator, "active_from")),
         until => format!("epochs {} to {until}", text(validator, "active_from")),
@@ -230,12 +231,12 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
 
     super::section(ui, look, &format!("Bonded validators · {}", bonded.len()), |ui| {
         if look.narrow {
-            for validator in &bonded {
+            for (validator, rewards) in bonded.iter().zip(&rewards) {
                 super::list_row(ui, look, |ui| {
                     let bond = ctx.coins(&text(validator, "bond"));
                     widgets::end_row(ui, |ui| super::address(ui, ctx, &text(validator, "account")), |ui| ui.label(RichText::new(bond).monospace()));
                     ui.label(
-                        RichText::new(format!("{} · {}", active_text(validator), slashed(validator)))
+                        RichText::new(format!("{} · {} · {rewards}", active_text(validator), slashed(validator)))
                             .small()
                             .color(look.palette.muted),
                     );
@@ -245,16 +246,28 @@ fn voters(ui: &mut Ui, ctx: &mut Ctx) {
             return;
         }
 
-        super::table(ui, look, "bonded", &["voter", "account", "bond", "active", "slashed"], |ui| {
-            for validator in &bonded {
+        super::table(ui, look, "bonded", &["voter", "account", "bond", "active", "slashed", "rewards"], |ui| {
+            for (validator, rewards) in bonded.iter().zip(&rewards) {
                 let voter = text(validator, "voter");
                 super::copyable_as(ui, RichText::new(format::short(&voter)).monospace(), &voter);
                 super::address(ui, ctx, &text(validator, "account"));
                 ui.monospace(ctx.coins(&text(validator, "bond")));
                 ui.label(active_text(validator));
                 ui.label(slashed(validator));
+                ui.label(rewards);
                 super::row_end(ui);
             }
         });
     });
 }
+
+/// Where a validator's rewards go: its bond while it restakes them, up to a cap if it set one, or
+/// its account.
+pub fn restake_text(validator: &Value, ctx: &Ctx) -> String {
+    match (validator["restake"]["on"].as_bool(), validator["restake"]["cap"].as_str()) {
+        (Some(true), Some("0") | None) => "restaked".to_string(),
+        (Some(true), Some(cap)) => format!("restaked up to {}", ctx.coins(cap)),
+        _ => "to its account".to_string(),
+    }
+}
+

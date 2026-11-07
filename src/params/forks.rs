@@ -31,15 +31,22 @@ pub struct Fork {
 pub const TEST_FORK: Fork = Fork { name: "test-fork", summary: "Only in tests: a transfer's intrinsic gas one higher." };
 
 #[document(
-    summary = "Every fork this release knows, oldest first: none yet. Each new one goes on the end, and is scheduled by name; a release never drops one, as blocks from its height on run by it.",
+    summary = "The first fork: validators' rewards restaked into their bonds when their accounts turn it on (Tx::SetRestake), up to a cap if they set one; bonds topped up by hand with Tx::Bond; and the attestations of the justifications blocks carry checked as gossiped ones are, so a block with one that is not its validator's attester's is invalid.",
+    category = "Governance",
+    see_also = "FORKS, Tx::SetRestake",
+)]
+pub const RESTAKING: Fork = Fork { name: "restaking", summary: "Rewards restaked into bonds when a validator turns it on, bonds topped up by hand, and blocks' attestations checked." };
+
+#[document(
+    summary = "Every fork this release knows, oldest first. Each new one goes on the end, and is scheduled by name; a release never drops one, as blocks from its height on run by it.",
     category = "Governance",
     see_also = "Fork, Forks",
 )]
 #[cfg(not(test))]
-pub const FORKS: &[Fork] = &[];
+pub const FORKS: &[Fork] = &[RESTAKING];
 
 #[cfg(test)]
-pub const FORKS: &[Fork] = &[TEST_FORK];
+pub const FORKS: &[Fork] = &[RESTAKING, TEST_FORK];
 
 #[document(
     summary = "The most forks a release may know: Forks holds them as the bits of a u64.",

@@ -254,6 +254,34 @@ chainv4 --peer … --validate --validator-key vote.key
 Without `--validator-key`, the node votes with the development key, which is the one validator,
 or signer, of the dev settings.
 
+## Restaking
+
+From the `restaking` [fork](governance.md#forks) on, a validator's account may have its rewards
+go into its bond rather than the account, so its weight grows with what it earns:
+
+```sh
+chainv4 send --key account.key set-restake --voter ed25519:0x… --restake on              # every reward into the bond
+chainv4 send --key account.key set-restake --voter ed25519:0x… --restake on --cap 200000000000000000000000
+chainv4 send --key account.key set-restake --voter ed25519:0x… --restake off
+chainv4 send --key account.key bond --voter ed25519:0x… --amount 1000000000000000000000   # tops an existing bond up
+```
+
+- **Which rewards:** its vote rewards, from the justifications blocks carry, and under staked
+  consensus its block rewards, for the blocks it produces. Under proof of work, mining rewards are
+  a miner's, not a validator's, and go to the payout address as ever; so do a pool's.
+- **A cap:** past it, what would go into the bond goes to the account again. `--cap` left out, or
+  0, is none.
+- **Its weight follows at the next fixed set,** two epochs ahead, as any bond's does. The bond
+  grows at once: slashable, and withdrawn with the rest.
+- **Topping up:** from the fork, `bond` on a validator its sender already bonded adds to it,
+  rather than being refused; one leaving or slashed takes none.
+- **Before the fork,** a restake setting is no transaction, and a block holding one is invalid.
+  The setting sits in its own entry, apart from the validator's record, so nothing the chain kept
+  before the fork reads otherwise.
+
+`GET /validators` names each validator's `restake`; the explorer's finality page says where each
+one's rewards go, and the wallet's overview says so of a validator its accounts bonded.
+
 ## Attestations: finality followed on Ethereum
 
 Under FFG a validator may also name an **attester**: the Ethereum address of a secp256k1 key apart
@@ -275,7 +303,8 @@ chainv4's finality cheaply (`structs::attestation`, `contracts/evm/ChainV4Finali
   that key's address for its validator; before then its votes go without.
 - **Checked by every node:** an attestation rides inside the vote, so inside justifications and
   blocks, and must recover to the attester the target epoch's fixed set names for the vote's
-  validator, or the vote is invalid (`VerifyError::BadAttestation`). A vote without one counts as
+  validator, or the vote is invalid (`VerifyError::BadAttestation`). In justifications a block
+  carries, that check holds from the `restaking` fork on: the release before it skipped it there. A vote without one counts as
   ever: chainv4's own finality does not need them.
 - **On Ethereum:** `chainv4 bridge finality-deploy --eth-rpc … --evm-key …` deploys
   ChainV4Finality.sol from the finalized checkpoint; `chainv4 bridge finality-relay 0x… [--every

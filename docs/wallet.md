@@ -549,9 +549,14 @@ a time, and proves each by its link to the one above (see
 [EIP-7702](evm.md#eip-7702-delegations) transaction delegated runs a contract's code when it is
 called, so a call to it, or what it signs, may do what that code says. The wallet proves each
 secp256k1 address's delegation at the tip, from its entry in the chain's storage
-(`vm::evm::delegation_key`), and Overview says which contract it runs, with how far it is proven.
+(`structs::account::delegation_key`), and Overview says which contract it runs, with how far it is proven.
 Activity names a type-4 transaction by what it set: an account delegated to a contract, a
 delegation cleared, or how many.
+
+**A validator this wallet bonded.** For each finality validator one of the wallet's accounts
+bonded, Overview gives its bond and where its rewards go, restaked into the bond (up to a cap) or to
+the account, as `GET /validators` lists them: the node's word, which says so. Activity names a
+restake setting turned on or off.
 
 ## Read from checked blocks
 

@@ -490,7 +490,7 @@ pub fn proof(proof: &Justification) -> Value {
     })
 }
 
-pub fn validator(voter: &PublicKey, record: &ValidatorRecord) -> Value {
+pub fn validator(voter: &PublicKey, record: &ValidatorRecord, restake: Option<crate::registry::validators::Restake>) -> Value {
     json!({
         "voter": voter.to_string(),
         "account": record.account.to_string(),
@@ -499,6 +499,8 @@ pub fn validator(voter: &PublicKey, record: &ValidatorRecord) -> Value {
         "active_until": record.active_until,
         "withdrawable_from": record.withdrawable_from,
         "slashed": record.slashed,
+        "attester": record.attester.map(|attester| crate::structs::hex::to_hex(&attester)),
+        "restake": restake.map(|restake| json!({ "on": restake.on, "cap": restake.cap.to_string() })),
     })
 }
 

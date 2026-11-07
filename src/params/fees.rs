@@ -215,6 +215,7 @@ pub const TX_KINDS: &[&str] = &[
     "unbond",
     "withdraw",
     "set_attester",
+    "set_restake",
     "slash",
     "approve_signers",
     "withdraw_approval",

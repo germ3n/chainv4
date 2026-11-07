@@ -95,6 +95,9 @@ const PROOFS_AT_ONCE: usize = 8;
 pub enum Ask {
     /// The coin's symbol and decimals, for showing amounts: nothing proven rests on it.
     Status,
+    /// The chain's validators, as the node lists them: which of this wallet's accounts bonded one,
+    /// and whether its rewards are restaked, the node's word.
+    Validators,
     /// What the light client starts from.
     Light,
     Headers { from: u64, count: u32 },
@@ -216,6 +219,7 @@ impl Ask {
     fn path(&self) -> String {
         match self {
             Ask::Status | Ask::Finalized => "/status".to_string(),
+            Ask::Validators => "/validators".to_string(),
             Ask::Light => "/light".to_string(),
             Ask::Headers { from, count } | Ask::Ancestors { from, count } => format!("/headers?from={from}&count={count}"),
             Ask::Finality { from, count } => format!("/light/finality?from={from}&count={count}"),
@@ -275,7 +279,7 @@ impl Ask {
         self.body().is_none()
             && !matches!(
                 self,
-                Ask::Status | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ScanProof { .. } | Ask::Receipt(_) | Ask::SentReceipt(_) | Ask::Release
+                Ask::Status | Ask::Validators | Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Finalized | Ask::Checkpoint(_) | Ask::Proof { .. } | Ask::ScanProof { .. } | Ask::Receipt(_) | Ask::SentReceipt(_) | Ask::Release
             )
     }
 
@@ -292,6 +296,7 @@ impl Ask {
         match self {
             Ask::Light | Ask::Headers { .. } | Ask::Ancestors { .. } | Ask::Finality { .. } | Ask::Bundle { .. } | Ask::Checkpoint(_) | Ask::ScanProof { .. } | Ask::SentReceipt(_) | Ask::Submit(_) | Ask::Release => false,
             Ask::Status
+            | Ask::Validators
             | Ask::Finalized
             | Ask::Proof { .. }
             | Ask::Receipt(_)

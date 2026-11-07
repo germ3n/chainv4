@@ -544,6 +544,8 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Withdraw { .. }, _) => "Withdrew a bond".to_string(),
         (Tx::SetAttester { attester: Some(_), .. }, _) => "Set a validator's attester".to_string(),
         (Tx::SetAttester { attester: None, .. }, _) => "Cleared a validator's attester".to_string(),
+        (Tx::SetRestake { on: true, .. }, _) => "Turned restaking on".to_string(),
+        (Tx::SetRestake { on: false, .. }, _) => "Turned restaking off".to_string(),
         (Tx::Slash { .. }, _) => "Reported a double vote".to_string(),
         (Tx::ApproveSigners { version, .. }, _) => format!("Approved signers v{version}"),
         (Tx::WithdrawApproval { version }, _) => format!("Withdrew approval of signers v{version}"),

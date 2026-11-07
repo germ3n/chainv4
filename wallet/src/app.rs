@@ -831,6 +831,9 @@ impl Wallet {
             }
 
             match (&ask, &result) {
+                (Ask::Validators, Ok(value)) => {
+                    self.chain.validators = value["validators"].as_array().cloned().unwrap_or_default();
+                }
                 (Ask::Status, Ok(value)) => {
                     self.faucet = value.get("faucet").filter(|faucet| !faucet.is_null()).cloned();
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
@@ -1037,6 +1040,7 @@ impl Wallet {
         if self.asked_status.is_none_or(|asked| time - asked >= self.settings.pace().every(STATUS_EVERY)) {
             self.asked_status = Some(time);
             self.node.ask(Ask::Status);
+            self.node.ask(Ask::Validators);
         }
 
         if self.updates.due(time) {

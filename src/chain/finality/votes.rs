@@ -366,12 +366,21 @@ impl<E: Electorate> Votes<E> {
     /// None while either is not known here.
     #[cfg(feature = "secp256k1")]
     fn link_of(&self, chain: &View, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
-        use crate::structs::attestation::AttestedLink;
-
         let Some(header) = chain.header(&target.block)? else {
             return Ok(None);
         };
-        let attesting = |epoch: u64| self.attesting(chain, epoch);
+
+        self.link_in(&chain.state(), &header, source, target)
+    }
+
+    /// The link as an attestation commits to it, in a state, with the target's header given.
+    #[cfg(feature = "secp256k1")]
+    fn link_in(&self, state: &State, header: &crate::structs::block::BlockHeader, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
+        use crate::structs::attestation::{AttestedLink, AttestingSet};
+
+        let attesting = |epoch: u64| -> Result<Option<AttestingSet>, DbError> {
+            Ok(self.electorate.voters(state, epoch)?.map(|voters| AttestingSet::of(voters.set.members.iter().map(|member| (member.attester, member.weight)))))
+        };
         let (Some(set), Some(next)) = (attesting(target.epoch)?, attesting(target.epoch + 1)?) else {
             return Ok(None);
         };
@@ -622,6 +631,7 @@ impl<E: Electorate> Finality for Votes<E> {
         }
 
         let validators = Validators::new(state);
+        let restaking = crate::registry::changes::Changes::new(state).forks()?.at(block.header.height).has(&crate::params::forks::RESTAKING);
         // Bundles are taken from after_epochs epochs without a proven checkpoint, one epoch before
         // the leak starts, so the first leak already sees who voted.
         let bundling = match leak {
@@ -674,8 +684,29 @@ impl<E: Electorate> Finality for Votes<E> {
                     .member(&vote.vote.voter)
                     .ok_or_else(|| bad(format!("a vote by a non-validator for epoch {}", target.epoch)))?;
                 weight += member.weight;
-                paid.push(member.account);
+                paid.push((vote.vote.voter, member.account));
                 previous = Some(vote.vote.voter);
+
+                // From the restaking fork, an attestation in a block holds as a gossiped one must.
+                if restaking && let Some(attestation) = vote.attestation {
+                    let attester = member.attester.ok_or_else(|| bad(format!("an attestation by a validator that names no attester, for epoch {}", target.epoch)))?;
+                    #[cfg(feature = "secp256k1")]
+                    let holds = {
+                        let header = crate::chain::stored_header(&**state, &target.block)?.ok_or_else(|| bad(format!("epoch {}'s checkpoint is not held here", target.epoch)))?.header;
+                        let link = self.link_in(state, &header, source, target)?.ok_or_else(|| bad(format!("epoch {}'s attesting sets are not known here", target.epoch)))?;
+
+                        link.attester(&attestation) == Some(attester)
+                    };
+                    #[cfg(not(feature = "secp256k1"))]
+                    let holds = {
+                        let _ = (attestation, attester);
+                        false
+                    };
+
+                    if !holds {
+                        return Err(bad(format!("an attestation that is not its attester's, for epoch {}", target.epoch)));
+                    }
+                }
             }
 
             if leak.is_some() {
@@ -706,7 +737,7 @@ impl<E: Electorate> Finality for Votes<E> {
 
                 // Voters in the proof's order, which is by key: from the pool, each gets as much
                 // of its reward as the pool still holds; minted, each gets it whole.
-                for account in paid {
+                for (voter, account) in paid {
                     let reward = match rewards {
                         VoteRewardSource::Mint => {
                             crate::registry::supply::Supply::mint(state, params.vote_reward).map_err(ImportError::Db)?;
@@ -723,6 +754,12 @@ impl<E: Electorate> Finality for Votes<E> {
 
                             reward
                         }
+                    };
+
+                    // From the restaking fork, what a validator restakes goes into its bond.
+                    let reward = match restaking {
+                        true => validators.restake_reward(&voter, reward).map_err(ImportError::Db)?,
+                        false => reward,
                     };
 
                     if reward > u256::ZERO {

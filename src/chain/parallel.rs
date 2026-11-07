@@ -187,7 +187,7 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         Tx::Upgrade { contract, .. } => touched.push(Touch::Address(*contract)),
         Tx::Remove { contract, beneficiary } => touched.extend([Touch::Address(*contract), Touch::Address(*beneficiary)]),
         Tx::Burn { .. } => {}
-        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::SetAttester { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
+        Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::SetAttester { .. } | Tx::SetRestake { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
         Tx::ApproveSigners { .. } | Tx::WithdrawApproval { .. } => touched.push(Touch::Signers),
         // The directory is governance's state, as the admin keeps it without governance.
         Tx::VoteChange { .. } | Tx::ClearVote { .. } | Tx::SetDirectory { .. } => touched.push(Touch::Governance),

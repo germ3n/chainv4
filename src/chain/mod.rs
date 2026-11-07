@@ -2909,9 +2909,16 @@ impl Chain {
     fn settle(&self, layer: &Arc<State>, block: &Block, (reward, from): (Reward, u64), fees: u256, burned: u256, pooled: bool) -> Result<(), ImportError> {
         let reward = reward.since(block.header.height, from);
         let accounts = Accounts::new(layer);
+        // From the restaking fork, a validator producing under staked consensus may restake its
+        // block reward: what it restakes goes into its bond. Never a pool's block, whose reward is
+        // shared out.
+        let to_producer = match block.pool.is_none() && reward > u256::ZERO {
+            true => self.restaked_block_reward(layer, block, reward)?,
+            false => reward,
+        };
 
-        if reward > u256::ZERO {
-            accounts.credit(&block.header.producer, reward).map_err(|err| match err {
+        if to_producer > u256::ZERO {
+            accounts.credit(&block.header.producer, to_producer).map_err(|err| match err {
                 RegistryError::Db(err) => ImportError::Db(err),
                 _ => ImportError::Invalid(BlockError::Reward),
             })?;
@@ -2953,6 +2960,40 @@ impl Chain {
         }
 
         Ok(())
+    }
+
+    /// What of a block's reward goes to its producer's account once the producing validator, under
+    /// staked consensus and from the restaking fork on, restaked what its setting says.
+    fn restaked_block_reward(&self, layer: &Arc<State>, block: &Block, reward: u256) -> Result<u256, ImportError> {
+        let height = block.header.height;
+
+        if !Changes::new(layer).forks()?.at(height).has(&crate::params::forks::RESTAKING) {
+            return Ok(reward);
+        }
+
+        let Some(config) = &self.finality_config else {
+            return Ok(reward);
+        };
+        let epoch = config.epoch_of(height);
+        let consensus = match self.governed {
+            true => match Changes::new(layer).consensus_for(epoch)? {
+                Some(consensus) => consensus,
+                None => Changes::new(layer).decided()?.consensus,
+            },
+            false => self.light_params.consensus.clone(),
+        };
+
+        if !matches!(consensus, ConsensusConfig::Staked { .. }) {
+            return Ok(reward);
+        }
+
+        let validators = crate::registry::validators::Validators::new(layer);
+        let producing = validators.set(epoch)?.and_then(|set| set.members.into_iter().find(|member| member.account == block.header.producer));
+
+        Ok(match producing {
+            Some(member) => validators.restake_reward(&member.voter, reward)?,
+            None => reward,
+        })
     }
 
     /// Runs a block on top of below and makes it the tip there, keeping an undo record of every

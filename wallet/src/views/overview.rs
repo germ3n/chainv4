@@ -46,6 +46,18 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, send: &mut super::send::SendState) {
         }
     }
 
+    // A validator this wallet's accounts bonded: its bond, and where its rewards go.
+    for validator in ctx.chain.validators.iter().filter(|validator| addresses.iter().any(|address| validator["account"].as_str() == Some(address.to_string().as_str()))) {
+        let bond = ctx.amount(None, validator["bond"].as_str().unwrap_or("0"));
+        let rewards = match (validator["restake"]["on"].as_bool(), validator["restake"]["cap"].as_str()) {
+            (Some(true), Some("0") | None) => "its rewards restaked into its bond".to_string(),
+            (Some(true), Some(cap)) => format!("its rewards restaked up to {}", ctx.amount(None, cap)),
+            _ => "its rewards to the account".to_string(),
+        };
+        ui.add(egui::Label::new(RichText::new(format!("A validator with {bond} bonded, {rewards} (the node says)")).small().color(palette.soft)).wrap());
+        theme::section_gap(ui);
+    }
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &ctx.coin.symbol);
         ui.add_space(4.0);

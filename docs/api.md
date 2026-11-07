@@ -835,6 +835,8 @@ Under `ffg` or `authority`:
   - `voter`, `account` and `bond`;
   - `active_from`, `active_until` and `withdrawable_from`;
   - `slashed`;
+  - `attester`, the Ethereum address it attests links with, or `null`;
+  - `restake`, `null` while its account set none, or `on` and its `cap`, `"0"` for no most;
 - who votes in the current epoch under `active`, each with `voter`, `account` and `weight`;
 - `total_weight`.
 
