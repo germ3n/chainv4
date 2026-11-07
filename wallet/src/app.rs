@@ -528,6 +528,10 @@ pub struct Wallet {
     /// The EVM's spec /status names, which reads run here go by.
     #[cfg(not(target_arch = "wasm32"))]
     evm_spec: Option<chainv4::params::vm::EvmSpec>,
+    /// The fork schedule, as /status says it, which the wallet's own reads run by: on the desktop
+    /// and Android, as the browser runs none.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fork_schedule: chainv4::params::forks::ForkSchedule,
     /// The engines reads run on here, over the state the node proves.
     #[cfg(not(target_arch = "wasm32"))]
     engines: chainv4_ui::rerun::Engines,
@@ -644,6 +648,7 @@ impl Wallet {
             dex_settings: chainv4::params::vm::DexSettings::DEFAULT,
             #[cfg(not(target_arch = "wasm32"))]
             evm_spec: None,
+            fork_schedule: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
             engines: chainv4_ui::rerun::Engines::default(),
             updates: Updates::default(),
@@ -831,6 +836,7 @@ impl Wallet {
                     self.swap_contract = value["swap"]["contract"].as_str().map(str::to_string);
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
                     self.dex_settings = chainv4::params::json::dex_from_status(value);
+                    self.fork_schedule = chainv4::params::json::forks_from_status(value);
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.evm_spec = value["evm_spec"].as_str().and_then(|spec| spec.parse().ok());
@@ -851,7 +857,7 @@ impl Wallet {
                     #[cfg(not(target_arch = "wasm32"))]
                     let result = match (&ask, result) {
                         (Ask::Call(body), Ok(value)) => {
-                            let rules = chainv4_ui::rerun::Rules { dex: self.dex_settings, evm_spec: self.evm_spec };
+                            let rules = chainv4_ui::rerun::Rules { dex: self.dex_settings, evm_spec: self.evm_spec, forks: self.fork_schedule.clone() };
                             Ok(chainv4_ui::rerun::checked(&mut self.engines, body, value, self.chain.client.as_ref(), rules))
                         }
                         (_, result) => result,

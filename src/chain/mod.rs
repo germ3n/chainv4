@@ -332,9 +332,39 @@ pub struct Genesis {
     #[document(summary = "Contracts the chain starts with, by name, from PREINSTALLS: deployment_proxy, the deterministic deployment proxy at 0x4e59…956c, where other EVM chains have it, so what is deployed through it, MultiSig.sol and Swap.sol, lands at the same address here. Each needs the EVM among engines; chainv4 genesis names it for a chain that runs the EVM. Added after chains launched: empty adds nothing to genesis's encoding, and a file without it starts with none.")]
     #[wincode(with = "crate::structs::unset::UnsetMarkedList")]
     pub preinstalls: Vec<String>,
+    #[document(summary = "The forks it schedules from the start, each this release knows, at a height or an epoch's first block, and how far ahead governance must schedule others. Under governance, Change::Fork adds, moves and cancels them. Added after chains launched: none adds nothing to genesis's encoding.")]
+    #[wincode(with = "UnsetForks")]
+    pub forks: crate::params::forks::ForkSchedule,
 }
 
 impl Hashable for Genesis {}
+
+/// Encodes Genesis::forks as nothing while it schedules none and sets no lead, and as a 2 and its
+/// encoding otherwise: a marker no earlier unset field writes, so no genesis from before the field
+/// hashes as one with it. Genesis is never decoded.
+pub struct UnsetForks;
+
+// SAFETY: size_of is exactly what write writes: nothing for an empty schedule, a byte and the
+// encoding for any other.
+unsafe impl<C: wincode::config::Config> SchemaWrite<C> for UnsetForks {
+    type Src = crate::params::forks::ForkSchedule;
+
+    fn size_of(src: &crate::params::forks::ForkSchedule) -> wincode::WriteResult<usize> {
+        match *src == crate::params::forks::ForkSchedule::default() {
+            true => Ok(0),
+            false => Ok(1 + <crate::params::forks::ForkSchedule as SchemaWrite<C>>::size_of(src)?),
+        }
+    }
+
+    fn write(mut writer: impl wincode::io::Writer, src: &crate::params::forks::ForkSchedule) -> wincode::WriteResult<()> {
+        if *src == crate::params::forks::ForkSchedule::default() {
+            return Ok(());
+        }
+        <[u8; 1] as SchemaWrite<C>>::write(&mut writer, &[2])?;
+
+        <crate::params::forks::ForkSchedule as SchemaWrite<C>>::write(writer, src)
+    }
+}
 
 /// Encodes Genesis::governance as nothing while None, and as a 1 and its encoding once set, so a
 /// genesis from before the field hashes as it did. Genesis is never decoded.
@@ -637,6 +667,7 @@ impl Genesis {
             multisig_members: None,
             locked: Vec::new(),
             preinstalls: dev_preinstalls(),
+            forks: Default::default(),
         }
     }
 
@@ -692,6 +723,7 @@ impl Genesis {
             multisig_members: None,
             locked: Vec::new(),
             preinstalls: dev_preinstalls(),
+            forks: Default::default(),
         }
     }
 
@@ -828,6 +860,11 @@ impl Genesis {
             crate::registry::changes::Changes::new(state).write_name(name);
         }
 
+        // Written only when it schedules any, so a genesis without forks starts from the state it did.
+        if self.forks != crate::params::forks::ForkSchedule::default() {
+            crate::registry::changes::Changes::new(state).write_forks(&self.forks);
+        }
+
         // Written only when there are any, so a genesis without locks starts from the state it did.
         if self.governance.is_some() && !self.locked.is_empty() {
             crate::registry::changes::Changes::new(state).add_locks(&self.locked)?;
@@ -944,6 +981,14 @@ impl Genesis {
             return Some(problem);
         }
 
+        if self.forks.genesis_problem().is_some() {
+            return Some("forks names a fork this release does not know, a name that cannot be one, or one twice");
+        }
+
+        if self.forks.forks.iter().any(|fork| fork.epoch.is_some() && self.finality.is_none()) {
+            return Some("a fork at an epoch needs a chain with finality");
+        }
+
         if !self.locked.is_empty() && self.governance.is_none() {
             return Some("locked holds settings against governance: a chain without governance changes nothing, so it locks nothing");
         }
@@ -1015,6 +1060,7 @@ impl Genesis {
             names: self.names.clone().map(Arc::new),
             vm: self.vm_rules(),
             anchoring: self.anchoring.clone().unwrap_or_default(),
+            target_block_ms: Some(self.consensus.block_ms()),
         }
     }
 
@@ -1029,6 +1075,7 @@ impl Genesis {
             dex: self.dex.unwrap_or_default(),
             max_tx_bytes: self.max_tx_bytes,
             multisig_members: self.multisig_members.unwrap_or(crate::params::MULTISIG_MEMBERS),
+            forks: self.forks.at(0),
         }
     }
 
@@ -1082,6 +1129,8 @@ pub enum ImportError {
     UnknownParent(Hash),
     #[document(summary = "The block breaks the rules. Never relay it.")]
     Invalid(BlockError),
+    #[document(summary = "The chain scheduled a fork at or below the block's height that this release does not know, by its name: this node cannot run it as the others do, and stops until updated. Nothing is said of the block.")]
+    UnknownFork(String),
 }
 
 impl From<DbError> for ImportError {
@@ -1097,6 +1146,7 @@ impl fmt::Display for ImportError {
             ImportError::Known => write!(f, "already known"),
             ImportError::UnknownParent(parent) => write!(f, "unknown parent {parent}"),
             ImportError::Invalid(err) => write!(f, "invalid: {err}"),
+            ImportError::UnknownFork(name) => write!(f, "the chain runs fork {name} from here, which this release does not know: update chainv4"),
         }
     }
 }
@@ -2279,12 +2329,13 @@ impl Chain {
     /// that decided them; finality's settings by the epoch.
     pub(crate) fn params_in(&self, state: &State, height: u64) -> Result<BlockParams, DbError> {
         let mut params = BlockParams { rules: self.rules.clone(), reward: (self.reward, 0), max_block_bytes: self.max_block_bytes };
+        let changes = Changes::new(state);
+        // The forks in force, on a chain with governance or without: genesis's are in state too.
+        params.rules.vm.forks = changes.forks()?.at(height);
 
         if !self.governed {
             return Ok(params);
         }
-
-        let changes = Changes::new(state);
 
         if let Some(config) = changes.fees()? {
             params.rules.fees = Some(built_fees(&self.built_fees, config));
@@ -2918,6 +2969,12 @@ impl Chain {
             genesis: self.genesis(),
         };
         let params = self.params_in(below, height)?;
+
+        // A fork this release does not know: it cannot run the block as nodes that know it do.
+        if let Some(fork) = Changes::new(below).forks()?.unknown().filter(|fork| fork.height <= height) {
+            return Err(ImportError::UnknownFork(fork.name.clone()));
+        }
+
         let parent = stored_header(&*self.db, &block.header.parent)?.ok_or_else(|| missing(&block.header.parent))?.header;
         check_size_and_price(block, &parent, &params)?;
         let ran = self.runner(&params.rules).run(&layer, &block.txs, &context, Unfit::Refuse, None)?;
@@ -3679,6 +3736,9 @@ pub(crate) fn govern_rules(rules: &mut Rules, state: &State, height: u64) -> Res
     }
 
     rules.vm.evm_spec = changes.evm_spec_at(height, rules.vm.evm_spec)?;
+    // The forks in force at the height, as the schedule in state has them: genesis's, written at
+    // the chain's start, or governance's since.
+    rules.vm.forks = changes.forks()?.at(height);
 
     // Governance's own settings, from the block after the one that decided them.
     #[cfg(feature = "governance")]

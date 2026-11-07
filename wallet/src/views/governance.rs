@@ -50,7 +50,7 @@ const REFRESH: u64 = 15_000;
 const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
-const KINDS: [&str; 19] = ["name", "bootnodes", "upgrade", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
+const KINDS: [&str; 20] = ["name", "bootnodes", "upgrade", "fork", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
 
 /// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
 const KIND_LIST_HEIGHT: f32 = 620.0;
@@ -1203,8 +1203,8 @@ fn versions(value: &Value) -> Result<BTreeMap<ChangeKind, u64>, String> {
         .into_iter()
         .map(|kind| match versions.get(kind.name()).and_then(Value::as_u64) {
             Some(version) => Ok((kind, version)),
-            // A node from before locks, or before engines, has none to change.
-            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines) => Ok((kind, 0)),
+            // A node from before locks, engines or forks has none to change.
+            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines | ChangeKind::Fork) => Ok((kind, 0)),
             None => Err(format!("it says no version for {}", kind.name())),
         })
         .collect()
@@ -1431,6 +1431,7 @@ fn label(kind: &str) -> &str {
         "name" => "The chain's name",
         "bootnodes" => "Bootnodes",
         "upgrade" => "Upgrade",
+        "fork" => "Fork schedule",
         "names" => "Names",
         "token_functions" => "Tokens",
         "evm_spec" => "EVM spec",
@@ -1572,6 +1573,11 @@ fn stated(change: &Change, coin: &Coin) -> String {
             )
         }
         Change::Upgrade(upgrade) => format!("Upgrade: nodes older than {} stop at block {}", upgrade.least, format::thousands(&upgrade.from.to_string())),
+        Change::Fork(change) => {
+            let said = change.describe();
+
+            format!("Fork schedule: {}{}", said[..1].to_uppercase(), &said[1..])
+        }
         Change::Consensus(consensus) => match consensus {
             ConsensusConfig::Authority { key, slot_ms } => format!("Consensus: one key, {}, makes a block every {}", format::short(&key.to_string()), millis(*slot_ms)),
             ConsensusConfig::Rotating { slot_ms } => format!("Consensus: finality's signers take turns, a block every {}", millis(*slot_ms)),
@@ -2212,6 +2218,10 @@ mod tests {
             (Change::EvmSpec { spec: chainv4::params::vm::EvmSpec::Osaka, from: 9_000 }, "EVM spec: osaka from block 9,000"),
             (Change::Dex(chainv4::params::vm::DexSettings { tiers: [5, 25, 100, 0], protocol_permille: 100 }), "DEX fee tiers: 0.05%, 0.25%, 1%; 10% of each fee burned"),
             (Change::Locks(vec!["anchoring.enforce".to_string(), "reward".to_string()]), "Lock for good: anchoring.enforce, reward"),
+            (
+                Change::Fork(chainv4::params::forks::ForkChange::Schedule { name: "faster-lua".to_string(), at: chainv4::params::forks::ForkAt::Height(30_000), least: chainv4::structs::version::Version::new(0, 3, 0) }),
+                "Fork schedule: Fork faster-lua from block 30000, for chainv4 0.3.0 or newer",
+            ),
             (
                 Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32])], threshold: 1, approval_epochs: 8, quorum_permille: 500 }),
                 "Governance: a council of 1",

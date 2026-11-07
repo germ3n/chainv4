@@ -3756,3 +3756,24 @@ fn a_call_with_calldata_is_an_evm_read_and_proves_what_it_read() {
     let bad = json!({ "contract": empty, "input": "zz" });
     assert_eq!(request(fixture.address, "POST", "/call", &bad.to_string()).0, 400);
 }
+
+#[test]
+fn status_lists_the_fork_schedule_each_fork_passed_or_ahead_and_known_or_not() {
+    use crate::params::forks::{ForkSchedule, ScheduledFork, TEST_FORK};
+
+    let genesis = Genesis { forks: ForkSchedule { forks: vec![ScheduledFork { name: TEST_FORK.name.to_string(), height: 0, epoch: None, least: None }], lead: Some(40) }, ..free() };
+    let db = Arc::new(MemoryDb::default());
+    Chain::open(db.clone(), &genesis).unwrap();
+    let address = start(db, Some(fake_node()), &genesis, "127.0.0.1:0".parse().unwrap(), ApiOptions::default()).unwrap();
+    let forks = &ok(address, "/status")["forks"];
+
+    assert_eq!(forks["lead"], 40);
+    assert_eq!(forks["scheduled"][0]["name"], "test-fork");
+    assert_eq!((forks["scheduled"][0]["passed"].as_bool(), forks["scheduled"][0]["known"].as_bool()), (Some(true), Some(true)));
+    assert_eq!(forks["scheduled"][0]["summary"], TEST_FORK.summary);
+
+    // A chain that scheduled none says so, with a day of its blocks as the lead.
+    let plain = &ok(serve().address, "/status")["forks"];
+    assert_eq!(plain["scheduled"], json!([]));
+    assert_eq!(plain["lead"], crate::params::forks::DEFAULT_LEAD_MS / SLOT);
+}

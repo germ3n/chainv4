@@ -1942,6 +1942,43 @@ fn a_node_too_old_for_an_upgrade_governance_decided_stops_before_its_block() {
     assert_eq!(node.chain().tip().height, 5, "it never builds the block the upgrade names");
 }
 
+#[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
+#[test]
+fn a_node_stops_before_a_fork_the_chain_scheduled_that_its_release_does_not_know() {
+    use crate::governance::{Change, GovernanceConfig};
+    use crate::params::forks::{ForkAt, ForkChange};
+    use crate::structs::version::{Upgrade, Version};
+
+    let dev = DevAuthority::dev_keypair();
+    let genesis = Genesis {
+        fees: None,
+        governance: Some(GovernanceConfig::Council { members: vec![dev.public().address()], threshold: 1, approval_epochs: 64, quorum_permille: 0 }),
+        ..Genesis::dev_authority(dev.public())
+    };
+    let (mut node, _net) = producing_on(&genesis);
+    let ours = Version::ours();
+    let vote = |version, change, nonce| SignedTx::sign(Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version, change }, nonce, FeeOffer::NONE, &dev, &genesis_id(&genesis));
+    node.step(SLOT).unwrap();
+    node.submit(vote(0, Change::Fork(ForkChange::Lead { blocks: 1 }), 0)).unwrap();
+    node.step(SLOT * 2).unwrap();
+    // Named as for this very release, which does not know it: a newer one must.
+    node.submit(vote(1, Change::Fork(ForkChange::Schedule { name: "from-the-future".to_string(), at: ForkAt::Height(6), least: ours }), 1)).unwrap();
+
+    for slot in 3..=5 {
+        node.step(SLOT * slot).unwrap();
+    }
+
+    let stop = Upgrade { least: Version::new(ours.major, ours.minor, ours.patch + 1), from: 6 };
+    assert_eq!(node.upgrade(), Some(stop));
+    assert!(matches!(node.step(SLOT * 6), Err(NodeError::Upgrade { upgrade, .. }) if upgrade == stop));
+    assert_eq!(node.chain().tip().height, 5, "it never builds the fork's first block");
+}
+
+/// A genesis's id, as a chain opened on it has.
+fn genesis_id(genesis: &Genesis) -> crate::structs::hash::Hash {
+    Chain::open(Arc::new(MemoryDb::default()), genesis).unwrap().genesis()
+}
+
 #[cfg(feature = "updates")]
 #[test]
 fn a_node_too_old_for_an_upgrade_its_release_announces_takes_no_block_from_it_on() {

@@ -335,6 +335,9 @@ pub enum Change {
     #[document(summary = "The engines contracts deploy and run on, replacing genesis's or the last decided, whole: any of lua, wasm and evm, each once, several at once or none. From the block after the one that decides it. Contracts of an engine left out are frozen, refused every call, their state kept and readable, until a change turns the engine on again; nothing deploys on it meanwhile. A node built without an engine the chain turns on stops before that block, saying which.")]
     #[wincode(tag = 19)]
     Engines(Vec<crate::structs::code::Engine>),
+    #[document(summary = "A change of the fork schedule: a fork scheduled or moved, at a height or an epoch's first block at least the chain's lead ahead, which also stops nodes older than the release that knows it there; one not yet passed cancelled; or the lead set. A fork once passed, or within the lead, is fixed. Blocks from a fork's height run by it, those below by the rules before. See params::forks.")]
+    #[wincode(tag = 20)]
+    Fork(crate::params::forks::ForkChange),
 }
 
 #[document(
@@ -490,6 +493,9 @@ pub enum ChangeKind {
     #[document(summary = "The engines contracts run on.")]
     #[wincode(tag = 17)]
     Engines,
+    #[document(summary = "The fork schedule.")]
+    #[wincode(tag = 18)]
+    Fork,
 }
 
 impl Hashable for ChangeKind {
@@ -498,7 +504,7 @@ impl Hashable for ChangeKind {
 
 impl ChangeKind {
     #[document(parent = "ChangeKind", summary = "Every kind, in tag order.")]
-    pub const ALL: [ChangeKind; 18] = [
+    pub const ALL: [ChangeKind; 19] = [
         ChangeKind::Consensus,
         ChangeKind::Bootnodes,
         ChangeKind::Names,
@@ -517,9 +523,10 @@ impl ChangeKind {
         ChangeKind::Anchoring,
         ChangeKind::Locks,
         ChangeKind::Engines,
+        ChangeKind::Fork,
     ];
 
-    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks or engines.")]
+    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines or fork.")]
     pub fn name(self) -> &'static str {
         match self {
             ChangeKind::Consensus => "consensus",
@@ -540,6 +547,7 @@ impl ChangeKind {
             ChangeKind::Anchoring => "anchoring",
             ChangeKind::Locks => "locks",
             ChangeKind::Engines => "engines",
+            ChangeKind::Fork => "fork",
         }
     }
 }
@@ -581,10 +589,11 @@ impl Change {
             Change::Anchoring(_) => ChangeKind::Anchoring,
             Change::Locks(_) => ChangeKind::Locks,
             Change::Engines(_) => ChangeKind::Engines,
+            Change::Fork(_) => ChangeKind::Fork,
         }
     }
 
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring or locks.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines or fork.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -607,6 +616,7 @@ impl Change {
             Change::Anchoring(_) => "anchoring",
             Change::Locks(_) => "locks",
             Change::Engines(_) => "engines",
+            Change::Fork(_) => "fork",
         }
     }
 }

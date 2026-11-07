@@ -13,6 +13,7 @@ use {
 pub mod anchoring;
 pub mod fees;
 pub mod finality;
+pub mod forks;
 pub mod vm;
 #[cfg(feature = "json")]
 pub mod json;

@@ -956,7 +956,9 @@ actions.
   lists with **Add** and **Remove** (bootnodes, name prices by length, collections' functions, the
   federation's signers, the directory's EVM gateways, a switch's signers). What the chain keeps
   through a change of finality shows as staying as it is: the kind, `checkpoint_interval`,
-  `activation_delay`, the starting validators or signers and the thresholds.
+  `activation_delay`, the starting validators or signers and the thresholds. **Fork schedule**
+  schedules or moves a fork by block or by epoch, naming the least release that knows it, cancels
+  one, or sets the lead (see [Forks](governance.md#forks)); the chain refuses one within the lead.
   - **Only what changed is sent:** the fields that differ are laid over what stands with chainv4's
     `params::json::over`, as the CLI's `vote-change` does; a variant of another type, such as
     bids for a base price, replaces its object whole, as its old fields mean nothing to it.

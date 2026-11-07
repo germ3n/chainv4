@@ -56,6 +56,7 @@ pub fn to_json(genesis: &Genesis) -> Value {
         "anchoring": genesis.anchoring.as_ref().map(crate::params::json::anchoring_json),
         "locked": genesis.locked,
         "preinstalls": genesis.preinstalls,
+        "forks": (genesis.forks != crate::params::forks::ForkSchedule::default()).then(|| crate::params::json::forks_json(&genesis.forks)),
     })
 }
 
@@ -210,6 +211,10 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         false => Vec::new(),
     };
 
+    // Absent from files written before it: those chains schedule no forks.
+    let interval = finality.as_ref().map(crate::params::finality::FinalityConfig::checkpoint_interval);
+    let forks = root.later_object("forks")?.map(|forks| crate::params::json::forks_from_json(forks, interval)).transpose()?.unwrap_or_default();
+
     let genesis = Genesis {
         timestamp: root.whole("timestamp")?,
         hash: root.hash("hash")?,
@@ -243,6 +248,7 @@ pub fn from_json(value: &Value) -> Result<Genesis, String> {
         anchoring,
         locked,
         preinstalls,
+        forks,
     };
     root.done()?;
 

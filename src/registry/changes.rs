@@ -40,6 +40,7 @@ const NAME: &[u8] = b"change:name";
 const GOVERNANCE: &[u8] = b"change:governance";
 const REJECTED: &[u8] = b"change:rejected";
 const LOCKS: &[u8] = b"change:locks";
+const FORKS: &[u8] = b"change:forks";
 
 /// How many changes of one kind were decided, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -82,6 +83,8 @@ pub struct DecidedAt {
     pub activation_delay: u64,
     #[document(summary = "The block's time, in milliseconds since the Unix epoch: what a decided federation is kept with.")]
     pub time: u64,
+    #[document(summary = "Blocks per finality epoch: where a fork scheduled by epoch starts.")]
+    pub checkpoint_interval: u64,
 }
 
 #[document(
@@ -589,6 +592,16 @@ impl<'a> Changes<'a> {
         self.state.put_value(Column::Validators, NAME.to_vec(), &ChainName { name: name.to_string() });
     }
 
+    #[document(parent = "Changes", summary = "The fork schedule in force: genesis's, written at the chain's start when it schedules any, or the one governance decided last; empty on a chain that scheduled none.")]
+    pub fn forks(&self) -> Result<crate::params::forks::ForkSchedule, DbError> {
+        Ok(self.state.get_value(Column::Validators, FORKS)?.unwrap_or_default())
+    }
+
+    #[document(parent = "Changes", summary = "Writes the fork schedule in force: genesis's as the chain starts, or one governance decided.")]
+    pub fn write_forks(&self, schedule: &crate::params::forks::ForkSchedule) {
+        self.state.put_value(Column::Validators, FORKS.to_vec(), schedule);
+    }
+
     #[document(parent = "Changes", summary = "The upgrade governance decided last, or None while it decided none: from its height on, nodes older than its version stop.")]
     pub fn upgrade(&self) -> Result<Option<crate::structs::version::Upgrade>, DbError> {
         self.state.get_value(Column::Validators, UPGRADE)
@@ -853,6 +866,10 @@ impl<'a> Changes<'a> {
             Change::Limits(limits) => self.limits()?.as_ref() == Some(limits),
             Change::Finality(config) | Change::SwitchFinality { config, .. } => self.finality_eras()?.eras.last().map(|era| &era.config) == Some(config),
             Change::Upgrade(upgrade) => self.upgrade()?.as_ref() == Some(upgrade),
+            Change::Fork(change) => {
+                let schedule = self.forks()?;
+                change.apply(&schedule, Some(at.checkpoint_interval)) == schedule
+            }
             Change::Name(name) => self.name()?.as_ref() == Some(name),
             Change::Governance(config) => self.governance()?.map(|decided| decided.config).as_ref() == Some(config),
             Change::Locks(paths) => {
@@ -1004,6 +1021,26 @@ impl<'a> Changes<'a> {
 
                 decided.consensus
             }
+            // A fork changes the schedule blocks look their rules up in; scheduling one also tells
+            // nodes older than the release that knows it to stop there, as an upgrade does, unless
+            // an upgrade already stops them sooner or names a later release.
+            Change::Fork(change) => {
+                let schedule = change.apply(&self.forks()?, Some(at.checkpoint_interval));
+                self.write_forks(&schedule);
+
+                if let crate::params::forks::ForkChange::Schedule { name, least, .. } = &change
+                    && let Some(fork) = schedule.forks.iter().find(|fork| fork.name == *name)
+                {
+                    let standing = self.upgrade()?;
+                    let covered = standing.is_some_and(|upgrade| upgrade.least >= *least && upgrade.from <= fork.height && upgrade.from > at.height);
+
+                    if !covered {
+                        self.state.put_value(Column::Validators, UPGRADE.to_vec(), &crate::structs::version::Upgrade { least: *least, from: fork.height });
+                    }
+                }
+
+                decided.consensus
+            }
             // Finality's settings wait for an epoch far enough ahead that every node has fixed
             // it the same way, as the consensus does.
             Change::Finality(config) => {
@@ -1112,7 +1149,7 @@ mod tests {
 
     /// An approval made at an epoch, finality fixing what is decided two epochs ahead.
     fn at(epoch: u64) -> DecidedAt {
-        DecidedAt { height: epoch * 10, epoch, activation_delay: 2, time: epoch * 10_000 }
+        DecidedAt { height: epoch * 10, epoch, activation_delay: 2, time: epoch * 10_000, checkpoint_interval: 10 }
     }
     use crate::db::MemoryDb;
     use crate::structs::address::Address;
@@ -1479,7 +1516,7 @@ mod tests {
             changes.vote(&member(2), 0, bootnodes.clone(), ChangeVote::Yes, at(1), rules(4), &Weighted),
             Err(RegistryError::BadChange("governance changed itself in this block; vote from the next"))
         );
-        let next = DecidedAt { height: 11, epoch: 1, activation_delay: 2, time: 11_000 };
+        let next = DecidedAt { height: 11, epoch: 1, activation_delay: 2, time: 11_000, checkpoint_interval: 10 };
         assert_eq!(changes.vote(&member(2), 0, bootnodes, ChangeVote::Yes, next, rules(4), &Weighted), counted(u256::ONE));
     }
 }

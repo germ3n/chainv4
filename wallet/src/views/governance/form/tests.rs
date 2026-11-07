@@ -14,6 +14,7 @@ use {
     chainv4::structs::hash::HashType,
     chainv4::structs::u256::u256,
     chainv4::structs::version::{Upgrade, Version},
+    chainv4::params::forks::{ForkAt, ForkChange},
 };
 
 const DEV: u128 = 1_000_000_000_000_000_000;
@@ -124,6 +125,10 @@ fn every_shape() -> Vec<Change> {
             ..chainv4::params::anchoring::AnchorSettings::OFF
         }),
         Change::Upgrade(Upgrade { least: Version::new(0, 2, 0), from: 2_000 }),
+        Change::Fork(ForkChange::Schedule { name: "faster-lua".to_string(), at: ForkAt::Height(30_000), least: Version::new(0, 3, 0) }),
+        Change::Fork(ForkChange::Schedule { name: "faster-lua".to_string(), at: ForkAt::Epoch(4_000), least: Version::new(0, 3, 0) }),
+        Change::Fork(ForkChange::Cancel { name: "faster-lua".to_string() }),
+        Change::Fork(ForkChange::Lead { blocks: 2_000 }),
         Change::Consensus(ConsensusConfig::ProofOfWork(PowConfig { hash: HashType::Blake3_256, target_block_ms: 2_000, initial_difficulty: 100_000, min_difficulty: 1_000, tuning: None, window: None })),
         Change::Consensus(ConsensusConfig::Authority { key: key(1), slot_ms: 1_000 }),
         Change::Consensus(ConsensusConfig::Rotating { slot_ms: 2_000 }),

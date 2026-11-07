@@ -2248,6 +2248,19 @@ contract computes, so they wait for the next regenesis (see the todo).
   when the pair does, so the wallet reads `getReserves()` at the same block and brings it up to
   that block's time. Both are proven where the light client holds the block.
 
+## Forks
+
+- **No forks, no change.** A genesis that lists none hashes as it did and writes nothing more to
+  its first state, and every block runs as before: this release went to the devnet without a
+  reset of the rules it runs by.
+- **A fork is code, a schedule is data.** The chain can schedule a name no release knows yet;
+  nodes then stop before it until they update. Name the least release that knows it, and ship that
+  release well inside the lead.
+- **Fixed once near.** A fork within the lead of the vote, or passed, can no longer be moved or
+  cancelled: nodes may already be running the release that expects it.
+- **Fork by epoch on a chain with finality alone.** Its height is the epoch times the checkpoint
+  interval, worked out when it is scheduled.
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

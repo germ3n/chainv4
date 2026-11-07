@@ -1072,7 +1072,11 @@ impl Node {
             self.upgrade_at = Some(tip);
             let state = self.chain.state();
             let changes = crate::registry::changes::Changes::new(&state);
-            self.decided_upgrade = changes.upgrade()?.filter(|upgrade| upgrade.stops(ours));
+            // A fork the chain scheduled that this release does not know stops it there too, as
+            // an upgrade to the release governance named for it would.
+            // A release that names itself as knowing it is wrong of it: a newer one does.
+            let unknown_fork = changes.forks()?.unknown().map(|fork| Upgrade { least: fork.least.filter(|least| *least > ours).unwrap_or(Version::new(ours.major, ours.minor, ours.patch + 1)), from: fork.height });
+            self.decided_upgrade = [changes.upgrade()?.filter(|upgrade| upgrade.stops(ours)), unknown_fork].into_iter().flatten().min_by_key(|upgrade| upgrade.from);
 
             // The chain turned on an engine this node was built without: it stops before the next
             // block, which it could not run as every other node does.
@@ -1902,7 +1906,7 @@ fn block_verdict(imported: &Result<Imported, ImportError>) -> Verdict {
         Ok(_) => Verdict::Accept,
         Err(ImportError::Invalid(BlockError::Consensus(ConsensusError::FromTheFuture | ConsensusError::NoAncestors | ConsensusError::NoProducers)))
         | Err(ImportError::Invalid(BlockError::ConflictsWithFinality))
-        | Err(ImportError::Known | ImportError::UnknownParent(_) | ImportError::Db(_)) => Verdict::Ignore,
+        | Err(ImportError::Known | ImportError::UnknownParent(_) | ImportError::Db(_) | ImportError::UnknownFork(_)) => Verdict::Ignore,
         Err(ImportError::Invalid(_)) => Verdict::Reject(Fault::Block),
     }
 }

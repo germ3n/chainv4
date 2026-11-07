@@ -62,6 +62,8 @@ pub struct Rules {
     pub vm: crate::params::vm::VmRules,
     #[document(summary = "Anchoring's settings in force: genesis's, or the last decided.")]
     pub anchoring: crate::params::anchoring::AnchorSettings,
+    #[document(summary = "The chain's target block time, if its consensus has one: what a day of blocks is, for a fork's lead.")]
+    pub target_block_ms: Option<u64>,
 }
 
 impl Rules {
@@ -420,9 +422,14 @@ struct Charge<'a> {
 
 /// Checks a transaction can pay for itself: its gas limit covers its intrinsic cost, its price is
 /// enough for the block, and the sender holds its whole gas limit at that price.
-fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accounts, base: u256) -> Result<Charge<'a>, ExecuteError> {
+fn payment<'a>(fees: &'a Fees, tx: &SignedTx, sender: &Address, accounts: &Accounts, base: u256, forks: crate::params::forks::Forks) -> Result<Charge<'a>, ExecuteError> {
     let invalid = |error| Err(ExecuteError::Invalid(error));
     let intrinsic = fees.schedule().intrinsic(tx);
+    // The fork that exists in tests alone: a transfer's intrinsic gas one higher from it on.
+    #[cfg(test)]
+    let intrinsic = intrinsic + u64::from(forks.has(&crate::params::forks::TEST_FORK) && matches!(tx.tx, Tx::Transfer { .. }));
+    #[cfg(not(test))]
+    let _ = forks;
     let limit = tx.fee.gas_limit;
 
     if limit < intrinsic {
@@ -546,7 +553,7 @@ pub(crate) fn execute_authorized(
     }
 
     let payment = match &rules.fees {
-        Some(fees) => Some(payment(fees, tx, &sender, &accounts, context.base_price)?),
+        Some(fees) => Some(payment(fees, tx, &sender, &accounts, context.base_price, rules.vm.forks)?),
         None => None,
     };
     accounts.bump_nonce(&sender).map_err(node_fault)?;
@@ -1184,6 +1191,7 @@ fn run(
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
                 Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
                 Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),
+                Change::Fork(change) => Changes::new(layer).forks().map(|schedule| change.problem(&schedule, height, Some(governance.checkpoint_interval), rules.target_block_ms)),
                 Change::Name(name) => Ok(crate::governance::chain_name_problem(name)),
                 Change::Governance(config) => Ok(governance.config.change_problem(config)),
                 Change::Locks(paths) => match Changes::new(layer).locks() {
@@ -1210,7 +1218,7 @@ fn run(
                 Err(err) => return (Err(Failure::Registry(err.into())), Contracted::default()),
             }
 
-            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay(), time: context.timestamp };
+            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: governance.finality.activation_delay(), time: context.timestamp, checkpoint_interval: governance.checkpoint_interval };
             let voted = Changes::new(layer).vote(&sender, *version, change.clone(), *vote, at, governance.ballot(), &*governance.governance);
 
             let effect = voted.map(|voted| match voted {
@@ -1227,7 +1235,7 @@ fn run(
                 return (Err(Failure::NoGovernance), Contracted::default());
             };
             let epoch = height / rules.checkpoint_interval.max(1);
-            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: rules.finality.activation_delay(), time: context.timestamp };
+            let at = crate::registry::changes::DecidedAt { height, epoch, activation_delay: rules.finality.activation_delay(), time: context.timestamp, checkpoint_interval: rules.checkpoint_interval };
 
             (moved(Changes::new(layer).clear(&sender, *version, change, at, rules.approval_epochs, &*rules.governance)), Contracted::default())
         }

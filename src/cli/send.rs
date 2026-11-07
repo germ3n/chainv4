@@ -228,7 +228,7 @@ pub enum TxArgs {
     /// governance changes. A new vote replaces this account's old one on the same change. Sign
     /// with an account governance lets vote: a validator's or signer's account under the
     /// electorate, a member's under a council.
-    #[command(group = clap::ArgGroup::new("what").required(true).args(["change", "governance", "consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name", "lock"]))]
+    #[command(group = clap::ArgGroup::new("what").required(true).args(["change", "governance", "consensus", "bootnodes", "name_prices", "collections", "federation", "directory", "fees", "reward", "limits", "finality", "switch_finality", "upgrade", "chain_name", "lock", "fork", "cancel_fork", "fork_lead"]))]
     VoteChange {
         /// yes, no or abstain. Abstain counts toward the quorum alone.
         #[arg(long)]
@@ -300,6 +300,26 @@ pub enum TxArgs {
         /// enough for their operators to update.
         #[arg(long, requires = "upgrade")]
         upgrade_from: Option<u64>,
+        /// Schedules a fork this release knows, by its name, or moves one not yet passed: blocks
+        /// from --fork-height, or from --fork-epoch's first block, run by it. At least the chain's
+        /// lead ahead, a day of blocks unless governance set another.
+        #[arg(long, requires = "fork_least")]
+        fork: Option<String>,
+        /// The first block that runs by --fork.
+        #[arg(long, requires = "fork", conflicts_with = "fork_epoch")]
+        fork_height: Option<u64>,
+        /// The epoch whose first block runs by --fork first.
+        #[arg(long, requires = "fork")]
+        fork_epoch: Option<u64>,
+        /// The oldest release that knows --fork: older nodes stop before it.
+        #[arg(long, requires = "fork")]
+        fork_least: Option<crate::structs::version::Version>,
+        /// Cancels a fork not yet passed, by its name.
+        #[arg(long)]
+        cancel_fork: Option<String>,
+        /// How many blocks ahead a fork must be scheduled, moved or cancelled.
+        #[arg(long)]
+        fork_lead: Option<u64>,
         /// A new name for the chain, such as "chainv4 testnet": what the apps call the network.
         #[arg(long)]
         chain_name: Option<String>,
@@ -1207,6 +1227,12 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             switch_epoch,
             upgrade,
             upgrade_from,
+            fork,
+            fork_height,
+            fork_epoch,
+            fork_least,
+            cancel_fork,
+            fork_lead,
             chain_name,
             lock,
             version,
@@ -1254,6 +1280,17 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
 
                     Change::Name(name)
                 }
+                (_, _, _, _, _, _) if fork.is_some() => {
+                    let at = match (fork_height, fork_epoch) {
+                        (Some(height), None) => crate::params::forks::ForkAt::Height(height),
+                        (None, Some(epoch)) => crate::params::forks::ForkAt::Epoch(epoch),
+                        _ => return Err("--fork needs --fork-height or --fork-epoch".into()),
+                    };
+
+                    Change::Fork(crate::params::forks::ForkChange::Schedule { name: fork.unwrap_or_default(), at, least: fork_least.unwrap_or_default() })
+                }
+                (_, _, _, _, _, _) if cancel_fork.is_some() => Change::Fork(crate::params::forks::ForkChange::Cancel { name: cancel_fork.unwrap_or_default() }),
+                (_, _, _, _, _, _) if fork_lead.is_some() => Change::Fork(crate::params::forks::ForkChange::Lead { blocks: fork_lead.unwrap_or_default() }),
                 (_, _, _, _, _, _) if upgrade.is_some() => Change::Upgrade(crate::structs::version::Upgrade {
                     least: upgrade.unwrap_or_default(),
                     from: upgrade_from.ok_or("--upgrade needs --upgrade-from")?,
@@ -1365,6 +1402,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 }
                 crate::governance::Change::Governance(config) => format!("governance's settings: {}", crate::chain::json::governance_json(config)),
                 crate::governance::Change::Locks(paths) => format!("locking {} for good", paths.join(", ")),
+                crate::governance::Change::Fork(change) => change.describe(),
             };
             println!("voting {} on {what}, from version {version}", vote.name());
 

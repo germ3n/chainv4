@@ -445,6 +445,8 @@ pub struct VmRules {
     pub max_tx_bytes: Option<u64>,
     #[document(summary = "The most members a native multisig may have.")]
     pub multisig_members: u32,
+    #[document(summary = "The forks in force at the block's height, which every rule a fork changes asks: none on a chain that scheduled none.")]
+    pub forks: crate::params::forks::Forks,
 }
 
 #[document(
@@ -466,6 +468,7 @@ impl Default for VmRules {
             dex: DexSettings::DEFAULT,
             max_tx_bytes: None,
             multisig_members: super::MULTISIG_MEMBERS,
+            forks: crate::params::forks::Forks::NONE,
         }
     }
 }

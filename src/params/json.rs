@@ -1161,6 +1161,117 @@ impl<'a> Fields<'a> {
     }
 }
 
+#[r#macro::document(
+    summary = "A fork schedule as JSON, as genesis files and GET /status write it: lead, the blocks ahead governance must schedule a fork, or null for a day's; and scheduled, each fork's name and height, its epoch if it was scheduled by one, and the least release governance named.",
+    category = "Governance",
+    see_also = "ForkSchedule",
+)]
+pub fn forks_json(schedule: &crate::params::forks::ForkSchedule) -> Value {
+    json!({
+        "lead": schedule.lead,
+        "scheduled": schedule.forks.iter().map(|fork| json!({
+            "name": fork.name,
+            "height": fork.height,
+            "epoch": fork.epoch,
+            "least": fork.least.map(|least| least.to_string()),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+#[r#macro::document(
+    summary = "The fork schedule GET /status says the chain keeps, as the apps run their own reads by it: each fork's name, height and epoch; anything it does not read is left out. None from an older node.",
+    category = "Governance",
+)]
+pub fn forks_from_status(status: &Value) -> crate::params::forks::ForkSchedule {
+    let forks = status["forks"]["scheduled"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|fork| {
+            Some(crate::params::forks::ScheduledFork {
+                name: fork["name"].as_str()?.to_string(),
+                height: fork["height"].as_u64()?,
+                epoch: fork["epoch"].as_u64(),
+                least: fork["least"].as_str().and_then(|least| least.parse().ok()),
+            })
+        })
+        .collect();
+
+    crate::params::forks::ForkSchedule { forks, lead: status["forks"]["lead"].as_u64() }
+}
+
+/// A fork schedule as a genesis file writes it: each fork at a height, or at an epoch, whose first
+/// block it is placed at by the chain's checkpoint interval.
+#[cfg_attr(not(feature = "node"), allow(dead_code))]
+pub(crate) fn forks_from_json(mut fields: Fields, interval: Option<u64>) -> Result<crate::params::forks::ForkSchedule, String> {
+    use crate::params::forks::{ForkAt, ForkSchedule, ScheduledFork};
+
+    let lead = fields.optional_whole("lead")?;
+    let mut forks = Vec::new();
+
+    for mut fork in fields.list("scheduled")? {
+        let name = fork.text("name")?;
+        let epoch = fork.later_whole("epoch")?;
+        let at = match (epoch, fork.later_whole("height")?) {
+            (Some(epoch), None) => ForkAt::Epoch(epoch),
+            (Some(epoch), Some(height)) if ForkAt::Epoch(epoch).height(interval) == Some(height) => ForkAt::Epoch(epoch),
+            (None, Some(height)) => ForkAt::Height(height),
+            _ => return Err(format!("fork {name} names a height or an epoch, one of them")),
+        };
+        let height = at.height(interval).ok_or_else(|| format!("fork {name} is at an epoch, and the chain has no finality to count epochs by"))?;
+        let least = fork.later_text("least")?.map(|least| least.parse()).transpose().map_err(|_| format!("fork {name}'s least is not a version"))?;
+        fork.done()?;
+        forks.push(ScheduledFork { name, height, epoch, least });
+    }
+
+    forks.sort_by_key(|fork| fork.height);
+    fields.done()?;
+    let schedule = ForkSchedule { forks, lead };
+
+    match schedule.genesis_problem() {
+        Some(problem) => Err(problem),
+        None => Ok(schedule),
+    }
+}
+
+/// A change of the fork schedule as JSON, its type naming what it does: {"type": "schedule",
+/// "name", "height" or "epoch", the other null, "least"}, {"type": "cancel", "name"} or {"type": "lead", "blocks"}.
+fn fork_change_json(change: &crate::params::forks::ForkChange) -> Value {
+    use crate::params::forks::{ForkAt, ForkChange};
+
+    match change {
+        ForkChange::Schedule { name, at: ForkAt::Height(height), least } => json!({ "type": "schedule", "name": name, "height": height, "epoch": null, "least": least.to_string() }),
+        ForkChange::Schedule { name, at: ForkAt::Epoch(epoch), least } => json!({ "type": "schedule", "name": name, "height": null, "epoch": epoch, "least": least.to_string() }),
+        ForkChange::Cancel { name } => json!({ "type": "cancel", "name": name }),
+        ForkChange::Lead { blocks } => json!({ "type": "lead", "blocks": blocks }),
+    }
+}
+
+fn fork_change_from_json(value: &Value) -> Result<crate::params::forks::ForkChange, String> {
+    use crate::params::forks::{ForkAt, ForkChange};
+
+    let mut fields = Fields::of(value, "fork")?;
+    let change = match fields.text("type")?.as_str() {
+        "schedule" => {
+            let name = fields.text("name")?;
+            let at = match (fields.later_whole("height")?, fields.later_whole("epoch")?) {
+                (Some(height), None) => ForkAt::Height(height),
+                (None, Some(epoch)) => ForkAt::Epoch(epoch),
+                _ => return Err("fork names a height or an epoch, one of them".to_string()),
+            };
+            let least = fields.text("least")?.parse().map_err(|why| format!("fork.least: {why}"))?;
+
+            ForkChange::Schedule { name, at, least }
+        }
+        "cancel" => ForkChange::Cancel { name: fields.text("name")? },
+        "lead" => ForkChange::Lead { blocks: fields.whole("blocks")? },
+        other => return Err(format!("fork.type: {other} is not schedule, cancel or lead")),
+    };
+    fields.done()?;
+
+    Ok(change)
+}
+
 /// The finality kinds this build has, for error messages.
 pub fn finality_kinds() -> String {
     match FinalityConfig::KINDS {
@@ -1244,6 +1355,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::Finality(finality) => json!({ "finality": finality_json(finality) }),
         Change::SwitchFinality { epoch, config } => json!({ "switch_finality": { "epoch": epoch, "finality": finality_json(config) } }),
         Change::Upgrade(upgrade) => json!({ "upgrade": { "least": upgrade.least.to_string(), "from": upgrade.from } }),
+        Change::Fork(change) => json!({ "fork": fork_change_json(change) }),
         Change::Name(name) => json!({ "name": name }),
         Change::Governance(config) => json!({ "governance": governance_json(config) }),
         Change::TokenFunctions(functions) => json!({ "token_functions": functions }),
@@ -1338,6 +1450,7 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
 
             Change::SwitchFinality { epoch, config }
         }
+        "fork" => Change::Fork(fork_change_from_json(value)?),
         "upgrade" => {
             let mut fields = Fields::of(value, "upgrade")?;
             let least = fields.text("least")?.parse().map_err(|why| format!("upgrade.least: {why}"))?;

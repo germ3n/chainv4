@@ -81,6 +81,46 @@ pub struct Status {
     /// The upgrade governance decided, if any: from a height on, nodes older than a version stop.
     #[serde(default)]
     pub upgrade: Option<UpgradeView>,
+    /// The fork schedule: none from older nodes.
+    #[serde(default)]
+    pub forks: Option<ForksView>,
+}
+
+/// The chain's fork schedule, as /status says it: how far ahead one must be scheduled, and each
+/// scheduled.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct ForksView {
+    #[serde(default)]
+    pub lead: u64,
+    #[serde(default)]
+    pub scheduled: Vec<ForkView>,
+}
+
+impl ForksView {
+    /// The schedule, as the explorer's own reads run by it: on the desktop alone, as the browser
+    /// runs none.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn schedule(&self) -> chainv4::params::forks::ForkSchedule {
+        let forks = self.scheduled.iter().map(|fork| chainv4::params::forks::ScheduledFork { name: fork.name.clone(), height: fork.height, epoch: fork.epoch, least: None }).collect();
+
+        chainv4::params::forks::ForkSchedule { forks, lead: Some(self.lead) }
+    }
+}
+
+/// A scheduled fork: its name, its first block, its epoch if scheduled by one, whether it has
+/// passed, whether the node's release knows it, and what it changes, as the node's release says.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ForkView {
+    pub name: String,
+    pub height: u64,
+    #[serde(default)]
+    pub epoch: Option<u64>,
+    #[serde(default)]
+    pub passed: bool,
+    #[serde(default)]
+    pub known: bool,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// What the explorer calls a chain that names itself nothing, or before it knows.

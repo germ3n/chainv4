@@ -549,6 +549,7 @@ fn a_chain_without_the_evm_refuses_evm_transactions() {
         engines: Engine::compiled().into_iter().filter(|engine| *engine != Engine::Evm).collect(),
         // The deployment proxy is EVM code: a chain without the EVM has none.
         preinstalls: Vec::new(),
+        forks: Default::default(),
         ..super::genesis()
     };
     let mut chain = Chain::open(db, &genesis).unwrap();

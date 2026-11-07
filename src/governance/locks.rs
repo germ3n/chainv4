@@ -12,7 +12,7 @@ use r#macro::document;
     category = "Governance",
     see_also = "path_problem, Change::Locks",
 )]
-pub const ROOTS: [&str; 20] = [
+pub const ROOTS: [&str; 21] = [
     "consensus",
     "bootnodes",
     "names",
@@ -31,7 +31,7 @@ pub const ROOTS: [&str; 20] = [
     "evm_spec",
     "dex",
     "anchoring",
-    "locks", "engines"];
+    "locks", "engines", "fork"];
 
 /// Fees' fields, each variant's and its host costs' among them.
 const FEES: [&str; 48] = [
@@ -153,6 +153,9 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
             "depth",
         ],
         "upgrade" => &["least", "from"],
+        // Nothing stands for the fork schedule to compare a change with: fork whole freezes it,
+        // fork.blocks the lead alone, and so on.
+        "fork" => &["type", "name", "height", "epoch", "least", "blocks"],
         "governance" => &["type", "members", "threshold", "approval_epochs", "quorum_permille"],
         "evm_spec" => &["spec", "from"],
         "dex" => &["tiers", "protocol_permille"],

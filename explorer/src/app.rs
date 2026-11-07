@@ -306,6 +306,7 @@ impl Explorer {
                             let rules = chainv4_ui::rerun::Rules {
                                 dex: status.map_or(chainv4::params::vm::DexSettings::DEFAULT, crate::model::Status::dex),
                                 evm_spec: status.and_then(|status| status.evm_spec.as_deref()).and_then(|spec| spec.parse().ok()),
+                                forks: status.and_then(|status| status.forks.as_ref()).map(crate::model::ForksView::schedule).unwrap_or_default(),
                             };
                             let body = ask.body().unwrap_or_default();
                             let checked = chainv4_ui::rerun::checked(&mut self.engines, &body, value, self.light.client(), rules);

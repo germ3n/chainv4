@@ -46,6 +46,7 @@ fn rules() -> Rules {
         anchoring: Default::default(),
         names: None,
         vm: crate::params::vm::VmRules::default(),
+        target_block_ms: None,
     }
 }
 

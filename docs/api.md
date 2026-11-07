@@ -46,6 +46,7 @@ Where the chain stands:
 | `max_block_bytes` | The most bytes the next block's transactions may take, encoded, as governance or genesis set it, or `null` for none. |
 | `bootnodes` | The chain's bootnodes at the tip: the ones governance decided last, or genesis's. |
 | `upgrade` | `null`, or the [upgrade](updates.md#upgrades) governance decided last: nodes older than `least` stop before block `from`. |
+| `forks` | The [fork schedule](governance.md#forks): `lead`, the blocks ahead governance must schedule a fork, and `scheduled`, each fork's `name`, `height`, `epoch` if it was scheduled by one, the `least` release governance named, whether it has `passed` at the tip, whether this node's release knows it (`known`), and its `summary`, what it changes, as the release says. |
 | `version` | The node's own chainv4 version, such as `0.1.0`. |
 | `name` | The chain's name, genesis's or the one governance decided last, such as `chainv4 testnet`, or `null` for a chain that has none: what the apps call the network. |
 | `bodies_from` | The lowest height whose block this node holds whole: 0 for one that holds every block, the block after the snapshot it synced from, or where it pruned to with `--prune-blocks`. Below it, `GET /blocks/{block}` answers the header alone, with `bodies_from`, and transactions there are not found. |
@@ -909,7 +910,8 @@ On a chain with [governance](governance.md):
 - `in_force`, every setting governance may change as it stands at the tip, by kind: `consensus`,
   `name`, `bootnodes`, `names`, `collections`, `token_functions`, `federation`, `directory`, `fees`,
   `reward`, `limits`, `finality`, `upgrade`, `governance`, `evm_spec`, `dex`, `anchoring` and
-  `locks`, a kind left out when the chain has none of it.
+  `locks`, a kind left out when the chain has none of it. The fork schedule is `GET /status`'s
+  `forks`, not here.
   Each has its `value`, as a change writes it, and `decided`, the version of the change that set
   it last, or `null` while genesis's stands. It is what the chain compares a change with to hold
   its locks;

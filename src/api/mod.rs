@@ -1066,6 +1066,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "evm_spec": api.rules.vm.evm_spec.name(),
         "directory_admin": crate::registry::directory::directory_admin(&State::new(db.clone()))?.map(|admin| admin.to_string()),
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
+        "forks": forks_json(&crate::registry::changes::Changes::new(&State::new(db.clone())).forks()?, tip.header.height, api.rules.target_block_ms),
         "version": crate::structs::version::Version::ours().to_string(),
         "name": crate::registry::changes::Changes::new(&State::new(db.clone())).name()?,
         "names_suffix": names_suffix(&api),
@@ -1081,6 +1082,30 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "dex": dex_json(&api, directory.as_ref()),
         "operator": operator_json(&api),
     })))
+}
+
+/// The fork schedule as GET /status says it: the lead in blocks, and each fork scheduled with
+/// whether it has passed at the tip, whether this release knows it, and what it changes.
+fn forks_json(schedule: &crate::params::forks::ForkSchedule, tip: u64, target_block_ms: Option<u64>) -> Value {
+    let scheduled: Vec<Value> = schedule
+        .forks
+        .iter()
+        .map(|fork| {
+            let known = crate::params::forks::known(&fork.name);
+
+            json!({
+                "name": fork.name,
+                "height": fork.height,
+                "epoch": fork.epoch,
+                "least": fork.least.map(|least| least.to_string()),
+                "passed": fork.height <= tip,
+                "known": known.is_some(),
+                "summary": known.map(|fork| fork.summary),
+            })
+        })
+        .collect();
+
+    json!({ "lead": schedule.lead(target_block_ms), "scheduled": scheduled })
 }
 
 /// The newest release the node took, as signed, for the apps and workers to check themselves; where

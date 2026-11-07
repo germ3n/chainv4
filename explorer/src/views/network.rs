@@ -174,6 +174,14 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                     ui.add(egui::Label::new(RichText::new(self::upgrade(upgrade, height)).color(palette.warn)).wrap());
                 });
             }
+            // Each fork the chain scheduled, and when; none listed for a chain that scheduled none.
+            for fork in status.and_then(|status| status.forks.as_ref()).map(|forks| forks.scheduled.as_slice()).unwrap_or_default() {
+                let height = status.map_or(0, |status| status.height);
+                let tone = if fork.known { palette.ink } else { palette.warn };
+                facts.row("fork", |ui| {
+                    ui.add(egui::Label::new(RichText::new(self::fork(fork, height)).color(tone)).wrap());
+                });
+            }
             facts.row("syncing", |ui| match &node.syncing {
                 _ if node.hides("syncing") => hidden(ui, &palette),
                 Some(syncing) => {
@@ -308,6 +316,27 @@ pub fn upgrade(upgrade: &UpgradeView, height: u64) -> String {
     text[..1].make_ascii_uppercase();
 
     format!("{text} ({by}) · {left}")
+}
+
+/// A scheduled fork: its name and first block, by epoch where it was scheduled by one, whether it
+/// has passed or how far off it is, and what it changes, or that the node's release does not know it.
+pub fn fork(fork: &crate::model::ForkView, height: u64) -> String {
+    let at = match fork.epoch {
+        Some(epoch) => format!("epoch {}, block {}", format::thousands(&epoch.to_string()), format::thousands(&fork.height.to_string())),
+        None => format!("block {}", format::thousands(&fork.height.to_string())),
+    };
+    let when = match fork.height.checked_sub(height) {
+        _ if fork.passed => "in force".to_string(),
+        Some(1) => "1 block from the tip".to_string(),
+        Some(left) => format!("{} blocks from the tip", format::thousands(&left.to_string())),
+        None => "in force".to_string(),
+    };
+    let what = match (&fork.summary, fork.known) {
+        (Some(summary), true) => format!(": {summary}"),
+        _ => ": this node's release does not know it, and stops before it".to_string(),
+    };
+
+    format!("{} from {at} · {when}{what}", fork.name)
 }
 
 /// The node's mining: the hashrate over the last minutes, its own devices, the pool it runs, if
@@ -681,6 +710,18 @@ mod tests {
         let said = ["/ip4/10.0.0.1/tcp/1", "/ip4/10.0.0.2/tcp/1", "/ip4/10.0.0.1/tcp/1"].map(str::to_string);
 
         assert_eq!(once_each(&said), [&said[0], &said[1]]);
+    }
+
+    #[test]
+    fn a_fork_says_when_it_runs_from_and_what_it_changes_or_that_the_node_does_not_know_it() {
+        let fork = |known, passed, epoch| crate::model::ForkView { name: "faster-lua".to_string(), height: 12_000, epoch, passed, known, summary: known.then(|| "Lua's fuel table".to_string()) };
+
+        assert_eq!(super::fork(&fork(true, false, None), 11_000), "faster-lua from block 12,000 · 1,000 blocks from the tip: Lua's fuel table");
+        assert_eq!(super::fork(&fork(true, true, Some(1_500)), 12_500), "faster-lua from epoch 1,500, block 12,000 · in force: Lua's fuel table");
+        assert!(super::fork(&fork(false, false, None), 11_999).ends_with("1 block from the tip: this node's release does not know it, and stops before it"));
+
+        let forks: crate::model::ForksView = serde_json::from_value(serde_json::json!({ "lead": 17_280, "scheduled": [{ "name": "faster-lua", "height": 12_000, "epoch": null, "least": "0.3.0", "passed": false, "known": true, "summary": "Lua's fuel table" }] })).unwrap();
+        assert_eq!((forks.lead, &forks.scheduled[0]), (17_280, &fork(true, false, None)));
     }
 
     #[test]

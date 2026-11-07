@@ -424,6 +424,49 @@ chainv4 send --key member.key vote-change --vote yes --upgrade 0.2.0 --upgrade-f
   `GET /status`.
 - A chain without governance announces one in a release instead. See [Updates](updates.md).
 
+## Forks
+
+A fork changes what blocks compute from a height on, so a live chain takes a consensus change
+without a new genesis: blocks below it run by the rules before it, blocks from it by its own, and
+a node replaying history runs each block by its own height's (`params::forks`).
+
+- **A fork is a name its release knows** (`FORKS`), with the code it changes asking whether it is
+  in force (`Forks::has`, through `VmRules::forks`, set for every block from its parent's state).
+  This release knows none yet: the machinery stands, tested with a fork that exists in tests
+  alone, and the first real one comes with the next consensus change.
+- **Genesis may list forks** (`forks`, see [Genesis](genesis.md)), each its release knows, at a
+  height or a finality epoch's first block.
+- **Governance schedules one** at least the chain's lead ahead, a day of its blocks unless it set
+  another, by height or by epoch, naming the least release that knows it. That also stops nodes
+  older than that release there, as an [upgrade](#upgrade) does, unless an upgrade already
+  stops them sooner. It moves or cancels one until it is within the lead; from then, and once
+  passed, it is fixed.
+- **A node whose release does not know a scheduled fork** stops before its height, warning as it
+  nears as for an upgrade, and runs no block from it: a release that knows it is needed.
+- **Locks hold it too:** `fork` locked freezes the schedule.
+
+```sh
+chainv4 send --key member.key vote-change --vote yes --fork-lead 2000
+chainv4 send --key member.key vote-change --vote yes --fork faster-lua --fork-height 180000 --fork-least 0.3.0
+chainv4 send --key member.key vote-change --vote yes --fork faster-lua --fork-epoch 22500 --fork-least 0.3.0   # moves it
+chainv4 send --key member.key vote-change --vote yes --cancel-fork faster-lua
+chainv4 send --key member.key vote-change --vote yes --change '{"fork":{"type":"schedule","name":"faster-lua","height":180000,"epoch":null,"least":"0.3.0"}}'
+```
+
+The wallet's Governance page proposes the same under **Fork schedule**: schedule or move a fork by
+block or by epoch, cancel one, or set the lead. The apps' own runs of contract reads go by the
+forks in force at each read's height, from the schedule `GET /status` gives.
+
+The schedule is kept whole in `change:forks`, genesis's written there as the chain starts when it
+lists any, so a light client proves it as any setting. `GET /status` lists it as `forks`, and the
+explorer's network page each fork, when it runs from and what it changes.
+
+**What a fork may change:** anything a block computes, each looked up by the block's height where
+it applies: the VM's rules, fuel and host costs, the fee schedule, the limits, the checks a
+transaction must pass. A new transaction kind or encoding is a new tag that only blocks from its
+fork take. A change of an engine itself, such as another Luau build, would run beside the old one
+for the blocks before it.
+
 ## Name
 
 A change renames the chain, replacing genesis's `name` or the last decided:

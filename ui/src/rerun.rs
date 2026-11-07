@@ -27,11 +27,14 @@ const LIMITS: Limits = Limits { fuel: 10_000_000_000, memory: 256 * 1024 * 1024 
 
 /// What the wallet's own reads go by beside the proven state: what /status says the chain runs
 /// with, the node's word until genesis is proven too.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Rules {
     /// The DEXes' settings, as /status says them (chainv4::params::json::dex_from_status).
     pub dex: DexSettings,
     pub evm_spec: Option<chainv4::params::vm::EvmSpec>,
+    /// The fork schedule, as /status says it (chainv4::params::json::forks_from_status): a read
+    /// runs by the forks in force at the height it was proven at, as the node ran it.
+    pub forks: chainv4::params::forks::ForkSchedule,
 }
 
 /// The engines reads run on here: the app keeps one, made the first time a read is checked.
@@ -108,7 +111,7 @@ fn run_here(engines: &mut Engines, body: &str, answer: &Value, client: Option<&L
     }
 
     let reads = proven["entries"].as_array().into_iter().flatten().map(read).collect::<Result<Vec<_>, _>>()?;
-    let mut vm_rules = VmRules { dex: rules.dex, ..VmRules::default() };
+    let mut vm_rules = VmRules { dex: rules.dex, forks: rules.forks.at(height), ..VmRules::default() };
 
     if let Some(spec) = rules.evm_spec {
         vm_rules.evm_spec = spec;
@@ -200,12 +203,12 @@ mod tests {
         let earlier = json!({ "contract": "contract:0x01", "function": "pool", "args": [], "block": 40 }).to_string();
         assert_eq!(serde_json::from_str::<Value>(&proving(&earlier, "0xabc").unwrap()).unwrap()["block"], json!(40));
 
-        let rules = Rules { dex: DexSettings::DEFAULT, evm_spec: None };
+        let rules = Rules { dex: DexSettings::DEFAULT, evm_spec: None, forks: Default::default() };
         let answer = json!({ "status": "returned", "values": [{ "type": "i64", "value": "1" }] });
         let mut engines = Engines::default();
 
         // No light client yet: the node's word, and why.
-        let kept = checked(&mut engines, &body, answer.clone(), None, rules);
+        let kept = checked(&mut engines, &body, answer.clone(), None, rules.clone());
         assert_eq!(kept["values"], answer["values"]);
         assert_eq!(kept["checked"]["here"], false);
         assert!(kept["checked"]["why"].as_str().unwrap().contains("light client"));

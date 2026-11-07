@@ -627,6 +627,7 @@ fn deploys_for_engines_genesis_leaves_out_fail() {
     let lua_only = Genesis {
         engines: vec![Engine::Lua],
         preinstalls: Vec::new(),
+        forks: Default::default(),
         ..genesis()
     };
     let mut chain = Chain::open(db, &lua_only).unwrap();
@@ -2179,6 +2180,7 @@ mod pentest_wasm;
 mod pentest_contracts;
 mod batch;
 mod range;
+mod forks;
 // A council governs them, on the dev chain, whose finality votes only under FFG.
 #[cfg(all(feature = "finality-ffg", feature = "governance-council"))]
 mod settings;

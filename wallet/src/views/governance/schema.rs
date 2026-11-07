@@ -140,6 +140,7 @@ impl Spec {
     }
 }
 
+const FORK_KINDS: Options = &[("schedule", "Schedule or move a fork"), ("cancel", "Cancel a fork"), ("lead", "Set the lead")];
 const CONSENSUS_KINDS: Options = &[("pow", "Proof of work"), ("authority", "One key"), ("rotating", "Signers in turn"), ("staked", "Validators by stake")];
 const SECURE_HASHES: Options = &[("blake3", "BLAKE3"), ("sha256", "SHA-256"), ("blake2s", "BLAKE2s"), ("blake2b", "BLAKE2b"), ("keccak256", "Keccak-256")];
 const SCHEDULES: Options = &[("draw", "A weighted draw"), ("priority", "Priority rotation")];
@@ -190,6 +191,15 @@ pub fn schema(kind: &str) -> Vec<Spec> {
         "upgrade" => vec![
             field("least", "Least version that runs on", "Nodes older than this stop and say to update.", Control::Version),
             field("from", "From block", "Must be ahead of the block that decides it.", Control::Whole),
+        ],
+        "fork" => vec![
+            field("type", "What it does", "A fork changes what blocks compute from a height on. One within the lead of this vote, or passed, stays as it is.", Control::Choice(FORK_KINDS)),
+            field("name", "Fork", "Its name, as the release that knows it calls it: scheduling it again moves it.", Control::Text).when(&[("type", "schedule")]),
+            field("name", "Fork", "The one to cancel, not yet within the lead.", Control::Text).when(&[("type", "cancel")]),
+            field("height", "From a block", "At least the chain's lead ahead: a day of blocks unless it set another. A block or an epoch, one of them.", Control::MaybeWhole { off: "Not by block", on: "From block" }).when(&[("type", "schedule")]),
+            field("epoch", "From an epoch's first block", "", Control::MaybeWhole { off: "Not by epoch", on: "From epoch" }).when(&[("type", "schedule")]),
+            field("least", "Least release that knows it", "Older nodes stop there, as for an upgrade.", Control::Version).when(&[("type", "schedule")]),
+            field("blocks", "Lead, in blocks", "How far ahead a fork must be scheduled, moved or cancelled.", Control::Whole).when(&[("type", "lead")]).least(1),
         ],
         "names" => vec![
             field("prices", "What a year of a name costs", "By its length; the last price holds for every longer name.", Control::List(Line::Price)),
@@ -412,6 +422,7 @@ pub fn defaults(kind: &str) -> Value {
         "anchoring" => json!({ "bitcoin": false, "ethereum": false, "enforce": false, "relay": null, "btc_start": null, "eth_relay": null, "eth_start": null, "depth": 6, "every": 90, "reward": "0" }),
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
+        "fork" => json!({ "type": "schedule", "name": "", "height": null, "epoch": null, "least": "", "blocks": null }),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),
         "fees" => json!({
             "block_gas_limit": 50_000_000,
@@ -454,7 +465,7 @@ pub fn defaults(kind: &str) -> Value {
 /// whole, as the fields of the one standing mean nothing to it.
 pub fn variants(kind: &str) -> &'static [&'static str] {
     match kind {
-        "consensus" => &[""],
+        "consensus" | "fork" => &[""],
         "fees" => &["schedule", "pricing"],
         "switch_finality" => &["finality"],
         _ => &[],
