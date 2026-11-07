@@ -153,7 +153,8 @@ impl Form {
     fn code(&self) -> Result<Code, String> {
         match self.engine {
             Engine::Lua if self.code.trim().is_empty() => Err("give the contract's source".to_string()),
-            Engine::Lua => Ok(Code::Lua(self.code.clone())),
+            // A contract's own tests stay off chain: chainv4 test runs them.
+            Engine::Lua => Ok(Code::Lua(chainv4::structs::lua_tests::strip_tests(&self.code))),
             Engine::Wasm => Ok(Code::Wasm(self.wasm.as_ref().ok_or("pick the module")?.1.clone())),
             Engine::Evm => Ok(Code::Evm(from_hex(self.code.trim()).filter(|code| !code.is_empty()).ok_or("the init code is not hex")?)),
         }

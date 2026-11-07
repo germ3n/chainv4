@@ -969,8 +969,14 @@ pub(super) fn lua_source(path: &Path) -> CliResult<String> {
     }
 
     check(&bundle)?;
+    // A contract's own tests stay off chain: chainv4 test runs them.
+    let stripped = crate::structs::lua_tests::strip_tests(&bundle.source);
 
-    Ok(bundle.source)
+    if stripped != bundle.source {
+        println!("left out its tests: {}", crate::structs::lua_tests::test_names(&bundle.source).join(", "));
+    }
+
+    Ok(stripped)
 }
 
 /// Whether a bundle compiles and its layout reads, as a node will check it, with any mistake

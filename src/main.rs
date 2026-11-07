@@ -61,6 +61,11 @@ enum Command {
     /// against what it is charged, with suggested lua_costs and costs for a genesis file's fees.
     #[cfg(feature = "lvm")]
     Calibrate(cli::CalibrateArgs),
+    /// Runs Lua contracts' unit tests on an in-memory chain: each test_ function, in a contract
+    /// beside its code, in a name_test.lua file or under a tests folder, on a fresh chain with ten
+    /// funded accounts and `t` to drive it. Deploys leave a contract's own tests out.
+    #[cfg(all(feature = "lvm", feature = "node"))]
+    Test(cli::TestArgs),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
@@ -628,6 +633,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Bench(args)) => cli::bench(args),
         #[cfg(feature = "lvm")]
         Some(Command::Calibrate(args)) => cli::calibrate(args),
+        #[cfg(all(feature = "lvm", feature = "node"))]
+        Some(Command::Test(args)) => cli::test(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
         Some(Command::Db(args)) => cli::db(args),

@@ -551,6 +551,35 @@ fn instantiate(state: &Pristine, bytecode: &[u8]) -> Result<Table, VmError> {
 
 /// The allowed globals only, read-only, so a script keeps its state in locals and cannot
 /// change what other code sees.
+/// A Lua state for chainv4 test, never a chain's: the libraries and globals a contract has, in an
+/// environment left open for a test's own globals and `t`, and no fuel limit, as tests run off
+/// chain and only what they send to the chain is metered.
+#[cfg(feature = "node")]
+pub(crate) fn test_state() -> Result<(Lua, Table), VmError> {
+    let pristine = Pristine::new()?;
+    pristine.lua.set_fuel(u64::MAX)?;
+    let env = pristine.lua.create_table()?;
+
+    for pair in pristine.env.pairs::<Value, Value>() {
+        let (name, value) = pair?;
+        env.raw_set(name, value)?;
+    }
+
+    Ok((pristine.lua, env))
+}
+
+/// A call's argument as a Lua value, as a contract receives one: for chainv4 test.
+#[cfg(feature = "node")]
+pub(crate) fn argument_to_lua(lua: &Lua, argument: &TxCallArgumentType) -> Result<Value, VmError> {
+    value::to_lua(lua, argument)
+}
+
+/// A Lua value as a call's argument, as a contract returns one: for chainv4 test.
+#[cfg(feature = "node")]
+pub(crate) fn argument_from_lua(value: Value) -> Result<TxCallArgumentType, VmError> {
+    value::from_lua(value)
+}
+
 fn environment(lua: &Lua) -> mlua::Result<Table> {
     // The sandbox leaves an empty globals table that reads through to the locked originals,
     // so these lookups go through __index rather than raw.

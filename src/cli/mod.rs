@@ -35,6 +35,8 @@ mod light;
 pub(crate) mod bench;
 #[cfg(feature = "lvm")]
 mod calibrate;
+#[cfg(all(feature = "lvm", feature = "node"))]
+mod test;
 #[cfg(feature = "client")]
 mod claim;
 #[cfg(feature = "client")]
@@ -68,6 +70,8 @@ pub use send::{SendArgs, TlsArgs, TxArgs, send};
 pub use bench::{BenchArgs, bench};
 #[cfg(feature = "lvm")]
 pub use calibrate::{CalibrateArgs, calibrate};
+#[cfg(all(feature = "lvm", feature = "node"))]
+pub use test::{TestArgs, test};
 #[cfg(feature = "client")]
 pub use claim::{ClaimArgs, claim};
 #[cfg(all(feature = "client", feature = "swap"))]

@@ -663,16 +663,13 @@ with.
 
 ### Script layer
 
-- [ ] **Unit tests for Lua contracts (owner, 2026-11-07).** `chainv4 test` runs a contract's tests,
-  each `test_*` function on a fresh in-memory chain, with no node or network, and reports each
-  pass or failure with the line it failed at, exiting non-zero for CI. Tests live three ways: in
-  the contract itself, kept out of what is deployed; in `name_test.lua` beside it; and in a
-  `tests/` folder. A `t` library from the start: deploy with init arguments, call as any account
-  with value, expect a failure and its message, assert; the events a call emitted, coin and token
-  balances, the contract's storage; move time and height, and the fuel each call used; call Wasm
-  and EVM contracts; and property tests with random inputs. Still to settle when it starts: how a
-  contract's own tests are kept out of the deployed code. Queued after the validity proofs' first
-  stage.
+- [x] **Unit tests for Lua contracts (owner, 2026-11-07).** Done 2026-11-08: `chainv4 test` runs
+  each `test_*` function on a fresh in-memory chain, from a contract's own tests (left out of every
+  deploy, `structs::lua_tests`), `name_test.lua` files and `tests` folders, with `t` to call,
+  deploy Lua, Wasm and EVM contracts, send as any of ten accounts, expect failures, read events,
+  balances, storage and fuel, move time and height, and fuzz from a seed. See
+  [Contracts](contracts.md#testing-lua-contracts). Left: coverage of what lines ran, and tests
+  for Wasm contracts written in Rust, which cargo test already serves through the SDK.
 
 - [x] **Push the Luau and mlua forks, then drop the local `[patch]`.** Done 2026-11-05: both forks
   are pushed (`germ3n/luau-src-rs` 93df670, `germ3n/mlua` 3832a79), the `[patch]` is gone, and

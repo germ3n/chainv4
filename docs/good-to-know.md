@@ -2277,6 +2277,18 @@ contract computes, so they wait for the next regenesis (see the todo).
 - **A wrong attestation is an invalid vote,** in gossip and in blocks alike: a validator whose
   `--attestation-key` is not the attester its set names simply attests nothing.
 
+## Lua contract tests
+
+- **Tests run off chain, their calls on it.** A test's own code is not metered or limited; only
+  what it sends, each call and deploy, runs on the test chain's engines with its fuel. Fuel a test
+  reads is what that one transaction used.
+- **One block per transaction.** `t.call` makes a block for itself, so time and height move a slot
+  each; `t.warp` and `t.roll` move them further.
+- **A test file's top level runs too.** Loading it runs what is outside functions, as a contract's
+  load does: keep it to definitions.
+- **Only top-level test functions are found and left out.** One defined inside another function, or
+  under another name, ships with the contract.
+
 ## Building and testing
 
 - **The end-to-end SDK test needs the wasm32 target.** It builds `contracts/` with cargo:

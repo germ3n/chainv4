@@ -790,6 +790,45 @@ end
 
 The full API is in the wiki under Lua.
 
+### Testing Lua contracts
+
+`chainv4 test` runs a contract's unit tests on an in-memory chain, with no node and no network:
+
+```sh
+chainv4 test                       # every test under this folder
+chainv4 test contracts/lua/token.lua --filter transfer
+chainv4 test tests/ --seed 7       # t.fuzz's draws, again the same
+```
+
+A test is a function named `test_` and something, written three ways:
+- **in the contract itself,** at its top level: `function M.test_transfer()`, `function test_x()`
+  or `local function test_x()`. Deploys leave them out, `chainv4 send deploy`, the wallet's
+  Contracts and Batch pages and the runner's own alike, each replaced by empty lines so every other
+  line stays where it was (`structs::lua_tests::strip_tests`). The contract, so stripped, is
+  deployed before each test as `t.self`;
+- **in `name_test.lua`** beside it, or **any file under a `tests` folder**, which deploys what it
+  tests itself.
+
+Each test runs on a fresh chain of its own: the development chain without fees, every engine on,
+accounts 1 to 10 funded. The test itself runs off chain, in a Lua state with the chain's libraries,
+so it names addresses and numbers as a contract does; every call and deploy it makes is a real
+transaction, in a block of its own, run by the chain's engines and fuel. A failure is a Lua error
+with its line; the run lists each test as ok or FAIL and exits non-zero when any failed.
+
+| `t.` | What it does |
+| --- | --- |
+| `self` | The contract the tests are in, deployed without them. |
+| `call(contract, function, ...)` | Calls a contract as the sender, returning what it returns; its failure is an error. |
+| `deploy(path)`, `deploy_wasm(path)`, `deploy_evm(path, types, ...)` | Deploys a Lua file (includes put together, its tests left out), a Wasm module or EVM init code with its constructor's arguments, by a path from the test's folder, returning the address. |
+| `evm_call(contract, signature, ...)` | Calls an EVM contract, `"bump(uint256)", 2`, returning its output in hex. |
+| `transfer(to, amount)`, `pay(amount)` | Sends the coin, or sends it with the next call. |
+| `account(n)`, `from(n)`, `as(n, fn)`, `sender()` | Account n's address, sending as it from now, or for one function, and who sends. |
+| `eq(got, want, why)`, `ok(value, why)`, `expect_error(fn, words)` | Assertions, the last one's passing only when fn fails, with those words if given. |
+| `events()`, `fuel()` | What the last transaction emitted, each `contract`, `name` and `data`, and the fuel it used. |
+| `balance(address)`, `storage(contract, key, namespace)` | An account's coin, and a contract's stored value, raw. |
+| `time()`, `height()`, `warp(ms)`, `roll(blocks)` | The tip's time and height; moving the next block's time on, or making empty blocks. |
+| `fuzz(runs, fn)`, `gen` | Runs fn that many times with `gen`: `gen.int(low, high)`, `gen.u256()`, `gen.bytes(n)`, `gen.bool()`, `gen.pick(list)`, `gen.address()`, all from `--seed`. A failing run says its number and seed. |
+
 ## WebAssembly contracts
 
 **The host functions:** a module imports them from `chain`, with pointers and lengths as `i32`s

@@ -735,7 +735,8 @@ fn deploy(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &Address
 fn deploy_tx(ctx: &mut Ctx, state: &ContractsState, from: &Address, abi: Option<&Abi>) -> Result<Prepared, String> {
     let code = match state.engine {
         Engine::Lua if state.code.trim().is_empty() => return Err("give the contract's source".to_string()),
-        Engine::Lua => Code::Lua(state.code.clone()),
+        // A contract's own tests stay off chain: chainv4 test runs them.
+        Engine::Lua => Code::Lua(chainv4::structs::lua_tests::strip_tests(&state.code)),
         Engine::Wasm => Code::Wasm(state.wasm.as_ref().ok_or("pick the module")?.1.clone()),
         Engine::Evm => {
             let mut init = from_hex(state.code.trim()).ok_or("the init code is not hex")?;

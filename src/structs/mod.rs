@@ -9,6 +9,7 @@ pub mod bech32;
 #[cfg(feature = "json")]
 pub mod json;
 pub mod bundle;
+pub mod lua_tests;
 pub mod code;
 pub mod digits;
 pub mod event;
