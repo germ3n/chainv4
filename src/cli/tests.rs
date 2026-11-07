@@ -879,7 +879,7 @@ mod send {
         assert!(crate::cli::multisig::review_bundle(&read, "Sign", false, false, &mut "".as_bytes()).is_err());
         crate::cli::multisig::review_bundle(&read, "Sign", false, false, &mut "yes\n".as_bytes()).unwrap();
         crate::cli::multisig::review_bundle(&read, "Sign", true, false, &mut "".as_bytes()).unwrap();
-        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false }).unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false, eip712: false }).unwrap();
         let node = running.stop();
         let held = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap();
 
@@ -923,13 +923,13 @@ mod send {
         });
         propose(&bundle, 10).unwrap();
         let submitted_short = multisig(&files[0], MultisigAction::Submit { bundle: bundle.clone() });
-        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false }).unwrap();
+        multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false, eip712: false }).unwrap();
 
         // The next one goes by approval on chain: member 2 approves, and that is enough with the
         // proposer's signature, so approving submits it.
         let second = dir.0.join("again.bundle");
         propose(&second, 5).unwrap();
-        multisig(&files[2], MultisigAction::Approve { bundle: second.clone(), yes: true, full: false }).unwrap();
+        multisig(&files[2], MultisigAction::Approve { bundle: second.clone(), yes: true, full: false, eip712: false }).unwrap();
         let shown = multisig(&files[0], MultisigAction::Show { account });
         let node = running.stop();
         let balance = |address: &Address| crate::registry::Accounts::new(&node.chain().state()).get(address).unwrap().balance;
@@ -968,7 +968,7 @@ mod send {
         let bundle = dir.0.join("pay.bundle");
         let to = Address::Ed25519([9; 32]);
         send(SendArgs { key: Some(files[0].clone()), multisig: Some(account), out: Some(bundle.clone()), ..running.args(TxArgs::Transfer { to: to.into(), amount: u256::new(10) }) }).unwrap();
-        let signed = multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false });
+        let signed = multisig(&files[1], MultisigAction::Sign { bundle: bundle.clone(), submit: true, yes: true, full: false, eip712: false });
         let node = running.stop();
 
         signed.expect("taken, not refused under its intrinsic cost");
@@ -4047,7 +4047,7 @@ mod send {
             ..running.args(TxArgs::ChangeMultisig { members: vec![member(0), member(1), member(3)], threshold: 2 })
         })
         .unwrap();
-        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true, yes: true, full: false } }).unwrap();
+        crate::cli::multisig(MultisigArgs { node: node.clone(), tls: Default::default(), key: Some(members[1].clone()), timeout: 10, action: MultisigAction::Sign { bundle: change, submit: true, yes: true, full: false, eip712: false } }).unwrap();
 
         let sync = dir.0.join("sync.evm");
         multisig(&files[0], EvmAction::Sync { eth_rpc: eth_rpc.clone(), out: sync.clone() }).unwrap();

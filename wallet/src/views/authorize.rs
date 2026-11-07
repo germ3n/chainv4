@@ -51,6 +51,9 @@ pub struct AuthorizeState {
     /// The owner's next permit nonce, as the token answered it.
     nonce: Option<Result<u256, String>>,
     signed: Option<SignedAuthorization>,
+    /// Whether the offline signer is asked to sign, and what reads its answer back.
+    asking: bool,
+    scan: super::scan::Scan,
     pasted: String,
     trouble: Option<String>,
 }
@@ -133,9 +136,13 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut AuthorizeState, send: &mut S
     }
 }
 
-/// The addresses of the account whose keys this wallet holds: what signs text here.
+/// The addresses of the account that sign text: those whose keys this wallet holds, and those an
+/// offline signer holds, which it signs on. MetaMask's sign no such text.
 fn signers(ctx: &Ctx) -> Vec<Address> {
-    ctx.holder().map(|holder| holder.addresses().into_iter().filter(|address| holder.key(address).is_some()).collect()).unwrap_or_default()
+    ctx.holder()
+        .filter(|holder| !holder.by_metamask())
+        .map(|holder| holder.addresses().into_iter().filter(|address| holder.key(address).is_some() || holder.keys.is_empty()).collect())
+        .unwrap_or_default()
 }
 
 fn sign(ui: &mut Ui, ctx: &mut Ctx, state: &mut AuthorizeState, chain_id: u64) {
@@ -144,7 +151,7 @@ fn sign(ui: &mut Ui, ctx: &mut Ctx, state: &mut AuthorizeState, chain_id: u64) {
 
     if signers.is_empty() {
         theme::card(ui, &palette, |ui| {
-            ui.add(egui::Label::new(RichText::new("This account's keys are not in this wallet: on the offline signer or in MetaMask, which sign transactions, not a token's text.").color(palette.muted)).wrap());
+            ui.add(egui::Label::new(RichText::new("This account is in MetaMask, which signs transactions, not a token's text. Its authorizations are signed here or on the offline signer.").color(palette.muted)).wrap());
         });
 
         return;
@@ -235,6 +242,7 @@ fn sign(ui: &mut Ui, ctx: &mut Ctx, state: &mut AuthorizeState, chain_id: u64) {
             state.nonce = None;
             state.written = None;
             state.signed = None;
+            state.asking = false;
             state.trouble = None;
             state.prepared = Some(prepared);
         }
@@ -264,15 +272,42 @@ fn sign(ui: &mut Ui, ctx: &mut Ctx, state: &mut AuthorizeState, chain_id: u64) {
                     return;
                 }
 
-                match &state.signed {
-                    None => {
-                        if theme::primary(ui, &palette, "Sign it", true).clicked() {
-                            let key = ctx.holder().and_then(|holder| holder.key(&terms.owner()));
+                let key = ctx.holder().and_then(|holder| holder.key(&terms.owner())).cloned();
 
-                            match key.map(|key| SignedAuthorization::sign(terms.clone(), key, chain_id)) {
-                                Some(Ok(signed)) => state.signed = Some(signed),
-                                Some(Err(why)) => state.trouble = Some(why),
-                                None => state.trouble = Some("This wallet does not hold that address's key.".to_string()),
+                match &state.signed {
+                    None if key.is_none() => {
+                        // The offline signer holds the key: it is shown the terms, writes the same
+                        // text from them and signs it, and its answer is checked here.
+                        if !state.asking && theme::primary(ui, &palette, "Ask the signer", true).clicked() {
+                            state.asking = true;
+                        }
+
+                        if state.asking {
+                            let (symbol, decimals) = ctx.token(&terms.token().to_string());
+                            let request = crate::airgap::AuthorizeRequest { authorization: terms.clone(), chain_id, token: Some(crate::airgap::Shown { symbol, decimals }) };
+                            ui.label(RichText::new("On the offline signer, open Sign and read this code; then read its code back.").color(palette.soft));
+                            super::code(ui, &palette, &crate::airgap::Message::Authorize(Box::new(request)));
+
+                            match state.scan.show(ui, &palette) {
+                                Some(crate::airgap::Message::Authorized(signed)) => match taken(&signed, terms, chain_id) {
+                                    Ok(()) => {
+                                        state.signed = Some(*signed);
+                                        state.asking = false;
+                                    }
+                                    Err(why) => state.scan.fail(why),
+                                },
+                                Some(other) => state.scan.refuse(&other, "a signed authorization"),
+                                None => {}
+                            }
+                        }
+                    }
+                    None => {
+                        if theme::primary(ui, &palette, "Sign it", true).clicked()
+                            && let Some(key) = &key
+                        {
+                            match SignedAuthorization::sign(terms.clone(), key, chain_id) {
+                                Ok(signed) => state.signed = Some(signed),
+                                Err(why) => state.trouble = Some(why),
                             }
                         }
                     }
@@ -294,6 +329,15 @@ fn sign(ui: &mut Ui, ctx: &mut Ctx, state: &mut AuthorizeState, chain_id: u64) {
             ui.colored_label(palette.bad, trouble);
         }
     });
+}
+
+/// Whether the offline signer's answer is the authorization asked for, signed so it holds.
+fn taken(signed: &SignedAuthorization, terms: &TokenAuthorization, chain_id: u64) -> Result<(), String> {
+    if signed.authorization != *terms {
+        return Err("The signer signed other terms than these: read the code it shows for this one.".to_string());
+    }
+
+    signed.check(chain_id).map_err(|why| format!("The signer's signature does not hold: {why}."))
 }
 
 /// Who to authorize: an address, or a name the light client proved points at one.

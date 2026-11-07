@@ -674,7 +674,7 @@ fn a_multisig_s_proposal_is_priced_for_its_heaviest_quorum_whoever_proposes_sign
 
     let body = MultisigBody { account, tx: Tx::Transfer { from: account, to: key(9).public().address(), amount: Amount::U128(1) }, nonce: 0, fee: FeeOffer::NONE };
     let bundle = |fee: FeeOffer, signers: &[&Keypair]| {
-        let mut bundle = MultisigBundle { genesis: genesis_id, body: MultisigBody { fee, ..body.clone() }, signatures: Vec::new() };
+        let mut bundle = MultisigBundle { genesis: genesis_id, body: MultisigBody { fee, ..body.clone() }, signatures: Vec::new(), functions: Vec::new() };
 
         for signer in signers {
             bundle.sign(signer);
@@ -683,7 +683,7 @@ fn a_multisig_s_proposal_is_priced_for_its_heaviest_quorum_whoever_proposes_sign
         bundle
     };
     let schedule = chain.fees().unwrap().schedule();
-    let priced = schedule.intrinsic(&MultisigBundle::probe(&genesis_id, &body, &keys, 2));
+    let priced = schedule.intrinsic(&MultisigBundle::probe(&genesis_id, &body, &keys, 2, &[]));
 
     // As it was priced before: the Ed25519 proposer's own signature twice, under its own key.
     let mut proposer = bundle(FeeOffer::NONE, &[&ed]);

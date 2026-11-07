@@ -24,10 +24,6 @@ use {
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const CONNECT: &str = "Connect this account to the chainv4 wallet. This signs nothing that moves funds.";
 
-/// What the wallet says for a multisig's batch from an account MetaMask holds: it never asks for
-/// that signature.
-pub const NO_BATCH: &str = "MetaMask would show a multisig's batch as one opaque hash, not its steps, and the chain takes none signed that way. Send it from an account this wallet or the offline signer holds.";
-
 /// What the wallet says for a call whose function it cannot name, which MetaMask would show by its
 /// hash alone, and the chain takes no typed signature for.
 pub const NO_NAME: &str = "MetaMask shows a call by its function's name, and this wallet does not know the name of one here. Send it from an account this wallet or the offline signer holds.";

@@ -785,8 +785,8 @@ with.
   router.lua, which the wallet's Trade page and `chainv4 dex swap --split` use, the wallet offering
   the split when it pays more than one DEX alone; the wallet picks a new pool's tier among those
   offered; a native pool's time-weighted price in the wallet, proven where it can be, and both
-  DEXes' in the explorer. See [DEX](dex.md#in-the-wallet). Left: an EVM pair's time-weighted price
-  in the wallet.
+  DEXes' in the explorer. See [DEX](dex.md#in-the-wallet). An EVM pair's time-weighted price in the
+  wallet too, done 2026-11-07, from `price0CumulativeLast()` and `getReserves()` at two blocks.
 - [ ] **Concentrated liquidity.** V3's ranges: liquidity placed between two prices, ticks, and
   positions as NFTs. Not planned yet.
 - [x] **Native calls in EVM traces.** Done 2026-11-04. The EVM's inspector records every frame as a
@@ -796,8 +796,8 @@ with.
 - [x] **Signed authorizations in the wallet.** Done 2026-11-07 in batch 15: the Authorize page
   signs a token's permit or transfer authorization to hand on, as text and a QR code, only when the
   token writes the standard's text for the terms, which `registry::tokens::authorization` writes
-  too, and sends one pasted in once it checks. See [Wallet](wallet.md#authorize). Left: signing
-  them on the offline signer.
+  too, and sends one pasted in once it checks. See [Wallet](wallet.md#authorize). The offline
+  signer signs them too, done 2026-11-07, through `ur:chainv4-authorize` and `ur:chainv4-authorized`.
 - [x] **Token refreshes from native calls the EVM makes.** Done 2026-11-04. They travel out with the
   EVM's run, of the native calls that stand, and an EVM transaction refreshes them as a native one does.
 - [x] **The wallet's Contracts page calling across engines.** Done 2026-11-04. Each native function has
@@ -831,8 +831,8 @@ with.
   collection registry after an ERC-165 check; the wallet finds what the account holds from their
   logs and proves it by `ownerOf` and `balanceOf` run again over proven state, sending by
   `safeTransferFrom` and `safeBatchTransferFrom`; the explorer reads them through `eth_call` (see
-  [EVM collections](nft-standard.md#evm-collections)). Left: the offline signer naming an EVM
-  collection it signs a transfer for. Done 2026-11-06: batch transfers and royalties on the reference collections
+  [EVM collections](nft-standard.md#evm-collections)); the offline signer names an EVM collection it
+  signs a transfer for, done 2026-11-07. Done 2026-11-06: batch transfers and royalties on the reference collections
   (docs/nft-standard.md), SVG and animated GIF pictures, royalties shown and batches sent in the
   wallet.
 - [x] **Containers where they matter.** `eth_getLogs` matches its address and topic filters as
@@ -1857,8 +1857,9 @@ with.
   `Batch` form writing every step out; the names travel beside the signature in
   `SignedTx::functions`, checked against each call's hash. Checked against `@metamask/eth-sig-util`.
   `chainv4 send --eip712` and the wallet's MetaMask accounts sign both. See
-  [Typed data](crypto.md#typed-data-eip-712). Left: a multisig's batch, inside its opaque
-  transaction, has no form.
+  [Typed data](crypto.md#typed-data-eip-712). A multisig's transaction too, done 2026-11-07: the
+  `MultisigTransaction` form, signed off chain into the bundle, approving on chain or carrying it,
+  the CLI's `--eip712` and the wallet's **Sign with MetaMask** on the Multisig page.
 - [x] **Sites reach the wallet through window.ethereum.** The browser extension gives dApps an
   EIP-1193 provider, announced by EIP-6963, once Settings let sites ask: reads go to the node,
   connecting, sending as an Ethereum transaction, `personal_sign` and `eth_signTypedData_v4` are

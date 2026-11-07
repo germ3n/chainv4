@@ -618,8 +618,10 @@ unsafe impl<'de, C: wincode::config::Config> SchemaRead<'de, C> for BatchSteps {
 pub struct MemberSignature {
     #[document(summary = "The member's key.")]
     pub key: PublicKey,
-    #[document(summary = "Its signature over the body's signing bytes.")]
+    #[document(summary = "Its signature over the body's signing bytes, or, as Signature::Secp256k1Eip712, over its EIP-712 typed form, MultisigBody::eip712_digest.")]
     pub signature: Signature,
+    #[document(summary = "Under a typed signature, the names of the calls the form writes out, in order, each checked against its call's hash; empty under any other.")]
+    pub functions: Vec<String>,
 }
 
 impl Hashable for MemberSignature {}
@@ -638,7 +640,54 @@ impl MemberSignature {
         MemberSignature {
             key: keypair.public(),
             signature: keypair.sign(&body.signing_bytes(genesis)),
+            functions: Vec::new(),
         }
+    }
+
+    #[document(
+        parent = "MemberSignature",
+        summary = "A member signs a multisig's transaction as EIP-712 typed data, as MetaMask would: the steps it runs written out, its calls by name.",
+        params = {
+            body = "The transaction, with the multisig's nonce and fee offer.",
+            functions = "The names of the calls its form writes out, in order (crypto::eip712::name_multisig_calls).",
+            keypair = "The member's key, a secp256k1 one.",
+            genesis = "The chain's genesis id.",
+        },
+        returns = "The signature, or None for a key of another scheme or names that are not the calls'.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn sign_eip712(body: &crate::registry::multisig::MultisigBody, functions: Vec<String>, keypair: &Keypair, genesis: &Hash) -> Option<MemberSignature> {
+        let secret = match keypair.private() {
+            crate::crypto::keypair::PrivateKey::Secp256k1(secret) => secret,
+            #[allow(unreachable_patterns)]
+            _ => return None,
+        };
+        let digest = body.eip712_digest(&functions, genesis)?;
+
+        Some(MemberSignature { key: keypair.public(), signature: Signature::Secp256k1Eip712(crate::crypto::secp256k1::sign_hash(secret, &digest)), functions })
+    }
+
+    #[document(
+        parent = "MemberSignature",
+        summary = "Whether it is the member's over this body on this chain: chainv4's own signature over its signing bytes with no names beside it, or a typed one over its EIP-712 form with its calls' names.",
+        params = { body = "The multisig's transaction.", genesis = "The chain's genesis id." },
+    )]
+    pub fn verify(&self, body: &crate::registry::multisig::MultisigBody, genesis: &Hash) -> Result<(), VerifyError> {
+        #[cfg(feature = "secp256k1")]
+        if let (PublicKey::Secp256k1(key), Signature::Secp256k1Eip712(signature)) = (&self.key, &self.signature) {
+            let digest = body.eip712_digest(&self.functions, genesis).ok_or(VerifyError::FunctionNames)?;
+
+            return match crate::crypto::secp256k1::verify_hash(key, &digest, signature) {
+                true => Ok(()),
+                false => Err(VerifyError::InvalidSignature),
+            };
+        }
+
+        if !self.functions.is_empty() {
+            return Err(VerifyError::FunctionNames);
+        }
+
+        self.key.verify_signature(&body.signing_bytes(genesis), &self.signature)
     }
 }
 
@@ -1160,7 +1209,7 @@ fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey, genesi
 impl SignedTx {
     #[document(
         parent = "SignedTx",
-        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Every signature names its chain, so one signed for another chain does not hold here: chainv4's own over the genesis id and the transaction, an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), and an Ethereum one by its chain id. A typed signature carries the names of the calls its form writes out, each checked against its call's function hash, and nothing else carries any; a multisig's batch holds under no typed signature, which would show its signer an opaque hash. Whether the nonce is the next one depends on chain state, so the executor checks that. Every node's check of a transaction is this one, and there is no check of a signature without a chain.",
+        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Every signature names its chain, so one signed for another chain does not hold here: chainv4's own over the genesis id and the transaction, an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), and an Ethereum one by its chain id. A typed signature carries the names of the calls its form writes out, each checked against its call's function hash, and nothing else carries any; a multisig's transaction, its batch too, is written out step by step (crypto::eip712's MultisigTransaction). Whether the nonce is the next one depends on chain state, so the executor checks that. Every node's check of a transaction is this one, and there is no check of a signature without a chain.",
         params = { genesis = "The chain's genesis id, which the signature is bound to." },
         see_also = "Tx::verify, VerifyError::NotSender",
     )]
@@ -1180,11 +1229,6 @@ impl SignedTx {
 
         #[cfg(feature = "secp256k1")]
         if let Signature::Secp256k1Eip712(signature) = &self.signature {
-            // A multisig's batch is inside its opaque transaction, which the form cannot write out.
-            if !matches!(self.tx, Tx::Batch { .. }) && self.tx.batch_steps().is_some() {
-                return Err(VerifyError::BatchNotTyped);
-            }
-
             self.tx.verify()?;
             self.signer.verify()?;
             let key = match &self.signer {
@@ -1233,10 +1277,6 @@ impl SignedTx {
     )]
     #[cfg(feature = "secp256k1")]
     pub fn sign_eip712(tx: Tx, functions: Vec<String>, nonce: u64, fee: FeeOffer, keypair: &Keypair, genesis: &crate::structs::hash::Hash) -> Option<SignedTx> {
-        if !matches!(tx, Tx::Batch { .. }) && tx.batch_steps().is_some() {
-            return None;
-        }
-
         let secret = match keypair.private() {
             crate::crypto::keypair::PrivateKey::Secp256k1(secret) => secret,
             #[allow(unreachable_patterns)]

@@ -313,6 +313,18 @@ impl MultisigBody {
     pub fn id(&self, genesis: &Hash) -> Hash {
         crate::crypto::hasher::Hasher::digest(genesis.algorithm(), &self.signing_bytes(genesis))
     }
+
+    #[document(
+        parent = "MultisigBody",
+        summary = "What a member signs as EIP-712 typed data instead, as MetaMask shows it: the MultisigTransaction form under the chain's domain, the steps it runs written out and its calls by name.",
+        params = { functions = "The names of the calls its form writes out, in order.", genesis = "The chain's genesis id." },
+        returns = "The digest, or None when the names are not its calls'.",
+        see_also = "MemberSignature::sign_eip712",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn eip712_digest(&self, functions: &[String], genesis: &Hash) -> Option<[u8; 32]> {
+        crate::crypto::eip712::multisig_digest(&self.account, &self.tx, functions, self.nonce, &self.fee, genesis)
+    }
 }
 
 #[document(
@@ -565,7 +577,6 @@ impl<'a> Multisigs<'a> {
     )]
     pub fn backing(&self, body: &MultisigBody, signatures: &[crate::structs::tx::MemberSignature], genesis: &Hash) -> Result<(MultisigPolicy, u32), RegistryError> {
         let policy = self.get(&body.account)?.ok_or(RegistryError::NotMultisig)?;
-        let bytes = body.signing_bytes(genesis);
         let mut backers: Vec<PublicKey> = Vec::new();
         let mut verified: Vec<&crate::structs::tx::MemberSignature> = Vec::new();
 
@@ -577,7 +588,7 @@ impl<'a> Multisigs<'a> {
             // member's signature costs one verify, not twenty. A different signature, even from the
             // same member, is still verified, so a bad one is still refused.
             if !verified.contains(&signed) {
-                signed.key.verify_signature(&bytes, &signed.signature).map_err(|_| RegistryError::BadMemberSignature)?;
+                signed.verify(body, genesis).map_err(|_| RegistryError::BadMemberSignature)?;
                 verified.push(signed);
             }
 
@@ -618,6 +629,8 @@ pub struct MultisigBundle {
     pub body: MultisigBody,
     #[document(summary = "The members' signatures so far, each key once.")]
     pub signatures: Vec<crate::structs::tx::MemberSignature>,
+    #[document(summary = "The names of the calls the body's typed form writes out, in order, as its proposer knew them: what a member signing it as EIP-712 typed data shows each by. Each is checked against its call's hash as it is signed; empty when the body calls nothing or a name was not known.")]
+    pub functions: Vec<String>,
 }
 
 impl Hashable for MultisigBundle {}
@@ -647,9 +660,41 @@ const BUNDLE_PREFIX: &str = "chainv4-multisig:";
 impl MultisigBundle {
     #[document(parent = "MultisigBundle", summary = "Adds a member's signature, replacing any earlier one by the same key.")]
     pub fn sign(&mut self, keypair: &crate::crypto::keypair::Keypair) {
-        let signed = crate::structs::tx::MemberSignature::sign(&self.body, keypair, &self.genesis);
+        self.add(crate::structs::tx::MemberSignature::sign(&self.body, keypair, &self.genesis));
+    }
+
+    #[document(
+        parent = "MultisigBundle",
+        summary = "Adds a member's signature as EIP-712 typed data, its calls named by the bundle's functions, replacing any earlier one by the same key.",
+        returns = "Whether it signed: not for a key of another scheme, or when the bundle does not name every call its form writes out.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn sign_eip712(&mut self, keypair: &crate::crypto::keypair::Keypair) -> bool {
+        match crate::structs::tx::MemberSignature::sign_eip712(&self.body, self.functions.clone(), keypair, &self.genesis) {
+            Some(signed) => {
+                self.add(signed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[document(parent = "MultisigBundle", summary = "Adds a member's signature made elsewhere, as MetaMask makes one, replacing any earlier one by the same key. Whether it checks out is the caller's to ask first (MemberSignature::verify).")]
+    pub fn add(&mut self, signed: crate::structs::tx::MemberSignature) {
         self.signatures.retain(|held| held.key != signed.key);
         self.signatures.push(signed);
+    }
+
+    #[document(
+        parent = "MultisigBundle",
+        summary = "Its body as EIP-712 typed data, for a member to sign in MetaMask: the domain and the MultisigTransaction form, its calls named by the bundle's functions.",
+        returns = "None when the bundle does not name every call its form writes out.",
+    )]
+    #[cfg(feature = "secp256k1")]
+    pub fn typed(&self) -> Option<(crate::crypto::eip712::Typed, crate::crypto::eip712::Typed)> {
+        let message = crate::crypto::eip712::multisig_message(&self.body.account, &self.body.tx, &self.functions, self.body.nonce, &self.body.fee)?;
+
+        Some((crate::crypto::eip712::domain(&self.genesis), message))
     }
 
     #[document(
@@ -671,10 +716,11 @@ impl MultisigBundle {
             body = "The multisig's transaction.",
             members = "Its members' keys; with none, the heaviest key this build has stands in for each.",
             threshold = "How many of them it needs.",
+            functions = "The names of the calls its typed form writes out, which each secp256k1 member's signature carries, as one signed in MetaMask would.",
         },
         see_also = "Fees::offer, MultisigBundle::envelope",
     )]
-    pub fn probe(genesis: &Hash, body: &MultisigBody, members: &[crate::crypto::keypair::PublicKey], threshold: usize) -> crate::structs::tx::SignedTx {
+    pub fn probe(genesis: &Hash, body: &MultisigBody, members: &[crate::crypto::keypair::PublicKey], threshold: usize, functions: &[String]) -> crate::structs::tx::SignedTx {
         use crate::crypto::keypair::{KeyType, PublicKey};
         use crate::structs::tx::{MemberSignature, SignedTx};
 
@@ -685,7 +731,16 @@ impl MultisigBundle {
             false => members.to_vec(),
         };
         // The members' whose signatures weigh most, as many as it needs.
-        let mut signatures: Vec<MemberSignature> = stand_ins.iter().map(|key| MemberSignature { key: *key, signature: sample(key.key_type()).sign(b"") }).collect();
+        // A secp256k1 member may sign typed, its calls' names beside its signature.
+        #[cfg(not(feature = "secp256k1"))]
+        let _ = functions;
+        #[allow(unreachable_patterns)]
+        let names = |key: &PublicKey| match key.key_type() {
+            #[cfg(feature = "secp256k1")]
+            KeyType::Secp256k1 => functions.to_vec(),
+            _ => Vec::new(),
+        };
+        let mut signatures: Vec<MemberSignature> = stand_ins.iter().map(|key| MemberSignature { key: *key, signature: sample(key.key_type()).sign(b""), functions: names(key) }).collect();
         signatures.sort_by_key(|signed| std::cmp::Reverse(signed.hashable_bytes_with_tag().len()));
         signatures.truncate(threshold.max(1));
         let tx = Tx::Multisig { account: body.account, tx: Box::new(body.tx.clone()), signatures };

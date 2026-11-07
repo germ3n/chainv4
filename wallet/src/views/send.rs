@@ -631,7 +631,7 @@ const NO_CHAIN: &str = "The wallet cannot sign yet: a signature holds on one cha
 /// The NFT or multi-token collection a call goes to, as the light client proved the registry names
 /// it, for the offline signer to show: none for a call to anything else.
 fn named_collection(ctx: &Ctx, tx: &Tx) -> Option<crate::airgap::NamedCollection> {
-    let Tx::ContractCall { to, .. } = tx else {
+    let (Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. }) = tx else {
         return None;
     };
     let collection = ctx.chain.collections.get(&to.to_string())?.value.clone();
@@ -770,14 +770,12 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         let collection = named_collection(ctx, &draft.tx);
         let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
         let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
-        // A multisig's batch would be one opaque hash, and a call it cannot name would be its
-        // hash: the chain refuses both.
-        let multisig_batch = !matches!(draft.tx, Tx::Batch { .. }) && steps.is_some();
-        let metamask_refuses = key.is_none() && by_metamask && (multisig_batch || draft.functions.is_none());
+        // A call it cannot name would show as its hash: the chain refuses that.
+        let metamask_refuses = key.is_none() && by_metamask && draft.functions.is_none();
 
         if metamask_refuses {
             ui.add_space(6.0);
-            ui.colored_label(palette.bad, if multisig_batch { crate::metamask::NO_BATCH } else { crate::metamask::NO_NAME });
+            ui.colored_label(palette.bad, crate::metamask::NO_NAME);
         }
 
         ui.add_space(12.0);

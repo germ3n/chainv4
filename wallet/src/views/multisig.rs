@@ -74,7 +74,7 @@ pub struct Mine {
     /// Whether this wallet holds the key, to sign with here; else the offline signer, or MetaMask,
     /// holds it.
     pub here: bool,
-    /// Whether MetaMask holds it, which signs no bundle, only an approval sent from Send.
+    /// Whether MetaMask holds it, which signs a bundle as typed data, and approvals from Send.
     pub by_metamask: bool,
 }
 
@@ -129,7 +129,15 @@ pub struct MultisigState {
     evm: evm::EvmState,
     /// A transaction another page asked the multisig to send, waiting for its nonce to price.
     incoming: Option<(String, Tx)>,
+    /// The functions what is proposed may call, by name, for a member signing in MetaMask to see
+    /// each call by: the names the bundle carries are those its calls' hashes are of.
+    functions: Vec<String>,
+    /// A bundle MetaMask is signing: the body it signs, the member's address, and its answer.
+    metamask: Option<(MultisigBody, Address, MetaMaskSigned)>,
 }
+
+/// What MetaMask answers, once it has: its signature, or why it gave none.
+type MetaMaskSigned = std::sync::Arc<std::sync::Mutex<Option<Result<[u8; 65], String>>>>;
 
 impl MultisigState {
     /// Takes a transaction another page made for a followed multisig to send, such as a swap's
@@ -140,6 +148,7 @@ impl MultisigState {
         self.selected = Some(account.clone());
         self.asked_at = 0;
         self.bundle = None;
+        self.functions = prepared.functions;
         self.incoming = Some((account, prepared.tx));
     }
 
@@ -226,7 +235,8 @@ impl MultisigState {
                 match result.as_ref().map_err(|failure| failure.message.clone()).and_then(fee_of) {
                     Ok((fee, warning)) => {
                         self.trouble = warning.map(|why| format!("A dry run says it would fail: {why}"));
-                        self.bundle = Some(MultisigBundle { genesis, body: MultisigBody { fee, ..body }, signatures: Vec::new() });
+                        let functions = named(&body.tx, &self.functions);
+                        self.bundle = Some(MultisigBundle { genesis, body: MultisigBody { fee, ..body }, signatures: Vec::new(), functions });
                         self.signer = None;
 
                         if from_steps {
@@ -698,7 +708,7 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
                     let approved = done.contains(&member.key);
 
                     if !approved && theme::quiet(ui, &palette, &format!("Approve as {}", member.name)).clicked() {
-                        *prepared = Some(approve_as(ctx, member, approval(address, account, nonce, fee, tx.clone())));
+                        *prepared = Some(approve_as(ctx, member, approval(address, account, nonce, fee, tx.clone(), Vec::new())));
                     }
 
                     if approved && theme::quiet(ui, &palette, &format!("Take back {}'s approval", member.name)).clicked() {
@@ -716,7 +726,7 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
                 }
 
                 if approvals.len() as u64 >= threshold && state.submitting.is_none() && theme::primary(ui, &palette, "Send it", true).clicked() {
-                    let bundle = MultisigBundle { genesis: ctx.chain.genesis.expect("shown only with a genesis"), body: MultisigBody { account, tx: tx.clone(), nonce, fee }, signatures: Vec::new() };
+                    let bundle = MultisigBundle { genesis: ctx.chain.genesis.expect("shown only with a genesis"), body: MultisigBody { account, tx: tx.clone(), nonce, fee }, signatures: Vec::new(), functions: Vec::new() };
                     submit(ctx, state, &bundle, threshold);
                 }
             });
@@ -781,6 +791,7 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, selected: &str
                 ui.add(egui::TextEdit::singleline(&mut state.amount).hint_text(format!("Amount in {}", ctx.coin.symbol)).desired_width(f32::INFINITY));
 
                 if theme::primary(ui, &palette, if busy { "Pricing…" } else { "Make the proposal" }, !busy).clicked() {
+                    state.functions.clear();
                     let to = super::send::recipient(state.to.trim());
                     let amount = format::parse_units(state.amount.trim(), ctx.coin.decimals).and_then(|raw| u256::from_str_radix(&raw, 10).ok());
 
@@ -811,6 +822,7 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, selected: &str
         if let Some((tx, _, _)) = batch::steps_card(ui, ctx, &mut state.steps, &account, button, true)
             && !busy
         {
+            state.functions = state.steps.known.clone();
             price(ctx, state, account, tx, value, genesis, true);
         }
 
@@ -822,7 +834,8 @@ fn propose(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, selected: &str
 fn price(ctx: &mut Ctx, state: &mut MultisigState, account: Address, tx: Tx, value: &Value, genesis: chainv4::structs::hash::Hash, from_steps: bool) {
     let nonce = value["nonce"].as_u64().unwrap_or(0);
     let body = MultisigBody { account, tx, nonce, fee: FeeOffer::NONE };
-    let ask = Ask::Offer(json!({ "tx": to_hex(&wincode::serialize(&sized(&body, value, &genesis)).expect("a probe always encodes")) }).to_string());
+    let functions = named(&body.tx, &state.functions);
+    let ask = Ask::Offer(json!({ "tx": to_hex(&wincode::serialize(&sized(&body, value, &genesis, &functions)).expect("a probe always encodes")) }).to_string());
     ctx.node.ask(ask.clone());
     state.pricing = Some((ask, body, genesis, from_steps));
     state.trouble = None;
@@ -831,11 +844,35 @@ fn price(ctx: &mut Ctx, state: &mut MultisigState, account: Address, tx: Tx, val
 /// A probe of the multisig's transaction, as heavy as any quorum of its members can make it, carried
 /// by any key: what the node prices, unsigned. Each member's key and signature weigh by its scheme,
 /// so a quorum of the largest keys costs more than one of the proposer's.
-fn sized(body: &MultisigBody, value: &Value, genesis: &chainv4::structs::hash::Hash) -> SignedTx {
+fn sized(body: &MultisigBody, value: &Value, genesis: &chainv4::structs::hash::Hash, functions: &[String]) -> SignedTx {
     let keys: Vec<PublicKey> = value["members"].as_array().into_iter().flatten().filter_map(|member| member["key"].as_str()?.parse().ok()).collect();
     let threshold = value["threshold"].as_u64().unwrap_or(1) as usize;
 
-    MultisigBundle::probe(genesis, body, &keys, threshold)
+    MultisigBundle::probe(genesis, body, &keys, threshold, functions)
+}
+
+/// The names of the calls a multisig's transaction makes, as its typed form writes them out:
+/// those the proposer gave, or the wallet knows, by each call's hash; none when one is unknown,
+/// and MetaMask cannot sign it.
+fn named(tx: &Tx, given: &[String]) -> Vec<String> {
+    let known: Vec<String> = given.iter().cloned().chain(crate::history::KNOWN.map(str::to_string)).collect();
+
+    chainv4::crypto::eip712::name_multisig_calls(tx, &known).unwrap_or_default()
+}
+
+/// A member's signature as MetaMask gave it, over the bundle's typed form: recovered to the
+/// member's key and checked, as the chain will.
+fn from_metamask(bundle: &MultisigBundle, member: &Address, signature: &[u8; 65]) -> Result<chainv4::structs::tx::MemberSignature, String> {
+    let digest = bundle.body.eip712_digest(&bundle.functions, &bundle.genesis).ok_or(crate::metamask::NO_NAME)?;
+    let address = match member {
+        Address::Secp256k1(bytes) => to_hex(bytes),
+        other => return Err(format!("{other} is no Ethereum account for MetaMask to sign as")),
+    };
+    let (key, low) = crate::metamask::key_of(&digest, signature, &address)?;
+    let signed = chainv4::structs::tx::MemberSignature { key: PublicKey::Secp256k1(key), signature: chainv4::crypto::keypair::Signature::Secp256k1Eip712(low), functions: bundle.functions.clone() };
+    signed.verify(&bundle.body, &bundle.genesis).map_err(|why| format!("MetaMask's signature does not hold: {why}"))?;
+
+    Ok(signed)
 }
 
 /// The bundle on its way round: what it does, who signed, and signing, approving or submitting it,
@@ -967,8 +1004,55 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
             }
         }
 
+        // MetaMask's answer, once it gives one, for the body it was asked to sign.
+        let answer = state.metamask.as_ref().filter(|(body, _, _)| *body == held.body).and_then(|(_, address, signed)| Some((*address, signed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?)));
+
+        if let Some((address, answer)) = answer {
+            state.metamask = None;
+
+            match answer.and_then(|signature| from_metamask(&held, &address, &signature)) {
+                Ok(signed) => {
+                    held.add(signed);
+                    state.signer = None;
+                }
+                Err(why) => state.trouble = Some(why),
+            }
+        }
+
+        if state.metamask.as_ref().is_some_and(|(body, _, _)| *body == held.body) {
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Sign it in MetaMask: it shows each step to check before you sign.").color(palette.soft));
+            });
+        }
+
+        let metamask_cannot = member.is_some_and(|member| member.by_metamask && !agreed) && held.typed().is_none();
+
+        if metamask_cannot {
+            ui.colored_label(palette.bad, crate::metamask::NO_NAME);
+        }
+
         ui.horizontal_wrapped(|ui| {
             let keypair = member.and_then(|member| ctx.holders.get(member.holder)?.key(&member.address).cloned());
+
+            if let Some(member) = member
+                && member.by_metamask
+                && !agreed
+                && let Some((domain, message)) = held.typed()
+                && theme::primary(ui, &palette, &format!("Sign with MetaMask as {}", member.name), state.metamask.is_none()).clicked()
+            {
+                let signed = MetaMaskSigned::default();
+                let (inbox, wake) = (signed.clone(), ctx.wake.clone());
+                let address = match member.address {
+                    Address::Secp256k1(bytes) => to_hex(&bytes),
+                    other => other.to_string(),
+                };
+                crate::metamask::sign(address, chainv4::crypto::eip712::json(&domain, &message), move |answer| {
+                    *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                    wake.request_repaint();
+                });
+                state.metamask = Some((held.body.clone(), member.address, signed));
+            }
 
             if let (Some(member), Some(keypair)) = (member, &keypair)
                 && !agreed
@@ -992,7 +1076,7 @@ fn bundle(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, genesis: chainv
                 && !agreed
                 && theme::quiet(ui, &palette, &format!("Approve on chain as {}", member.name)).clicked()
             {
-                *prepared = Some(approve_as(ctx, member, approval(member.address, held.body.account, held.body.nonce, held.body.fee, held.body.tx.clone())));
+                *prepared = Some(approve_as(ctx, member, approval(member.address, held.body.account, held.body.nonce, held.body.fee, held.body.tx.clone(), held.functions.clone())));
             }
 
             if backed as u64 >= needed && state.submitting.is_none() && theme::primary(ui, &palette, "Send it", true).clicked() {
@@ -1066,14 +1150,14 @@ fn submit(ctx: &mut Ctx, state: &mut MultisigState, bundle: &MultisigBundle, thr
 }
 
 /// A member's approval of a multisig's transaction, for Send to sign however the account signs.
-fn approval(from: Address, account: Address, nonce: u64, fee: FeeOffer, tx: Tx) -> Prepared {
+fn approval(from: Address, account: Address, nonce: u64, fee: FeeOffer, tx: Tx, functions: Vec<String>) -> Prepared {
     Prepared {
         from,
         tx: Tx::ApproveMultisig { account, nonce, fee, tx: Box::new(tx) },
         what: format!("Approve the multisig's transaction {nonce}"),
         about: format::short(&account.to_string()),
         coin: u256::ZERO,
-        functions: Vec::new(),
+        functions,
     }
 }
 
@@ -1173,7 +1257,7 @@ mod tests {
         for (width, _) in crate::views::drawn::SCREENS {
             let mut book = crate::views::drawn::two_phrases();
             let mut holders = crate::keys::open(&book).unwrap();
-            let mut state = MultisigState { bundle: Some(MultisigBundle { genesis, body: body.clone(), signatures: Vec::new() }), selected: Some(account.to_string()), ..MultisigState::default() };
+            let mut state = MultisigState { bundle: Some(MultisigBundle { genesis, body: body.clone(), signatures: Vec::new(), functions: Vec::new() }), selected: Some(account.to_string()), ..MultisigState::default() };
             let (drawn, _, shown) = crate::views::drawn::page_shown(&mut book, &mut holders, (width, 20_000.0), |ui, ctx| {
                 let mut prepared = None;
 
@@ -1230,7 +1314,7 @@ mod tests {
         let tx = Tx::Batch { steps: vec![Tx::Burn { from: account, amount: chainv4::structs::amount::Amount::U128(5) }] };
         let body = MultisigBody { account, tx, nonce: 7, fee: FeeOffer::NONE };
         let keys = [Keypair::from_seed([1; 32]).public(), Keypair::from_seed([2; 32]).public()];
-        let probe = sized(&body, &listed(account, &keys, 2), &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()));
+        let probe = sized(&body, &listed(account, &keys, 2), &chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()), &[]);
 
         assert_eq!((probe.sender(), probe.nonce), (account, 7));
         assert_eq!(probe.batch_problem(), None, "a batch the chain takes from it");
@@ -1302,14 +1386,14 @@ mod tests {
         let tx = Tx::Transfer { from: account, to: Address::Ed25519([9; 32]), amount: chainv4::structs::amount::Amount::U128(5) };
         let body = MultisigBody { account, tx, nonce: 7, fee: FeeOffer::NONE };
         let (ed, other, secp) = (Keypair::from_seed([1; 32]), Keypair::from_seed([2; 32]), Keypair::from_private(PrivateKey::Secp256k1([3; 32])));
-        let probe = sized(&body, &listed(account, &[ed.public(), other.public(), secp.public()], 2), &genesis);
+        let probe = sized(&body, &listed(account, &[ed.public(), other.public(), secp.public()], 2), &genesis, &[]);
         let weight = |signed: &SignedTx| signed.hashable_bytes_with_tag().len();
 
         assert_eq!((probe.sender(), probe.nonce), (account, 7));
         assert!(matches!(&probe.tx, Tx::Multisig { signatures, .. } if signatures.len() == 2));
 
         // An Ed25519 member proposes; the secp256k1 one signs too, and any key carries it.
-        let mut real = MultisigBundle { genesis, body: body.clone(), signatures: Vec::new() };
+        let mut real = MultisigBundle { genesis, body: body.clone(), signatures: Vec::new(), functions: Vec::new() };
         real.sign(&ed);
         real.sign(&secp);
 
@@ -1318,8 +1402,50 @@ mod tests {
         }
 
         // As it was priced: by Ed25519 keys alone, it weighs less than what is sent.
-        let ed_only = sized(&body, &listed(account, &[ed.public(), other.public()], 2), &genesis);
+        let ed_only = sized(&body, &listed(account, &[ed.public(), other.public()], 2), &genesis, &[]);
         assert!(weight(&ed_only) < weight(&real.envelope(&secp)));
+    }
+
+    #[test]
+    fn a_member_in_metamask_signs_a_bundle_as_typed_data_its_calls_by_name() {
+        use chainv4::crypto::{hasher::Hasher, keypair::PrivateKey, secp256k1};
+        use chainv4::structs::hash::{Hash, HashType};
+
+        let secret = [21; 32];
+        let member = Keypair::from_private(PrivateKey::Secp256k1(secret));
+        let account = Address::Multisig([4; 32]);
+        let mint = Tx::ContractCall { to: Address::Contract([8; 32]), func: Hasher::digest(HashType::Xxh3_64, b"plant_trees"), amount: chainv4::structs::amount::Amount::U128(0), data: Vec::new() };
+        let tx = Tx::Batch { steps: vec![mint.clone(), Tx::Burn { from: account, amount: chainv4::structs::amount::Amount::U128(1) }] };
+
+        // The names the proposer gave, by each call's hash; one it cannot name leaves it unsignable there.
+        assert_eq!(named(&tx, &["burn".to_string(), "plant_trees".to_string()]), vec!["plant_trees".to_string()]);
+        assert_eq!(named(&tx, &[]), Vec::<String>::new());
+
+        let genesis = Hash::zero(HashType::default_chain());
+        let mut bundle = MultisigBundle { genesis, body: MultisigBody { account, tx, nonce: 2, fee: FeeOffer::NONE }, signatures: Vec::new(), functions: vec!["plant_trees".to_string()] };
+        let (domain, message) = bundle.typed().unwrap();
+        let typed = chainv4::crypto::eip712::json(&domain, &message);
+
+        assert_eq!(typed["primaryType"], "MultisigTransaction");
+        assert_eq!(typed["message"]["steps"][0]["function"], "plant_trees");
+
+        // What MetaMask gives back: r, s and v over the digest, recovered to the member and checked.
+        let digest = chainv4::crypto::eip712::digest(&domain, &message);
+        let (rs, parity) = secp256k1::sign_recoverable(&secret, &digest);
+        let mut given = [0; 65];
+        given[..64].copy_from_slice(&rs);
+        given[64] = 27 + parity;
+        let signed = from_metamask(&bundle, &member.public().address(), &given).unwrap();
+
+        assert_eq!(signed.key, member.public());
+        bundle.add(signed);
+        assert_eq!(bundle.signatures[0].verify(&bundle.body, &genesis), Ok(()));
+
+        // Another account's answer, or one over another body, is refused.
+        assert!(from_metamask(&bundle, &Keypair::from_private(PrivateKey::Secp256k1([22; 32])).public().address(), &given).unwrap_err().contains("not"));
+        let other = MultisigBundle { body: MultisigBody { nonce: 3, ..bundle.body.clone() }, ..bundle.clone() };
+        assert!(from_metamask(&other, &member.public().address(), &given).is_err());
+        assert!(from_metamask(&MultisigBundle { functions: Vec::new(), ..bundle }, &member.public().address(), &given).unwrap_err().contains("name"));
     }
 
     #[test]
@@ -1418,7 +1544,7 @@ mod tests {
             // Both accounts' Ed25519 keys, and a stranger's.
             let keys = [holders[0].publics[0], holders[1].publics[0], Keypair::from_seed([5; 32]).public()];
             let mut state = MultisigState {
-                bundle: Some(MultisigBundle { genesis, body: body.clone(), signatures: Vec::new() }),
+                bundle: Some(MultisigBundle { genesis, body: body.clone(), signatures: Vec::new(), functions: Vec::new() }),
                 selected: Some(account.to_string()),
                 shown: Some((account.to_string(), listed(account, &keys, 3))),
                 ..MultisigState::default()

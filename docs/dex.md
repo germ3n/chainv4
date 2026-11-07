@@ -288,7 +288,9 @@ both, and two tabs:
 - **Both DEXes at once:** a trade that pays more divided between the two DEXes than on the one
   shown offers to go through `router.lua`, the directory's `dex_split`, with each part shown.
 - **Time-weighted price:** a native pool's, from `pool()` read at the light client's final block
-  and its tip (`dex::twap`).
+  and its tip (`dex::twap`); an EVM pair's, from `price0CumulativeLast()` and `getReserves()` read
+  at the same two blocks, each brought up to its block's time (`dex::evm_cumulative`,
+  `dex::evm_twap`).
 
 See [Wallet](wallet.md#trade).
 

@@ -2227,8 +2227,9 @@ contract computes, so they wait for the next regenesis (see the todo).
   `balanceOf`, run again over proven state.
 - **A signed authorization is text, not a transaction.** The wallet signs it only when the token's
   `permit_message` or `transfer_message` writes exactly the standard's text for the terms, which
-  the wallet writes itself. MetaMask's `personal_sign` and the offline signer sign no such text, so
-  their accounts sign none; any account can send one.
+  the wallet writes itself. The offline signer signs one too, writing the text from the terms
+  itself, as it cannot ask the token. MetaMask's `personal_sign` prefixes the text, so a MetaMask
+  account signs none; any account can send one.
 - **A time-weighted price needs two reads at known blocks.** `POST /call` now says the `height` and
   `time` it ran at. The wallet reads a native pool's at the light client's final block and tip; a
   call that names a `block` keeps it when the wallet asks for it proven, and is proven only where
@@ -2236,6 +2237,16 @@ contract computes, so they wait for the next regenesis (see the todo).
 - **The split router is in the directory.** `dex_split`, beside `dex` and `dex_router`; a genesis or
   vote written before it reads as none. The wallet offers a split only when the directory names a
   router and dividing the trade pays more than the DEX shown alone.
+- **A multisig's transaction is typed data too.** `MultisigTransaction` writes out what it runs, so
+  a member in MetaMask signs the bundle, approves on chain or carries it seeing every step; it took
+  `VerifyError::BatchNotTyped` away. A member's typed signature carries its calls' names in
+  `MemberSignature::functions`, and a bundle the names its proposer knew in
+  `MultisigBundle::functions`. Both are new fields, so every multisig transaction's encoding and
+  every bundle's text changed: a bundle made before them does not read. The fee probe adds each
+  secp256k1 member's names, as a MetaMask member's signature weighs that much more.
+- **An EVM pair's time-weighted price is two reads a block.** `price0CumulativeLast()` moves only
+  when the pair does, so the wallet reads `getReserves()` at the same block and brings it up to
+  that block's time. Both are proven where the light client holds the block.
 
 ## Building and testing
 

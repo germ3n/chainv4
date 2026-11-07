@@ -43,6 +43,11 @@ pub const MULTISIG_TYPE: &str = "chainv4-multisig";
 /// answer's bundle holding the signature.
 pub const EVM_TYPE: &str = "chainv4-multisig-evm";
 
+/// A token's signed authorization for the offline signer to sign, and signed: the terms, as JSON
+/// text, and its answer, as the text that is handed on.
+pub const AUTHORIZE_TYPE: &str = "chainv4-authorize";
+pub const AUTHORIZED_TYPE: &str = "chainv4-authorized";
+
 /// The most bytes of a message one code holds, about 700 characters: as many as a token transfer's
 /// request takes, the chain it names included. A code that stays still may be denser than one of
 /// those that pass by, each of which a phone has a moment to read.
@@ -148,6 +153,46 @@ pub enum Message {
     Multisig(Box<chainv4::registry::multisig::MultisigBundle>),
     /// A multisig's call on an EVM chain, with the key to sign it with: to sign, and signed.
     Evm(Box<chainv4::abi::multisig::EvmRequest>),
+    /// A token's allowance or transfer to sign off the chain, as the Authorize page prepared it.
+    Authorize(Box<AuthorizeRequest>),
+    /// The signer's answer to one: the authorization, signed, to hand on.
+    Authorized(Box<chainv4::registry::tokens::authorization::SignedAuthorization>),
+}
+
+/// A token's authorization for the signer to sign: its terms, the chain whose id its text names,
+/// and the token as the sender names it, which is the sender's word, as a transfer's token is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizeRequest {
+    pub authorization: chainv4::registry::tokens::authorization::TokenAuthorization,
+    pub chain_id: u64,
+    pub token: Option<Shown>,
+}
+
+impl AuthorizeRequest {
+    /// Its encoding: the terms as JSON, with the chain's id and the token's symbol and decimals.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut value = self.authorization.to_json();
+        value["chain_id"] = self.chain_id.into();
+
+        if let Some(token) = &self.token {
+            value["symbol"] = token.symbol.clone().into();
+            value["decimals"] = token.decimals.into();
+        }
+
+        value.to_string().into_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<AuthorizeRequest, String> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|_| "a code that does not decode".to_string())?;
+        let authorization = chainv4::registry::tokens::authorization::TokenAuthorization::from_json(&value)?;
+        let chain_id = value["chain_id"].as_u64().ok_or("a request that names no chain")?;
+        let token = match (value["symbol"].as_str(), value["decimals"].as_u64().and_then(|decimals| u8::try_from(decimals).ok())) {
+            (Some(symbol), Some(decimals)) => Some(Shown { symbol: symbol.to_string(), decimals }),
+            _ => None,
+        };
+
+        Ok(AuthorizeRequest { authorization, chain_id, token })
+    }
 }
 
 impl Message {
@@ -164,6 +209,8 @@ impl Message {
             Message::Swap(_) => chainv4::swap::UR_TYPE,
             Message::Multisig(_) => MULTISIG_TYPE,
             Message::Evm(_) => EVM_TYPE,
+            Message::Authorize(_) => AUTHORIZE_TYPE,
+            Message::Authorized(_) => AUTHORIZED_TYPE,
         }
     }
 
@@ -186,6 +233,8 @@ impl Message {
             Message::Bitcoin(request) => return request.to_cbor(),
             #[cfg(feature = "swap")]
             Message::Swap(terms) => return terms.to_bytes(),
+            Message::Authorize(request) => return request.to_bytes(),
+            Message::Authorized(signed) => return signed.to_text().into_bytes(),
         }
         .expect("messages always encode")
     }
@@ -203,6 +252,11 @@ impl Message {
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
             MULTISIG_TYPE => whole::<chainv4::registry::multisig::MultisigBundle>(bytes).map(|bundle| Message::Multisig(Box::new(bundle))),
             EVM_TYPE => whole::<chainv4::abi::multisig::EvmRequest>(bytes).map(|request| Message::Evm(Box::new(request))),
+            AUTHORIZE_TYPE => AuthorizeRequest::from_bytes(bytes).map(|request| Message::Authorize(Box::new(request))),
+            AUTHORIZED_TYPE => std::str::from_utf8(bytes)
+                .map_err(|_| "a code that does not decode".to_string())
+                .and_then(chainv4::registry::tokens::authorization::SignedAuthorization::from_text)
+                .map(|signed| Message::Authorized(Box::new(signed))),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
             crate::hardware::SIGNATURE_TYPE => crate::hardware::Signature::from_cbor(bytes).map(|signature| Message::EthSignature(Box::new(signature))),
             #[cfg(feature = "swap")]
@@ -244,6 +298,8 @@ impl Message {
             Message::Swap(_) => "a swap's terms",
             Message::Multisig(_) => "a multisig's transaction",
             Message::Evm(_) => "a multisig's call on an EVM chain",
+            Message::Authorize(_) => "a token's authorization to sign",
+            Message::Authorized(_) => "a signed authorization",
         }
     }
 }
@@ -446,6 +502,25 @@ pub fn describe(request: &Request) -> Described {
 
             (format!("Send {} from {}", if units.is_some() { "items" } else { "an NFT" }, crate::steps::plain(&collection.name)), Some(what), Some(recipient.to_string()), Some(contract.to_string()))
         }
+        // An EVM collection's, as the NFTs page sends one, by safeTransferFrom or safeBatchTransferFrom.
+        Tx::EvmCall { to: contract, value, input } if value.to_u256() == u256::ZERO && request.collection.as_ref().and_then(|collection| sends_from_evm_collection(input, collection)).is_some() => {
+            let collection = request.collection.as_ref().expect("looked");
+            let (recipient, items) = sends_from_evm_collection(input, collection).expect("looked");
+            let symbol = crate::steps::plain(&collection.symbol);
+            let what = match items.as_slice() {
+                [(id, None)] => (format!("{symbol} #{id}"), "1".to_string()),
+                [(id, Some(units))] => (format!("{units} of {symbol} #{id}"), units.to_string()),
+                many => {
+                    let listed: Vec<String> = many.iter().take(5).map(|(id, units)| format!("{} of #{id}", units.unwrap_or(u256::ONE))).collect();
+                    let more = if many.len() > 5 { format!(" and {} more", many.len() - 5) } else { String::new() };
+                    let total = many.iter().fold(u256::ZERO, |sum, (_, units)| sum.saturating_add(units.unwrap_or(u256::ONE)));
+
+                    (format!("{symbol}: {}{more}", listed.join(", ")), total.to_string())
+                }
+            };
+
+            (format!("Send {} from {}", if collection.multi { "items" } else { "an NFT" }, crate::steps::plain(&collection.name)), Some(what), Some(chainv4::structs::address::Address::Evm(recipient).to_string()), Some(contract.to_string()))
+        }
         // A token's transfer only as the sender names its token: the same call to an NFT collection
         // sends an id, which no amount is to be read from.
         Tx::ContractCall { to: contract, func, amount, data } if is_token_transfer(func, amount.to_u256(), data) && request.token.is_some() => {
@@ -550,6 +625,51 @@ fn sends_from_collection(func: &chainv4::structs::hash::Hash, data: &[TxCallArgu
     match (named, collection.multi, data) {
         (true, false, [TxCallArgumentType::Address(to), TxCallArgumentType::U256(id)]) => Some((*to, *id, None)),
         (true, true, [TxCallArgumentType::Address(to), TxCallArgumentType::U256(id), TxCallArgumentType::U256(units)]) => Some((*to, *id, Some(*units))),
+        _ => None,
+    }
+}
+
+/// One id an EVM collection's transfer sends, and for an ERC-1155 how many of it.
+type Sent = (u256, Option<u256>);
+
+/// Whom an EVM collection's transfer, as the NFTs page makes one, sends to, and which ids, with how
+/// many of each for an ERC-1155: safeTransferFrom of either standard, or safeBatchTransferFrom.
+fn sends_from_evm_collection(input: &[u8], collection: &NamedCollection) -> Option<([u8; 20], Vec<Sent>)> {
+    use chainv4::abi::{AbiType, AbiValue, decode_values};
+
+    let selector = |signature: &str| chainv4::crypto::secp256k1::keccak(signature.as_bytes())[..4].to_vec();
+    let (head, body) = (input.get(..4)?, input.get(4..)?);
+    let uints = || AbiType::Array(Box::new(AbiType::Uint(256)));
+    let number = |value: &AbiValue| match value {
+        AbiValue::Uint(number) => Some(*number),
+        _ => None,
+    };
+    let numbers = |value: &AbiValue| match value {
+        AbiValue::Array(items) => items.iter().map(number).collect::<Option<Vec<u256>>>(),
+        _ => None,
+    };
+    let to = |values: &[AbiValue]| match values.get(1) {
+        Some(AbiValue::Address(to)) => Some(*to),
+        _ => None,
+    };
+
+    match collection.multi {
+        false if head == selector("safeTransferFrom(address,address,uint256)") => {
+            let values = decode_values(&[AbiType::Address, AbiType::Address, AbiType::Uint(256)], body).ok()?;
+
+            Some((to(&values)?, vec![(number(&values[2])?, None)]))
+        }
+        true if head == selector("safeTransferFrom(address,address,uint256,uint256,bytes)") => {
+            let values = decode_values(&[AbiType::Address, AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Bytes], body).ok()?;
+
+            Some((to(&values)?, vec![(number(&values[2])?, Some(number(&values[3])?))]))
+        }
+        true if head == selector("safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)") => {
+            let values = decode_values(&[AbiType::Address, AbiType::Address, uints(), uints(), AbiType::Bytes], body).ok()?;
+            let (ids, amounts) = (numbers(&values[2])?, numbers(&values[3])?);
+
+            (ids.len() == amounts.len() && !ids.is_empty()).then(|| ids.into_iter().zip(amounts).map(|(id, units)| (id, Some(units))).collect()).map(|items| (to(&values).expect("decoded as an address"), items))
+        }
         _ => None,
     }
 }

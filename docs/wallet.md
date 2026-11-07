@@ -679,7 +679,9 @@ neither a token nor a collection the chain lists. Batch steps and the offline si
 same way. The offline signer knows only what the sender names: a token, or the collection the
 light client proved the registry lists, which the request carries after its encoding, so it shows
 **Send an NFT from Test Pixels**, `PIX #7`, or **Send items from Test Items**, `12 of ITEM #3`,
-both the sender's word as a token's symbol is. A request naming no collection is byte for byte
+both the sender's word as a token's symbol is. An EVM collection's transfer reads the same, from
+its `safeTransferFrom` of either standard or `safeBatchTransferFrom`, a batch as each id and how
+many. A request naming no collection is byte for byte
 what it always was, and a signer from before reads it; one naming a collection is refused there,
 as having bytes left over, rather than shown wrong.
 
@@ -725,8 +727,9 @@ the same way, with the fee the multisig pays and the chain the bundle is for.
 function's name (see [Typed data](crypto.md#typed-data-eip-712)). The names come with the
 transaction from the page that made it, the function typed on the Contracts page or a step added in
 the batch builder, or from those the history knows; a call to a function the wallet knows no name
-for would show as its hash, so the wallet says so instead of asking. A multisig's batch has no such
-form at all: send those from an account this wallet or the offline signer holds.
+for would show as its hash, so the wallet says so instead of asking. A multisig's transaction, a
+batch or a lone one, is written out step by step too, whether a member in MetaMask signs its bundle
+on the Multisig page or approves it on chain from Send.
 
 Activity lists a batch once, opened to each step and what came of it: done, or undone, failed and not
 run. Which step failed is proven; why is the node's word, which the [explorer](explorer.md#pages) shows.
@@ -1013,9 +1016,13 @@ for someone else to send and pay for, and sends one signed for you:
   one that does goes to the Send page as a call of `permit` or `transfer_with_authorization`, from
   whichever account sends it.
 
-The keys sign text by their own scheme's rules, as `crypto.verify` checks: an account on the
-offline signer, or in MetaMask, whose `personal_sign` puts a prefix of its own before the text,
-signs none here.
+The keys sign text by their own scheme's rules, as `crypto.verify` checks. For an account on the
+offline signer, **Ask the signer** shows the terms as a `ur:chainv4-authorize` code; the signer
+shows what it lets happen, to whom, how much and until when, on which chain, writes the same text
+from the terms itself and signs it with the owner's key, and its `ur:chainv4-authorized` code
+comes back to be checked here, its terms these and its signature holding, before it is handed on.
+A signer told its chain's id refuses one for another chain. An account in MetaMask, whose
+`personal_sign` puts a prefix of its own before the text, signs none.
 
 ## Faucet
 
@@ -1224,7 +1231,10 @@ its router, the EVM's, switched with **Native** and **EVM** beside the page's tw
   client's final block and at its tip, a hundred blocks back under no finality: what its first
   side was worth in the other on average between them (`dex::twap`), which one block's trades
   cannot move far, as they can its last price. Each read names its block and is proven there when
-  the light client holds that block.
+  the light client holds that block. An EVM pair's the same way: its `price0CumulativeLast()` and
+  `getReserves()` read as calldata at both blocks, the cumulative price brought up to each block's
+  own time from the reserves and when they last changed, as V2's `currentCumulativePrices` does
+  (`dex::evm_cumulative`), then averaged over the seconds between (`dex::evm_twap`).
 
 Approving a token, trading, adding and taking out are calls the Send page reviews and signs,
 from the address the From picker names: what it holds of each asset and each pool's shares is what

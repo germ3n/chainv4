@@ -220,6 +220,13 @@ Build one with the wallet's Batch page by picking the multisig under Send as, or
 wallet's bundle, its proposals, the offline signer, and `chainv4 multisig sign` and `approve`, which
 print each before the member's key goes on it.
 
+**Members in MetaMask.** A member whose key is an Ethereum one signs a multisig's transaction, a
+batch or a lone one, as EIP-712 typed data, its steps written out and its calls by name (see
+[Typed data](crypto.md#typed-data-eip-712)): off chain into the bundle, approving it on chain, or
+carrying it. The bundle carries the names of its calls as its proposer knew them, which the member
+signs with; each is checked against its call's hash. `--eip712` on `chainv4 send --multisig`,
+`multisig sign` and `multisig approve` does the same with a secp256k1 key file.
+
 **A deploy is listed by what identifies it, not its code.** `multisig sign` and `approve` print the
 transaction, or each step of a batch, as the API writes it, but a deploy or upgrade as its engine,
 its size, its code's SHA-256 and, for a deploy, the address it lands at. `send --multisig` lists a
@@ -259,7 +266,8 @@ the bundle fixes the multisig's nonce, so it is known before anyone signs.
 
 **Priced for its heaviest quorum.** The probe it prices carries the signatures of the threshold
 members whose keys weigh most, and is carried by the heaviest key the build has, so whichever
-members sign and whoever carries it, the fee covers it (`MultisigBundle::probe`). A secp256k1 or
+members sign and whoever carries it, the fee covers it (`MultisigBundle::probe`), each secp256k1
+member's signature with the calls' names beside it, as one signed in MetaMask carries. A secp256k1 or
 bitcoin key is a byte longer than an Ed25519 one; priced for the proposer's key alone, a quorum
 with one of them was refused as under its intrinsic cost. A bundle goes out with no more
 signatures than the threshold, which is all it was priced for (`MultisigBundle::trimmed`).
@@ -319,8 +327,11 @@ approval from or send. With Read from checked blocks on, the node is asked none 
 - **Agree as** picks which key signs and approves: each of the wallet's accounts that is a member,
   any of its schemes, and an offline signer. It starts at one that has not signed or approved yet,
   a key held here before one on a signer, and moves on to the next once it signs, so one wallet
-  holding several members' keys signs with each in turn. **Sign as** signs with that key; **Ask
-  the signer**, for a watch-only account or an offline signer, shows the bundle as a
+  holding several members' keys signs with each in turn. **Sign as** signs with that key; **Sign
+  with MetaMask as**, for a member MetaMask holds, in the browser, has MetaMask sign the bundle's
+  typed form, every step written out, and checks its signature is the member's before adding it.
+  A call whose function the bundle names no name for would show as its hash, so the wallet says so
+  instead. **Ask the signer**, for a watch-only account or an offline signer, shows the bundle as a
   `ur:chainv4-multisig` code, animated, and reads the signer's code back. **Approve on chain as**
   goes to Send as that account, so a hardware or offline account approves too; an offline signer
   the wallet holds no account of approves once paired under Accounts. **Copy as text** gives what

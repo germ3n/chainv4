@@ -54,6 +54,9 @@ enum Step {
     /// A multisig's call on an EVM chain, read, to sign as one of its contract's owners with the
     /// key it names, or as an owner of another multisig that owns it.
     Evm { request: Box<chainv4::abi::multisig::EvmRequest>, trouble: Option<String> },
+    /// A token's allowance or transfer to sign off the chain, read, with why it cannot be signed,
+    /// if it cannot.
+    Authorize { request: Box<airgap::AuthorizeRequest>, trouble: Option<String> },
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
@@ -70,6 +73,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         Step::Bitcoin { .. } => bitcoin_review(ui, ctx, state),
         Step::Multisig { .. } => multisig_review(ui, ctx, state),
         Step::Evm { .. } => evm_review(ui, ctx, state),
+        Step::Authorize { .. } => authorize_review(ui, ctx, state),
         Step::BitcoinSigned { message } => {
             let message = message.clone();
             theme::card(ui, &palette, |ui| {
@@ -271,6 +275,12 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 let held = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).any(|key| key.public() == request.signer);
                 let trouble = (!held).then(|| format!("This wallet holds no key {}: the request is for another's.", format::short(&request.signer.to_string())));
                 state.step = Step::Evm { request, trouble };
+            }
+            Some(Message::Authorize(request)) => {
+                let owner = request.authorization.owner();
+                let held = ctx.holders.iter().any(|holder| holder.key(&owner).is_some());
+                let trouble = (!held).then(|| format!("This wallet holds no key for {}: the authorization is another's to sign.", format::short(&owner.to_string())));
+                state.step = Step::Authorize { request, trouble };
             }
             Some(other) => state.scan.refuse(&other, "a request to sign, this wallet's, MetaMask's or a Bitcoin wallet's"),
             None => {}
@@ -622,6 +632,107 @@ fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                         note(ctx, &format!("Multisig {} · {kind}", format::short(&bundle.body.account.to_string())), &on_chain(&what, described.chain), &member);
                         next = Some(Step::Signed { message: Box::new(Message::Multisig(Box::new(signed))) });
                     }
+                    None => *trouble = Some("the key is gone from this wallet".to_string()),
+                }
+            }
+
+            if theme::quiet(ui, &palette, "Cancel").clicked() {
+                next = Some(Step::Reading);
+                state.confirming = None;
+            }
+        });
+    });
+
+    if let Some(next) = next {
+        state.step = next;
+    }
+}
+
+/// A token's authorization laid out: what it lets happen, to whom, how much and until when, on
+/// which chain, and the text itself, which this signer writes from those terms and signs.
+fn authorize_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
+    let palette = *ctx.palette;
+    let Step::Authorize { request, trouble } = &mut state.step else {
+        return;
+    };
+    let yours = ctx.settings.signer_chain;
+    let wrong = yours
+        .filter(|yours| *yours != request.chain_id)
+        .map(|yours| format!("This is for chain {}, not yours, {yours}: it would hold on chain {} alone, so this signer will not sign it.", request.chain_id, request.chain_id));
+    let mut next = None;
+    let mut confirmed = false;
+
+    if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
+        state.confirming = None;
+
+        match came {
+            Ok(_) => confirmed = true,
+            Err(Failure::Canceled) => {}
+            Err(failure) => *trouble = Some(failure.to_string()),
+        }
+    }
+
+    let authorization = &request.authorization;
+    // The token is the sender's word: its symbol and decimals are cut short and escaped, the raw
+    // units shown beside them.
+    let token = request.token.as_ref().map(|token| airgap::Shown { symbol: crate::steps::plain(&token.symbol), decimals: token.decimals });
+    let amount = |raw: chainv4::structs::u256::u256| match &token {
+        Some(token) => format!("{} ({raw} units)", format::amount(&raw.to_string(), token.decimals, &token.symbol)),
+        None => format!("{raw} units"),
+    };
+
+    theme::card(ui, &palette, |ui| {
+        use chainv4::registry::tokens::authorization::TokenAuthorization;
+
+        let (heading, party, whom, raw, window) = match authorization {
+            TokenAuthorization::Permit { spender, amount, deadline, .. } => ("An allowance of a token", "Spender", spender, *amount, format!("until {}", format::utc(*deadline))),
+            TokenAuthorization::Transfer { to, amount, valid_after, valid_before, .. } => ("A transfer of a token", "To", to, *amount, format!("from {} until {}", format::utc(*valid_after), format::utc(*valid_before))),
+        };
+
+        theme::caps(ui, &palette, heading);
+        ui.label(RichText::new("Signed here, it is handed on for someone else to send and pay for: whoever holds it can use it, once, until it lapses.").small().color(palette.muted));
+        super::row(ui, &palette, "Token", |ui| super::address(ui, &palette, &authorization.token().to_string()));
+        super::row(ui, &palette, "From", |ui| super::address(ui, &palette, &authorization.owner().to_string()));
+        super::row(ui, &palette, party, |ui| super::address(ui, &palette, &whom.to_string()));
+        super::row(ui, &palette, if party == "Spender" { "Up to" } else { "Amount" }, |ui| {
+            ui.label(RichText::new(amount(raw)).strong());
+        });
+        super::row(ui, &palette, "Holds", |ui| {
+            ui.label(window);
+        });
+        super::row(ui, &palette, "For the chain", |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(format!("chain id {}", request.chain_id)).strong());
+
+                if yours.is_none() {
+                    ui.label(RichText::new("The sender says so. Set your chain's id in Settings, and this signer refuses any other.").small().color(palette.warn));
+                }
+            });
+        });
+        egui::CollapsingHeader::new(RichText::new("The text it signs").color(palette.soft)).id_salt("authorize-text").show(ui, |ui| {
+            ui.add(egui::Label::new(theme::mono(authorization.message(request.chain_id)).color(palette.soft)).wrap());
+        });
+
+        if let Some(why) = wrong.as_ref().or(trouble.as_ref()) {
+            ui.colored_label(palette.bad, why.as_str());
+        }
+
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            let tapped = theme::primary(ui, &palette, "Sign", wrong.is_none() && trouble.is_none() && state.confirming.is_none()).clicked();
+            let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
+
+            if tapped && !confirmed && let Some((enrolled, _)) = biometric {
+                state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign this authorization"));
+            } else if tapped || confirmed {
+                let owner = authorization.owner();
+
+                match ctx.holders.iter().find_map(|holder| holder.key(&owner)).map(|key| chainv4::registry::tokens::authorization::SignedAuthorization::sign(authorization.clone(), key, request.chain_id)) {
+                    Some(Ok(signed)) => {
+                        note(ctx, "Authorization", &on_chain(&format!("{} of {}", authorization.summary(), format::short(&authorization.token().to_string())), request.chain_id), &owner.to_string());
+                        next = Some(Step::Signed { message: Box::new(Message::Authorized(Box::new(signed))) });
+                    }
+                    Some(Err(why)) => *trouble = Some(why),
                     None => *trouble = Some("the key is gone from this wallet".to_string()),
                 }
             }
@@ -1085,7 +1196,7 @@ mod batch_tests {
         for (width, _) in drawn::SCREENS {
             let shown = drawn_sign(width, |_| {
                 let pay = Tx::Transfer { from: account, to: Address::Ed25519([9; 32]), amount: Amount::U128(5) };
-                let bundle = MultisigBundle { genesis: Hash::zero(HashType::default_chain()), body: MultisigBody { account, tx: Tx::Batch { steps: vec![pay; 2] }, nonce: 1, fee: fee() }, signatures: Vec::new() };
+                let bundle = MultisigBundle { genesis: Hash::zero(HashType::default_chain()), body: MultisigBody { account, tx: Tx::Batch { steps: vec![pay; 2] }, nonce: 1, fee: fee() }, signatures: Vec::new(), functions: Vec::new() };
 
                 Step::Multisig { bundle: Box::new(bundle), key: Some(chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public()), trouble: None }
             });
@@ -1118,7 +1229,7 @@ mod batch_tests {
         let account = Address::Multisig([6; 32]);
         let shown = drawn_sign(360.0, |_| {
             let tx = Tx::EvmCall { to: Address::Evm([0xcd; 20]), value: Amount::U128(7), input: vec![0xde, 0xad, 0xbe, 0xef] };
-            let bundle = MultisigBundle { genesis: Hash::zero(HashType::default_chain()), body: MultisigBody { account, tx, nonce: 1, fee: fee() }, signatures: Vec::new() };
+            let bundle = MultisigBundle { genesis: Hash::zero(HashType::default_chain()), body: MultisigBody { account, tx, nonce: 1, fee: fee() }, signatures: Vec::new(), functions: Vec::new() };
 
             Step::Multisig { bundle: Box::new(bundle), key: Some(chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public()), trouble: None }
         });
@@ -1205,7 +1316,7 @@ mod batch_tests {
         let account = Address::Multisig([6; 32]);
         let genesis = Hash::zero(HashType::default_chain());
         let tx = Tx::Burn { from: account, amount: Amount::U128(1) };
-        let bundle = MultisigBundle { genesis, body: MultisigBody { account, tx, nonce: 1, fee: fee() }, signatures: Vec::new() };
+        let bundle = MultisigBundle { genesis, body: MultisigBody { account, tx, nonce: 1, fee: fee() }, signatures: Vec::new(), functions: Vec::new() };
         let mut book = drawn::two_phrases();
         let mut holders = keys::open(&book).unwrap();
         let key = holders[0].keys.first().map(|key| key.public());
@@ -1242,5 +1353,37 @@ mod batch_tests {
         assert!(shown.iter().any(|(text, _)| text.contains("Not allowed in a batch: Mint")));
         assert!(shown.iter().any(|(text, _)| text.contains("The chain would refuse this batch")));
     }
-}
 
+    #[test]
+    fn the_offline_signer_signs_a_tokens_authorization_on_its_chain_with_the_owners_key_and_no_other() {
+        use chainv4::registry::tokens::authorization::TokenAuthorization;
+
+        let mut book = drawn::two_phrases();
+        let mut holders = keys::open(&book).unwrap();
+        let owner = holders[0].addresses()[0];
+        let terms = TokenAuthorization::Transfer { token: Address::Contract([4; 32]), from: owner, to: Address::Ed25519([9; 32]), amount: u256::new(250), valid_after: 0, valid_before: 1_900_000_000_000, nonce: [5; 32] };
+        let request = |chain_id| Box::new(airgap::AuthorizeRequest { authorization: terms.clone(), chain_id, token: Some(airgap::Shown { symbol: "TOK".to_string(), decimals: 2 }) });
+        let mut world = drawn::World::default();
+        world.settings.signer_chain = Some(77);
+
+        // Told its chain is 77, it signs for 77 alone.
+        let mut state = SignState { step: Step::Authorize { request: request(78), trouble: None }, ..SignState::default() };
+        let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), |ui, ctx| authorize_review(ui, ctx, &mut state));
+        drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), "Sign", |ui, ctx| authorize_review(ui, ctx, &mut state));
+
+        assert!(said.contains("not yours"), "{said}");
+        assert!(matches!(state.step, Step::Authorize { .. }));
+
+        let mut state = SignState { step: Step::Authorize { request: request(77), trouble: None }, ..SignState::default() };
+        let said = drawn::said_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), |ui, ctx| authorize_review(ui, ctx, &mut state));
+
+        assert!(said.contains("A TRANSFER OF A TOKEN") && said.contains("2.5 TOK (250 units)") && said.contains("chain id 77"), "{said}");
+        drawn::tap_in(&mut world, &mut book, &mut holders, (360.0, 4_000.0), "Sign", |ui, ctx| authorize_review(ui, ctx, &mut state));
+
+        let Step::Signed { message } = &state.step else { panic!("signed: {said}") };
+        let Message::Authorized(signed) = &**message else { panic!("an authorization") };
+        assert_eq!(signed.authorization, terms);
+        assert_eq!(signed.check(77), Ok(()));
+        assert!(book.signed.iter().any(|line| line.kind == "Authorization"), "noted in the history");
+    }
+}

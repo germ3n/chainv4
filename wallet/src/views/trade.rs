@@ -121,8 +121,36 @@ pub struct TradeState {
     /// at the light client's final block and its tip, by pool share and which: what its
     /// time-weighted price comes from.
     twap: HashMap<(String, &'static str), (u256, u64)>,
+    /// The chosen EVM pair's observations, at the same two blocks, by pair and which.
+    evm_twap: HashMap<(String, &'static str), EvmObservation>,
     twap_asked: f64,
     trouble: Option<String>,
+}
+
+/// An EVM pair read at one block: its price0CumulativeLast, its reserves and when they last
+/// changed, and the block's time in milliseconds, which the cumulative price is brought up to.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct EvmObservation {
+    cumulative: Option<u256>,
+    reserves: Option<(u256, u256, u32)>,
+    time_ms: u64,
+}
+
+impl EvmObservation {
+    /// Its price0Cumulative as of its block, as V2's currentCumulativePrices works it out.
+    fn at_block(&self) -> Option<u256> {
+        let (reserve0, reserve1, last_s) = self.reserves?;
+
+        Some(chainv4::dex::evm_cumulative(self.cumulative?, reserve0, reserve1, last_s, self.time_ms / 1000))
+    }
+}
+
+/// An EVM pair's time-weighted price between two observations: token1's in token0's on average,
+/// in raw units, and the milliseconds between them.
+fn evm_average(then: &EvmObservation, now: &EvmObservation) -> Option<(f64, u64)> {
+    let elapsed_s = (now.time_ms / 1000).checked_sub(then.time_ms / 1000)?;
+
+    Some((chainv4::dex::evm_twap(then.at_block()?, now.at_block()?, elapsed_s)?, now.time_ms - then.time_ms))
 }
 
 impl Default for TradeState {
@@ -159,6 +187,7 @@ impl Default for TradeState {
             charted: f64::NEG_INFINITY,
             split: true,
             twap: HashMap::new(),
+            evm_twap: HashMap::new(),
             twap_asked: f64::NEG_INFINITY,
             trouble: None,
         }
@@ -213,6 +242,31 @@ impl TradeState {
         }
 
         let contract = body["contract"].as_str().unwrap_or_default().to_string();
+
+        // An EVM pair's time-weighted price's observations, read as calldata at a block.
+        if let (Some(which), Some(part), Some(pair)) = (body["twap"].as_str(), body["evm"].as_str(), body["share"].as_str()) {
+            let which = if which == "then" { "then" } else { "now" };
+            let answer = result.as_ref().ok().filter(|value| value["status"] == "returned");
+
+            if let Some((output, time)) = answer.and_then(|value| Some((value["output"].as_str().and_then(from_hex)?, value["time"].as_u64()?))) {
+                let seen = self.evm_twap.entry((pair.to_string(), which)).or_default();
+
+                // A reading at another block starts the observation over.
+                if seen.time_ms != time {
+                    *seen = EvmObservation { time_ms: time, ..EvmObservation::default() };
+                }
+
+                match part {
+                    "cumulative" => seen.cumulative = number_word(&output, 0),
+                    _ => {
+                        let last = number_word(&output, 2).and_then(|last| u32::try_from(last).ok());
+                        seen.reserves = number_word(&output, 0).zip(number_word(&output, 1)).zip(last).map(|((zero, one), last)| (zero, one, last));
+                    }
+                }
+            }
+
+            return true;
+        }
 
         match (body["function"].as_str(), values(result)) {
             // A time-weighted price's observations: the first side's cumulative price, and when.
@@ -1104,8 +1158,10 @@ fn pool_panel(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool
         });
     }
 
-    if state.venue == Venue::Native {
-        chart(ui, ctx, state, pool);
+    match state.venue {
+        Venue::Native => chart(ui, ctx, state, pool),
+        // The EVM's pairs have no Sync index here to chart, but their cumulative prices.
+        Venue::Evm => twap(ui, ctx, state, pool, ui.input(|input| input.time)),
     }
 
     let (held, supply) = (state.held.get(&pool.share.to_string()).copied().unwrap_or(u256::ZERO), state.supply.get(&pool.share.to_string()).copied());
@@ -1387,10 +1443,11 @@ fn chart(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool) {
 
 /// The pool's time-weighted price, from its cumulative prices read at the light client's final
 /// block and at its tip: what one side was worth in the other on average between them, which one
-/// block's trades cannot move far, as its last price they can.
+/// block's trades cannot move far, as its last price they can. A native pool's come from pool(),
+/// an EVM pair's from price0CumulativeLast and getReserves, each read at those blocks.
 fn twap(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool, time: f64) {
     let palette = *ctx.palette;
-    let (Some(dex), Some((tip, final_height))) = (dex(ctx), ctx.chain.following()) else {
+    let Some((tip, final_height)) = ctx.chain.following() else {
         return;
     };
 
@@ -1399,22 +1456,48 @@ fn twap(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool, time
         // At least a few blocks apart: under no finality, a hundred back.
         let then = if final_height + 10 <= tip { final_height } else { tip.saturating_sub(100) };
         let args = json!([{ "type": "address", "value": pool.a.to_string() }, { "type": "address", "value": pool.b.to_string() }, { "type": "i64", "value": pool.fee_bps.to_string() }]);
+        let none: &[AbiType] = &[];
 
         for (which, height) in [("then", then), ("now", tip)] {
-            ctx.node.ask(Ask::Call(json!({ "contract": dex.to_string(), "function": "pool", "args": args, "block": height, "purpose": "trade", "twap": which, "share": pool.share.to_string() }).to_string()));
+            match pool.venue {
+                chainv4::dex::Venue::Native => {
+                    let Some(dex) = dex(ctx) else { continue };
+                    ctx.node.ask(Ask::Call(json!({ "contract": dex.to_string(), "function": "pool", "args": args, "block": height, "purpose": "trade", "twap": which, "share": pool.share.to_string() }).to_string()));
+                }
+                // The pair's cumulative price and its reserves, at each block, as calldata.
+                chainv4::dex::Venue::Evm => {
+                    for (part, signature) in [("cumulative", "price0CumulativeLast()"), ("reserves", "getReserves()")] {
+                        let input = to_hex(&calldata(signature, none, &[]));
+                        ctx.node.ask(Ask::Call(json!({ "contract": pool.share.to_string(), "input": input, "block": height, "purpose": "trade", "twap": which, "evm": part, "share": pool.share.to_string() }).to_string()));
+                    }
+                }
+            }
         }
     }
 
     let share = pool.share.to_string();
-    let (Some((then, from)), Some((now, to))) = (state.twap.get(&(share.clone(), "then")), state.twap.get(&(share, "now"))) else {
-        return;
+    let average = match pool.venue {
+        chainv4::dex::Venue::Native => {
+            let (Some((then, from)), Some((now, to))) = (state.twap.get(&(share.clone(), "then")), state.twap.get(&(share, "now"))) else {
+                return;
+            };
+
+            chainv4::dex::twap(*then, *now, to.saturating_sub(*from)).map(|average| (average, to.saturating_sub(*from)))
+        }
+        chainv4::dex::Venue::Evm => {
+            let (Some(then), Some(now)) = (state.evm_twap.get(&(share.clone(), "then")), state.evm_twap.get(&(share, "now"))) else {
+                return;
+            };
+
+            evm_average(then, now)
+        }
     };
-    let Some(average) = chainv4::dex::twap(*then, *now, to.saturating_sub(*from)) else {
+    let Some((average, over)) = average else {
         return;
     };
     let scaled = average * 10f64.powi(i32::from(decimals(ctx, &pool.a)) - i32::from(decimals(ctx, &pool.b)));
 
-    ui.label(RichText::new(format!("Time-weighted over the last {}: 1 {} = {} {}", format::span(to.saturating_sub(*from)), symbol(ctx, &pool.a), rate_words(scaled), symbol(ctx, &pool.b))).small().color(palette.soft))
+    ui.label(RichText::new(format!("Time-weighted over the last {}: 1 {} = {} {}", format::span(over), symbol(ctx, &pool.a), rate_words(scaled), symbol(ctx, &pool.b))).small().color(palette.soft))
         .on_hover_text("Its price on average between two blocks, from the pool's own cumulative prices: one block's trades move it little.");
 }
 

@@ -101,7 +101,8 @@ Each summary has:
   `bootnodes`, or any setting as [governance](governance.md#a-change) lists them; and
   `clear_vote`, with its `version`, `kind` and `change`;
 - `multisig`, a multisig's own: its `account`, the `tx` it sends and the members' `signatures`,
-  each with `key` and `signature`; `create_multisig` and `change_multisig` with `members`, each a
+  each with `key` and `signature`, and for one signed as EIP-712 typed data `typed: true` and the
+  `functions` its form named its calls by; `create_multisig` and `change_multisig` with `members`, each a
   `key`, its `bitcoin` xpub and its `evm` address or `null`, `threshold` and `testnet`;
   `approve_multisig` with `account`, `nonce`, `fee` and `tx`; `withdraw_multisig` with `account`
   and `proposal`;

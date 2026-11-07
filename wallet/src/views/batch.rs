@@ -299,7 +299,7 @@ pub struct BatchState {
     from: Option<Address>,
     steps: Vec<Tx>,
     /// The functions its calls were added by, which MetaMask shows them as.
-    known: Vec<String>,
+    pub(super) known: Vec<String>,
     form: Form,
     picked: Picked,
     trouble: Option<String>,

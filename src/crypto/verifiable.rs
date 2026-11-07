@@ -59,8 +59,6 @@ pub enum VerifyError {
     BatchSize,
     #[document(summary = "A batch holding what a batch may not: anything but a transfer, contract call, EVM call, deploy, upgrade, name, primary name, burn or claim.")]
     BatchStep,
-    #[document(summary = "A multisig's batch signed as EIP-712 typed data, which could only show its signer an opaque hash.")]
-    BatchNotTyped,
     #[document(summary = "Function names that are not the ones a typed signature's calls hold: too few, too many, one that hashes to another function, or any beside a signature of another kind.")]
     FunctionNames,
 }
@@ -85,7 +83,6 @@ impl fmt::Display for VerifyError {
             VerifyError::BadAnchor => write!(f, "an anchor's transaction, coinbase or path is longer than any Bitcoin block holds"),
             VerifyError::BatchSize => write!(f, "a batch holds 1 to {} steps", crate::structs::tx::MAX_BATCH_STEPS),
             VerifyError::BatchStep => write!(f, "a batch holds only transfers, contract calls, EVM calls, deploys, upgrades, names, primary names, burns and claims"),
-            VerifyError::BatchNotTyped => write!(f, "a multisig's batch cannot be signed as EIP-712 typed data: its signer would see an opaque hash, not its steps"),
             VerifyError::FunctionNames => write!(f, "the function names are not the ones its typed signature's calls hold, or stand beside a signature of another kind"),
         }
     }

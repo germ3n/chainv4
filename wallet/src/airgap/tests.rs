@@ -108,6 +108,7 @@ fn every_message_reads_back_from_its_ur_and_a_short_one_fits_one_code() {
         genesis: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()),
         body: chainv4::registry::multisig::MultisigBody { account, tx: transfer(&key).tx, nonce: 3, fee: FeeOffer::NONE },
         signatures: Vec::new(),
+        functions: Vec::new(),
     };
     bundle.sign(&key);
 
@@ -490,4 +491,82 @@ fn a_request_names_its_collection_after_its_encoding_and_only_when_it_has_one() 
     };
     assert_eq!(describe(&items).what, Some(("12 of ITEM #3".to_string(), "12".to_string())));
     assert_eq!(describe(&items).kind, "Send items from Test Items");
+}
+
+#[test]
+fn the_signer_names_the_evm_collection_a_transfer_is_from_and_the_items_it_sends() {
+    use chainv4::abi::{AbiType, AbiValue, encode_values};
+
+    enum CollectionKind {
+        Nft,
+        Multi,
+    }
+    let call = |signature: &str, types: &[AbiType], values: &[AbiValue]| [chainv4::crypto::secp256k1::keccak(signature.as_bytes())[..4].to_vec(), encode_values(types, values).unwrap()].concat();
+    let evm = |address: &Address| AbiValue::Address(chainv4::crypto::secp256k1::keccak(&address.to_string().into_bytes())[12..].try_into().unwrap());
+    // As the NFTs page writes them (views::nfts::evm).
+    let transfer_input = |kind: CollectionKind, from: &Address, to: &Address, id: u256, amount: u256| match kind {
+        CollectionKind::Nft => call("safeTransferFrom(address,address,uint256)", &[AbiType::Address, AbiType::Address, AbiType::Uint(256)], &[evm(from), evm(to), AbiValue::Uint(id)]),
+        CollectionKind::Multi => call(
+            "safeTransferFrom(address,address,uint256,uint256,bytes)",
+            &[AbiType::Address, AbiType::Address, AbiType::Uint(256), AbiType::Uint(256), AbiType::Bytes],
+            &[evm(from), evm(to), AbiValue::Uint(id), AbiValue::Uint(amount), AbiValue::Bytes(Vec::new())],
+        ),
+    };
+    let batch_input = |from: &Address, to: &Address, items: &[(u256, u256)]| {
+        let list = |values: Vec<u256>| AbiValue::Array(values.into_iter().map(AbiValue::Uint).collect());
+        let uints = || AbiType::Array(Box::new(AbiType::Uint(256)));
+
+        call(
+            "safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)",
+            &[AbiType::Address, AbiType::Address, uints(), uints(), AbiType::Bytes],
+            &[evm(from), evm(to), list(items.iter().map(|(id, _)| *id).collect()), list(items.iter().map(|(_, amount)| *amount).collect()), AbiValue::Bytes(Vec::new())],
+        )
+    };
+
+    let key = key();
+    let me = key.public().address();
+    let collection = Address::Evm([0x31; 20]);
+    let request = |input: Vec<u8>, multi: bool| Request {
+        tx: Tx::EvmCall { to: collection, value: Amount::U128(0), input },
+        collection: Some(NamedCollection { name: "Evm Pixels".to_string(), symbol: "EPX".to_string(), multi }),
+        ..transfer(&key)
+    };
+
+    let nft = describe(&request(transfer_input(CollectionKind::Nft, &me, &someone(0xcd), u256::new(7), u256::ONE), false));
+    assert_eq!((nft.kind.as_str(), nft.what), ("Send an NFT from Evm Pixels", Some(("EPX #7".to_string(), "1".to_string()))));
+    assert_eq!(nft.to.as_deref().map(|to| to.starts_with("evm:0x")), Some(true));
+    assert_eq!(nft.token, Some(collection.to_string()));
+
+    let items = describe(&request(transfer_input(CollectionKind::Multi, &me, &someone(0xcd), u256::new(3), u256::new(12)), true));
+    assert_eq!((items.kind.as_str(), items.what), ("Send items from Evm Pixels", Some(("12 of EPX #3".to_string(), "12".to_string()))));
+
+    let batch = describe(&request(batch_input(&me, &someone(0xcd), &[(u256::new(1), u256::new(2)), (u256::new(5), u256::new(4))]), true));
+    assert_eq!(batch.what, Some(("EPX: 2 of #1, 4 of #5".to_string(), "6".to_string())));
+
+    // The calldata of the other standard, or of anything else, is not named as a transfer from it.
+    assert!(describe(&request(transfer_input(CollectionKind::Multi, &me, &someone(0xcd), u256::new(3), u256::new(12)), false)).kind != "Send an NFT from Evm Pixels");
+    assert_eq!(describe(&request(vec![1, 2, 3, 4], false)).what, None);
+}
+
+#[test]
+fn an_authorization_goes_to_the_signer_and_comes_back_signed_in_codes_of_their_own() {
+    use chainv4::registry::tokens::authorization::{SignedAuthorization, TokenAuthorization};
+
+    let key = key();
+    let terms = TokenAuthorization::Permit { token: Address::Contract([0x44; 32]), owner: key.public().address(), spender: someone(0xcd), amount: u256::new(300), nonce: u256::ONE, deadline: 1_900_000_000_000 };
+    let asked = Message::Authorize(Box::new(AuthorizeRequest { authorization: terms.clone(), chain_id: 77, token: Some(Shown { symbol: "TOK".to_string(), decimals: 2 }) }));
+
+    assert_eq!(asked.ur_type(), AUTHORIZE_TYPE);
+    assert_eq!(Message::from_text(&asked.to_text()), Ok(asked.clone()));
+
+    let signed = SignedAuthorization::sign(terms, &key, 77).unwrap();
+    let answer = Message::Authorized(Box::new(signed.clone()));
+
+    assert_eq!(Message::from_text(&answer.to_text()), Ok(answer));
+    assert!(Message::from_ur(AUTHORIZE_TYPE, b"{\"kind\":\"chainv4 token permit\"}").is_err());
+    assert!(Message::from_ur(AUTHORIZED_TYPE, &[0xff]).is_err());
+
+    // Without the token named, it reads back as the terms alone.
+    let bare = AuthorizeRequest { authorization: signed.authorization, chain_id: 77, token: None };
+    assert_eq!(Message::from_ur(AUTHORIZE_TYPE, &Message::Authorize(Box::new(bare.clone())).bytes()), Ok(Message::Authorize(Box::new(bare))));
 }

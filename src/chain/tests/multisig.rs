@@ -65,7 +65,7 @@ fn a_bundle_for_another_chain_is_refused_with_its_carrier_or_its_members_signing
     let to = Address::Ed25519([9; 32]);
     let body = MultisigBody { account, tx: Tx::Transfer { from: account, to, amount: Amount::U128(10) }, nonce: 0, fee: FeeOffer::NONE };
     let bundled = |genesis: Hash| {
-        let mut bundle = crate::registry::multisig::MultisigBundle { genesis, body: body.clone(), signatures: Vec::new() };
+        let mut bundle = crate::registry::multisig::MultisigBundle { genesis, body: body.clone(), signatures: Vec::new(), functions: Vec::new() };
         bundle.sign(&alice);
         bundle.sign(&bob);
 
@@ -524,4 +524,56 @@ fn the_member_index_lists_each_multisig_under_its_members_through_changes_reorgs
     assert!(late.drop_member_index().unwrap());
     assert!(entries(&late_db).is_empty());
     assert!(!Chain::open(late_db.clone(), &pow_genesis()).unwrap().member_index());
+}
+
+#[cfg(all(feature = "ed25519", feature = "secp256k1"))]
+#[test]
+fn an_ethereum_member_signs_approves_and_carries_a_multisigs_batch_as_typed_data() {
+    let mut chain = open(&Arc::new(MemoryDb::default()));
+    let genesis_id = chain.genesis();
+    let creator = authority();
+    let ethereum = of_scheme(KeyType::Secp256k1, 71);
+    let ed = of_scheme(KeyType::Ed25519, 72);
+    let at = nonce(&chain, &creator);
+    let create = Tx::CreateMultisig { members: [&ethereum, &ed].into_iter().map(member).collect(), threshold: 2, testnet: false };
+    advance(&mut chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &creator, &genesis_id)]);
+    let account = multisig_address(&creator.public().address(), at, chain.hash());
+    for to in [account, ethereum.public().address()] {
+        let funding = transfer(&chain, &creator, &to, 1_000);
+        advance(&mut chain, vec![funding]);
+    }
+    let to = Address::Ed25519([9; 32]);
+    let batch = Tx::Batch { steps: vec![Tx::Transfer { from: account, to, amount: Amount::U128(2) }, Tx::Transfer { from: account, to, amount: Amount::U128(3) }] };
+
+    // Signed off chain in its typed form, and carried under a typed signature too.
+    let body = MultisigBody { account, tx: batch.clone(), nonce: 0, fee: FeeOffer::NONE };
+    let typed = MemberSignature::sign_eip712(&body, Vec::new(), &ethereum, &genesis_id).unwrap();
+    let signatures = vec![typed.clone(), MemberSignature::sign(&body, &ed, &genesis_id)];
+    let carried = SignedTx::sign_eip712(Tx::Multisig { account, tx: Box::new(batch.clone()), signatures }, Vec::new(), 0, FeeOffer::NONE, &ethereum, &genesis_id).unwrap();
+
+    assert!(matches!(advance(&mut chain, vec![carried])[0].result, Ok(Effect::Batch(_))));
+    assert_eq!(balance(&chain, &to), u256::new(5));
+
+    // A typed signature is no native one, nor holds with a name beside it that calls nothing.
+    let body = MultisigBody { nonce: 1, ..body };
+    let crate::crypto::keypair::Signature::Secp256k1Eip712(bytes) = MemberSignature::sign_eip712(&body, Vec::new(), &ethereum, &genesis_id).unwrap().signature else { unreachable!() };
+    let as_native = MemberSignature { key: ethereum.public(), signature: crate::crypto::keypair::Signature::Secp256k1(bytes), functions: Vec::new() };
+    let named = MemberSignature { functions: vec!["transfer".to_string()], ..MemberSignature::sign_eip712(&body, Vec::new(), &ethereum, &genesis_id).unwrap() };
+
+    for wrong in [as_native, named] {
+        let signatures = vec![wrong, MemberSignature::sign(&body, &ed, &genesis_id)];
+        refused(&mut chain, SignedTx::sign(Tx::Multisig { account, tx: Box::new(batch.clone()), signatures }, 1, FeeOffer::NONE, &ed, &genesis_id), "does not check out");
+    }
+
+    // Approved on chain under a typed signature, then carried with the other's.
+    let approve = Tx::ApproveMultisig { account, nonce: 1, fee: FeeOffer::NONE, tx: Box::new(batch.clone()) };
+    let approval = SignedTx::sign_eip712(approve, Vec::new(), nonce(&chain, &ethereum), FeeOffer::NONE, &ethereum, &genesis_id).unwrap();
+
+    assert!(advance(&mut chain, vec![approval])[0].result.is_ok());
+
+    let signatures = vec![MemberSignature::sign(&body, &ed, &genesis_id)];
+    let receipts = advance(&mut chain, vec![SignedTx::sign(Tx::Multisig { account, tx: Box::new(batch), signatures }, 1, FeeOffer::NONE, &ed, &genesis_id)]);
+
+    assert!(matches!(receipts[0].result, Ok(Effect::Batch(_))), "{:?}", receipts[0].result);
+    assert_eq!(balance(&chain, &to), u256::new(10));
 }

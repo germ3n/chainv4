@@ -94,3 +94,17 @@ fn a_pasted_authorization_shows_its_terms_and_whether_it_holds_here() {
     state.pasted = "not one".to_string();
     assert!(shown(&mut state).iter().any(|text| text.contains("not a signed authorization")));
 }
+
+#[test]
+fn the_offline_signers_answer_is_taken_only_for_these_terms_and_holding() {
+    let key = Keypair::from_seed([9; 32]);
+    let terms = TokenAuthorization::Permit { token: TOKEN, owner: key.public().address(), spender: Address::Ed25519([3; 32]), amount: u256::new(30), nonce: u256::ZERO, deadline: 5_000 };
+    let signed = SignedAuthorization::sign(terms.clone(), &key, chain_id()).unwrap();
+
+    assert_eq!(taken(&signed, &terms, chain_id()), Ok(()));
+
+    // Other terms, though they hold; or these, signed for another chain.
+    let other = TokenAuthorization::Permit { token: TOKEN, owner: key.public().address(), spender: Address::Ed25519([3; 32]), amount: u256::new(31), nonce: u256::ZERO, deadline: 5_000 };
+    assert!(taken(&SignedAuthorization::sign(other, &key, chain_id()).unwrap(), &terms, chain_id()).unwrap_err().contains("other terms"));
+    assert!(taken(&SignedAuthorization::sign(terms.clone(), &key, chain_id() + 1).unwrap(), &terms, chain_id()).unwrap_err().contains("does not hold"));
+}

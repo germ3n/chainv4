@@ -131,12 +131,10 @@ pub fn signature_checks(signed: &SignedTx, genesis: Option<&Hash>) -> Result<(),
 /// A multisig bundle's signatures: each member's key, the account it controls, and whether its
 /// signature checks over the transaction on the bundle's chain.
 pub fn bundle_signatures(bundle: &MultisigBundle) -> Vec<(String, String, bool)> {
-    let bytes = bundle.body.signing_bytes(&bundle.genesis);
-
     bundle
         .signatures
         .iter()
-        .map(|signed| (signed.key.to_string(), signed.key.address().to_string(), signed.key.verify_signature(&bytes, &signed.signature).is_ok()))
+        .map(|signed| (signed.key.to_string(), signed.key.address().to_string(), signed.verify(&bundle.body, &bundle.genesis).is_ok()))
         .collect()
 }
 

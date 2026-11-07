@@ -92,6 +92,45 @@ impl TokenAuthorization {
             TokenAuthorization::Transfer { to, amount, .. } => format!("Send {amount} to {to}"),
         }
     }
+
+    #[document(parent = "TokenAuthorization", summary = "Its terms as JSON: its kind, addresses and amounts as text, times in milliseconds, a transfer's nonce in hex. What a signed one's text holds beside its key and signature, and what a wallet hands an offline signer to sign.")]
+    pub fn to_json(&self) -> Value {
+        match self {
+            TokenAuthorization::Permit { token, owner, spender, amount, nonce, deadline } => json!({
+                "kind": "chainv4 token permit",
+                "token": token.to_string(), "owner": owner.to_string(), "spender": spender.to_string(),
+                "amount": amount.to_string(), "nonce": nonce.to_string(), "deadline": deadline,
+            }),
+            TokenAuthorization::Transfer { token, from, to, amount, valid_after, valid_before, nonce } => json!({
+                "kind": "chainv4 token transfer",
+                "token": token.to_string(), "from": from.to_string(), "to": to.to_string(), "amount": amount.to_string(),
+                "valid_after": valid_after, "valid_before": valid_before, "nonce": to_hex(nonce),
+            }),
+        }
+    }
+
+    #[document(parent = "TokenAuthorization", summary = "Reads terms to_json wrote; any other fields beside them are left be.", returns = "The terms, or what does not read.")]
+    pub fn from_json(value: &Value) -> Result<TokenAuthorization, String> {
+        let text = |key: &str| value[key].as_str().ok_or_else(|| format!("it has no {key}"));
+        let address = |key: &str| text(key)?.parse::<Address>().map_err(|_| format!("its {key} is not an address"));
+        let number = |key: &str| text(key).and_then(|digits| u256::from_str_radix(digits, 10).map_err(|_| format!("its {key} is not a whole number")));
+        let time = |key: &str| value[key].as_u64().ok_or_else(|| format!("its {key} is not a time in milliseconds"));
+        let bytes = |key: &str| text(key).and_then(|hex| from_hex(hex).ok_or_else(|| format!("its {key} is not hex")));
+
+        Ok(match text("kind")? {
+            "chainv4 token permit" => TokenAuthorization::Permit { token: address("token")?, owner: address("owner")?, spender: address("spender")?, amount: number("amount")?, nonce: number("nonce")?, deadline: time("deadline")? },
+            "chainv4 token transfer" => TokenAuthorization::Transfer {
+                token: address("token")?,
+                from: address("from")?,
+                to: address("to")?,
+                amount: number("amount")?,
+                valid_after: time("valid_after")?,
+                valid_before: time("valid_before")?,
+                nonce: bytes("nonce")?.try_into().map_err(|_| "its nonce is not 32 bytes".to_string())?,
+            },
+            other => return Err(format!("not terms: its kind is {other}")),
+        })
+    }
 }
 
 #[document(
@@ -199,18 +238,7 @@ impl SignedAuthorization {
 
     #[document(parent = "SignedAuthorization", summary = "It as JSON text to hand on: its kind, its terms, addresses and amounts as text, the key and signature in hex.")]
     pub fn to_text(&self) -> String {
-        let mut value = match &self.authorization {
-            TokenAuthorization::Permit { token, owner, spender, amount, nonce, deadline } => json!({
-                "kind": "chainv4 token permit",
-                "token": token.to_string(), "owner": owner.to_string(), "spender": spender.to_string(),
-                "amount": amount.to_string(), "nonce": nonce.to_string(), "deadline": deadline,
-            }),
-            TokenAuthorization::Transfer { token, from, to, amount, valid_after, valid_before, nonce } => json!({
-                "kind": "chainv4 token transfer",
-                "token": token.to_string(), "from": from.to_string(), "to": to.to_string(), "amount": amount.to_string(),
-                "valid_after": valid_after, "valid_before": valid_before, "nonce": to_hex(nonce),
-            }),
-        };
+        let mut value = self.authorization.to_json();
         value["key"] = to_hex(&self.key).into();
         value["signature"] = to_hex(&self.signature).into();
 
@@ -220,24 +248,8 @@ impl SignedAuthorization {
     #[document(parent = "SignedAuthorization", summary = "Reads what to_text wrote.", returns = "It, or what does not read.")]
     pub fn from_text(text: &str) -> Result<SignedAuthorization, String> {
         let value: Value = serde_json::from_str(text.trim()).map_err(|_| "not a signed authorization: it is not JSON".to_string())?;
-        let text = |key: &str| value[key].as_str().ok_or_else(|| format!("it has no {key}"));
-        let address = |key: &str| text(key)?.parse::<Address>().map_err(|_| format!("its {key} is not an address"));
-        let number = |key: &str| text(key).and_then(|digits| u256::from_str_radix(digits, 10).map_err(|_| format!("its {key} is not a whole number")));
-        let time = |key: &str| value[key].as_u64().ok_or_else(|| format!("its {key} is not a time in milliseconds"));
-        let bytes = |key: &str| text(key).and_then(|hex| from_hex(hex).ok_or_else(|| format!("its {key} is not hex")));
-        let authorization = match text("kind")? {
-            "chainv4 token permit" => TokenAuthorization::Permit { token: address("token")?, owner: address("owner")?, spender: address("spender")?, amount: number("amount")?, nonce: number("nonce")?, deadline: time("deadline")? },
-            "chainv4 token transfer" => TokenAuthorization::Transfer {
-                token: address("token")?,
-                from: address("from")?,
-                to: address("to")?,
-                amount: number("amount")?,
-                valid_after: time("valid_after")?,
-                valid_before: time("valid_before")?,
-                nonce: bytes("nonce")?.try_into().map_err(|_| "its nonce is not 32 bytes".to_string())?,
-            },
-            other => return Err(format!("not a signed authorization: its kind is {other}")),
-        };
+        let authorization = TokenAuthorization::from_json(&value).map_err(|why| why.replace("not terms", "not a signed authorization"))?;
+        let bytes = |key: &str| value[key].as_str().ok_or_else(|| format!("it has no {key}")).and_then(|hex| from_hex(hex).ok_or_else(|| format!("its {key} is not hex")));
 
         Ok(SignedAuthorization { authorization, key: bytes("key")?, signature: bytes("signature")? })
     }

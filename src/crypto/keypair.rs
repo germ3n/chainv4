@@ -423,7 +423,7 @@ pub enum Signature {
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 2)]
     Secp256k1([u8; 64]),
-    #[document(summary = "A secp256k1 ECDSA signature over a transaction's EIP-712 typed hash, as MetaMask and hardware wallets sign typed data, bound to one chain by its genesis id: r, then s, which is always low. Only SignedTx::verify_on checks it, knowing the chain; PublicKey::verify_signature refuses it.")]
+    #[document(summary = "A secp256k1 ECDSA signature over a transaction's EIP-712 typed hash, as MetaMask and hardware wallets sign typed data, bound to one chain by its genesis id: r, then s, which is always low; or a multisig member's over its transaction's typed form. Only SignedTx::verify_on and MemberSignature::verify check it, knowing the chain; PublicKey::verify_signature refuses it.")]
     #[cfg(feature = "secp256k1")]
     #[wincode(tag = 3)]
     Secp256k1Eip712([u8; 64]),

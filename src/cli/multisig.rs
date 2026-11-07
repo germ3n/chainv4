@@ -63,6 +63,10 @@ pub enum MultisigAction {
         /// hex, rather than its engine, size, SHA-256 and address alone.
         #[arg(long)]
         full: bool,
+        /// Sign it as EIP-712 typed data, as MetaMask would, with a secp256k1 key: its steps
+        /// written out and its calls by the names the bundle carries.
+        #[arg(long)]
+        eip712: bool,
     },
     /// Approves a bundle's transaction on chain, from --key's own account at its own cost, and
     /// submits it once the approvals and the bundle's signatures are enough.
@@ -75,6 +79,9 @@ pub enum MultisigAction {
         /// Show each deploy's and upgrade's code whole, as sign --full does.
         #[arg(long)]
         full: bool,
+        /// Sign the approval as EIP-712 typed data, as MetaMask would, with a secp256k1 key.
+        #[arg(long)]
+        eip712: bool,
     },
     /// Takes back --key's approval of an open proposal.
     Withdraw {
@@ -186,10 +193,10 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
 
     match args.action {
         MultisigAction::Show { account } => show(&agent, &node, &account),
-        MultisigAction::Sign { bundle: path, submit, yes, full } => {
+        MultisigAction::Sign { bundle: path, submit, yes, full, eip712 } => {
             let mut bundle = read(&path)?;
             review_bundle(&bundle, "Sign", yes, full, &mut std::io::stdin().lock())?;
-            bundle.sign(&keypair);
+            sign(&mut bundle, &keypair, eip712)?;
             write(&path, &bundle)?;
             println!("signed as {}: {} signature{} now", keypair.public(), bundle.signatures.len(), plural(bundle.signatures.len()));
 
@@ -198,13 +205,17 @@ pub fn multisig(args: MultisigArgs) -> CliResult<()> {
                 false => Ok(()),
             }
         }
-        MultisigAction::Approve { bundle: path, yes, full } => {
+        MultisigAction::Approve { bundle: path, yes, full, eip712 } => {
             let bundle = read(&path)?;
             let body = &bundle.body;
             review_bundle(&bundle, "Approve", yes, full, &mut std::io::stdin().lock())?;
             let approval = Tx::ApproveMultisig { account: body.account, nonce: body.nonce, fee: body.fee, tx: Box::new(body.tx.clone()) };
             println!("approving {} of {} on chain", body.id(&bundle.genesis), body.account);
-            send_own(&agent, &node, &keypair, approval, timeout)?;
+
+            match eip712 {
+                true => send_typed(&agent, &node, &keypair, approval, &bundle.functions, timeout)?,
+                false => send_own(&agent, &node, &keypair, approval, timeout)?,
+            }
 
             submit_if_backed(&agent, &node, &bundle, &keypair, timeout)
         }
@@ -242,7 +253,16 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
     let nonce = multisig["nonce"].as_u64().ok_or("the node sent no nonce")?;
     let threshold = multisig["threshold"].as_u64().ok_or("the node sent no threshold")? as usize;
     let keys = member_keys(&multisig)?;
+    // The functions it calls by name, which the bundle carries for members signing it as typed
+    // data, in MetaMask or with --eip712.
+    let known = match &args.tx {
+        super::send::TxArgs::Call { function, .. } => vec![function.clone()],
+        super::send::TxArgs::Batch { file, steps } => super::batch::functions(steps, file.as_deref())?,
+        _ => Vec::new(),
+    };
+    let eip712 = args.eip712;
     let tx = transaction(args.tx, account, &agent, node)?;
+    let functions = crate::crypto::eip712::name_multisig_calls(&tx, &known).unwrap_or_default();
 
     // Where its deploys land, a line each after the steps: the bundle fixes the multisig's nonce,
     // so it is known before anyone signs, for what comes after to call.
@@ -258,7 +278,7 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
 
     // The probe weighs what the heaviest quorum's envelope will, whichever members sign and
     // whoever carries it: a member with a larger key than the proposer's may well be one.
-    let probe = MultisigBundle::probe(&genesis, &MultisigBody { account, tx: tx.clone(), nonce, fee: FeeOffer::NONE }, &keys, threshold);
+    let probe = MultisigBundle::probe(&genesis, &MultisigBody { account, tx: tx.clone(), nonce, fee: FeeOffer::NONE }, &keys, threshold, &functions);
     let chosen = OfferChoice { gas_limit: args.gas_limit, max_price: args.max_price, tip: args.tip };
     let (fee, failure, _) = offer(&agent, node, &probe, chosen)?;
 
@@ -270,8 +290,8 @@ pub(super) fn propose(args: SendArgs, account: Address) -> CliResult<()> {
         eprintln!("a dry run says this would fail: {error}; proposing it anyway");
     }
 
-    let mut bundle = MultisigBundle { genesis, body: MultisigBody { account, tx, nonce, fee }, signatures: Vec::new() };
-    bundle.sign(&keypair);
+    let mut bundle = MultisigBundle { genesis, body: MultisigBody { account, tx, nonce, fee }, signatures: Vec::new(), functions };
+    sign(&mut bundle, &keypair, eip712)?;
     let (backed, needed) = backing(&agent, node, &bundle)?;
 
     if backed >= needed {
@@ -343,6 +363,42 @@ fn submit(agent: &Agent, node: &str, bundle: &MultisigBundle, carrier: &Keypair,
     println!("submitting {}'s transaction {}", bundle.body.account, bundle.body.nonce);
 
     post_and_wait(agent, node, &signed, timeout)
+}
+
+/// Adds --key's signature to a bundle: chainv4's own, or with eip712 a typed one.
+fn sign(bundle: &mut MultisigBundle, keypair: &Keypair, eip712: bool) -> CliResult<()> {
+    if !eip712 {
+        bundle.sign(keypair);
+
+        return Ok(());
+    }
+
+    #[cfg(feature = "secp256k1")]
+    if bundle.sign_eip712(keypair) {
+        return Ok(());
+    }
+
+    match keypair.public().key_type() {
+        #[cfg(feature = "secp256k1")]
+        crate::crypto::keypair::KeyType::Secp256k1 => Err("the bundle does not name every function it calls, which typed data shows: sign it without --eip712".into()),
+        _ => Err("--eip712 needs a secp256k1 key: typed data is Ethereum's".into()),
+    }
+}
+
+/// Sends one of --key's own transactions signed as EIP-712 typed data, its calls named by
+/// functions, with the fee a dry run of it says.
+fn send_typed(agent: &Agent, node: &str, keypair: &Keypair, tx: Tx, functions: &[String], timeout: Duration) -> CliResult<()> {
+    let sender = keypair.public().address();
+    let nonce = ok(agent.get(format!("{node}/accounts/{sender}")).call())?["nonce"].as_u64().ok_or("the node sent no nonce")?;
+    let genesis = genesis_of(&ok(agent.get(format!("{node}/status")).call())?)?;
+    let typed = |fee| super::send::typed(&genesis, tx.clone(), functions, nonce, fee, keypair);
+    let (fee, failure, _) = offer(agent, node, &typed(FeeOffer::NONE)?, Default::default())?;
+
+    if let Some(error) = failure {
+        return Err(format!("a dry run says this would fail: {error}").into());
+    }
+
+    post_and_wait(agent, node, &typed(fee)?, timeout)
 }
 
 /// Sends one of --key's own transactions, with the fee a dry run of it says.

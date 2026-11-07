@@ -627,14 +627,14 @@ pub(super) fn chain_to_sign_for(status: &Value, wanted: Option<&str>) -> CliResu
 /// A transaction signed as EIP-712 typed data for this chain, each call named by the function it
 /// was given as.
 #[cfg(feature = "secp256k1")]
-fn typed(genesis: &Hash, tx: Tx, known: &[String], nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
+pub(super) fn typed(genesis: &Hash, tx: Tx, known: &[String], nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
     let functions = crate::crypto::eip712::name_calls(&tx, known).ok_or("a call's function has no name to show it by")?;
 
     Ok(SignedTx::sign_eip712(tx, functions, nonce, fee, keypair, genesis).ok_or("--eip712 needs a secp256k1 key: typed data is Ethereum's")?)
 }
 
 #[cfg(not(feature = "secp256k1"))]
-fn typed(_: &Hash, _: Tx, _: &[String], _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
+pub(super) fn typed(_: &Hash, _: Tx, _: &[String], _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
     Err("--eip712 needs a secp256k1 key, and this build has no secp256k1".into())
 }
 

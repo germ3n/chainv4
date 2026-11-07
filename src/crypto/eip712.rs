@@ -11,12 +11,19 @@
 //!   `Argument`, its type's name and its value written out, for any other contract call.
 //! - **`Batch`:** its steps, each a `Step`: a transfer, call or EVM call written out as those are,
 //!   anything else as its kind and encoded bytes.
+//! - **`MultisigTransaction`:** what a multisig runs, for a member to agree to: the multisig,
+//!   whether it runs one transaction or a batch, its steps written out as a batch's are, and the
+//!   multisig's nonce and fee. A member signs one off chain into a bundle, as
+//!   `MultisigBody::eip712_digest` hashes it.
+//! - **`ApproveMultisig`:** a member's approval on chain, the `MultisigTransaction` it approves
+//!   as its proposal.
+//! - **`Multisig`:** a multisig's transaction as its carrier submits it, the
+//!   `MultisigTransaction` and the members' signatures it carries, as their encoded bytes.
 //! - **`Transaction`:** its kind and encoded bytes, nonce and fee, for every other.
 //!
 //! A call holds its function's XXH3-64 hash, not its name, so the name travels beside the
-//! signature, in SignedTx::functions, one for each call the form writes out, in order: the node
-//! checks each hashes to its call's and builds the same form. A multisig's batch has no form
-//! anyone may sign, as its steps sit inside the multisig's opaque transaction.
+//! signature, in SignedTx::functions or MemberSignature::functions, one for each call the form
+//! writes out, in order: the node checks each hashes to its call's and builds the same form.
 //!
 //! Each form maps back to one transaction alone: a transfer or call whose amount could be
 //! narrower, read as Transfer or Call, would sign the same as the narrow one under another id, so
@@ -224,6 +231,14 @@ pub fn message(tx: &Tx, functions: &[String], nonce: u64, fee: &FeeOffer) -> Opt
             ],
         ),
         Tx::Batch { steps } => ("Batch", vec![("steps", "Step[]", Value::Array(steps.iter().map(|step| self::step(step, &mut names)).collect::<Option<_>>()?))]),
+        Tx::ApproveMultisig { account, nonce, fee, tx: inner } => ("ApproveMultisig", vec![("proposal", "MultisigTransaction", Value::Struct(multisig_transaction(account, inner, *nonce, fee, &mut names)?))]),
+        Tx::Multisig { account, tx: inner, signatures } => (
+            "Multisig",
+            vec![
+                ("transaction", "MultisigTransaction", Value::Struct(multisig_transaction(account, inner, nonce, fee, &mut names)?)),
+                ("signatures", "bytes", Value::Bytes(signatures.iter().flat_map(|signed| signed.hashable_bytes_with_tag()).collect())),
+            ],
+        ),
         _ => generic(tx),
     };
 
@@ -235,6 +250,44 @@ pub fn message(tx: &Tx, functions: &[String], nonce: u64, fee: &FeeOffer) -> Opt
     fields.extend(costs);
 
     Some(Typed { name, fields })
+}
+
+/// What a multisig runs, as its members agree to it: the multisig, whether it is one transaction
+/// or a batch, so one transfer and a batch of that transfer alone sign apart, every step written
+/// out as a batch's are, and the multisig's own nonce and fee offer.
+fn multisig_transaction<'a>(account: &crate::structs::address::Address, tx: &Tx, nonce: u64, fee: &FeeOffer, names: &mut impl Iterator<Item = &'a String>) -> Option<Typed> {
+    let (runs, steps): (&str, Vec<&Tx>) = match tx {
+        Tx::Batch { steps } => ("batch", steps.iter().collect()),
+        tx => ("one", vec![tx]),
+    };
+
+    Some(Typed {
+        name: "MultisigTransaction",
+        fields: vec![
+            ("multisig", "string", Value::String(account.to_string())),
+            ("runs", "string", Value::String(runs.to_string())),
+            ("steps", "Step[]", Value::Array(steps.into_iter().map(|one| step(one, names)).collect::<Option<_>>()?)),
+            ("nonce", "uint64", Value::Uint(u256::from(nonce))),
+            ("gasLimit", "uint64", Value::Uint(u256::from(fee.gas_limit))),
+            ("maxPrice", "uint256", Value::Uint(fee.max_price)),
+            ("tip", "uint256", Value::Uint(fee.tip)),
+        ],
+    })
+}
+
+/// A multisig's transaction as a member signs it off chain, typed, with the names of the calls it
+/// writes out: None when they are not those calls'.
+pub fn multisig_message(account: &crate::structs::address::Address, tx: &Tx, functions: &[String], nonce: u64, fee: &FeeOffer) -> Option<Typed> {
+    let mut names = functions.iter();
+    let typed = multisig_transaction(account, tx, nonce, fee, &mut names)?;
+
+    names.next().is_none().then_some(typed)
+}
+
+/// What a member signs for a multisig's transaction on this chain, typed: None when the names are
+/// not its calls'.
+pub fn multisig_digest(account: &crate::structs::address::Address, tx: &Tx, functions: &[String], nonce: u64, fee: &FeeOffer, genesis: &Hash) -> Option<[u8; 32]> {
+    Some(digest(&domain(genesis), &multisig_message(account, tx, functions, nonce, fee)?))
 }
 
 /// The token standard's transfer call: the token, to whom and how many units.
@@ -346,29 +399,43 @@ fn narrowest(amount: &Amount) -> bool {
     }
 }
 
-/// How many function names a transaction's typed form carries: one for each call it writes out.
-pub fn calls_named(tx: &Tx) -> usize {
-    let call = |tx: &Tx| matches!(tx, Tx::ContractCall { amount, .. } if narrowest(amount)) && token_transfer(tx).is_none();
+/// The calls a transaction's typed form writes out, in order: a call on its own unless it is a
+/// token transfer, which has a form of its own; every call among a batch's steps, or among what a
+/// multisig runs, as steps.
+fn written_calls(tx: &Tx) -> Vec<&Tx> {
+    fn call(tx: &Tx) -> bool {
+        matches!(tx, Tx::ContractCall { amount, .. } if narrowest(amount))
+    }
+
+    fn steps(tx: &Tx) -> Vec<&Tx> {
+        match tx {
+            Tx::Batch { steps } => steps.iter().filter(|step| call(step)).collect(),
+            tx => [tx].into_iter().filter(|step| call(step)).collect(),
+        }
+    }
 
     match tx {
-        Tx::Batch { steps } => steps.iter().filter(|step| matches!(step, Tx::ContractCall { amount, .. } if narrowest(amount))).count(),
-        tx => usize::from(call(tx)),
+        Tx::Batch { .. } => steps(tx),
+        Tx::Multisig { tx: inner, .. } | Tx::ApproveMultisig { tx: inner, .. } => steps(inner),
+        tx => [tx].into_iter().filter(|tx| call(tx) && token_transfer(tx).is_none()).collect(),
     }
+}
+
+/// How many function names a transaction's typed form carries: one for each call it writes out.
+pub fn calls_named(tx: &Tx) -> usize {
+    written_calls(tx).len()
 }
 
 /// The names of the calls a transaction's typed form writes out, in order, each found among names
 /// its sender knows by its hash: None when one is not among them.
 pub fn name_calls(tx: &Tx, known: &[String]) -> Option<Vec<String>> {
-    let calls: Vec<&Tx> = match tx {
-        Tx::Batch { steps } => steps.iter().collect(),
-        tx => vec![tx],
-    };
+    written_calls(tx).into_iter().map(|call| known.iter().find_map(|name| named(call, name))).collect()
+}
 
-    calls
-        .into_iter()
-        .filter(|call| matches!(call, Tx::ContractCall { amount, .. } if narrowest(amount)) && (matches!(tx, Tx::Batch { .. }) || token_transfer(call).is_none()))
-        .map(|call| known.iter().find_map(|name| named(call, name)))
-        .collect()
+/// The names of the calls a multisig's transaction writes out as a member signs it, found among
+/// names the member knows: None when one is not among them.
+pub fn name_multisig_calls(tx: &Tx, known: &[String]) -> Option<Vec<String>> {
+    name_calls(&Tx::ApproveMultisig { account: crate::structs::address::Address::Multisig([0; 32]), nonce: 0, fee: FeeOffer::NONE, tx: Box::new(tx.clone()) }, known)
 }
 
 /// What a key signs for a transaction on this chain, in EIP-712's typed form, with the names of

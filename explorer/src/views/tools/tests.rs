@@ -56,6 +56,7 @@ fn bundle() -> MultisigBundle {
             fee: FeeOffer::NONE,
         },
         signatures: Vec::new(),
+        functions: Vec::new(),
     };
     bundle.sign(&Keypair::development());
 

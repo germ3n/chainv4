@@ -101,6 +101,8 @@ its chain: there is no check of one without a chain.
 | `TokenTransfer` | `string token`, `string to`, `uint256 amount` | The token standard's `transfer` call. |
 | `Call` | `string contract`, `string function`, `uint256 amount`, `Argument[] arguments` | Any other contract call, its function by name. |
 | `Batch` | `Step[] steps` | A batch, every step written out. |
+| `ApproveMultisig` | `MultisigTransaction proposal` | A member's approval on chain, of what the multisig runs. |
+| `Multisig` | `MultisigTransaction transaction`, `bytes signatures` | A multisig's transaction as a carrier submits it, with the members' signatures as their encoding. |
 | `Transaction` | `string kind`, `bytes data` | Every other: its kind, and its encoding. |
 
 Each ends with `uint64 nonce`, `uint64 gasLimit`, `uint256 maxPrice` and `uint256 tip`. Addresses
@@ -125,19 +127,35 @@ sender knows, as the CLI and the wallet do.
 Argument[] arguments, bytes data)`: a transfer as `Transfer` with whom it pays and the amount, a
 contract call as `Call` with the contract, its function's name and its arguments, an EVM call as
 `EvmCall` with its target, value and calldata; anything else as its kind and its encoding in
-`data`, with no target, which a written-out step always has. A multisig's batch has no form: its
-steps sit inside the multisig's own transaction, which `Transaction` would show as bytes, so it is
-`VerifyError::BatchNotTyped`.
+`data`, with no target, which a written-out step always has.
+
+**A multisig's transaction** is a `MultisigTransaction(string multisig, string runs, Step[] steps,
+uint64 nonce, uint64 gasLimit, uint256 maxPrice, uint256 tip)`: the multisig, `runs` saying `one`
+for a lone transaction or `batch` for a batch, so one transfer and a batch of that transfer alone
+sign apart, what it runs as steps written out as a batch's are, and the multisig's own nonce and
+fee offer. A member signs it three ways, each showing the steps:
+- **off chain, into the bundle:** the form itself under the chain's domain
+  (`MultisigBody::eip712_digest`), as `Signature::Secp256k1Eip712` in the `MemberSignature`, the
+  calls' names beside it in `MemberSignature::functions`. `MemberSignature::verify` checks it, and
+  any names beside a native signature are refused as they are beside a transaction's;
+- **on chain, approving:** `ApproveMultisig`, the form as its proposal;
+- **carrying it:** `Multisig`, the form and the members' signatures it carries.
+
+A bundle carries the names its proposer knew (`MultisigBundle::functions`), which a member signing
+it typed signs with; each is checked against its call's hash as it is signed.
 
 **Checked against the standard and MetaMask:** EIP-712's own example hashes and signs as the
 standard says, and `@metamask/eth-sig-util`, MetaMask's own library, hashes each form as chainv4
-does, `Call` and `Batch` with their arrays of structs too, an empty one included; its signatures
+does, `Call` and `Batch` with their arrays of structs too, an empty one included, and the three
+multisig forms, nested structs and all; its signatures
 recover to the signer's key (`wallet/src/metamask/tests.rs`, the two ignored tests, run by hand
 with the library). Within the build, `eip712::json` writes each form as eth_signTypedData_v4 takes
 it, and chainv4's own reading of typed data hashes that JSON to the digest the node signs.
 
 `chainv4 send --eip712` signs a transaction this way with a secp256k1 key of its own, a call and a
-batch by the functions they were given as.
+batch by the functions they were given as; `chainv4 send --multisig --eip712`, `chainv4 multisig
+sign --eip712` and `chainv4 multisig approve --eip712` sign a multisig's transaction as a member
+does in MetaMask.
 
 ## Key files
 

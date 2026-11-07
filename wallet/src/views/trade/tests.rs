@@ -203,3 +203,33 @@ fn what_a_share_token_says_another_address_holds_is_not_taken_as_the_picked_one_
     assert!(state.answered(&held(&picked), &answer));
     assert_eq!(state.held.get(&share.to_string()), Some(&u256::from(70u64)));
 }
+
+#[test]
+fn an_evm_pairs_time_weighted_price_comes_from_its_cumulative_price_and_reserves_at_two_blocks() {
+    let pair = Address::Evm([0x77; 20]).to_string();
+    let mut state = TradeState::default();
+    let word = |value: u128| format!("{value:064x}");
+    let answer = |state: &mut TradeState, which: &str, part: &str, output: String, time: u64| {
+        let ask = Ask::Call(json!({ "contract": pair, "input": "0x", "block": 1, "purpose": "trade", "twap": which, "evm": part, "share": pair }).to_string());
+        assert!(state.answered(&ask, &Ok(json!({ "status": "returned", "output": format!("0x{output}"), "time": time }))));
+    };
+    // 4,000 of token1 to 1,000 of token0 since second 100, nothing traded since: 4 throughout.
+    let reserves = format!("{}{}{}", word(1_000), word(4_000), word(100));
+
+    answer(&mut state, "then", "cumulative", word(0), 100_000);
+    answer(&mut state, "then", "reserves", reserves.clone(), 100_000);
+    answer(&mut state, "now", "cumulative", word(0), 160_000);
+
+    assert!(state.evm_twap[&(pair.clone(), "now")].reserves.is_none(), "one half of an observation is not one");
+
+    answer(&mut state, "now", "reserves", reserves.clone(), 160_000);
+    let (average, over) = evm_average(&state.evm_twap[&(pair.clone(), "then")], &state.evm_twap[&(pair.clone(), "now")]).unwrap();
+
+    assert!((average - 4.0).abs() < 1e-9, "{average}");
+    assert_eq!(over, 60_000);
+
+    // A reading at another block starts that observation over.
+    answer(&mut state, "now", "cumulative", word(7), 170_000);
+    assert_eq!(state.evm_twap[&(pair.clone(), "now")], EvmObservation { cumulative: Some(u256::new(7)), reserves: None, time_ms: 170_000 });
+    assert!(evm_average(&state.evm_twap[&(pair.clone(), "then")], &state.evm_twap[&(pair, "now")]).is_none());
+}

@@ -45,6 +45,23 @@ pub fn signed_tx(signed: &SignedTx, hash: HashType) -> Value {
     value
 }
 
+/// A member's signature a multisig's transaction carries: its key and signature, and, for one made
+/// as EIP-712 typed data, "typed" and the names of the calls its form showed.
+fn member_signature(signed: &crate::structs::tx::MemberSignature) -> Value {
+    let mut value = json!({ "key": signed.key.to_string(), "signature": signed.signature.to_string() });
+
+    #[cfg(feature = "secp256k1")]
+    if matches!(signed.signature, crate::crypto::keypair::Signature::Secp256k1Eip712(_)) {
+        value["typed"] = true.into();
+    }
+
+    if !signed.functions.is_empty() {
+        value["functions"] = signed.functions.clone().into();
+    }
+
+    value
+}
+
 pub fn tx(transaction: &Tx) -> Value {
     match transaction {
         Tx::Transfer { from, to, amount } => json!({
@@ -136,7 +153,7 @@ pub fn tx(transaction: &Tx) -> Value {
             "type": "multisig",
             "account": account.to_string(),
             "tx": tx(inner),
-            "signatures": signatures.iter().map(|signed| json!({ "key": signed.key.to_string(), "signature": signed.signature.to_string() })).collect::<Vec<_>>(),
+            "signatures": signatures.iter().map(member_signature).collect::<Vec<_>>(),
         }),
         Tx::CreateMultisig { members, threshold, testnet } => json!({ "type": "create_multisig", "members": members.iter().map(|member| multisig_member(member, *testnet)).collect::<Vec<_>>(), "threshold": threshold, "testnet": testnet }),
         Tx::ChangeMultisig { members, threshold, testnet } => json!({ "type": "change_multisig", "members": members.iter().map(|member| multisig_member(member, *testnet)).collect::<Vec<_>>(), "threshold": threshold, "testnet": testnet }),

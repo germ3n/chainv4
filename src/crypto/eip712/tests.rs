@@ -171,8 +171,7 @@ fn a_transaction_signed_as_typed_data_holds_on_its_chain_and_nowhere_else() {
 }
 
 #[test]
-fn a_batch_holds_under_a_typed_signature_step_by_step_but_a_multisigs_never() {
-    use crate::crypto::keypair::Signature;
+fn a_batch_holds_under_a_typed_signature_step_by_step() {
     use crate::crypto::verifiable::VerifyError;
     use crate::structs::tx::SignedTx;
 
@@ -202,25 +201,6 @@ fn a_batch_holds_under_a_typed_signature_step_by_step_but_a_multisigs_never() {
     let named = SignedTx { functions: vec!["transfer".to_string()], ..signed.clone() };
 
     assert_eq!(named.verify_on(&genesis), Err(VerifyError::FunctionNames));
-
-    // A multisig's, carried or approved, has no form: its steps sit inside the multisig's own.
-    let secret = match key.private() {
-        crate::crypto::keypair::PrivateKey::Secp256k1(secret) => secret,
-        #[allow(unreachable_patterns)]
-        _ => unreachable!(),
-    };
-    let forged = |tx: Tx| {
-        let digest = transaction_digest(&tx, &[], 0, &FeeOffer::NONE, &genesis).unwrap();
-
-        SignedTx { tx, nonce: 0, fee: FeeOffer::NONE, signer: key.public(), signature: Signature::Secp256k1Eip712(secp256k1::sign_hash(secret, &digest)), functions: Vec::new() }
-    };
-    let account = Address::Multisig([6; 32]);
-    let its = Tx::Batch { steps: vec![Tx::Burn { from: account, amount: Amount::U128(1) }] };
-    let carried = Tx::Multisig { account, tx: Box::new(its.clone()), signatures: Vec::new() };
-
-    assert_eq!(SignedTx::sign_eip712(carried.clone(), Vec::new(), 0, FeeOffer::NONE, &key, &genesis), None, "nothing to sign it with");
-    assert_eq!(forged(carried).verify_on(&genesis), Err(VerifyError::BatchNotTyped));
-    assert_eq!(forged(Tx::ApproveMultisig { account, nonce: 0, fee: FeeOffer::NONE, tx: Box::new(its) }).verify_on(&genesis), Err(VerifyError::BatchNotTyped));
 
     // Names beside chainv4's own signature are refused too: they would change the id alone.
     let own = SignedTx::sign(batch, 0, FeeOffer::NONE, &key, &genesis);
@@ -319,6 +299,85 @@ fn a_call_reads_by_its_functions_name_and_each_argument_written_out() {
     assert_eq!(SignedTx { functions: vec!["transfer".to_string(), "approve".to_string()], ..signed }.verify_on(&genesis), Err(VerifyError::FunctionNames), "in order");
 }
 
+#[cfg(feature = "xxh3")]
+#[test]
+fn a_multisigs_transaction_reads_step_by_step_to_sign_off_chain_approve_or_carry() {
+    use crate::crypto::hasher::Hasher;
+    use crate::crypto::verifiable::VerifyError;
+    use crate::registry::multisig::MultisigBody;
+    use crate::structs::tx::{MemberSignature, SignedTx};
+
+    let key = Keypair::generate(KeyType::Secp256k1).unwrap();
+    let genesis = Hash::zero(HashType::default_chain());
+    let account = Address::Multisig([6; 32]);
+    let pay = Tx::Transfer { from: account, to: Address::Ed25519([1; 32]), amount: Amount::U128(1) };
+    let call = Tx::ContractCall { to: Address::Contract([8; 32]), func: Hasher::digest(HashType::Xxh3_64, b"mint"), amount: Amount::U128(0), data: Vec::new() };
+    let batch = Tx::Batch { steps: vec![pay.clone(), call.clone(), Tx::Burn { from: account, amount: Amount::U128(2) }] };
+    let mint = vec!["mint".to_string()];
+
+    // Off chain: the multisig, what it runs and its own nonce and fee, every step written out.
+    let typed = multisig_message(&account, &batch, &mint, 4, &FeeOffer::NONE).unwrap();
+
+    assert_eq!(
+        typed.encode_type(),
+        "MultisigTransaction(string multisig,string runs,Step[] steps,uint64 nonce,uint64 gasLimit,uint256 maxPrice,uint256 tip)Argument(string type,string value)Step(string kind,string target,string function,uint256 amount,Argument[] arguments,bytes data)"
+    );
+    assert_eq!(typed.fields[1].2, Value::String("batch".to_string()));
+    let Value::Array(steps) = &typed.fields[2].2 else { panic!("steps as an array") };
+    assert_eq!(steps.len(), 3);
+    assert!(multisig_message(&account, &batch, &[], 4, &FeeOffer::NONE).is_none(), "its call wants its name");
+    assert!(multisig_message(&account, &batch, &["burn".to_string()], 4, &FeeOffer::NONE).is_none(), "and that name alone");
+    assert_eq!(name_multisig_calls(&batch, &["burn".to_string(), "mint".to_string()]), Some(mint.clone()));
+
+    // One transfer and a batch of that transfer alone sign apart.
+    let one = multisig_message(&account, &pay, &[], 4, &FeeOffer::NONE).unwrap();
+    let alone = multisig_message(&account, &Tx::Batch { steps: vec![pay.clone()] }, &[], 4, &FeeOffer::NONE).unwrap();
+    assert_eq!(one.fields[1].2, Value::String("one".to_string()));
+    assert_ne!(one.hash(), alone.hash());
+
+    // A member's typed signature checks over the body on its chain, with its names, alone.
+    let body = MultisigBody { account, tx: batch.clone(), nonce: 4, fee: FeeOffer::NONE };
+    let signed = MemberSignature::sign_eip712(&body, mint.clone(), &key, &genesis).unwrap();
+
+    assert_eq!(signed.verify(&body, &genesis), Ok(()));
+    assert_eq!(signed.verify(&MultisigBody { nonce: 5, ..body.clone() }, &genesis), Err(VerifyError::InvalidSignature));
+    assert_eq!(signed.verify(&body, &Hash::zero(HashType::Xxh3_64)), Err(VerifyError::InvalidSignature));
+    assert_eq!(MemberSignature { functions: Vec::new(), ..signed.clone() }.verify(&body, &genesis), Err(VerifyError::FunctionNames));
+    assert!(MemberSignature::sign_eip712(&body, Vec::new(), &key, &genesis).is_none());
+    assert_eq!(MemberSignature { functions: mint.clone(), ..MemberSignature::sign(&body, &key, &genesis) }.verify(&body, &genesis), Err(VerifyError::FunctionNames), "names beside a native one");
+    assert_eq!(MemberSignature::sign(&body, &key, &genesis).verify(&body, &genesis), Ok(()));
+
+    // On chain: an approval holds the proposal as that form, and a carrier's the signatures too.
+    let approve = Tx::ApproveMultisig { account, nonce: 4, fee: FeeOffer::NONE, tx: Box::new(batch.clone()) };
+    let approval = message(&approve, &mint, 0, &FeeOffer::NONE).unwrap();
+
+    assert!(approval.encode_type().starts_with("ApproveMultisig(MultisigTransaction proposal,uint64 nonce,uint64 gasLimit,uint256 maxPrice,uint256 tip)Argument("));
+    assert_eq!(approval.fields[0].2, Value::Struct(typed.clone()));
+    assert_eq!(calls_named(&approve), 1);
+
+    let carried = |signatures| Tx::Multisig { account, tx: Box::new(batch.clone()), signatures };
+    let envelope = message(&carried(vec![signed.clone()]), &mint, 4, &FeeOffer::NONE).unwrap();
+
+    // The API writes a typed member's signature as typed, with the names it showed.
+    #[cfg(feature = "json")]
+    {
+        let written = crate::structs::json::tx(&carried(vec![signed.clone(), MemberSignature::sign(&body, &key, &genesis)]));
+
+        assert_eq!((written["signatures"][0]["typed"].as_bool(), written["signatures"][0]["functions"][0].as_str()), (Some(true), Some("mint")));
+        assert!(written["signatures"][1].get("typed").is_none() && written["signatures"][1].get("functions").is_none());
+    }
+
+    assert_eq!(envelope.fields[0].2, Value::Struct(typed));
+    assert_ne!(envelope.hash(), message(&carried(Vec::new()), &mint, 4, &FeeOffer::NONE).unwrap().hash(), "the signatures it carries are signed for");
+
+    for tx in [approve, carried(vec![signed])] {
+        let sent = SignedTx::sign_eip712(tx.clone(), mint.clone(), 0, FeeOffer::NONE, &key, &genesis).unwrap();
+
+        assert_eq!(sent.verify_on(&genesis), Ok(()));
+        assert!(SignedTx::sign_eip712(tx, Vec::new(), 0, FeeOffer::NONE, &key, &genesis).is_none());
+    }
+}
+
 #[cfg(all(feature = "abi", feature = "xxh3"))]
 #[test]
 fn calls_and_batches_hash_as_metamask_hashes_their_json() {
@@ -335,7 +394,24 @@ fn calls_and_batches_hash_as_metamask_hashes_their_json() {
             Tx::Burn { from: Address::Ed25519([1; 32]), amount: Amount::U128(1) },
         ],
     };
-    let cases = [(call("mint", vec![TxCallArgumentType::Bool(true)]), vec!["mint".to_string()]), (call("mint", Vec::new()), vec!["mint".to_string()]), (batch, vec!["mint".to_string(), "burn".to_string()])];
+    let account = Address::Multisig([6; 32]);
+    let approve = Tx::ApproveMultisig { account, nonce: 7, fee, tx: Box::new(batch.clone()) };
+    let carried = Tx::Multisig { account, tx: Box::new(call("mint", Vec::new())), signatures: Vec::new() };
+    let both = vec!["mint".to_string(), "burn".to_string()];
+    let cases = [
+        (call("mint", vec![TxCallArgumentType::Bool(true)]), vec!["mint".to_string()]),
+        (call("mint", Vec::new()), vec!["mint".to_string()]),
+        (batch.clone(), both.clone()),
+        (approve, both.clone()),
+        (carried, vec!["mint".to_string()]),
+    ];
+
+    // A member's off-chain form, as MetaMask is handed it.
+    let body = crate::registry::multisig::MultisigBody { account, tx: batch, nonce: 7, fee };
+    let off_chain = multisig_message(&account, &body.tx, &both, 7, &fee).unwrap();
+    let read = typed::TypedData::parse(&json(&domain(&genesis), &off_chain)).unwrap();
+
+    assert_eq!(read.digest().unwrap(), body.eip712_digest(&both, &genesis).unwrap());
 
     for (tx, functions) in cases {
         let message = message(&tx, &functions, 2, &fee).unwrap();
