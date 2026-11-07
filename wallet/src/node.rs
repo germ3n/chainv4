@@ -136,6 +136,10 @@ pub enum Ask {
     /// Events that mention an address, newest first, the newest page or the older one after a
     /// cursor: where it looks on a node with no address index but an event index, and beside one.
     Events { address: String, cursor: Option<String> },
+    /// A contract's EVM logs with a topic in any place, newest first, a page at a time: where the
+    /// NFTs page looks for what an EVM collection's transfers named an account's form.
+    #[cfg_attr(not(feature = "nft"), allow(dead_code))]
+    Logs { contract: String, topic: String, cursor: Option<String> },
     /// The chain's names: their suffix, prices and grace period, as the node says. Nothing proven
     /// rests on them but whether a name is in its grace period.
     Names,
@@ -229,6 +233,7 @@ impl Ask {
                 format!("/accounts/{address}/txs?limit=50&{query}{cursor}")
             }
             Ask::Events { address, cursor } => format!("/events?address={address}&limit=50{}", after(cursor)),
+            Ask::Logs { contract, topic, cursor } => format!("/events?contract={contract}&topic={topic}&limit=200{}", after(cursor)),
             Ask::Named { contract, name } => format!("/events?contract={contract}&name={name}&limit=200"),
             Ask::Names => "/names".to_string(),
             Ask::OwnedNames { address, cursor } => format!("/accounts/{address}/names?limit=200{}", after(cursor)),
@@ -294,6 +299,7 @@ impl Ask {
             | Ask::History { .. }
             | Ask::Filtered { .. }
             | Ask::Events { .. }
+            | Ask::Logs { .. }
             | Ask::Names
             | Ask::OwnedNames { .. }
             | Ask::Contract(_)
@@ -882,6 +888,7 @@ mod tests {
             Ask::History { address: text(), cursor: None },
             Ask::Filtered { address: text(), query: text(), cursor: None },
             Ask::Events { address: text(), cursor: None },
+            Ask::Logs { contract: text(), topic: text(), cursor: None },
             Ask::Names,
             Ask::OwnedNames { address: text(), cursor: None },
             Ask::Contract(text()),

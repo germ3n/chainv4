@@ -14,7 +14,9 @@ other pages explain each part in full; this one is the short list to keep in min
   work out the rest with `batch_deploy_nonce`, or read them from the wallet or the CLI before signing.
 - **Each EVM step is its own transaction to the EVM.** Transient storage does not survive from step to
   step, nothing stays warm, and a contract made in step 1 is not new to `SELFDESTRUCT` in step 2.
-- **MetaMask cannot sign one.** EIP-712 would show an opaque hash, so the chain refuses that signature.
+- **MetaMask signs one step by step.** Its EIP-712 form writes each step out, a call by its function's
+  name, which travels beside the signature. A call the wallet knows no name for, and a multisig's
+  batch, which would show as bytes, are not signed that way.
 - **A batch costs a transaction's `per_tx` for each step.** Batching saves signatures and nonces, not
   gas.
 - **Old nodes fork on it.** A node older than batches cannot read a block holding one, so every node of
@@ -2204,6 +2206,36 @@ slip is not quietly read as another number. One rule for all of it, `structs::di
 The apps' amount fields drop `_` and `,` as they always did. Contracts do not take them yet:
 Lua's `u256("1_000")` and `tonumber("1_000")`, and the SDK's `from_decimal`, change what a
 contract computes, so they wait for the next regenesis (see the todo).
+
+## Batch 15: what the apps see
+
+- **A typed signature carries names its transaction does not.** `SignedTx::functions` sits beside a
+  MetaMask signature, so a call's id covers its names too; the chain refuses names beside any
+  other signature, which would let anyone change an id and nothing else. Each name is checked
+  against the XXH3-64 hash the call holds, and signed, so none can be swapped for another.
+- **A call MetaMask cannot name is not asked for.** The wallet knows the names its pages built a
+  call with, and those the history knows; a call prepared elsewhere for an unknown function
+  says so rather than show MetaMask a hash. The offline signer and the wallet's own keys sign it.
+- **EVM collections join the registry on their own.** Every EVM creation is asked ERC-165's
+  questions once its transaction stands, a factory's included, paid out of what the transaction
+  has left, at most 60,000 gas each. They never fail it: a transaction short of gas for them
+  just leaves the contract unlisted, and a contract that answers badly is not a collection. A
+  contract that lies about ERC-721 is listed: trust an address, as with tokens.
+- **What an account holds of an EVM collection is found through the event index.** EVM
+  collections have no `tokens_of`, so a node without `--index-events` lets the apps list none.
+  What the logs name is only where to look: the owner or amount shown is `ownerOf` or
+  `balanceOf`, run again over proven state.
+- **A signed authorization is text, not a transaction.** The wallet signs it only when the token's
+  `permit_message` or `transfer_message` writes exactly the standard's text for the terms, which
+  the wallet writes itself. MetaMask's `personal_sign` and the offline signer sign no such text, so
+  their accounts sign none; any account can send one.
+- **A time-weighted price needs two reads at known blocks.** `POST /call` now says the `height` and
+  `time` it ran at. The wallet reads a native pool's at the light client's final block and tip; a
+  call that names a `block` keeps it when the wallet asks for it proven, and is proven only where
+  the light client holds that block. The explorer's is the node's word, about an hour wide.
+- **The split router is in the directory.** `dex_split`, beside `dex` and `dex_router`; a genesis or
+  vote written before it reads as none. The wallet offers a split only when the directory names a
+  router and dividing the trade pays more than the DEX shown alone.
 
 ## Building and testing
 

@@ -394,6 +394,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("swap", "The swap contract", "", Control::MaybeContract),
             field("dex", "The DEX", "", Control::MaybeContract),
             field("dex_router", "The EVM DEX's router", "", Control::MaybeEvm),
+            field("dex_split", "The split router, router.lua", "", Control::MaybeContract),
             field("nft_factory", "The NFT factory", "", Control::MaybeContract),
         ],
         _ => Vec::new(),
@@ -444,7 +445,7 @@ pub fn defaults(kind: &str) -> Value {
         }),
         "collections" => json!({ "nft": [], "multi": [] }),
         "federation" => json!({ "signers": [], "threshold": 1, "chain_depth": 20, "evm_depth": 12, "bitcoin_depth": 6 }),
-        "directory" => json!({ "gateway": null, "btc_gateway": null, "evm_gateways": [], "swap": null, "dex": null, "dex_router": null, "nft_factory": null }),
+        "directory" => json!({ "gateway": null, "btc_gateway": null, "evm_gateways": [], "swap": null, "dex": null, "dex_router": null, "dex_split": null, "nft_factory": null }),
         _ => Value::Null,
     }
 }

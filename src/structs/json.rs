@@ -27,7 +27,7 @@ pub fn event(event: &Event) -> Value {
 }
 
 pub fn signed_tx(signed: &SignedTx, hash: HashType) -> Value {
-    json!({
+    let mut value = json!({
         "id": signed.id(hash).to_string(),
         "sender": signed.sender().to_string(),
         "nonce": signed.nonce,
@@ -35,7 +35,14 @@ pub fn signed_tx(signed: &SignedTx, hash: HashType) -> Value {
         "signer": signed.signer.to_string(),
         "signature": signed.signature.to_string(),
         "tx": tx(&signed.tx),
-    })
+    });
+
+    // A typed signature's calls, by the names it showed them by.
+    if !signed.functions.is_empty() {
+        value["functions"] = signed.functions.clone().into();
+    }
+
+    value
 }
 
 pub fn tx(transaction: &Tx) -> Value {
@@ -235,6 +242,27 @@ fn ethereum(raw: &[u8]) -> Value {
         value["to"] = ethereum.to.map(|to| Address::Evm(to).to_string()).into();
         value["value"] = ethereum.value.to_string().into();
         value["input"] = to_hex(&ethereum.input).into();
+
+        // EIP-7702's: each account that signed one, and whose code it runs from now, or none.
+        #[cfg(feature = "secp256k1")]
+        if !ethereum.authorizations.is_empty() {
+            value["authorizations"] = ethereum
+                .authorizations
+                .iter()
+                .map(|authorization| {
+                    let authority = authorization.signer().and_then(|key| crate::crypto::secp256k1::address(&key)).map(|bytes| Address::Secp256k1(bytes).to_string());
+                    let cleared = authorization.address == [0; 20];
+
+                    json!({
+                        "authority": authority,
+                        "address": (!cleared).then(|| Address::Evm(authorization.address).to_string()),
+                        "chain_id": authorization.chain_id.to_string(),
+                        "nonce": authorization.nonce,
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into();
+        }
     }
 
     value

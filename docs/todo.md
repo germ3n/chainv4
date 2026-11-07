@@ -781,16 +781,23 @@ with.
   time-weighted ones, flash swaps, the burned protocol share, fee tiers, and `contracts/lua/router.lua`
   dividing one trade between both DEXes, which `dex::best_split` and `chainv4 dex swap --split` work
   out. See [DEX](dex.md).
-- [ ] **The DEX in the apps, with batch 15.** The wallet's Trade page routes within the DEX switched
-  to, at every tier, and opens a new pool at 0.3%. Left: a split route through router.lua (and the
-  directory naming router.lua, which only `--split-router` names now), picking a tier when opening
-  a pool, and time-weighted prices shown in the wallet and the explorer.
+- [x] **The DEX in the apps.** Done 2026-11-07 in batch 15: the directory's `dex_split` names
+  router.lua, which the wallet's Trade page and `chainv4 dex swap --split` use, the wallet offering
+  the split when it pays more than one DEX alone; the wallet picks a new pool's tier among those
+  offered; a native pool's time-weighted price in the wallet, proven where it can be, and both
+  DEXes' in the explorer. See [DEX](dex.md#in-the-wallet). Left: an EVM pair's time-weighted price
+  in the wallet.
 - [ ] **Concentrated liquidity.** V3's ranges: liquidity placed between two prices, ticks, and
   positions as NFTs. Not planned yet.
 - [x] **Native calls in EVM traces.** Done 2026-11-04. The EVM's inspector records every frame as a
   hop (calls, delegate calls, creates as the new `create` kind), and the native precompile puts each
   native call's hops under the frame that made it, events placed where they land; `evm.call` from Lua
   or WebAssembly nests the EVM's frames under its hop. See [EVM](evm.md#calls-with-lua-and-webassembly-contracts).
+- [x] **Signed authorizations in the wallet.** Done 2026-11-07 in batch 15: the Authorize page
+  signs a token's permit or transfer authorization to hand on, as text and a QR code, only when the
+  token writes the standard's text for the terms, which `registry::tokens::authorization` writes
+  too, and sends one pasted in once it checks. See [Wallet](wallet.md#authorize). Left: signing
+  them on the offline signer.
 - [x] **Token refreshes from native calls the EVM makes.** Done 2026-11-04. They travel out with the
   EVM's run, of the native calls that stand, and an EVM transaction refreshes them as a native one does.
 - [x] **The wallet's Contracts page calling across engines.** Done 2026-11-04. Each native function has
@@ -805,8 +812,9 @@ with.
   transactions set a delegation an account runs as its own code, kept through a revert, shown by
   eth_getCode and eth_getTransactionByHash (see [EVM](evm.md#eip-7702-delegations)). Left: blob
   transactions, type 3, refused for now as the chain keeps no blob data, and the KZG point
-  evaluation precompile with them; showing type-4 transactions and delegations in the explorer and
-  the wallet, with batch 15.
+  evaluation precompile with them. Done 2026-11-07 in batch 15: type-4 transactions and
+  delegations shown in the API (`authorizations`, `delegated_to`), the explorer, and the wallet,
+  which proves its own accounts' delegations.
 - [ ] **Native accounts delegating to contracts (owner, 2026-11-06).** EIP-7702's idea for chainv4's
   own accounts: an Ed25519, EdBlake or Bitcoin account letting a Lua or WebAssembly contract's
   code run as its own, by a signed authorization, so it batches, sponsors fees or recovers keys as
@@ -818,12 +826,13 @@ with.
   genesis or turned on by governance; the wallet's NFTs page, proving what the account holds and
   showing pictures once Settings lets it fetch them; the explorer's NFTs pages; `chainv4 nft`; and
   NFTs in atomic swaps, on chainv4 and EVM chains. See [NFT standards](nft-standard.md).
-- [ ] **NFTs: next.** A marketplace contract, which would pay royalties; EVM collections in the
-  apps, for the consensus batches (owner, 2026-11-06): ERC-721 and ERC-1155 contracts on the
-  chain's own EVM, listed by the collection registry as native ones are, an ERC-165 check at
-  deploy deciding; the apps prove their ownership by running `ownerOf` and `balanceOf` on their
-  own EVM over proven state, and the NFTs page sends them as an EVM `safeTransferFrom` or
-  `safeBatchTransferFrom` call. Done 2026-11-06: batch transfers and royalties on the reference collections
+- [ ] **NFTs: next.** A marketplace contract, which would pay royalties. Done 2026-11-07 in batch
+  15: EVM collections, every ERC-721 and ERC-1155 the EVM creates, a factory's too, listed by the
+  collection registry after an ERC-165 check; the wallet finds what the account holds from their
+  logs and proves it by `ownerOf` and `balanceOf` run again over proven state, sending by
+  `safeTransferFrom` and `safeBatchTransferFrom`; the explorer reads them through `eth_call` (see
+  [EVM collections](nft-standard.md#evm-collections)). Left: the offline signer naming an EVM
+  collection it signs a transfer for. Done 2026-11-06: batch transfers and royalties on the reference collections
   (docs/nft-standard.md), SVG and animated GIF pictures, royalties shown and batches sent in the
   wallet.
 - [x] **Containers where they matter.** `eth_getLogs` matches its address and topic filters as
@@ -864,9 +873,8 @@ with.
   `check_perms("remove", sender, beneficiary)`, deletes its code and every entry of its storage for
   fuel, pays its balance to the beneficiary, takes it out of the registries, and keeps a provable
   `Removal` so nothing is deployed or cloned at the address again. EVM contracts stay removed by
-  their own code. See [Contracts](contracts.md#lifecycle-hooks). Left for the apps, with batch 15:
-  a Remove button on the wallet's Contracts page and in its batch builder (the wallet and the
-  offline signer already review one).
+  their own code. See [Contracts](contracts.md#lifecycle-hooks). Done in batch 15: Remove on the
+  wallet's Contracts page and in its batch builder, typed out, then reviewed.
 - [x] **Lua contracts can pass values on untouched.** `ctx.args` is the call's arguments as a
   values list, which `contracts.call`, `call_value`, `delegate` and `events.emit` take in place
   of loose values; a call given one returns one, and a function returning one returns its values
@@ -1844,10 +1852,13 @@ with.
 - [x] **Ethereum wallets sign for chainv4.** A transaction's EIP-712 typed form, salted with the
   genesis id, is a signature nodes take: MetaMask and the hardware wallets it drives sign for the
   browser wallet, and `chainv4 send --eip712` signs it with a key of its own.
-- [ ] **Contract calls show as bytes in MetaMask.** Only transfers and token transfers have typed
-  fields; a call's arguments have no clean EIP-712 form, as it has no unions. For the consensus
-  batches (owner, 2026-11-06): a typed form for calls with each argument as its type's name and its
-  value written out, which nodes take from the next regenesis.
+- [x] **Contract calls show as bytes in MetaMask.** Done 2026-11-07 in batch 15: a `Call` form,
+  its function by name and each argument as its type's name and its value written out, and a
+  `Batch` form writing every step out; the names travel beside the signature in
+  `SignedTx::functions`, checked against each call's hash. Checked against `@metamask/eth-sig-util`.
+  `chainv4 send --eip712` and the wallet's MetaMask accounts sign both. See
+  [Typed data](crypto.md#typed-data-eip-712). Left: a multisig's batch, inside its opaque
+  transaction, has no form.
 - [x] **Sites reach the wallet through window.ethereum.** The browser extension gives dApps an
   EIP-1193 provider, announced by EIP-6963, once Settings let sites ask: reads go to the node,
   connecting, sending as an Ethereum transaction, `personal_sign` and `eth_signTypedData_v4` are

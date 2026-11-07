@@ -714,6 +714,7 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, listed: Option<&Value
             what: format!("Make a multisig, {} members", of(wizard.threshold, wizard.rows.len())),
             about: format::short(&address.to_string()),
             coin: u256::ZERO,
+            functions: Vec::new(),
         });
     }
 

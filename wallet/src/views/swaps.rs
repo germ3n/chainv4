@@ -1964,6 +1964,7 @@ fn call(from: Address, to: Address, function: &str, args: Vec<TxCallArgumentType
         what,
         about: to.to_string(),
         coin,
+        functions: vec![function.to_string()],
     }
 }
 

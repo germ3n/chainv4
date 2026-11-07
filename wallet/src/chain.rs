@@ -74,6 +74,8 @@ enum Target {
     PoolRoot(u64),
     /// What a miner has claimed from a pool, by the pool's and the miner's addresses as text.
     PoolClaimed { pool: String, miner: String },
+    /// An Ethereum account's EIP-7702 delegation, by its address as text.
+    Delegation(String),
 }
 
 /// An NFT a page shows, for its ownership to be proven: a token of an NFT collection, or a
@@ -260,6 +262,9 @@ pub struct Chain {
     retry_at: f64,
     /// Accounts by address text: what was proven at the final block and at the tip.
     pub accounts: HashMap<String, Vec<Proven<Account>>>,
+    /// Each Ethereum account's EIP-7702 delegation, proven at the tip: the contract whose code it
+    /// runs as its own, or None.
+    pub delegations: HashMap<String, Proven<Option<Address>>>,
     /// The tokens the registry lists, by address text: the node says which, the proof what.
     pub listed: Vec<String>,
     /// The registry's pages so far, while a listing of it comes in a page at a time: what listed
@@ -499,6 +504,11 @@ impl Chain {
 
         for holder in holders {
             targets.push((Column::Accounts, address_key(holder), Target::Account(holder.to_string()), blocks.clone()));
+
+            // An Ethereum key's account may run a contract's code, by EIP-7702: proven at the tip.
+            if let Address::Secp256k1(bytes) = holder {
+                targets.push((Column::Storage, chainv4::vm::evm::delegation_key(bytes), Target::Delegation(holder.to_string()), vec![tip]));
+            }
 
             if self.has_names == Some(true) {
                 wanted.push(Ask::OwnedNames { address: holder.to_string(), cursor: None });
@@ -1040,7 +1050,7 @@ impl Chain {
                 let target = self.targets.get(key).cloned().ok_or("a proof nobody asked for")?;
                 let client = self.client.as_ref().ok_or("the light client has not started")?;
                 let block = id(client, value["block"].as_str().unwrap_or_default()).ok_or("a proof at a block id that does not read")?;
-                let column = [Column::Accounts, Column::Tokens, Column::Namespaces, Column::Names, Column::Validators]
+                let column = [Column::Accounts, Column::Tokens, Column::Namespaces, Column::Names, Column::Validators, Column::Storage]
                     .into_iter()
                     .find(|known| known.name() == *column)
                     .ok_or("a proof of a column it never asks for")?;
@@ -1116,6 +1126,14 @@ impl Chain {
                             None => u256::ZERO,
                         };
                         newest(&mut self.multi_balances, (collection, id, holder), Proven { value: amount, assurance });
+                    }
+                    Target::Delegation(address) => {
+                        // 0xef0100 and the 20 bytes of the contract it runs, as Ethereum writes it.
+                        let to = match held {
+                            Some(code) => Some(code.strip_prefix(&[0xef, 0x01, 0x00][..]).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).map(Address::Evm).ok_or("a delegation that does not read")?),
+                            None => None,
+                        };
+                        self.delegations.insert(address, Proven { value: to, assurance });
                     }
                     Target::Directory => {
                         let directory: Option<Directory> = held

@@ -266,7 +266,7 @@ pub enum TxArgs {
         federation: Option<String>,
         /// A new directory, the contracts the chain announces, as JSON: '{"gateway":"contract:0x…",
         /// "btc_gateway":null,"evm_gateways":[{"chain_id":1,"gateway":"0x…"}],"swap":"contract:0x…",
-        /// "dex":null,"dex_router":null,"nft_factory":null}', EVM chains in the order of their ids.
+        /// "dex":null,"dex_router":null,"dex_split":null,"nft_factory":null}', EVM chains in the order of their ids.
         #[arg(long)]
         directory: Option<String>,
         /// New fees, as a genesis file's fees object: '{"block_gas_limit":50000000,"burn_permille":500,"schedule":{…},"pricing":{…}}'.
@@ -624,14 +624,17 @@ pub(super) fn chain_to_sign_for(status: &Value, wanted: Option<&str>) -> CliResu
     }
 }
 
-/// A transaction signed as EIP-712 typed data for this chain.
+/// A transaction signed as EIP-712 typed data for this chain, each call named by the function it
+/// was given as.
 #[cfg(feature = "secp256k1")]
-fn typed(genesis: &Hash, tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
-    Ok(SignedTx::sign_eip712(tx, nonce, fee, keypair, genesis).ok_or("--eip712 needs a secp256k1 key: typed data is Ethereum's")?)
+fn typed(genesis: &Hash, tx: Tx, known: &[String], nonce: u64, fee: FeeOffer, keypair: &Keypair) -> CliResult<SignedTx> {
+    let functions = crate::crypto::eip712::name_calls(&tx, known).ok_or("a call's function has no name to show it by")?;
+
+    Ok(SignedTx::sign_eip712(tx, functions, nonce, fee, keypair, genesis).ok_or("--eip712 needs a secp256k1 key: typed data is Ethereum's")?)
 }
 
 #[cfg(not(feature = "secp256k1"))]
-fn typed(_: &Hash, _: Tx, _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
+fn typed(_: &Hash, _: Tx, _: &[String], _: u64, _: FeeOffer, _: &Keypair) -> CliResult<SignedTx> {
     Err("--eip712 needs a secp256k1 key, and this build has no secp256k1".into())
 }
 
@@ -652,11 +655,6 @@ fn send_named(args: SendArgs) -> CliResult<()> {
         return super::multisig::propose(args, account);
     }
 
-    // Typed data would show its signer one opaque hash for all the steps: the chain takes none.
-    if args.eip712 && matches!(args.tx, TxArgs::Batch { .. }) {
-        return Err("a batch cannot be signed as EIP-712 typed data: its signer would see an opaque hash, not its steps".into());
-    }
-
     let keypair = signer(args.key.as_deref())?;
     let sender = keypair.public().address();
     let node = args.node.trim_end_matches('/');
@@ -666,6 +664,12 @@ fn send_named(args: SendArgs) -> CliResult<()> {
     let status = ok(agent.get(format!("{node}/status")).call())?;
     let genesis = chain_to_sign_for(&status, args.genesis.as_deref())?;
     let reads = matches!(args.tx, TxArgs::EvmCall { read: true, .. });
+    // The functions it calls by name, which a typed signature shows.
+    let known = match &args.tx {
+        TxArgs::Call { function, .. } if args.eip712 => vec![function.clone()],
+        TxArgs::Batch { file, steps } if args.eip712 => super::batch::functions(steps, file.as_deref())?,
+        _ => Vec::new(),
+    };
     let tx = transaction(args.tx, sender, &agent, node)?;
     let deploys = matches!(tx, Tx::Deploy { .. }) || tx.batch_steps().is_some_and(|steps| steps.iter().any(|step| matches!(step, Tx::Deploy { .. })));
     let chosen = OfferChoice {
@@ -691,7 +695,7 @@ fn send_named(args: SendArgs) -> CliResult<()> {
     }
 
     let signed = match args.eip712 {
-        true => typed(&genesis, tx, nonce, fee, &keypair)?,
+        true => typed(&genesis, tx, &known, nonce, fee, &keypair)?,
         false => SignedTx::sign(tx, nonce, fee, &keypair, &genesis),
     };
     let body = json!({ "tx": to_hex(&wincode::serialize(&signed)?) }).to_string();
@@ -1352,7 +1356,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::Name(name) => format!("the name {name} for the chain"),
                 crate::governance::Change::Upgrade(upgrade) => format!("an upgrade: nodes older than {} stop at block {}", upgrade.least, upgrade.from),
                 crate::governance::Change::Directory(directory) => {
-                    let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("NFT factory", directory.nft_factory)];
+                    let named = [("gateway", directory.gateway), ("Bitcoin gateway", directory.btc_gateway), ("swap", directory.swap), ("DEX", directory.dex), ("split router", directory.dex_split), ("NFT factory", directory.nft_factory)];
                     let mut listed: Vec<String> = named.iter().filter_map(|(what, address)| address.map(|address| format!("the {what} {address}"))).collect();
                     listed.extend(directory.dex_router.map(|router| format!("the DEX router {}", crate::structs::hex::to_hex(&router))));
                     listed.extend(directory.evm_gateways.iter().map(|evm| format!("Gateway.sol {} on chain {}", crate::structs::hex::to_hex(&evm.gateway), evm.chain_id)));

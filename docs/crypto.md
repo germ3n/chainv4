@@ -99,18 +99,45 @@ its chain: there is no check of one without a chain.
 | --- | --- | --- |
 | `Transfer` | `string from`, `string to`, `uint256 amount` | A coin transfer, its amount in its narrowest width. |
 | `TokenTransfer` | `string token`, `string to`, `uint256 amount` | The token standard's `transfer` call. |
+| `Call` | `string contract`, `string function`, `uint256 amount`, `Argument[] arguments` | Any other contract call, its function by name. |
+| `Batch` | `Step[] steps` | A batch, every step written out. |
 | `Transaction` | `string kind`, `bytes data` | Every other: its kind, and its encoding. |
 
 Each ends with `uint64 nonce`, `uint64 gasLimit`, `uint256 maxPrice` and `uint256 tip`. Addresses
 are their text, `ed25519:0x…`, since EIP-712's `address` holds Ethereum's alone. Each form maps
-back to one transaction: a transfer whose amount could be narrower goes as `Transaction`, so no two
-encodings share a signature.
+back to one transaction: a transfer or call whose amount could be narrower goes as `Transaction`,
+so no two encodings share a signature.
+
+**A call's arguments** are each an `Argument(string type, string value)`: the type's name as
+`chainv4 send call` writes it, and the value written out, an address as its text, bytes as 0x hex,
+numbers in decimal, `nil` with no value. An `amount` wider than it needs is `amount256`, so each
+writing stands for one argument alone.
+
+**A call's function** is held in the transaction as its XXH3-64 hash, which no wallet can show. Its
+name goes beside the signature, in `SignedTx::functions`: one for each call the form writes out,
+in order. The node checks that each hashes to its call's, then builds the same form; a name that
+does not, a missing one or one too many is `VerifyError::FunctionNames`, and so is any name beside
+a signature of another kind, which would change the id and nothing else. A token transfer needs
+none: its form names what it does. `eip712::name_calls` finds each call's name among those a
+sender knows, as the CLI and the wallet do.
+
+**A batch's steps** are each a `Step(string kind, string target, string function, uint256 amount,
+Argument[] arguments, bytes data)`: a transfer as `Transfer` with whom it pays and the amount, a
+contract call as `Call` with the contract, its function's name and its arguments, an EVM call as
+`EvmCall` with its target, value and calldata; anything else as its kind and its encoding in
+`data`, with no target, which a written-out step always has. A multisig's batch has no form: its
+steps sit inside the multisig's own transaction, which `Transaction` would show as bytes, so it is
+`VerifyError::BatchNotTyped`.
 
 **Checked against the standard and MetaMask:** EIP-712's own example hashes and signs as the
 standard says, and `@metamask/eth-sig-util`, MetaMask's own library, hashes each form as chainv4
-does; its signatures recover to the signer's key.
+does, `Call` and `Batch` with their arrays of structs too, an empty one included; its signatures
+recover to the signer's key (`wallet/src/metamask/tests.rs`, the two ignored tests, run by hand
+with the library). Within the build, `eip712::json` writes each form as eth_signTypedData_v4 takes
+it, and chainv4's own reading of typed data hashes that JSON to the digest the node signs.
 
-`chainv4 send --eip712` signs a transaction this way with a secp256k1 key of its own.
+`chainv4 send --eip712` signs a transaction this way with a secp256k1 key of its own, a call and a
+batch by the functions they were given as.
 
 ## Key files
 

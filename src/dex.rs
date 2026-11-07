@@ -288,6 +288,100 @@ pub fn shares_worth(shares: u256, supply: u256, reserve_a: u256, reserve_b: u256
     (supply != u256::ZERO).then(|| (shares * reserve_a / supply, shares * reserve_b / supply))
 }
 
+#[document(
+    summary = "A native pool's time-weighted price from two observations of one side's cumulative price, as pool() returns them: what that side was worth in the other on average between them, in raw units, the cumulative prices being 10^18 fixed point times milliseconds and wrapping, as Uniswap V2's do.",
+    params = { then = "The earlier observation.", now = "The later one.", elapsed_ms = "The milliseconds between the two blocks they were read at." },
+    returns = "The average, or None for no time between them.",
+    category = "DEX",
+)]
+pub fn twap(then: u256, now: u256, elapsed_ms: u64) -> Option<f64> {
+    (elapsed_ms > 0).then(|| now.wrapping_sub(then).as_f64() / elapsed_ms as f64 / 1e18)
+}
+
+#[document(
+    summary = "An EVM pair's price0CumulativeLast as of a later time, as Uniswap V2's currentCumulativePrices works it out: the reserves it held since its last change, token1's in token0's as 112-bit fixed point, times the seconds since, added, wrapping. price1's is the same with the reserves swapped.",
+    params = { last = "price0CumulativeLast.", reserve0 = "getReserves's first.", reserve1 = "Its second.", last_s = "Its blockTimestampLast, in seconds.", now_s = "The time to work it out for, in seconds." },
+    category = "DEX",
+    see_also = "evm_twap",
+)]
+pub fn evm_cumulative(last: u256, reserve0: u256, reserve1: u256, last_s: u32, now_s: u64) -> u256 {
+    // Dex.sol counts in 32 bits, wrapping, as V2 does.
+    let elapsed = (now_s as u32).wrapping_sub(last_s);
+
+    match reserve0 == u256::ZERO || elapsed == 0 {
+        true => last,
+        false => {
+            let price: u256 = (reserve1 << 112u32) / reserve0;
+
+            last.wrapping_add(price.wrapping_mul(u256::from(elapsed)))
+        }
+    }
+}
+
+#[document(
+    summary = "An EVM pair's time-weighted price from two observations of a cumulative price: what token0 was worth in token1 on average between them, in raw units.",
+    params = { then = "The earlier cumulative price.", now = "The later.", elapsed_s = "The seconds between them." },
+    returns = "The average, or None for no time between them.",
+    category = "DEX",
+    see_also = "evm_cumulative, twap",
+)]
+pub fn evm_twap(then: u256, now: u256, elapsed_s: u64) -> Option<f64> {
+    (elapsed_s > 0).then(|| now.wrapping_sub(then).as_f64() / elapsed_s as f64 / 2f64.powi(112))
+}
+
+#[document(
+    summary = "router.lua's route arguments for a split, as chainv4 dex swap --split and the wallet send it: from, to, the whole amount, the least out, the deadline in milliseconds, the native part with its fee tier and middle, and the EVM part with its path and tiers ABI-encoded.",
+    params = {
+        split = "What best_split worked out.",
+        least = "The least both parts may pay together.",
+        deadline = "Until when, in milliseconds.",
+        evm_token = "Each asset's ERC-20 on the EVM, WDEV for the coin.",
+    },
+    returns = "The arguments, or None when an asset on the EVM's path has no ERC-20.",
+    category = "DEX",
+    see_also = "best_split",
+)]
+#[cfg(feature = "abi")]
+pub fn split_args(split: &Split, from: Address, to: Address, amount: u256, least: u256, deadline: u64, evm_token: impl Fn(&Address) -> Option<[u8; 20]>) -> Option<Vec<crate::structs::tx::TxCallArgumentType>> {
+    use crate::abi::{AbiType, AbiValue, encode_values};
+    use crate::structs::tx::TxCallArgumentType as Arg;
+
+    let zero = Arg::U256(u256::ZERO);
+    let (native_amount, fee, middle, middle_fee) = match &split.native {
+        Some((part, route)) => (
+            Arg::U256(*part),
+            Arg::I64(i64::from(route.fee_bps)),
+            route.middle.map_or(Arg::Nil, |(middle, _)| Arg::Address(middle)),
+            route.middle.map_or(Arg::Nil, |(_, fee)| Arg::I64(i64::from(fee))),
+        ),
+        None => (zero.clone(), Arg::I64(i64::from(DEFAULT_FEE_BPS)), Arg::Nil, Arg::Nil),
+    };
+    let (evm_amount, evm_route) = match &split.evm {
+        Some((part, route)) => {
+            let path = [Some(from), route.middle.map(|(middle, _)| middle), Some(to)].into_iter().flatten().map(|asset| evm_token(&asset).map(AbiValue::Address)).collect::<Option<Vec<_>>>()?;
+            let fees = [Some(route.fee_bps), route.middle.map(|(_, fee)| fee)].into_iter().flatten().map(|fee| AbiValue::Uint(u256::from(fee))).collect();
+            let encoded = encode_values(&[AbiType::Array(Box::new(AbiType::Address)), AbiType::Array(Box::new(AbiType::Uint(256)))], &[AbiValue::Array(path), AbiValue::Array(fees)]).ok()?;
+
+            (Arg::U256(*part), Arg::Bytes(encoded))
+        }
+        None => (zero, Arg::Bytes(Vec::new())),
+    };
+
+    Some(vec![
+        Arg::Address(from),
+        Arg::Address(to),
+        Arg::U256(amount),
+        Arg::U256(least),
+        Arg::I64(i64::try_from(deadline).unwrap_or(i64::MAX)),
+        native_amount,
+        fee,
+        middle,
+        middle_fee,
+        evm_amount,
+        evm_route,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +482,18 @@ mod tests {
         assert_eq!(add_amounts(u256::ZERO, u256::ZERO, n(5), n(7)), Some((n(5), n(7))));
         assert_eq!(add_amounts(u256::ZERO, n(5), n(5), n(7)), None);
         assert_eq!(add_amounts(n(2), n(2), u256::MAX, n(1)), None, "too large to reckon");
+    }
+
+    #[test]
+    fn an_evm_pairs_time_weighted_price_comes_from_its_cumulative_prices_as_v2s_does() {
+        // 2 of token1 to 1 of token0 since second 100: 50 seconds on, the cumulative grew by 2 a
+        // second, and the average between the two is 2.
+        let at_100: u256 = u256::new(7) << 112u32;
+        let at_150 = evm_cumulative(at_100, u256::new(1_000), u256::new(2_000), 100, 150);
+
+        assert_eq!(at_150 - at_100, (u256::new(2) << 112u32) * u256::new(50));
+        assert_eq!(evm_twap(at_100, at_150, 50), Some(2.0));
+        assert_eq!(evm_cumulative(at_100, u256::ZERO, u256::new(2_000), 100, 150), at_100, "nothing held, nothing summed");
+        assert_eq!(evm_twap(at_100, at_100, 0), None);
     }
 }

@@ -220,7 +220,7 @@ The council, the owner alone, names the contracts; it is in force at once with o
 ```sh
 $B send --node $N --key $K vote-change --vote yes --directory '{"gateway":"contract:0x…",
   "btc_gateway":"contract:0x…","evm_gateways":[],"swap":"contract:0x…","dex":"contract:0x…",
-  "dex_router":"0x…","nft_factory":"contract:0x…"}'
+  "dex_router":"0x…","dex_split":"contract:0x…","nft_factory":"contract:0x…"}'
 curl -s $N/status    # directory
 ```
 

@@ -11,21 +11,26 @@
 //! built alike everywhere, which is what the tests check against MetaMask's own library.
 
 use {
-    chainv4::crypto::eip712::{self, Typed, Value},
+    chainv4::crypto::eip712,
     chainv4::crypto::keypair::PublicKey,
     chainv4::crypto::secp256k1,
     chainv4::structs::hash::Hash,
     chainv4::structs::hex::to_hex,
     chainv4::structs::tx::{FeeOffer, Tx},
-    serde_json::{Map, Value as Json, json},
+    serde_json::Value as Json,
 };
 
 /// What connecting has MetaMask sign, once, so the wallet learns the account's public key.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub const CONNECT: &str = "Connect this account to the chainv4 wallet. This signs nothing that moves funds.";
 
-/// What the wallet says for a batch from an account MetaMask holds: it never asks for that signature.
-pub const NO_BATCH: &str = "MetaMask would show a batch as one opaque hash, not its steps, and the chain takes no batch signed that way. Send it from an account this wallet or the offline signer holds.";
+/// What the wallet says for a multisig's batch from an account MetaMask holds: it never asks for
+/// that signature.
+pub const NO_BATCH: &str = "MetaMask would show a multisig's batch as one opaque hash, not its steps, and the chain takes none signed that way. Send it from an account this wallet or the offline signer holds.";
+
+/// What the wallet says for a call whose function it cannot name, which MetaMask would show by its
+/// hash alone, and the chain takes no typed signature for.
+pub const NO_NAME: &str = "MetaMask shows a call by its function's name, and this wallet does not know the name of one here. Send it from an account this wallet or the offline signer holds.";
 
 /// EIP-191's hash of a message, as MetaMask's personal_sign signs it, and the wallet's own for sites.
 pub fn personal_digest(message: &[u8]) -> [u8; 32] {
@@ -35,44 +40,10 @@ pub fn personal_digest(message: &[u8]) -> [u8; 32] {
     secp256k1::keccak(&bytes)
 }
 
-/// A transaction's typed data for this chain, as eth_signTypedData_v4 takes it.
-pub fn typed_data(tx: &Tx, nonce: u64, fee: &FeeOffer, genesis: &Hash) -> Json {
-    let (domain, message) = (eip712::domain(genesis), eip712::message(tx, nonce, fee));
-    let mut types = Map::new();
-    types.insert(domain.name.to_string(), fields(&domain));
-    types.insert(message.name.to_string(), fields(&message));
-
-    json!({
-        "types": types,
-        "primaryType": message.name,
-        "domain": values(&domain),
-        "message": values(&message),
-    })
-}
-
-fn fields(typed: &Typed) -> Json {
-    typed.fields.iter().map(|(name, kind, _)| json!({ "name": name, "type": kind })).collect()
-}
-
-fn values(typed: &Typed) -> Json {
-    typed
-        .fields
-        .iter()
-        .map(|(name, _, value)| {
-            let value = match value {
-                Value::String(text) => json!(text),
-                // Decimal text, as wide numbers are too wide for JSON's.
-                Value::Uint(number) => json!(number.to_string()),
-                Value::Bytes(bytes) => json!(to_hex(bytes)),
-                Value::Bytes32(bytes) => json!(to_hex(bytes)),
-                Value::Address(bytes) => json!(to_hex(bytes)),
-                Value::Struct(inner) => values(inner),
-            };
-
-            (name.to_string(), value)
-        })
-        .collect::<Map<_, _>>()
-        .into()
+/// A transaction's typed data for this chain, as eth_signTypedData_v4 takes it, each call named
+/// by its function: None when the names are not its calls'.
+pub fn typed_data(tx: &Tx, functions: &[String], nonce: u64, fee: &FeeOffer, genesis: &Hash) -> Option<Json> {
+    Some(eip712::json(&eip712::domain(genesis), &eip712::message(tx, functions, nonce, fee)?))
 }
 
 /// The public key that made a signature over a hash, if it is the account at this address, as

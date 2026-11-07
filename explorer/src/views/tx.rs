@@ -180,6 +180,32 @@ pub(crate) fn asked(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, outcome: Option<&Ou
                 ("height", Value::Number(height)) if tx.kind() == "claim" => {
                     super::block(ui, ctx, &height.to_string(), &format::thousands(&height.to_string()));
                 }
+                ("authorizations", Value::Array(listed)) => {
+                    ui.vertical(|ui| {
+                        for authorization in listed {
+                            ui.horizontal_wrapped(|ui| {
+                                match authorization["authority"].as_str() {
+                                    Some(authority) => super::address(ui, ctx, authority),
+                                    None => {
+                                        ui.label(RichText::new("a signature that recovers no account, skipped").color(look.palette.muted));
+                                    }
+                                };
+
+                                match authorization["address"].as_str() {
+                                    Some(to) => {
+                                        ui.label(RichText::new("runs the code of").color(look.palette.muted));
+                                        super::address(ui, ctx, to);
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("clears its delegation").color(look.palette.muted));
+                                    }
+                                }
+
+                                ui.label(RichText::new(format!("at its nonce {}", authorization["nonce"])).small().color(look.palette.muted));
+                            });
+                        }
+                    });
+                }
                 ("func", Value::String(selector)) => {
                     match &called {
                         Some(function) => ui.monospace(function).on_hover_text(selector),
@@ -280,6 +306,15 @@ fn one_step(ui: &mut Ui, ctx: &mut Ctx, tx: &TxView, step: &Value, index: usize,
 /// What a transaction asks, in words, for kinds whose fields alone say it badly.
 fn means(tx: &TxView) -> Option<String> {
     match tx.kind() {
+        // EIP-7702's type 4: each authorization makes an Ethereum account run a contract's code.
+        "ethereum" if tx.tx["kind"].as_u64() == Some(4) => {
+            let count = tx.tx["authorizations"].as_array().map_or(0, Vec::len);
+
+            Some(format!(
+                "An Ethereum wallet's transaction of type 4, EIP-7702: it sets {count} account{}'s delegation, the contract code each runs as its own, or clears it, then calls as any does",
+                if count == 1 { "" } else { "s" }
+            ))
+        }
         "claim" => Some(format!(
             "Claim of {}'s mining pool earnings, from the pool's block {}: what it earned, less what it claimed before",
             tx.tx["to"].as_str().map_or_else(|| "?".to_string(), format::short),
@@ -754,5 +789,21 @@ mod tests {
 
         let counted: Outcome = serde_json::from_value(json!({ "status": "done", "fuel_used": 0, "gas_used": 0, "fee": "0", "events": [] })).unwrap();
         assert_eq!(counted.version, None, "a vote that only counted decided nothing");
+    }
+
+    #[test]
+    fn an_eip_7702_transaction_says_how_many_delegations_it_sets() {
+        let of = |kind: u64, authorizations: Value| -> TxView {
+            serde_json::from_value(json!({
+                "id": "0x01", "sender": "secp256k1:0x02", "nonce": 0, "signer": "0x03", "signature": "ethereum",
+                "fee": { "gas_limit": 0, "max_price": "0", "tip": "0" },
+                "tx": { "type": "ethereum", "kind": kind, "raw": "0x", "authorizations": authorizations },
+            }))
+            .unwrap()
+        };
+        let one = json!([{ "authority": "secp256k1:0x02", "address": "evm:0xd7", "chain_id": "1", "nonce": 1 }]);
+
+        assert!(means(&of(4, one)).is_some_and(|means| means.contains("sets 1 account's delegation")));
+        assert_eq!(means(&of(2, json!(null))), None, "any other Ethereum transaction says it as its fields do");
     }
 }

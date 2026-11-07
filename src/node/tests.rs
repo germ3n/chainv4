@@ -331,12 +331,12 @@ fn a_transfer_signed_as_typed_data_goes_into_a_block_as_any_other() {
 
     // Signed for another chain, it is refused at the door.
     let elsewhere = Hash::from_bytes(HashType::default_chain(), &[9; 32]).unwrap();
-    let foreign = SignedTx::sign_eip712(transfer.clone(), 0, FeeOffer::NONE, &ethereum, &elsewhere).unwrap();
+    let foreign = SignedTx::sign_eip712(transfer.clone(), Vec::new(), 0, FeeOffer::NONE, &ethereum, &elsewhere).unwrap();
 
     assert!(producer.submit(foreign).is_err());
 
     // For this one, it goes into the producer's block, and the follower imports it.
-    let signed = SignedTx::sign_eip712(transfer, 0, FeeOffer::NONE, &ethereum, &producer.chain().genesis()).unwrap();
+    let signed = SignedTx::sign_eip712(transfer, Vec::new(), 0, FeeOffer::NONE, &ethereum, &producer.chain().genesis()).unwrap();
     producer.submit(signed.clone()).unwrap();
     producer.step(SLOT).unwrap();
     let block = published_block(&mut producer_net);

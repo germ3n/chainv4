@@ -38,6 +38,7 @@ pub enum Kind {
     Evm,
     Deploy,
     Upgrade,
+    Remove,
     Name,
     Primary,
     Burn,
@@ -45,13 +46,14 @@ pub enum Kind {
 }
 
 /// What each kind is called in the form.
-const KINDS: [(Kind, &str); 10] = [
+const KINDS: [(Kind, &str); 11] = [
     (Kind::Coin, "Send the coin"),
     (Kind::Token, "Send a token"),
     (Kind::Call, "Call a contract"),
     (Kind::Evm, "Call an EVM contract"),
     (Kind::Deploy, "Deploy a contract"),
     (Kind::Upgrade, "Upgrade a contract"),
+    (Kind::Remove, "Remove a contract"),
     (Kind::Name, "A name"),
     (Kind::Primary, "The primary name"),
     (Kind::Burn, "Burn the coin"),
@@ -221,6 +223,25 @@ impl Form {
                 Engine::Evm => return Err("EVM contracts are upgraded through a proxy, with a call".to_string()),
                 _ => Tx::Upgrade { contract: contract(&self.to)?, code: self.code()? },
             },
+            // For good: typed out, as on the Contracts page.
+            Kind::Remove => {
+                let removed = contract(&self.to)?;
+
+                if matches!(removed, Address::Evm(_)) {
+                    return Err("an EVM contract is removed by its own code, as Ethereum's are".to_string());
+                }
+
+                if self.value.trim() != super::contracts::REMOVE_WORD {
+                    return Err(format!("type {} to remove it: it cannot be undone", super::contracts::REMOVE_WORD));
+                }
+
+                let beneficiary = match self.key.trim() {
+                    "" => from,
+                    to => (reading.recipient)(to)?,
+                };
+
+                Tx::Remove { contract: removed, beneficiary }
+            }
             Kind::Name => {
                 let name = (reading.bare_name)(&self.name);
                 let years = || match self.years.trim() {
@@ -277,6 +298,8 @@ pub struct BatchState {
     /// Whom it is sent as: one of the account's addresses, or a multisig it follows.
     from: Option<Address>,
     steps: Vec<Tx>,
+    /// The functions its calls were added by, which MetaMask shows them as.
+    known: Vec<String>,
     form: Form,
     picked: Picked,
     trouble: Option<String>,
@@ -446,6 +469,7 @@ fn list(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, send: &mut SendState
         what: format!("A batch of {count} step{}", if count == 1 { "" } else { "s" }),
         about: "its steps".to_string(),
         coin,
+        functions: state.known.clone(),
     };
 
     match from {
@@ -505,17 +529,11 @@ pub(super) fn steps_card(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, fro
             });
         }
 
-        let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(from));
-
-        if by_metamask {
-            ui.colored_label(palette.bad, crate::metamask::NO_BATCH);
-        }
-
         if let Some(why) = &state.trouble {
             ui.colored_label(palette.bad, why.as_str());
         }
 
-        if theme::primary(ui, &palette, button, laid.count > 0 && !by_metamask).clicked() {
+        if theme::primary(ui, &palette, button, laid.count > 0).clicked() {
             let made_up = match proposal {
                 true => state.proposal(from),
                 false => state.batch(from),
@@ -582,8 +600,14 @@ pub(super) fn add_form(ui: &mut Ui, ctx: &mut Ctx, state: &mut BatchState, from:
             let bare_name = |text: &str| ctx.chain.names.as_ref().map_or_else(|| text.trim().to_string(), |names| names.strip(text.trim()));
             let reading = Reading { from: *from, decimals: ctx.coin.decimals, token_decimals: &token_decimals, recipient: &recipient, bare_name: &bare_name };
 
+            let function = state.form.function.trim().to_string();
+
             match state.form.step(&reading).and_then(|step| state.add(step)) {
                 Ok(()) => {
+                    if !function.is_empty() && !state.known.contains(&function) {
+                        state.known.push(function);
+                    }
+
                     // What the kind's fields hold goes; which kind it was stays, for the next of them.
                     state.form = Form { kind: state.form.kind, engine: state.form.engine, ..Form::default() };
                     state.trouble = None;
@@ -693,6 +717,12 @@ fn fields(ui: &mut Ui, ctx: &Ctx, state: &mut BatchState) {
             address_line(ui, &mut form.to, "The contract: contract:0x…");
             code_fields(ui, ctx, state, &[(Engine::Lua, "Lua"), (Engine::Wasm, "WebAssembly")]);
         }
+        Kind::Remove => {
+            ui.add(egui::Label::new(RichText::new("For good: its balance to whom you name, its code and storage deleted, its address never used again. Only if its check_perms lets this sender.").small().color(palette.bad)).wrap());
+            address_line(ui, &mut form.to, "The contract: contract:0x…");
+            address_line(ui, &mut form.key, "Its balance to: an address or a name, or empty for this sender");
+            line(ui, &mut form.value, "Type remove");
+        }
         Kind::Name => {
             theme::segmented_rows(ui, &palette, &mut form.name_kind, &[(NameKind::Register, "Register"), (NameKind::Renew, "Renew"), (NameKind::Give, "Give"), (NameKind::Point, "Point"), (NameKind::Text, "Text"), (NameKind::Subname, "Subname")]);
             ui.add_space(4.0);
@@ -786,6 +816,19 @@ mod tests {
         assert!(state.add(pay(1)).unwrap_err().contains("at most 32"));
         assert_eq!(state.steps.len(), MAX_BATCH_STEPS);
         assert!(state.batch(&me()).is_ok());
+    }
+
+    #[test]
+    fn a_removal_is_typed_out_and_pays_this_sender_unless_it_names_another() {
+        let token = format!("contract:0x{}", "11".repeat(32));
+        let form = |value: &str, key: &str| Form { kind: Kind::Remove, to: token.clone(), value: value.to_string(), key: key.to_string(), ..Form::default() };
+
+        assert!(read(&form("", "")).unwrap_err().contains("type remove"), "not typed, nothing made");
+        assert_eq!(read(&form("remove", "")), Ok(Tx::Remove { contract: token.parse().unwrap(), beneficiary: me() }));
+        assert_eq!(read(&form("remove", &someone().to_string())), Ok(Tx::Remove { contract: token.parse().unwrap(), beneficiary: someone() }));
+
+        let evm = Form { to: format!("0x{}", "ab".repeat(20)), ..form("remove", "") };
+        assert!(read(&evm).unwrap_err().contains("its own code"));
     }
 
     #[test]

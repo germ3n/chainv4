@@ -166,6 +166,7 @@ fn primary(ui: &mut Ui, ctx: &mut Ctx, from: &Address, prepared: &mut Option<Pre
                                 what: "Clear the primary name".to_string(),
                                 about: name.clone(),
                                 coin: u256::ZERO,
+                                functions: Vec::new(),
                             });
                         }
                     },
@@ -258,6 +259,7 @@ fn find(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfig,
                                 what: format!("Register {shown}"),
                                 about: format!("{years} year{}", if years == 1 { "" } else { "s" }),
                                 coin: cost,
+                                functions: Vec::new(),
                             });
                             state.search.clear();
                         }
@@ -346,6 +348,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
         what,
         about: shown.clone(),
         coin,
+        functions: Vec::new(),
     };
     let mut chosen = None;
 
@@ -374,6 +377,7 @@ fn manage(ui: &mut Ui, ctx: &mut Ctx, state: &mut NamesState, names: &NamesConfi
             what: format!("Go by {shown}"),
             about: shown.clone(),
             coin: u256::ZERO,
+            functions: Vec::new(),
         });
     }
 

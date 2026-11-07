@@ -1657,6 +1657,18 @@ fn json_rpc_shows_an_eip_7702_transaction_and_the_delegation_it_set() {
     assert_eq!(tx["authorizationList"][0]["address"], json!(to_hex(&target)));
     assert_eq!(tx["authorizationList"][0]["nonce"], json!("0x1"));
     assert_eq!(rpc("eth_getTransactionReceipt", json!([to_hex(&tx_hash(&raw))]))["status"], json!("0x1"));
+
+    // The API's own: the account says whose code it runs, and the transaction whom it authorized.
+    let (status, _, account) = request(address, "GET", &format!("/accounts/{sender}"), "");
+    assert_eq!(status, 200, "{account}");
+    assert_eq!(account["delegated_to"], json!(Address::Evm(target).to_string()));
+
+    let (_, _, block) = request(address, "GET", "/blocks/2", "");
+    let ethereum = &block["txs"][0]["tx"];
+    assert_eq!(ethereum["kind"], json!(4));
+    assert_eq!(ethereum["authorizations"][0]["authority"], json!(sender.to_string()), "the account that signed it");
+    assert_eq!(ethereum["authorizations"][0]["address"], json!(Address::Evm(target).to_string()));
+    assert_eq!(ethereum["authorizations"][0]["nonce"], json!(1));
 }
 
 #[cfg(feature = "ethereum")]

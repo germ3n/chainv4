@@ -446,7 +446,7 @@ impl Explorer {
                     store.accounts.insert(address, account);
                 }
             }
-            Ask::Rpc(_) | Ask::Faucet(_) => {
+            Ask::Rpc(_) | Ask::CallAt(_) | Ask::Faucet(_) => {
                 store.calls.insert(ask.clone(), value);
             }
             Ask::Pool => store.pool = parse(value),

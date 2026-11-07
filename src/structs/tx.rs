@@ -1049,6 +1049,8 @@ pub struct SignedTx {
     pub signer: PublicKey,
     #[document(summary = "The signer's signature over the chain's genesis id, the transaction, nonce, fee offer and signer.")]
     pub signature: Signature,
+    #[document(summary = "For an EIP-712 typed signature alone, the names of the contract calls its typed form writes out, in order, each checked against the function hash its call holds, so MetaMask shows a call by its function's name (crypto::eip712). Empty for every other signature.")]
+    pub functions: Vec<String>,
 }
 
 #[document(
@@ -1109,6 +1111,7 @@ impl SignedTx {
             fee,
             signer,
             signature,
+            functions: Vec::new(),
         }
     }
 
@@ -1157,7 +1160,7 @@ fn signing_bytes(tx: &Tx, nonce: u64, fee: &FeeOffer, signer: &PublicKey, genesi
 impl SignedTx {
     #[document(
         parent = "SignedTx",
-        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Every signature names its chain, so one signed for another chain does not hold here: chainv4's own over the genesis id and the transaction, an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), and an Ethereum one by its chain id. Nothing that holds a batch holds under EIP-712, which would show its signer an opaque hash. Whether the nonce is the next one depends on chain state, so the executor checks that. Every node's check of a transaction is this one, and there is no check of a signature without a chain.",
+        summary = "Checks the transaction itself, the signer's key, the signature, and that a transfer or burn, or any batch's step that is one, only takes from the sender. Every signature names its chain, so one signed for another chain does not hold here: chainv4's own over the genesis id and the transaction, an EIP-712 one over the transaction's typed hash under this chain's domain (crypto::eip712), and an Ethereum one by its chain id. A typed signature carries the names of the calls its form writes out, each checked against its call's function hash, and nothing else carries any; a multisig's batch holds under no typed signature, which would show its signer an opaque hash. Whether the nonce is the next one depends on chain state, so the executor checks that. Every node's check of a transaction is this one, and there is no check of a signature without a chain.",
         params = { genesis = "The chain's genesis id, which the signature is bound to." },
         see_also = "Tx::verify, VerifyError::NotSender",
     )]
@@ -1177,7 +1180,8 @@ impl SignedTx {
 
         #[cfg(feature = "secp256k1")]
         if let Signature::Secp256k1Eip712(signature) = &self.signature {
-            if self.tx.batch_steps().is_some() {
+            // A multisig's batch is inside its opaque transaction, which the form cannot write out.
+            if !matches!(self.tx, Tx::Batch { .. }) && self.tx.batch_steps().is_some() {
                 return Err(VerifyError::BatchNotTyped);
             }
 
@@ -1188,7 +1192,7 @@ impl SignedTx {
                 #[allow(unreachable_patterns)]
                 _ => return Err(VerifyError::InvalidSignature),
             };
-            let digest = crate::crypto::eip712::transaction_digest(&self.tx, self.nonce, &self.fee, genesis);
+            let digest = crate::crypto::eip712::transaction_digest(&self.tx, &self.functions, self.nonce, &self.fee, genesis).ok_or(VerifyError::FunctionNames)?;
 
             if !crate::crypto::secp256k1::verify_hash(key, &digest, signature) {
                 return Err(VerifyError::InvalidSignature);
@@ -1200,6 +1204,11 @@ impl SignedTx {
         // An Ethereum-signed transaction holds only as the first check above takes it.
         if matches!(self.tx, Tx::Ethereum { .. }) {
             return Err(VerifyError::BadEthereum);
+        }
+
+        // Names stand beside a typed signature alone: here they would change the id and nothing else.
+        if !self.functions.is_empty() {
+            return Err(VerifyError::FunctionNames);
         }
 
         self.tx.verify()?;
@@ -1218,12 +1227,13 @@ impl SignedTx {
             fee = "What the sender offers to pay.",
             keypair = "The sender's keys: secp256k1, Ethereum's, alone sign typed data.",
             genesis = "The chain's genesis id, which the signature is bound to.",
+            functions = "The names of the calls its typed form writes out, in order: eip712::calls_named says how many.",
         },
-        returns = "The signed transaction, or None for a key of another scheme, or for a batch, which holds under chainv4's own signature alone.",
+        returns = "The signed transaction, or None for a key of another scheme, for names that are not its calls', or for a multisig's batch, which holds under chainv4's own signature alone.",
     )]
     #[cfg(feature = "secp256k1")]
-    pub fn sign_eip712(tx: Tx, nonce: u64, fee: FeeOffer, keypair: &Keypair, genesis: &crate::structs::hash::Hash) -> Option<SignedTx> {
-        if tx.batch_steps().is_some() {
+    pub fn sign_eip712(tx: Tx, functions: Vec<String>, nonce: u64, fee: FeeOffer, keypair: &Keypair, genesis: &crate::structs::hash::Hash) -> Option<SignedTx> {
+        if !matches!(tx, Tx::Batch { .. }) && tx.batch_steps().is_some() {
             return None;
         }
 
@@ -1232,7 +1242,7 @@ impl SignedTx {
             #[allow(unreachable_patterns)]
             _ => return None,
         };
-        let digest = crate::crypto::eip712::transaction_digest(&tx, nonce, &fee, genesis);
+        let digest = crate::crypto::eip712::transaction_digest(&tx, &functions, nonce, &fee, genesis)?;
 
         Some(SignedTx {
             tx,
@@ -1240,6 +1250,7 @@ impl SignedTx {
             fee,
             signer: keypair.public(),
             signature: Signature::Secp256k1Eip712(crate::crypto::secp256k1::sign_hash(secret, &digest)),
+            functions,
         })
     }
 
@@ -1264,6 +1275,7 @@ impl SignedTx {
             },
             signer: PublicKey::Secp256k1(key),
             signature: Signature::Ethereum,
+            functions: Vec::new(),
         })
     }
 

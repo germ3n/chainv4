@@ -91,8 +91,8 @@ pub enum DexAction {
         /// than the quote by more.
         #[arg(long, default_value_t = 0.5)]
         slippage: f64,
-        /// Divides the trade between both DEXes as pays the most, through router.lua
-        /// (--split-router), in one transaction.
+        /// Divides the trade between both DEXes as pays the most, through router.lua, the one the
+        /// chain's directory names unless --split-router names another, in one transaction.
         #[arg(long)]
         split: bool,
     },
@@ -191,35 +191,15 @@ pub fn dex(args: DexArgs) -> CliResult<()> {
             // Both listings name the coin and ERC-20s alike, so an asset is its own on the EVM.
             let split = best_split(&pools, &from, &to, *amount, |asset| (*asset == COIN || matches!(asset, Address::Evm(_))).then_some(*asset)).ok_or("neither DEX trades these")?;
             let least = least_out(split.out, percent(*slippage)?);
-            let router = dex.args.split_router.ok_or("--split needs --split-router, router.lua's address: chainv4 dex deploy-router")?;
-            let zero = TxCallArgumentType::U256(u256::ZERO);
-            let (native_amount, fee, middle, middle_fee) = match &split.native {
-                Some((part, route)) => (TxCallArgumentType::U256(*part), TxCallArgumentType::I64(i64::from(route.fee_bps)), route.middle.map_or(TxCallArgumentType::Nil, |(middle, _)| TxCallArgumentType::Address(middle)), route.middle.map_or(TxCallArgumentType::Nil, |(_, fee)| TxCallArgumentType::I64(i64::from(fee)))),
-                None => (zero.clone(), TxCallArgumentType::I64(i64::from(crate::dex::DEFAULT_FEE_BPS)), TxCallArgumentType::Nil, TxCallArgumentType::Nil),
-            };
-            let (evm_amount, evm_route) = match &split.evm {
-                Some((part, route)) => {
-                    let path = [Some(from), route.middle.map(|(middle, _)| middle), Some(to)].into_iter().flatten().map(|asset| dex.token(&asset).map(AbiValue::Address)).collect::<CliResult<Vec<_>>>()?;
-                    let fees = [Some(route.fee_bps), route.middle.map(|(_, fee)| fee)].into_iter().flatten().map(|fee| AbiValue::Uint(u256::from(fee))).collect();
-                    let encoded = encode_values(&[AbiType::Array(Box::new(AbiType::Address)), AbiType::Array(Box::new(AbiType::Uint(256)))], &[AbiValue::Array(path), AbiValue::Array(fees)])?;
-
-                    (TxCallArgumentType::U256(*part), TxCallArgumentType::Bytes(encoded))
-                }
-                None => (zero, TxCallArgumentType::Bytes(Vec::new())),
-            };
-            let args = vec![
-                TxCallArgumentType::Address(from),
-                TxCallArgumentType::Address(to),
-                TxCallArgumentType::U256(*amount),
-                TxCallArgumentType::U256(least),
-                TxCallArgumentType::I64(deadline as i64),
-                native_amount,
-                fee,
-                middle,
-                middle_fee,
-                evm_amount,
-                evm_route,
-            ];
+            let router = dex.split_router()?;
+            // Each asset's ERC-20 on the EVM, WDEV for the coin, asked as the path needs them.
+            let tokens: Vec<(Address, [u8; 20])> = [Some(from), split.evm.as_ref().and_then(|(_, route)| route.middle.map(|(middle, _)| middle)), Some(to)]
+                .into_iter()
+                .flatten()
+                .filter(|_| split.evm.is_some())
+                .map(|asset| dex.token(&asset).map(|token| (asset, token)))
+                .collect::<CliResult<_>>()?;
+            let args = crate::dex::split_args(&split, from, to, *amount, least, deadline, |asset| tokens.iter().find(|(known, _)| known == asset).map(|(_, token)| *token)).ok_or("an asset on the EVM's path has no ERC-20")?;
             dex.approve_for(&from, *amount, router)?;
             dex.call(router, "route", if from == COIN { *amount } else { u256::ZERO }, args)?;
             println!(
@@ -523,6 +503,19 @@ impl Dex {
             .ok_or("no DEX: the chain's directory names none, nor does the node. Give --dex")?
             .parse()
             .map_err(|_| "the node named a DEX that is not an address".into())
+    }
+
+    /// router.lua: --split-router, else the one the chain's directory names.
+    fn split_router(&self) -> CliResult<Address> {
+        if let Some(router) = self.args.split_router {
+            return Ok(router);
+        }
+
+        self.status()?["directory"]["dex_split"]
+            .as_str()
+            .ok_or("--split needs router.lua: the chain's directory names none, so give --split-router (chainv4 dex deploy-router makes one)")?
+            .parse()
+            .map_err(|_| "the directory names a split router that is not an address".into())
     }
 
     fn router_bytes(&self) -> CliResult<[u8; 20]> {

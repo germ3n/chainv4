@@ -196,6 +196,10 @@ together. The apps work the split out (`dex::best_split`) and send it.
 Approve the router for a token first; the coin is sent with the call. It emits `Routed(asset_in,
 asset_out, sender, amount_in, native_amount, evm_amount, out)`.
 
+The chain's [directory](governance.md#directory) names it as `dex_split`, where the wallet and
+`chainv4 dex swap --split` find it; `--split-router` names another. `dex::split_args` writes
+`route`'s arguments from a split, for both.
+
 ## Deploying
 
 ```sh
@@ -278,11 +282,15 @@ both, and two tabs:
     a node with an event index;
   - **Add**, at the pool's ratio, and **Take out**, all or some of your shares (on the EVM, the
     router takes them, approved first).
-- **Open a new pool**, folded under the pools: two assets and the first deposit of each, whose ratio
-  is its opening price. It opens at 0.3% where the chain offers it, else at its smallest tier.
+- **Open a new pool**, folded under the pools: two assets, the first deposit of each, whose ratio
+  is its opening price, and its fee tier, picked among those the chain offers, 0.3% unless another
+  is picked. A pair's tier already taken says so: add to that pool instead.
+- **Both DEXes at once:** a trade that pays more divided between the two DEXes than on the one
+  shown offers to go through `router.lua`, the directory's `dex_split`, with each part shown.
+- **Time-weighted price:** a native pool's, from `pool()` read at the light client's final block
+  and its tip (`dex::twap`).
 
-Picking a tier when opening a pool, a split route through router.lua, and the time-weighted
-price come to the wallet later (see the [todo](todo.md)).
+See [Wallet](wallet.md#trade).
 
 Every one of these is a call the Send page reviews and signs, on the offline signer too.
 
@@ -292,6 +300,12 @@ The **DEX** page lists both DEXes' pools, each named by its pair and tier, with 
 its price, and its volume and fees, at its tier, over about a day and a week; a pool opens its price chart and its latest trades, adds and
 removals. Volumes come from the last 500 trades at most, by the event index: a node without
 `--index-events` shows pools and prices alone. See [Explorer](explorer.md).
+
+A pool's page shows its **time-weighted price** over about the last hour, the node's word: a
+native pool's cumulative prices from `pool()` read at the tip and an hour's blocks before; an EVM
+pair's `price0CumulativeLast` at each, brought up to that block's time from its reserves as
+Uniswap V2's `currentCumulativePrices` does (`dex::evm_cumulative`, `dex::evm_twap`). Each read is
+`POST /call` at a `block`, whose answer says the block's `time`.
 
 ## Gas estimates for nested calls
 

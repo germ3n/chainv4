@@ -107,6 +107,8 @@ pub enum Ask {
     AccountMultisigs { address: String, cursor: Option<String> },
     /// A JSON-RPC request to POST /rpc, as its body: what EVM reads go through.
     Rpc(String),
+    /// A read at a block of its own, as POST /call's body: what a time-weighted price reads at two.
+    CallAt(String),
     /// A request to the node's faucet, with its proof of work: the body of POST /faucet.
     Faucet(String),
     /// The mining pool the node runs: its miners and its latest blocks.
@@ -164,6 +166,7 @@ impl Ask {
             Ask::AccountNames { address, cursor } => format!("/accounts/{address}/names?limit=200{}", after(cursor)),
             Ask::AccountMultisigs { address, cursor } => format!("/accounts/{address}/multisigs?limit=200{}", after(cursor)),
             Ask::Rpc(_) => "/rpc".to_string(),
+            Ask::CallAt(_) => "/call".to_string(),
             Ask::Faucet(_) => "/faucet".to_string(),
             Ask::Pool => "/pool".to_string(),
             Ask::PoolMiner(address) => format!("/pool/{address}"),
@@ -245,7 +248,7 @@ impl Ask {
                 json!(contract),
                 json!(function)
             )),
-            Ask::Offer(body) | Ask::Submit(body) | Ask::Rpc(body) | Ask::Faucet(body) => Some(body.clone()),
+            Ask::Offer(body) | Ask::Submit(body) | Ask::Rpc(body) | Ask::CallAt(body) | Ask::Faucet(body) => Some(body.clone()),
             _ => None,
         }
     }
@@ -291,6 +294,7 @@ impl Ask {
             | Ask::AccountNames { .. }
             | Ask::AccountMultisigs { .. }
             | Ask::Rpc(_)
+            | Ask::CallAt(_)
             | Ask::Faucet(_)
             | Ask::Pool
             | Ask::PoolMiner(_)
@@ -730,6 +734,7 @@ mod tests {
             Ask::AccountNames { address: text(), cursor: None },
             Ask::AccountMultisigs { address: text(), cursor: None },
             Ask::Rpc("{}".to_string()),
+            Ask::CallAt("{}".to_string()),
             Ask::Faucet("{}".to_string()),
             Ask::Pool,
             Ask::PoolMiner(text()),

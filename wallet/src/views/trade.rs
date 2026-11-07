@@ -15,7 +15,7 @@ use {
     chainv4::abi::{AbiType, AbiValue, encode_values, evm_address},
     chainv4::crypto::hasher::Hasher,
     chainv4::crypto::secp256k1::keccak,
-    chainv4::dex::{COIN, DexPool, best_route, least_out, shares_worth},
+    chainv4::dex::{COIN, DexPool, Split, best_route, best_split, least_out, shares_worth},
     chainv4::structs::address::Address,
     chainv4::structs::amount::Amount,
     chainv4::structs::hash::HashType,
@@ -109,10 +109,19 @@ pub struct TradeState {
     new_b: String,
     new_amount_a: String,
     new_amount_b: String,
+    /// The fee tier a new pool opens at, in hundredths of a percent: one the chain offers.
+    new_tier: Option<u32>,
     /// The chosen native pool's prices, by height, oldest first.
     chart: Vec<(u64, f64)>,
     syncs: Vec<Value>,
     charted: f64,
+    /// Whether a trade the split router pays more for goes through it, divided between both DEXes.
+    split: bool,
+    /// The chosen native pool's first side's cumulative price, and the block time it was read at,
+    /// at the light client's final block and its tip, by pool share and which: what its
+    /// time-weighted price comes from.
+    twap: HashMap<(String, &'static str), (u256, u64)>,
+    twap_asked: f64,
     trouble: Option<String>,
 }
 
@@ -144,9 +153,13 @@ impl Default for TradeState {
             new_b: String::new(),
             new_amount_a: String::new(),
             new_amount_b: String::new(),
+            new_tier: None,
             chart: Vec::new(),
             syncs: Vec::new(),
             charted: f64::NEG_INFINITY,
+            split: true,
+            twap: HashMap::new(),
+            twap_asked: f64::NEG_INFINITY,
             trouble: None,
         }
     }
@@ -202,6 +215,15 @@ impl TradeState {
         let contract = body["contract"].as_str().unwrap_or_default().to_string();
 
         match (body["function"].as_str(), values(result)) {
+            // A time-weighted price's observations: the first side's cumulative price, and when.
+            (Some("pool"), Some(values)) if body["twap"].is_string() => {
+                let which = if body["twap"] == "then" { "then" } else { "now" };
+                let time = result.as_ref().ok().and_then(|value| value["time"].as_u64());
+
+                if let (Some(price), Some(time), Some(share)) = (values.get(3).and_then(|price| u256::from_str_radix(price, 10).ok()), time, body["share"].as_str()) {
+                    self.twap.insert((share.to_string(), which), (price, time));
+                }
+            }
             (Some("pool_count"), Some(values)) => {
                 self.pool_count = values.first().and_then(|count| count.parse::<u64>().ok()).unwrap_or(0);
                 let count = self.pool_count.min(MAX_POOLS);
@@ -330,7 +352,12 @@ impl TradeState {
 
     /// The pools of the venue shown: the EVM's with WDEV as the coin.
     fn listed(&self) -> Vec<DexPool> {
-        match self.venue {
+        self.listed_on(self.venue)
+    }
+
+    /// One DEX's pools: the native one's, or the EVM's in the coin's terms, WDEV as the coin.
+    fn listed_on(&self, venue: Venue) -> Vec<DexPool> {
+        match venue {
             Venue::Native => self.pools.iter().flatten().cloned().collect(),
             Venue::Evm => {
                 let coin = |token: [u8; 20]| match Some(token) == self.evm.wdev {
@@ -752,6 +779,7 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
         let amount = parse_amount(ctx, &state.from, &state.amount);
         let same = state.from == to;
         let route = amount.filter(|_| !same).and_then(|amount| best_route(pools, &state.from, &to, amount));
+        let split = amount.filter(|_| !same).and_then(|amount| split_of(ctx, state, &to, amount, route.as_ref().map(|route| route.out)));
         let held = held_of(ctx, state.sender, &state.from);
         let wide = ui.available_width() >= SIDE_BY_SIDE;
         let mut flip = false;
@@ -857,29 +885,90 @@ fn trade(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, pools: &[DexPool], prep
             ui.add_space(6.0);
         }
 
+        // Divided between both DEXes, by the split router, when that pays more than this one alone.
+        if let Some((split, _)) = &split {
+            let part = |part: &Option<(u256, chainv4::dex::TradeRoute)>| shown(ctx, &from, part.as_ref().map_or(u256::ZERO, |(amount, _)| *amount));
+            ui.checkbox(&mut state.split, format!("Divide it between both DEXes: {} for {} natively and {} on the EVM", shown(ctx, &to, split.out), part(&split.native), part(&split.evm)));
+
+            if state.split {
+                detail(ui, &palette, "Minimum received", |ui| {
+                    ui.label(RichText::new(shown(ctx, &to, least_out(split.out, slippage(state)))).color(palette.ink));
+                });
+            }
+
+            ui.add_space(6.0);
+        }
+
+        let split = split.filter(|_| state.split);
+
         slippage_line(ui, &palette, state);
         ui.add_space(10.0);
 
-        let (said, goes) = action(amount.is_some(), same, route.is_some());
+        let (said, goes) = action(amount.is_some(), same, route.is_some() || split.is_some());
         let me = state.sender;
         let token = from != COIN;
 
-        if let (Some(amount), Some(me), Some(_), true) = (amount, me, &route, token) {
-            ui.add(egui::Label::new(RichText::new(format!("The DEX can only move {} once this account lets it: a transaction of its own, then the trade.", symbol(ctx, &from))).small().color(palette.muted)).wrap());
+        if let (Some(amount), Some(me), true, true) = (amount, me, route.is_some() || split.is_some(), token) {
+            let who = if split.is_some() { "split router" } else { "DEX" };
+            ui.add(egui::Label::new(RichText::new(format!("The {who} can only move {} once this account lets it: a transaction of its own, then the trade.", symbol(ctx, &from))).small().color(palette.muted)).wrap());
 
-            if chainv4_ui::widgets::quiet_wide(ui, &palette, &format!("1. Let the DEX move {}", symbol(ctx, &from))).clicked() {
-                *prepared = approve(ctx, state.venue, me, &from, amount);
+            if chainv4_ui::widgets::quiet_wide(ui, &palette, &format!("1. Let the {who} move {}", symbol(ctx, &from))).clicked() {
+                *prepared = match &split {
+                    Some((_, router)) => approve_to(ctx, me, &from, amount, *router),
+                    None => approve(ctx, state.venue, me, &from, amount),
+                };
             }
         }
 
         let label = if goes && token { "2. Trade" } else { said };
 
         if chainv4_ui::widgets::primary_wide(ui, &palette, label, goes && me.is_some()).clicked()
-            && let (Some(amount), Some(me), Some(route)) = (amount, me, &route)
+            && let (Some(amount), Some(me)) = (amount, me)
         {
-            *prepared = swap(ctx, state, me, amount, to, route, least_out(route.out, slippage(state)));
+            *prepared = match (&split, &route) {
+                (Some((split, router)), _) => split_swap(ctx, state, me, amount, to, split, *router),
+                (None, Some(route)) => swap(ctx, state, me, amount, to, route, least_out(route.out, slippage(state))),
+                (None, None) => None,
+            };
         }
     });
+}
+
+/// The best division of a trade between both DEXes, with the split router to send it through:
+/// only one the chain's directory names, only one that uses both, and only one that pays more than
+/// the DEX shown pays alone.
+fn split_of(ctx: &Ctx, state: &TradeState, to: &Address, amount: u256, alone: Option<u256>) -> Option<(Split, Address)> {
+    let router = ctx.chain.announced().and_then(|directory| directory.dex_split)?;
+    let pools = [state.listed_on(Venue::Native), state.listed_on(Venue::Evm)].concat();
+    // Both listings name the coin and ERC-20s alike, so an asset is its own on the EVM.
+    let split = best_split(&pools, &state.from, to, amount, |asset| (*asset == COIN || matches!(asset, Address::Evm(_))).then_some(*asset))?;
+
+    (split.native.is_some() && split.evm.is_some() && alone.is_none_or(|alone| split.out > alone)).then_some((split, router))
+}
+
+/// The trade divided between both DEXes, through the split router, router.lua.
+fn split_swap(ctx: &Ctx, state: &TradeState, me: Address, amount: u256, to: Address, split: &Split, router: Address) -> Option<Prepared> {
+    let wdev = state.evm.wdev?;
+    let token = |asset: &Address| match asset {
+        asset if *asset == COIN => Some(wdev),
+        Address::Evm(token) => Some(*token),
+        _ => None,
+    };
+    let least = least_out(split.out, slippage(state));
+    let args = chainv4::dex::split_args(split, state.from, to, amount, least, ctx.now + ctx.settings.trade_deadline_ms(), token)?;
+    let coin = if state.from == COIN { amount } else { u256::ZERO };
+
+    Some(native_call(me, router, "route", args, coin, format!("Trade {} for {}, on both DEXes", symbol(ctx, &state.from), symbol(ctx, &to))))
+}
+
+/// Letting a contract move an asset: a token by its approve, an ERC-20 at the contract's EVM form.
+fn approve_to(ctx: &Ctx, me: Address, asset: &Address, amount: u256, spender: Address) -> Option<Prepared> {
+    let what = format!("Let the split router move {}", symbol(ctx, asset));
+
+    match asset {
+        Address::Evm(token) => Some(evm_call(me, *token, approve_input(evm_address(&spender), amount), u256::ZERO, what)),
+        token => Some(native_call(me, *token, "approve", vec![TxCallArgumentType::Address(spender), TxCallArgumentType::U256(amount)], u256::ZERO, what)),
+    }
 }
 
 /// Approving the DEX to move an asset: a token by its approve, an ERC-20 at the DEX's EVM
@@ -1222,6 +1311,23 @@ fn create(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, prepared: &mut Option<
                 return;
             }
 
+            // The tier it charges, for good: one of those the chain offers, one pool to a pair and tier.
+            let offered = ctx.dex_settings.offered();
+            let tier = state.new_tier.filter(|tier| offered.contains(tier)).unwrap_or_else(|| opening_tier(&ctx.dex_settings));
+            let taken: Vec<u32> = state.listed().iter().filter(|pool| (pool.a, pool.b) == (a, b) || (pool.a, pool.b) == (b, a)).map(|pool| pool.fee_bps).collect();
+            super::row(ui, &palette, "Fee tier", |ui| {
+                let mut chosen = tier;
+                let options: Vec<(u32, String)> = offered.iter().map(|tier| (*tier, percent_of(*tier))).collect();
+                let labelled: Vec<(u32, &str)> = options.iter().map(|(tier, label)| (*tier, label.as_str())).collect();
+                theme::segmented(ui, &palette, &mut chosen, &labelled);
+                state.new_tier = Some(chosen);
+            });
+
+            if taken.contains(&tier) {
+                ui.colored_label(palette.warn, format!("A pool of these two at {} is open already: add to it under Pools, or pick another tier.", percent_of(tier)));
+                return;
+            }
+
             super::row(ui, &palette, "Opens at", |ui| {
                 let price = amount_b.as_f64() / 10f64.powi(i32::from(decimals(ctx, &b))) / (amount_a.as_f64() / 10f64.powi(i32::from(decimals(ctx, &a))));
                 ui.label(format!("1 {} = {price:.6} {}", symbol(ctx, &a), symbol(ctx, &b)));
@@ -1234,7 +1340,7 @@ fn create(ui: &mut Ui, ctx: &Ctx, state: &mut TradeState, prepared: &mut Option<
                 }
 
                 if theme::primary(ui, &palette, "Open it", true).clicked() {
-                    *prepared = add(ctx, state, me, &a, &b, opening_tier(&ctx.dex_settings), amount_a, amount_b);
+                    *prepared = add(ctx, state, me, &a, &b, tier, amount_a, amount_b);
                 }
             });
         });
@@ -1255,6 +1361,7 @@ fn chart(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool) {
     }
 
     state.chart = prices(&state.syncs, pool, decimals(ctx, &pool.a), decimals(ctx, &pool.b));
+    twap(ui, ctx, state, pool, time);
 
     if state.chart.len() < 2 {
         ui.label(RichText::new("Its price shows here once it has moved, on a node that keeps an event index.").small().color(palette.muted));
@@ -1276,6 +1383,39 @@ fn chart(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool) {
         .collect();
     painter.add(egui::Shape::line(points, egui::Stroke::new(1.5, palette.ink)));
     ui.label(RichText::new(format!("{low:.6} to {high:.6} {} per {}, over the last {} changes", symbol(ctx, &pool.b), symbol(ctx, &pool.a), state.chart.len())).small().color(palette.muted));
+}
+
+/// The pool's time-weighted price, from its cumulative prices read at the light client's final
+/// block and at its tip: what one side was worth in the other on average between them, which one
+/// block's trades cannot move far, as its last price they can.
+fn twap(ui: &mut Ui, ctx: &mut Ctx, state: &mut TradeState, pool: &DexPool, time: f64) {
+    let palette = *ctx.palette;
+    let (Some(dex), Some((tip, final_height))) = (dex(ctx), ctx.chain.following()) else {
+        return;
+    };
+
+    if time - state.twap_asked > ctx.settings.pace().every(ASK_EVERY) {
+        state.twap_asked = time;
+        // At least a few blocks apart: under no finality, a hundred back.
+        let then = if final_height + 10 <= tip { final_height } else { tip.saturating_sub(100) };
+        let args = json!([{ "type": "address", "value": pool.a.to_string() }, { "type": "address", "value": pool.b.to_string() }, { "type": "i64", "value": pool.fee_bps.to_string() }]);
+
+        for (which, height) in [("then", then), ("now", tip)] {
+            ctx.node.ask(Ask::Call(json!({ "contract": dex.to_string(), "function": "pool", "args": args, "block": height, "purpose": "trade", "twap": which, "share": pool.share.to_string() }).to_string()));
+        }
+    }
+
+    let share = pool.share.to_string();
+    let (Some((then, from)), Some((now, to))) = (state.twap.get(&(share.clone(), "then")), state.twap.get(&(share, "now"))) else {
+        return;
+    };
+    let Some(average) = chainv4::dex::twap(*then, *now, to.saturating_sub(*from)) else {
+        return;
+    };
+    let scaled = average * 10f64.powi(i32::from(decimals(ctx, &pool.a)) - i32::from(decimals(ctx, &pool.b)));
+
+    ui.label(RichText::new(format!("Time-weighted over the last {}: 1 {} = {} {}", format::span(to.saturating_sub(*from)), symbol(ctx, &pool.a), rate_words(scaled), symbol(ctx, &pool.b))).small().color(palette.soft))
+        .on_hover_text("Its price on average between two blocks, from the pool's own cumulative prices: one block's trades move it little.");
 }
 
 /// A pool's prices from Sync events, newest first as the node gives them, oldest first after:
@@ -1320,6 +1460,7 @@ fn native_call(from: Address, to: Address, function: &str, args: Vec<TxCallArgum
         what,
         about: to.to_string(),
         coin,
+        functions: vec![function.to_string()],
     }
 }
 
@@ -1331,6 +1472,7 @@ fn evm_call(from: Address, to: [u8; 20], input: Vec<u8>, coin: u256, what: Strin
         what,
         about: to_hex(&to),
         coin,
+        functions: Vec::new(),
     }
 }
 

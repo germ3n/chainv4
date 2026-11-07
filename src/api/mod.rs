@@ -2284,6 +2284,14 @@ async fn account(Shared(api): Shared<Api>, Path(address): Path<String>, Query(qu
     let mut answer = json::account(&address, &account);
     answer["height"] = header.height.into();
 
+    // An Ethereum account's EIP-7702 delegation: the code it runs as its own, while it has one.
+    #[cfg(feature = "evm")]
+    if let Address::Secp256k1(bytes) = address
+        && let Some(to) = crate::vm::evm::delegated_to(&state, bytes)?
+    {
+        answer["delegated_to"] = Address::Evm(to).to_string().into();
+    }
+
     // Its primary name, for a reverse lookup, while that name still resolves to it.
     #[cfg(feature = "names")]
     if let Some(names) = &api.rules.names {
@@ -3013,6 +3021,9 @@ async fn call(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     }
 
     let mut answer = json::call(&outcome);
+    // The block it ran at: what a time-weighted price, read from two, divides by.
+    answer["height"] = header.height.into();
+    answer["time"] = header.timestamp.into();
 
     if let Some(proven) = proven {
         answer["proven"] = proven;
@@ -3182,6 +3193,8 @@ async fn call_evm(api: Api, body: Value) -> Answer {
     .await
     .map_err(|err| ApiError::Unavailable(format!("the call stopped: {err}")))??;
     let mut answer = evm_answer(&ran);
+    answer["height"] = header.height.into();
+    answer["time"] = header.timestamp.into();
 
     if let Some(proven) = proven {
         answer["proven"] = proven;

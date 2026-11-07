@@ -449,6 +449,11 @@ fn a_pool_sums_its_prices_over_time_for_a_time_weighted_price() {
     // At 2 tokens a coin all along, the average is exactly that, and its inverse.
     assert_eq!((coin - first_coin) / elapsed, one * u256::from(2u64));
     assert_eq!((token_price - first_token) / elapsed, one / u256::from(2u64));
+
+    // As the apps work it out, from the two observations and the time between them.
+    assert_eq!(crate::dex::twap(first_coin, coin, time - first_time), Some(2.0));
+    assert_eq!(crate::dex::twap(first_token, token_price, time - first_time), Some(0.5));
+    assert_eq!(crate::dex::twap(first_coin, coin, 0), None);
 }
 
 const BORROWER: &str = r#"
@@ -554,6 +559,16 @@ fn the_router_divides_one_trade_between_both_dexes_for_more_than_either_pays_alo
     let route = |least: u128| {
         vec![at(x), at(y), wide(200_000), wide(least), TxCallArgumentType::Nil, wide(100_000), mid(), TxCallArgumentType::Nil, TxCallArgumentType::Nil, wide(100_000), TxCallArgumentType::Bytes(evm_route.clone())]
     };
+    // What the CLI and the wallet send for it: best_split's division of these pools, as split_args
+    // writes it, the very arguments above but for its deadline.
+    let pool = |venue| crate::dex::DexPool { a: x, b: y, fee_bps: 30, reserve_a: u256::new(1_000_000), reserve_b: u256::new(1_000_000), share: Address::Contract([9; 32]), venue };
+    let pools = [pool(crate::dex::Venue::Native), pool(crate::dex::Venue::Evm)];
+    let split = crate::dex::best_split(&pools, &x, &y, u256::new(200_000), |asset| matches!(asset, Address::Evm(_)).then_some(*asset)).unwrap();
+    let mut args = crate::dex::split_args(&split, x, y, u256::new(200_000), u256::new(halves), 0, |asset| Some(crate::abi::evm_address(asset))).unwrap();
+    assert_eq!(split.out, u256::new(halves));
+    args[4] = TxCallArgumentType::Nil;
+    assert_eq!(args, route(halves));
+
     refused(&call(&mut chain, router, "route", 0, route(halves + 1)), "the price moved");
     let before = erc20_balance(&mut chain, y, &me);
     let routed = call(&mut chain, router, "route", 0, route(halves));

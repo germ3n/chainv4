@@ -84,6 +84,9 @@ pub struct Prepared {
     /// What it is for, where a transfer shows whom it pays: the name.
     pub about: String,
     pub coin: u256,
+    /// The functions it may call, by name, for MetaMask to show each call by: the names its calls'
+    /// hashes are looked up among, with those the history knows.
+    pub functions: Vec<String>,
 }
 
 /// A transaction built and not yet sent.
@@ -103,6 +106,9 @@ struct Draft {
     what: String,
     /// What it moves of the coin, beside the fee: what the review checks the balance for.
     coin: u256,
+    /// The names of the calls its typed form writes out, for MetaMask to show them by: None when
+    /// this wallet cannot name one.
+    functions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -655,6 +661,9 @@ fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx
         body["tip"] = tip.into();
     }
 
+    // The names its calls were prepared with, and those the history knows.
+    let known: Vec<String> = state.prepared.iter().flat_map(|prepared| prepared.functions.iter().cloned()).chain(crate::history::KNOWN.map(str::to_string)).collect();
+    let functions = chainv4::crypto::eip712::name_calls(&tx, &known);
     let draft = Draft {
         from,
         signer,
@@ -664,6 +673,7 @@ fn finish(ctx: &Ctx, state: &SendState, from: Address, signer: PublicKey, tx: Tx
         token,
         what,
         coin,
+        functions,
     };
 
     Ok((draft, body.to_string()))
@@ -760,12 +770,14 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
         let collection = named_collection(ctx, &draft.tx);
         let key = ctx.holders.iter().find_map(|holder| holder.key(&draft.from));
         let by_metamask = ctx.holders.iter().any(|holder| holder.by_metamask() && holder.addresses().contains(&draft.from));
-        // It would have to sign one opaque hash for all the steps, which the chain refuses anyway.
-        let metamask_refuses = key.is_none() && by_metamask && steps.is_some();
+        // A multisig's batch would be one opaque hash, and a call it cannot name would be its
+        // hash: the chain refuses both.
+        let multisig_batch = !matches!(draft.tx, Tx::Batch { .. }) && steps.is_some();
+        let metamask_refuses = key.is_none() && by_metamask && (multisig_batch || draft.functions.is_none());
 
         if metamask_refuses {
             ui.add_space(6.0);
-            ui.colored_label(palette.bad, crate::metamask::NO_BATCH);
+            ui.colored_label(palette.bad, if multisig_batch { crate::metamask::NO_BATCH } else { crate::metamask::NO_NAME });
         }
 
         ui.add_space(12.0);
@@ -784,7 +796,8 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState, draft: Draft, fee: 
                     (None, genesis) if by_metamask => {
                         let signed = Signed::default();
                         let (inbox, wake) = (signed.clone(), ctx.wake.clone());
-                        let typed = crate::metamask::typed_data(&draft.tx, draft.nonce, &fee, &genesis);
+                        let functions = draft.functions.clone().unwrap_or_default();
+                        let typed = crate::metamask::typed_data(&draft.tx, &functions, draft.nonce, &fee, &genesis).unwrap_or_default();
                         crate::metamask::sign(ethereum(&draft.from), typed, move |answer| {
                             *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
                             wake.request_repaint();
@@ -897,9 +910,10 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
     let answer = signed.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
 
     if let Some(answer) = answer {
-        let hash = chainv4::crypto::eip712::transaction_digest(&draft.tx, draft.nonce, fee, genesis);
+        let functions = draft.functions.clone().unwrap_or_default();
+        let hash = chainv4::crypto::eip712::transaction_digest(&draft.tx, &functions, draft.nonce, fee, genesis).ok_or_else(|| crate::metamask::NO_NAME.to_string());
         let checked = answer
-            .and_then(|signature| crate::metamask::key_of(&hash, &signature, &ethereum(&draft.from)))
+            .and_then(|signature| crate::metamask::key_of(&hash?, &signature, &ethereum(&draft.from)))
             .and_then(|(key, low)| {
                 let signed = SignedTx {
                     tx: draft.tx.clone(),
@@ -907,6 +921,7 @@ fn metamask(ui: &mut Ui, ctx: &mut Ctx, state: &mut SendState) {
                     fee: *fee,
                     signer: PublicKey::Secp256k1(key),
                     signature: chainv4::crypto::keypair::Signature::Secp256k1Eip712(low),
+                    functions: functions.clone(),
                 };
                 signed.verify_on(genesis).map_err(|err| format!("MetaMask's signature does not hold: {err}"))?;
 
@@ -1071,7 +1086,9 @@ mod tests {
         let from = holders[0].addresses()[0];
         let signer = holders[0].public(&from).unwrap();
         let tx = Tx::Batch { steps: steps(from) };
-        let draft = Draft { from, signer, to: "its steps".to_string(), tx, nonce: 2, token: None, what: "A batch of 2 steps".to_string(), coin: u256::ZERO };
+        // Its calls named as finish names them: by what the history knows.
+        let functions = chainv4::crypto::eip712::name_calls(&tx, &crate::history::KNOWN.map(str::to_string));
+        let draft = Draft { from, signer, to: "its steps".to_string(), tx, nonce: 2, token: None, what: "A batch of 2 steps".to_string(), coin: u256::ZERO, functions };
         let fee = FeeOffer { gas_limit: 50_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO };
         let mut state = SendState { step: Step::Review { draft, fee, warning: None }, ..SendState::default() };
         let (drawn, _, shown) = crate::views::drawn::following_shown(book, &mut holders, (width, 20_000.0), |ui, ctx| show(ui, ctx, &mut state));
@@ -1110,7 +1127,7 @@ mod tests {
         let from = holders[0].addresses()[0];
         let signer = holders[0].public(&from).unwrap();
         let tx = Tx::Transfer { from, to: from, amount: Amount::U128(1) };
-        let draft = Draft { from, signer, to: "to someone".to_string(), tx, nonce: 2, token: None, what: "1 DEV".to_string(), coin: u256::ONE };
+        let draft = Draft { from, signer, to: "to someone".to_string(), tx, nonce: 2, token: None, what: "1 DEV".to_string(), coin: u256::ONE, functions: Some(Vec::new()) };
         let fee = FeeOffer { gas_limit: 26_250, max_price: u256::new(2_000), tip: u256::ZERO };
 
         for size in SCREENS {
@@ -1166,7 +1183,7 @@ mod tests {
         let from = holders[0].addresses()[0];
         let signer = holders[0].public(&from).unwrap();
         let tx = Tx::Transfer { from, to: from, amount: Amount::U128(1) };
-        let draft = Draft { from, signer, to: "to someone".to_string(), tx, nonce: 2, token: None, what: "1 DEV".to_string(), coin: u256::ONE };
+        let draft = Draft { from, signer, to: "to someone".to_string(), tx, nonce: 2, token: None, what: "1 DEV".to_string(), coin: u256::ONE, functions: Some(Vec::new()) };
         let fee = FeeOffer { gas_limit: 26_250, max_price: u256::new(2_000), tip: u256::ZERO };
         let world = || {
             let mut world = World::default();
@@ -1209,15 +1226,25 @@ mod tests {
     }
 
     #[test]
-    fn an_account_metamask_holds_is_told_it_cannot_sign_a_batch_and_is_not_asked_to() {
+    fn an_account_metamask_holds_signs_a_batch_by_its_steps_but_not_a_call_it_cannot_name() {
         use crate::vault::{Book, Source, StoredAccount};
 
         let key = chainv4::crypto::keypair::Keypair::generate(chainv4::crypto::keypair::KeyType::Secp256k1).unwrap().public();
-        let mut book = Book { accounts: vec![StoredAccount { name: "MetaMask".to_string(), source: Source::MetaMask { key: key.to_string() } }], ..Book::default() };
-        let shown = reviewed(&mut book, 360.0, some_steps);
+        let book = || Book { accounts: vec![StoredAccount { name: "MetaMask".to_string(), source: Source::MetaMask { key: key.to_string() } }], ..Book::default() };
+        let shown = reviewed(&mut book(), 360.0, some_steps);
 
-        assert!(shown.iter().any(|(text, _)| text.contains("MetaMask would show a batch as one opaque hash")), "{shown:?}");
+        assert!(!shown.iter().any(|(text, _)| text.contains("opaque hash") || text.contains("does not know the name")), "{shown:?}");
         assert!(shown.iter().any(|(text, _)| text == "Sign with MetaMask"));
+
+        // A call to a function this wallet knows no name for would show as its hash: refused.
+        let mystery = |from: Address| {
+            let call = Tx::ContractCall { to: Address::Contract([4; 32]), func: chainv4::crypto::hasher::Hasher::digest(chainv4::structs::hash::HashType::Xxh3_64, b"some_function_unknown_here"), amount: Amount::U128(0), data: Vec::new() };
+
+            [some_steps(from), vec![call]].concat()
+        };
+        let shown = reviewed(&mut book(), 360.0, mystery);
+
+        assert!(shown.iter().any(|(text, _)| text.contains("does not know the name")), "{shown:?}");
     }
 
     #[test]
@@ -1227,7 +1254,7 @@ mod tests {
         assert!(!state.take_batch_sent());
 
         let from = Address::Ed25519([2; 32]);
-        let draft = Draft { from, signer: chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public(), to: "its steps".to_string(), tx: Tx::Batch { steps: Vec::new() }, nonce: 2, token: None, what: "A batch".to_string(), coin: u256::ZERO };
+        let draft = Draft { from, signer: chainv4::crypto::keypair::Keypair::from_seed([7; 32]).public(), to: "its steps".to_string(), tx: Tx::Batch { steps: Vec::new() }, nonce: 2, token: None, what: "A batch".to_string(), coin: u256::ZERO, functions: Some(Vec::new()) };
         let ask = Ask::Submit("{}".to_string());
         state.step = Step::Sending { draft: draft.clone(), ask: ask.clone() };
 
@@ -1246,7 +1273,7 @@ mod tests {
         use chainv4::structs::address::Address;
 
         let mut state = SendState { from: Some(Address::Ed25519([1; 32])), ..SendState::default() };
-        state.prepare(Prepared { from: Address::Ed25519([2; 32]), tx: Tx::ClearVote { version: 3, change: chainv4::governance::Change::Name("x".to_string()) }, what: "Clear a vote".to_string(), about: String::new(), coin: u256::ZERO });
+        state.prepare(Prepared { from: Address::Ed25519([2; 32]), tx: Tx::ClearVote { version: 3, change: chainv4::governance::Change::Name("x".to_string()) }, what: "Clear a vote".to_string(), about: String::new(), coin: u256::ZERO, functions: Vec::new() });
 
         assert_eq!(state.from, Some(Address::Ed25519([2; 32])), "not whichever the form had picked");
     }
@@ -1333,7 +1360,7 @@ mod tests {
         }
 
         let tx = Tx::ContractCall { to: collection, func: Hasher::digest(HashType::Xxh3_64, b"transfer"), amount: Amount::U128(0), data };
-        let draft = Draft { from, signer, to: collection.to_string(), tx, nonce: 2, token: None, what: "Send NFT #42".to_string(), coin: u256::ZERO };
+        let draft = Draft { from, signer, to: collection.to_string(), tx, nonce: 2, token: None, what: "Send NFT #42".to_string(), coin: u256::ZERO, functions: Some(Vec::new()) };
         let fee = FeeOffer { gas_limit: 50_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO };
         let mut state = SendState { step: Step::Review { draft, fee, warning: None }, ..SendState::default() };
 

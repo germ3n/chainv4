@@ -382,6 +382,7 @@ fn earnings(ui: &mut Ui, ctx: &mut Ctx, from: &Address, claim: Option<&Result<Va
                         what: "Claim pool earnings".to_string(),
                         about: format!("{} from the pool's escrow", ctx.amount(None, &claimable.to_string())),
                         coin: u256::ZERO,
+                        functions: Vec::new(),
                     });
                 }
 
@@ -675,6 +676,7 @@ fn kept_claims(ui: &mut Ui, ctx: &mut Ctx, state: &mut MiningState, from: &Addre
                     what: "Claim pool earnings".to_string(),
                     about: format!("{} from the pool's escrow, by a claim kept on this device", ctx.amount(None, &claimable.to_string())),
                     coin: u256::ZERO,
+                    functions: Vec::new(),
                 });
             }
 

@@ -1991,6 +1991,25 @@ fn takes_signed_authorizations(code: Code) {
     let permit = [address(alice.public().address()), address(bob), amount(300), time(5_000)];
     let message = text(at(relayer, "permit_message", &permit, 1_000));
     assert!(message.starts_with("chainv4 token permit\nchain: ") && message.contains("\nnonce: 0\ndeadline: 5000"), "{message}");
+
+    // The wallet writes the same text from the terms alone, and signs and sends it as the token takes it.
+    #[cfg(feature = "json")]
+    {
+        use crate::registry::tokens::authorization::{SignedAuthorization, TokenAuthorization};
+
+        let chain: u64 = message.lines().nth(1).and_then(|line| line.strip_prefix("chain: ")).unwrap().parse().unwrap();
+        let terms = TokenAuthorization::Permit { token, owner: alice.public().address(), spender: bob, amount: u256::new(300), nonce: u256::ZERO, deadline: 5_000 };
+
+        assert_eq!(terms.message(chain), message);
+        assert_eq!(terms.message_call().1, permit);
+
+        let signed = SignedAuthorization::sign(terms, &alice, chain).unwrap();
+        assert_eq!(signed.check(chain), Ok(()));
+        let crate::structs::tx::Tx::ContractCall { data, .. } = signed.call() else { panic!("a call") };
+        // On a copy of state, so the permit below still finds the nonce it signed.
+        let scratch = World { state: Arc::new(State::new(world.state.clone())), vm: world.vm.clone(), nonce: world.nonce };
+        assert!(scratch.call_at(relayer, token, "permit", &data, 0, 1_000).result.is_ok(), "the token takes what the wallet signed");
+    }
     let (key, signature) = signed_with(&alice, message.as_bytes());
     let signed = [&permit[..], &[key.clone(), signature.clone()]].concat();
 
@@ -2009,6 +2028,17 @@ fn takes_signed_authorizations(code: Code) {
     let nonce = TxCallArgumentType::Bytes(vec![7; 32]);
     let transfer = [address(dave.public().address()), address(bob), amount(250), time(1_000), time(9_000), nonce.clone()];
     let message = text(at(relayer, "transfer_message", &transfer, 2_000));
+
+    #[cfg(feature = "json")]
+    {
+        use crate::registry::tokens::authorization::TokenAuthorization;
+
+        let chain: u64 = message.lines().nth(1).and_then(|line| line.strip_prefix("chain: ")).unwrap().parse().unwrap();
+        let terms = TokenAuthorization::Transfer { token, from: dave.public().address(), to: bob, amount: u256::new(250), valid_after: 1_000, valid_before: 9_000, nonce: [7; 32] };
+
+        assert_eq!(terms.message(chain), message);
+        assert_eq!(terms.message_call().1, transfer);
+    }
     assert!(message.ends_with(&format!("valid after: 1000\nvalid before: 9000\nnonce: 0x{}", "07".repeat(32))), "{message}");
     let (key, signature) = signed_with(&dave, message.as_bytes());
     let signed = [&transfer[..], &[key, signature]].concat();

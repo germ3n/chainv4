@@ -229,13 +229,14 @@ else could register first:
 | `evm_gateways` | `Gateway.sol` on each EVM chain: `{"chain_id": 1, "gateway": "0x…"}`, in the order of their ids, each chain once, 32 at most. |
 | `swap` | The [swap contract](swaps.md#chainv4s-side-the-swap-contract) new offers use. |
 | `dex`, `dex_router` | The native [DEX](dex.md), and the EVM DEX's router on this chain's EVM, `0x…`. |
+| `dex_split` | The split router, [router.lua](dex.md#across-both-dexes-routerlua), which divides one trade between both DEXes. Left out of a genesis or vote written before it, none. |
 | `nft_factory` | The [NFT factory](nft-standard.md) new collections are made with. |
 
 Each is `null` while there is none. Genesis may name it (`directory`, see [Genesis](genesis.md)),
 and a change replaces all of it:
 
 ```sh
-chainv4 send --key member.key vote-change --vote yes --directory '{"gateway":"contract:0x…","btc_gateway":"contract:0x…","evm_gateways":[{"chain_id":11155111,"gateway":"0x…"}],"swap":"contract:0x…","dex":"contract:0x…","dex_router":"0x…","nft_factory":"contract:0x…"}'
+chainv4 send --key member.key vote-change --vote yes --directory '{"gateway":"contract:0x…","btc_gateway":"contract:0x…","evm_gateways":[{"chain_id":11155111,"gateway":"0x…"}],"swap":"contract:0x…","dex":"contract:0x…","dex_router":"0x…","dex_split":"contract:0x…","nft_factory":"contract:0x…"}'
 ```
 
 - **One state entry,** `change:directory` in the validators column, holds the one in force,

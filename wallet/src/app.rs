@@ -865,6 +865,12 @@ impl Wallet {
                 (Ask::Rpc(body), _) => self.views.dapp.answered(body, &result),
                 #[cfg(feature = "dex")]
                 (Ask::Named { .. }, _) => self.views.trade.events(&result),
+                #[cfg(feature = "nft")]
+                (Ask::Logs { .. }, _) => {
+                    if let Some(next) = self.views.nfts.logs(&ask, &result) {
+                        self.node.ask(next);
+                    }
+                }
                 (Ask::Faucet(_), _) => self.views.faucet.answered(&ask, &result),
                 (Ask::PoolClaim(_) | Ask::Pool(_) | Ask::Claims { .. } | Ask::Mining, _) => self.views.mining.answered(&ask, &result),
                 (Ask::Governance | Ask::GovernanceHistory { .. } | Ask::GovernanceWeight(_), _) => self.views.governance.answered(&ask, &result),

@@ -474,6 +474,9 @@ pub struct Account {
     /// Its primary name, such as alice.dev, on a chain with names.
     #[serde(default)]
     pub name: Option<String>,
+    /// An Ethereum account's EIP-7702 delegation: the contract whose code it runs as its own.
+    #[serde(default)]
+    pub delegated_to: Option<String>,
 }
 
 /// GET /names/{name}: a name at the tip.

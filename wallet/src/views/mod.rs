@@ -3,6 +3,7 @@
 
 mod accounts;
 mod activity;
+mod authorize;
 mod batch;
 #[cfg(feature = "bridge")]
 pub mod bridge;
@@ -59,6 +60,9 @@ pub enum Page {
     Send,
     /// Several steps sent as one transaction, all or nothing.
     Batch,
+    /// A token's signed authorizations: an allowance or a transfer signed for someone else to
+    /// send, and sending one signed for this account.
+    Authorize,
     Receive,
     Activity,
     Names,
@@ -104,6 +108,7 @@ pub fn nav(role: Role) -> &'static [(Page, &'static str)] {
             (Page::Overview, "Overview"),
             (Page::Send, "Send"),
             (Page::Batch, "Batch"),
+            (Page::Authorize, "Authorize"),
             (Page::Receive, "Receive"),
             (Page::Activity, "Activity"),
             #[cfg(feature = "nft")]
@@ -134,7 +139,7 @@ const SIGNER_PAGES: &[(Page, &str)] = &[(Page::Sign, "Sign"), (Page::Pair, "Pair
 pub fn groups(role: Role) -> &'static [(&'static str, &'static [(Page, &'static str)])] {
     match role {
         Role::Online => &[
-            ("Wallet", &[(Page::Overview, "Overview"), (Page::Send, "Send"), (Page::Receive, "Receive"), (Page::Activity, "Activity"), (Page::Batch, "Batch")]),
+            ("Wallet", &[(Page::Overview, "Overview"), (Page::Send, "Send"), (Page::Receive, "Receive"), (Page::Activity, "Activity"), (Page::Batch, "Batch"), (Page::Authorize, "Authorize")]),
             (
                 "Markets",
                 &[
@@ -294,6 +299,7 @@ pub struct States {
     reading: reading::ReadingState,
     pub send: send::SendState,
     batch: batch::BatchState,
+    authorize: authorize::AuthorizeState,
     activity: activity::ActivityState,
     names: names::NamesState,
     pub multisig: multisig::MultisigState,
@@ -365,6 +371,10 @@ impl States {
             return;
         }
 
+        if self.authorize.answered(ask, result) {
+            return;
+        }
+
         self.contracts.answered(ask, result, kept);
     }
 
@@ -428,6 +438,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, states: &mut States) {
         }
         Page::Send => send::show(ui, ctx, &mut states.send),
         Page::Batch => batch::show(ui, ctx, &mut states.batch, &mut states.send, &mut states.multisig),
+        Page::Authorize => authorize::show(ui, ctx, &mut states.authorize, &mut states.send),
         Page::Receive => receive::show(ui, ctx, &mut states.receive),
         Page::Activity => activity::show(ui, ctx, &mut states.activity),
         Page::Names => names::show(ui, ctx, &mut states.names, &mut states.send),

@@ -89,6 +89,8 @@ Each summary has:
 - its `id`, `sender`, `nonce` and `signer`;
 - its `fee` offer: `gas_limit`, `max_price`, `tip`;
 - its `signature` and its `tx`;
+- `functions`, for an [EIP-712 typed signature](crypto.md#typed-data-eip-712) that names its
+  calls, the names it showed them by, in order;
 - its `receipt` when the block is on the main chain.
 
 **Each `tx`** has a `type` and that type's fields:
@@ -103,8 +105,11 @@ Each summary has:
   `key`, its `bitcoin` xpub and its `evm` address or `null`, `threshold` and `testnet`;
   `approve_multisig` with `account`, `nonce`, `fee` and `tx`; `withdraw_multisig` with `account`
   and `proposal`;
-- `ethereum`, with its signed bytes as `raw`, its Ethereum `hash`, and what they say: `kind`, 0, 1
-  or 2, `chain_id`, `to`, `value` and `input`;
+- `ethereum`, with its signed bytes as `raw`, its Ethereum `hash`, and what they say: `kind`, 0, 1,
+  2 or 4, `chain_id`, `to`, `value` and `input`; a type 4 has `authorizations`, each its
+  `authority`, the account that signed it, or `null` for a signature that recovers none, the
+  `address` whose code that account runs from now, `null` for one cleared, its `chain_id` and
+  `nonce`;
 - `name`, with the `name`, without the suffix, and its `action`: a `type` of `register` or `renew`
   with `years`, `transfer` with `to`, `target` with `target`, `text` with `key` and `value`, or
   `subname` with `label` and `owner`; and `primary_name`, with the `name` or `null`;
@@ -229,7 +234,9 @@ One that failed has `status` `failed`, as any failure, so what reads no further 
 nonce 0 and balance 0. `?block=` reads at an older main-chain block, by its height or id, while the
 node keeps its state; 404 past that.
 On a chain with [names](names.md), `name` too: the account's primary name with its suffix, such as
-`alice.dev`, while that name resolves to it, or `null`.
+`alice.dev`, while that name resolves to it, or `null`. An Ethereum account an
+[EIP-7702](evm.md#eip-7702-delegations) transaction delegated has `delegated_to`, the contract
+whose code it runs as its own, `evm:0x…`, while it does.
 
 ### `GET /accounts/{address}/txs`
 
@@ -497,7 +504,9 @@ committed state, under the chain's fuel cap. Whatever it writes, sends or emits 
 - its `status`, `returned` with `values` or `failed` with `error`;
 - `fuel_used`;
 - the `events` it would have emitted;
-- its `trace`.
+- its `trace`;
+- the `height` and `time` of the block it ran at, in milliseconds: what a time-weighted price
+  divides by, read at two.
 
 404 for an address that holds no contract. For reading contracts, such as a token's
 `decimals()` or someone's `balance_of`.
@@ -515,8 +524,8 @@ this answer (see [Proven reads](light-client.md#proven-contract-reads)):
 address, 0x and 20 bytes. It runs at the block's own height and time (not the next block's, as
 `eth_call` does) with a gas limit of 30,000,000, so an app running it over the proven entries
 (`vm::run_proven_evm`) gets the same answer; native contracts it calls run at one fuel a gas. It
-answers `status`, `output` in hex or `error` with what a revert returned as `reverted`, and
-`gas_used`; `"prove": true` adds `proven` as above. The apps read ERC-20 balances and NFT owners
+answers `status`, `output` in hex or `error` with what a revert returned as `reverted`,
+`gas_used`, and the block's `height` and `time`; `"prove": true` adds `proven` as above. The apps read ERC-20 balances and NFT owners
 this way. 400 for a `contract` that is not `evm:` or `input` that is not hex.
 
 ### `GET /anchors?from=N&limit=M`
@@ -666,7 +675,7 @@ as it answered at its deploy or last upgrade, each `null` when it exports none.
 `GET /status` also names the [bridges' federation](bridges.md#the-federation) in force, in
 `federation`: its `signers`, `threshold`, depths and `version`, or `null` on a chain with none.
 And the chain's [directory](governance.md#directory), in `directory`: its `gateway`,
-`btc_gateway`, `evm_gateways`, `swap`, `dex`, `dex_router` and `nft_factory`, each `null` while
+`btc_gateway`, `evm_gateways`, `swap`, `dex`, `dex_router`, `dex_split` and `nft_factory`, each `null` while
 there is none, or `null` on a chain without one. Both are state entries,
 `/proofs/validators/{key}` proves them: `change:federation` and `change:directory`, as hex. On a
 chain without governance, `directory_admin` is who sets the directory, or `null` for nobody

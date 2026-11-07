@@ -30,6 +30,22 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, send: &mut super::send::SendState) {
         theme::section_gap(ui);
     }
 
+    // An Ethereum key's account that EIP-7702 delegated runs a contract's code when called: say so,
+    // as proven, since a call to it, or what it signs, may then do what that code says.
+    for address in &addresses {
+        if let Some(proven) = ctx.chain.delegations.get(&address.to_string())
+            && let Some(to) = proven.value
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(format!("{} runs the code of", format::short(&address.to_string()))).small().color(palette.warn));
+                super::address(ui, &palette, &to.to_string());
+                ui.label(RichText::new("as its own, by EIP-7702").small().color(palette.warn));
+                super::assurance(ui, &palette, &proven.assurance);
+            });
+            theme::section_gap(ui);
+        }
+    }
+
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, &ctx.coin.symbol);
         ui.add_space(4.0);

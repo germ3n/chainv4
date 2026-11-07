@@ -1248,7 +1248,9 @@ mod send {
         let refused = send(running.args(step(failing)));
         let anyway = send(SendArgs { anyway: true, ..running.args(step(failing)) });
 
-        // A step no batch holds, one misspelled, none at all, and a typed signature, named at once.
+        // A step no batch holds, one misspelled and none at all, named at once; and one signed as
+        // typed data, which a batch may be now, its steps written out, refused here only for the
+        // key, which is not Ethereum's.
         let not_held = send(running.args(step(r#"{"type":"mint","to":"x","amount":"1"}"#)));
         let misspelled = send(running.args(step(r#"{"type":"burn","amount":"1","amout":"2"}"#)));
         let empty = send(running.args(TxArgs::Batch { file: None, steps: Vec::new() }));
@@ -1260,7 +1262,7 @@ mod send {
         assert!(not_held.unwrap_err().to_string().contains("not mint"));
         assert!(misspelled.unwrap_err().to_string().contains("no amout"));
         assert!(empty.unwrap_err().to_string().contains("needs a step"));
-        assert!(typed.unwrap_err().to_string().contains("EIP-712"));
+        assert!(typed.unwrap_err().to_string().contains("needs a secp256k1 key"), "a batch is not refused for being typed");
 
         let batches: Vec<crate::structs::tx::SignedTx> = (1..=node.chain().tip().height).flat_map(|height| node.chain().block_at(height).unwrap().unwrap().txs).filter(|tx| matches!(tx.tx, Tx::Batch { .. })).collect();
 

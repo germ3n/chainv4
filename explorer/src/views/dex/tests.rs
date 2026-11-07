@@ -69,3 +69,58 @@ fn an_evm_pairs_logs_read_as_trades() {
     let other = event("log", vec![to_hex(&keccak(b"Approval(address,address,uint256)")), words([1, 2, 3, 4])], 7);
     assert!(evm_activity(&pool(), &other).is_none());
 }
+
+#[test]
+fn a_pools_time_weighted_price_comes_from_two_reads_an_hour_apart() {
+    use crate::store::Store;
+    use chainv4::abi::{AbiType, AbiValue, encode_values};
+
+    let mut store = Store::default();
+    // The tip at 7,200; with no block times known, blocks are taken as 2 seconds apart, so the
+    // earlier read is an hour back, at 5,400.
+    store.main.insert(7_000, "0x01".to_string());
+    store.main.insert(7_200, "0x02".to_string());
+    let native = "contract:0x0d".to_string();
+    // Two tokens neither of whose decimals is known: raw units, as they are.
+    let pool = DexPool { a: Address::Contract([5; 32]), ..pool() };
+    let args = json!([{ "type": "address", "value": pool.a.to_string() }, { "type": "address", "value": pool.b.to_string() }, { "type": "i64", "value": pool.fee_bps.to_string() }]);
+    let one = u256::from(10u64).pow(18);
+    let answer = |cumulative: u256, time: u64| json!({ "status": "returned", "values": [{}, {}, {}, { "type": "u256", "value": cumulative.to_string() }], "time": time });
+    let at = |height: u64| Ask::CallAt(json!({ "contract": native, "function": "pool", "args": args, "block": height }).to_string());
+
+    // 3 a millisecond, 10^18 fixed point, over an hour: an average of 3.
+    store.calls.insert(at(5_400), answer(one, 1_000));
+    store.calls.insert(at(7_200), answer(one + one * u256::from(3u64) * u256::from(3_600_000u64), 3_601_000));
+    let mut found = None;
+
+    crate::views::render(&store, &mut crate::light::Light::default(), 1_200.0, |_, ctx| {
+        found = twap(ctx, &mut DexState::default(), &pool, &Some(native.clone()), false);
+    });
+
+    let (average, span) = found.expect("both reads answered");
+    assert_eq!(span, 3_600_000);
+    assert!((average - 3.0).abs() < 1e-9, "{average}");
+
+    // An EVM pair: its price0CumulativeLast brought up to each block's time from its reserves.
+    let pair = [0x2a; 20];
+    let evm_pool = DexPool { a: Address::Evm([5; 20]), b: Address::Evm([6; 20]), share: Address::Evm(pair), venue: chainv4::dex::Venue::Evm, ..pool.clone() };
+    let contract = format!("evm:{}", to_hex(&pair));
+    let input = |signature: &str| to_hex(&keccak(signature.as_bytes())[..4]);
+    let evm_at = |signature: &str, height: u64| Ask::CallAt(json!({ "contract": contract, "input": input(signature), "block": height }).to_string());
+    let word = |value: u256| to_hex(&value.to_be_bytes());
+    let reserves = |last_s: u64| to_hex(&encode_values(&[AbiType::Uint(112), AbiType::Uint(112), AbiType::Uint(32)], &[AbiValue::Uint(u256::new(1_000)), AbiValue::Uint(u256::new(2_000)), AbiValue::Uint(u256::from(last_s))]).unwrap());
+
+    // Last changed at second 1; read at seconds 1 and 3,601: an average of 2.
+    store.calls.insert(evm_at("price0CumulativeLast()", 5_400), json!({ "status": "returned", "output": word(u256::ZERO), "time": 1_000 }));
+    store.calls.insert(evm_at("getReserves()", 5_400), json!({ "status": "returned", "output": reserves(1), "time": 1_000 }));
+    store.calls.insert(evm_at("price0CumulativeLast()", 7_200), json!({ "status": "returned", "output": word(u256::ZERO), "time": 3_601_000 }));
+    store.calls.insert(evm_at("getReserves()", 7_200), json!({ "status": "returned", "output": reserves(1), "time": 3_601_000 }));
+    let mut found = None;
+
+    crate::views::render(&store, &mut crate::light::Light::default(), 1_200.0, |_, ctx| {
+        found = twap(ctx, &mut DexState::default(), &evm_pool, &None, true);
+    });
+
+    let (average, _) = found.expect("all four reads answered");
+    assert!((average - 2.0).abs() < 1e-9, "{average}");
+}

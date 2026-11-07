@@ -89,7 +89,7 @@ fn a_contract_is_sent_to_safely_and_a_key_plainly() {
 fn the_tiles_of_a_row_share_one_top_and_one_height_whatever_they_are_called() {
     let collection = |name: &str| Listed { address: format!("contract:{name}"), kind: CollectionKind::Nft, name: Some(name.to_string()), symbol: None };
     let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(HashType::default_chain()), height: 1, final_: true };
-    let card = |listed: Listed, id: &str| Card { listed, id: id.to_string(), holder: "ed25519:0x01".to_string(), amount: u256::from(1u64), assurance };
+    let card = |listed: Listed, id: &str| Card { listed, id: id.to_string(), holder: "ed25519:0x01".to_string(), amount: u256::from(1u64), proof: Proof::Light(assurance) };
     let cards = [
         card(collection("Art"), "1"),
         card(collection("A collection whose name runs on far longer than any tile has room for on a phone"), "12345678901234567890"),
@@ -189,7 +189,7 @@ fn an_nft_sent_to_another_of_the_account_s_addresses_stays_on_the_page_before_it
 
     // The Ed25519 address's list no longer has it: followed at the Bitcoin one, it stays.
     let mut found = drawn_cards(&mut world, &mut state);
-    state.follow(&found.iter().map(|(id, holder)| Card { listed: state.collections[0].clone(), id: id.clone(), holder: holder.clone(), amount: u256::from(1u64), assurance: proven((), 5).assurance }).collect::<Vec<_>>());
+    state.follow(&found.iter().map(|(id, holder)| Card { listed: state.collections[0].clone(), id: id.clone(), holder: holder.clone(), amount: u256::from(1u64), proof: Proof::Light(proven((), 5).assurance) }).collect::<Vec<_>>());
     assert!(state.answered(&tokens_of(&ed25519.to_string()), &returned(&[])));
     found = drawn_cards(&mut world, &mut state);
 

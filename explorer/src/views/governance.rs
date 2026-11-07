@@ -1393,7 +1393,7 @@ pub fn summary(kind: &str, value: &Value, coin: &Coin) -> String {
             number("bitcoin_depth"),
         ),
         "directory" => {
-            let names = [("gateway", "the gateway"), ("btc_gateway", "the Bitcoin gateway"), ("swap", "the swap contract"), ("dex", "the DEX"), ("dex_router", "the DEX router"), ("nft_factory", "the NFT factory")];
+            let names = [("gateway", "the gateway"), ("btc_gateway", "the Bitcoin gateway"), ("swap", "the swap contract"), ("dex", "the DEX"), ("dex_router", "the DEX router"), ("dex_split", "the split router"), ("nft_factory", "the NFT factory")];
             let mut announced: Vec<String> = names.iter().filter(|(key, _)| value[*key].is_string()).map(|(_, name)| name.to_string()).collect();
             let evm = value["evm_gateways"].as_array().map_or(0, Vec::len);
 

@@ -459,6 +459,14 @@ fn pool_page(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState, pool: &DexPool, n
             facts.row("share token", |ui| {
                 ui.monospace(format::short(&share));
             });
+
+            if let Some((average, span)) = twap(ctx, state, pool, native, evm) {
+                facts.row("time-weighted", |ui| {
+                    ui.monospace(format!("1 {a} = {average:.6} {b}"))
+                        .on_hover_text("Its price on average between two blocks, from the pool's own cumulative prices: one block's trades move it little");
+                    ui.label(RichText::new(format!("over the last {}", format::span(span))).small().color(look.palette.muted));
+                });
+            }
         });
 
         // Its price over time: from Sync events, what it held after every change.
@@ -525,6 +533,61 @@ fn pool_page(ui: &mut Ui, ctx: &mut Ctx, state: &mut DexState, pool: &DexPool, n
             }
         });
     });
+}
+
+/// What a read at a block returned, once it answered, with the block's time in milliseconds.
+fn read_at(ctx: &mut Ctx, state: &mut DexState, body: Value) -> Option<(Value, u64)> {
+    let asked = Ask::CallAt(body.to_string());
+    ask(ctx, state, asked.clone());
+    let answer = ctx.store.calls.get(&asked)?;
+
+    Some((answer.clone(), answer["time"].as_u64()?))
+}
+
+/// A pool's time-weighted price, the node's word: from its cumulative prices read at the tip and
+/// about an hour before, what its first side was worth in its second on average between them, in
+/// whole units, with the milliseconds between. A native pool's pool() says them as of each block; an
+/// EVM pair's price0CumulativeLast is brought up to each block's time from its reserves.
+fn twap(ctx: &mut Ctx, state: &mut DexState, pool: &DexPool, native: &Option<String>, evm: bool) -> Option<(f64, u64)> {
+    let tip = *ctx.store.main.keys().next_back()?;
+    let back = (3_600_000 / block_ms(ctx).max(1)).max(10);
+    let heights = [tip.saturating_sub(back), tip];
+    let mut seen = Vec::new();
+
+    for height in heights {
+        let observed = match (evm, &pool.share) {
+            (false, _) => {
+                let args = json!([{ "type": "address", "value": pool.a.to_string() }, { "type": "address", "value": pool.b.to_string() }, { "type": "i64", "value": pool.fee_bps.to_string() }]);
+                let (answer, time) = read_at(ctx, state, json!({ "contract": native.as_ref()?, "function": "pool", "args": args, "block": height }))?;
+                let cumulative = answer["values"].get(3)?["value"].as_str().and_then(|digits| u256::from_str_radix(digits, 10).ok())?;
+
+                (cumulative, time)
+            }
+            (true, chainv4::structs::address::Address::Evm(pair)) => {
+                let contract = format!("evm:{}", to_hex(pair));
+                let input = |signature: &str| to_hex(&keccak(signature.as_bytes())[..4]);
+                let (last, time) = read_at(ctx, state, json!({ "contract": contract, "input": input("price0CumulativeLast()"), "block": height }))?;
+                let (reserves, _) = read_at(ctx, state, json!({ "contract": contract, "input": input("getReserves()"), "block": height }))?;
+                let (last, reserves) = (from_hex(last["output"].as_str()?)?, from_hex(reserves["output"].as_str()?)?);
+                let last_s = u32::try_from(number_at(&reserves, 2)?).ok()?;
+                let cumulative = chainv4::dex::evm_cumulative(number_at(&last, 0)?, number_at(&reserves, 0)?, number_at(&reserves, 1)?, last_s, time / 1_000);
+
+                (cumulative, time)
+            }
+            _ => return None,
+        };
+        seen.push(observed);
+    }
+
+    let [(then, from), (now, to)] = seen[..] else { return None };
+    let span = to.checked_sub(from)?;
+    let raw = match evm {
+        false => chainv4::dex::twap(then, now, span)?,
+        true => chainv4::dex::evm_twap(then, now, span / 1_000)?,
+    };
+    let scale = 10f64.powi(i32::from(decimals(ctx, &pool.a, evm)) - i32::from(decimals(ctx, &pool.b, evm)));
+
+    Some((raw * scale, span))
 }
 
 /// A pool's price at each change, by block height, oldest first: the native DEX's Sync events, or

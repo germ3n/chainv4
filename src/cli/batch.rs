@@ -201,6 +201,11 @@ fn read(steps: &[String], file: Option<&Path>) -> CliResult<Vec<Value>> {
 
 /// The batch these steps make, each from this sender, checked here so a mistake is named before
 /// anything is sent.
+/// The functions a batch's call steps name, as a typed signature shows them.
+pub(super) fn functions(steps: &[String], file: Option<&Path>) -> CliResult<Vec<String>> {
+    Ok(read(steps, file)?.iter().filter_map(|step| step.get("function").and_then(Value::as_str).map(str::to_string)).collect())
+}
+
 pub(super) fn batch(steps: &[String], file: Option<&Path>, sender: Address, agent: &Agent, node: &str) -> CliResult<Tx> {
     let mut made = Vec::new();
 

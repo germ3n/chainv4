@@ -106,7 +106,16 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
         });
     }
 
-    // A multisig's members, threshold and proposals have a page of their own.
+    // An Ethereum account EIP-7702 delegated: what runs when it is called.
+    if let Some(to) = store.accounts.get(address).and_then(|account| account.delegated_to.clone()) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("runs the code of").small().color(look.palette.muted));
+            super::address(ui, ctx, &to);
+            ui.label(RichText::new("as its own, by EIP-7702, until it is cleared").small().color(look.palette.muted));
+        });
+    }
+
+        // A multisig's members, threshold and proposals have a page of their own.
     if address.starts_with("multisig:") && ui.link(RichText::new("Its members, threshold and open proposals ›").color(look.palette.accent)).clicked() {
         ctx.go(View::Multisig(address.to_string()));
     }

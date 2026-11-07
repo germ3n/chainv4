@@ -44,12 +44,13 @@ const MAX_HELD: usize = 16 << 20;
 const ENTRY_COST: usize = 1 << 10;
 
 /// Every ABI built in, standards first, by what it reads as. Where two fit, the first one says.
-const BUILT_IN: [(&str, &str, bool); 18] = [
+const BUILT_IN: [(&str, &str, bool); 19] = [
     ("ERC-20", include_str!("erc20.json"), true),
     ("ERC-721", include_str!("erc721.json"), true),
     ("ERC-1155 (Items)", include_str!("../../contracts/evm/Items.abi"), false),
     ("Token.sol", include_str!("../../contracts/evm/Token.abi"), false),
     ("Collectible", include_str!("../../contracts/evm/Collectible.abi"), false),
+    ("CollectibleFactory", include_str!("../../contracts/evm/CollectibleFactory.abi"), false),
     ("WDEV", include_str!("../../contracts/evm/WDEV.abi"), false),
     ("WrappedToken", include_str!("../../contracts/evm/WrappedToken.abi"), false),
     ("WrappedNft", include_str!("../../contracts/evm/WrappedNft.abi"), false),

@@ -612,6 +612,7 @@ mod tests {
             evm_gateways: vec![EvmGateway { chain_id: 1, gateway: [3; 20] }, EvmGateway { chain_id: 8453, gateway: [4; 20] }],
             swap: Some(Address::Contract([5; 32])),
             dex_router: Some([7; 20]),
+            dex_split: None,
             ..Directory::default()
         };
         let genesis = Genesis { directory: Some(directory.clone()), ..dev(DevChain::Pow) };

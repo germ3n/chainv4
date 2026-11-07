@@ -2055,6 +2055,7 @@ fn a_contract_made_where_coin_waited_takes_it_over_and_none_is_made_or_lost() {
 }
 
 mod batch;
+mod collections;
 #[cfg(all(feature = "secp256k1", feature = "ed25519"))]
 mod owners;
 

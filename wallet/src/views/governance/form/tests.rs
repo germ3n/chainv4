@@ -89,6 +89,7 @@ fn directory() -> Directory {
         swap: Some(Address::Contract([5; 32])),
         dex: Some(Address::Contract([6; 32])),
         dex_router: Some([7; 20]),
+        dex_split: None,
         nft_factory: Some(Address::Contract([8; 32])),
     }
 }
@@ -535,7 +536,7 @@ fn a_kind_with_nothing_standing_starts_from_defaults_and_names_all_it_sets() {
     let mut draft = Draft::of("directory", None, &env);
     let built = build("directory", &draft, None, &env);
 
-    assert_eq!(built.change, Some(Change::Directory(Directory { gateway: None, btc_gateway: None, evm_gateways: Vec::new(), swap: None, dex: None, dex_router: None, nft_factory: None })));
+    assert_eq!(built.change, Some(Change::Directory(Directory { gateway: None, btc_gateway: None, evm_gateways: Vec::new(), swap: None, dex: None, dex_router: None, dex_split: None, nft_factory: None })));
     assert!(built.changes.is_empty(), "nothing yet: nothing to review");
 
     draft.texts.insert("dex".to_string(), Address::Contract([6; 32]).to_string());

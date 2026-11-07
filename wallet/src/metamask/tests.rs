@@ -64,17 +64,17 @@ fn what_metamask_signs_of_the_typed_data_is_a_transaction_this_chain_takes() {
         amount: Amount::U128(1_500_000_000_000_000_000),
     };
     let fee = FeeOffer { gas_limit: 21_000, max_price: u256::new(2_000_000_000), tip: u256::ZERO };
-    let typed = typed_data(&tx, 3, &fee, &genesis);
+    let typed = typed_data(&tx, &[], 3, &fee, &genesis).unwrap();
 
     assert_eq!(typed["primaryType"], "Transfer");
     assert_eq!(typed["domain"]["name"], "chainv4");
     assert_eq!(typed["domain"]["salt"], to_hex(&[4; 32]), "the genesis id");
     assert_eq!(typed["message"]["amount"], "1500000000000000000", "wide numbers as decimal text");
     assert_eq!(typed["message"]["to"], tx_to(&tx));
-    assert_eq!(typed["types"]["Transfer"][0], json!({ "name": "from", "type": "string" }));
+    assert_eq!(typed["types"]["Transfer"][0], serde_json::json!({ "name": "from", "type": "string" }));
 
     // MetaMask signs the typed hash; recovered and checked, it is what the node takes.
-    let hash = eip712::transaction_digest(&tx, 3, &fee, &genesis);
+    let hash = eip712::transaction_digest(&tx, &[], 3, &fee, &genesis).unwrap();
     let (recovered, low) = key_of(&hash, &as_metamask(&key, &hash), &address(&key)).unwrap();
     let signed = SignedTx {
         tx,
@@ -82,6 +82,7 @@ fn what_metamask_signs_of_the_typed_data_is_a_transaction_this_chain_takes() {
         fee,
         signer: PublicKey::Secp256k1(recovered),
         signature: Signature::Secp256k1Eip712(low),
+        functions: Vec::new(),
     };
 
     assert_eq!(signed.verify_on(&genesis), Ok(()));
@@ -117,11 +118,31 @@ fn eip712_for_metamask() {
             },
         ),
         ("burn", Tx::Burn { from: key.public().address(), amount: Amount::U128(1) }),
+        (
+            "call",
+            Tx::ContractCall {
+                to: Address::Contract([0x22; 32]),
+                func: chainv4::crypto::hasher::Hasher::digest(HashType::Xxh3_64, b"swap_exact"),
+                amount: Amount::U128(9),
+                data: vec![chainv4::structs::tx::TxCallArgumentType::Address(to), chainv4::structs::tx::TxCallArgumentType::U64(3)],
+            },
+        ),
+        (
+            "batch",
+            Tx::Batch {
+                steps: vec![
+                    Tx::Transfer { from: key.public().address(), to, amount: Amount::U128(5) },
+                    Tx::ContractCall { to: Address::Contract([0x22; 32]), func: chainv4::crypto::hasher::Hasher::digest(HashType::Xxh3_64, b"swap_exact"), amount: Amount::U128(0), data: Vec::new() },
+                    Tx::Burn { from: key.public().address(), amount: Amount::U128(1) },
+                ],
+            },
+        ),
     ];
 
     for (name, tx) in forms {
-        let typed = typed_data(&tx, 3, &fee, &genesis);
-        let hash = eip712::transaction_digest(&tx, 3, &fee, &genesis);
+        let functions = eip712::name_calls(&tx, &["swap_exact".to_string()]).unwrap();
+        let typed = typed_data(&tx, &functions, 3, &fee, &genesis).unwrap();
+        let hash = eip712::transaction_digest(&tx, &functions, 3, &fee, &genesis).unwrap();
         std::fs::write(out.join(format!("{name}.json")), serde_json::to_string_pretty(&typed).unwrap()).unwrap();
         std::fs::write(out.join(format!("{name}.hash")), to_hex(&hash)).unwrap();
     }
@@ -137,7 +158,7 @@ fn eip712_from_metamask() {
     let out = std::path::PathBuf::from(std::env::var("EIP712_OUT").expect("EIP712_OUT names a folder"));
     let key = Keypair::from_key_file(&format!("secp256k1:0x{}", "11".repeat(32))).unwrap();
 
-    for name in ["transfer", "token", "burn"] {
+    for name in ["transfer", "token", "burn", "call", "batch"] {
         let hash: [u8; 32] = from_hex(&std::fs::read_to_string(out.join(format!("{name}.hash"))).unwrap()).unwrap().try_into().unwrap();
         let signed = signature(std::fs::read_to_string(out.join(format!("{name}.sig"))).unwrap().trim()).unwrap();
         let (recovered, _) = key_of(&hash, &signed, &address(&key)).unwrap();

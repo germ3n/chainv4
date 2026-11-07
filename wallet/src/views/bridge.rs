@@ -319,6 +319,7 @@ fn native_call(from: Address, to: Address, function: &str, args: Vec<TxCallArgum
         what,
         about: to.to_string(),
         coin,
+        functions: vec![function.to_string()],
     }
 }
 

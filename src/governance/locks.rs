@@ -112,7 +112,7 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
             "btc.repay_pct",
             "btc.repay_most",
         ],
-        "directory" => &["gateway", "btc_gateway", "evm_gateways", "swap", "dex", "dex_router", "nft_factory"],
+        "directory" => &["gateway", "btc_gateway", "evm_gateways", "swap", "dex", "dex_router", "dex_split", "nft_factory"],
         "fees" => &FEES,
         "reward" => &["initial", "halving_interval"],
         "limits" => &[

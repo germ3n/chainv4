@@ -99,6 +99,7 @@ pub fn directory_json(directory: &Directory) -> Value {
         "swap": here(directory.swap),
         "dex": here(directory.dex),
         "dex_router": directory.dex_router.map(|router| crate::structs::hex::to_hex(&router)),
+        "dex_split": here(directory.dex_split),
         "nft_factory": here(directory.nft_factory),
     })
 }
@@ -129,8 +130,13 @@ pub(crate) fn directory_from_json(mut fields: Fields) -> Result<Directory, Strin
         Value::Null => None,
         _ => Some(evm_address(&fields.text("dex_router")?, "directory.dex_router")?),
     };
+    // Added after genesis files were first written: one without it names none.
+    let dex_split = match fields.later_text("dex_split")? {
+        Some(text) => Some(text.parse().map_err(|_| format!("directory.dex_split: {text} is not an address"))?),
+        None => None,
+    };
     let nft_factory = fields.optional_parse("nft_factory")?;
-    let directory = Directory { gateway, btc_gateway, evm_gateways, swap, dex, dex_router, nft_factory };
+    let directory = Directory { gateway, btc_gateway, evm_gateways, swap, dex, dex_router, dex_split, nft_factory };
     fields.done()?;
 
     Ok(directory)

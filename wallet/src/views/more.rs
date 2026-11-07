@@ -13,6 +13,7 @@ pub type Listed = (Page, &'static str, &'static str);
 /// sidebar lists these too: a test keeps the two the same.
 pub const PAGES: &[Listed] = &[
     (Page::Batch, "Batch", "Several steps as one transaction, all or nothing"),
+    (Page::Authorize, "Authorize", "Sign a token allowance or transfer for someone to send"),
     #[cfg(feature = "nft")]
     (Page::Nfts, "NFTs", "What this account holds of collections"),
     (Page::Names, "Names", "Register and manage names like alice.dev"),

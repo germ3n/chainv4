@@ -83,6 +83,8 @@ pub struct Directory {
     pub dex: Option<Address>,
     #[document(summary = "The EVM DEX's router on this chain's EVM, 20 bytes.")]
     pub dex_router: Option<[u8; 20]>,
+    #[document(summary = "The split router, contracts/lua/router.lua, that divides one trade between both DEXes in one transaction.")]
+    pub dex_split: Option<Address>,
     #[document(summary = "The NFT factory, contracts/lua/nft_factory.lua, that new collections are made with.")]
     pub nft_factory: Option<Address>,
 }
@@ -95,7 +97,7 @@ impl Directory {
         summary = "Why it cannot be a chain's: a contract here that is not a contract, more than MOST_EVM_GATEWAYS EVM chains, their ids not in order, repeated or 0, or an EVM address of zero.",
     )]
     pub fn problem(&self) -> Option<&'static str> {
-        if [self.gateway, self.btc_gateway, self.swap, self.dex, self.nft_factory].iter().flatten().any(|address| !matches!(address, Address::Contract(_))) {
+        if [self.gateway, self.btc_gateway, self.swap, self.dex, self.dex_split, self.nft_factory].iter().flatten().any(|address| !matches!(address, Address::Contract(_))) {
             return Some("the directory's contracts here are contracts");
         }
 
@@ -133,6 +135,7 @@ mod tests {
             swap: Some(Address::Contract([5; 32])),
             dex: Some(Address::Contract([6; 32])),
             dex_router: Some([7; 20]),
+            dex_split: Some(Address::Contract([9; 32])),
             nft_factory: Some(Address::Contract([8; 32])),
         };
 

@@ -3,6 +3,11 @@
 //! looks a token up, lists what an address holds, and shows what moved, from the event index:
 //! Transfer events for an NFT collection, TransferSingle for a multi-token one. Token URIs show as
 //! text: the explorer fetches nothing from where they point.
+//!
+//! An ERC-721 or ERC-1155 contract on the chain's EVM, which the registry lists too, is read by
+//! eth_call, ownerOf, balanceOf, tokenURI and uri, the node's word; what a holder holds is found
+//! by its logs naming the holder's EVM form, then checked by ownerOf or balanceOf; what moved is
+//! its Transfer or TransferSingle logs.
 
 use {
     super::{Ctx, View},
@@ -54,6 +59,65 @@ fn called(ctx: &mut Ctx, contract: &str, function: &str, args: Value) -> Option<
         "returned" => Ok(called.values.iter().map(|value| value.text()).collect()),
         _ => Err(called.error.unwrap_or_else(|| "the call failed".to_string())),
     })
+}
+
+/// Whether a registry entry is a contract on the chain's EVM.
+fn is_evm(collection: &RegisteredCollection) -> bool {
+    collection.address.starts_with("evm:")
+}
+
+/// What an EVM read returned, through eth_call, once it answered: Err with why it did not.
+fn evm_read(ctx: &mut Ctx, contract: &str, signature: &str, words: &[Vec<u8>]) -> Option<Result<Vec<u8>, String>> {
+    let to = contract.strip_prefix("evm:")?;
+    let input = [chainv4::crypto::secp256k1::keccak(signature.as_bytes())[..4].to_vec(), words.concat()].concat();
+    let ask = Ask::Rpc(json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{ "to": to, "data": chainv4::structs::hex::to_hex(&input) }, "latest"] }).to_string());
+
+    if let Some(failure) = ctx.store.failures.get(&ask) {
+        return Some(Err(failure.message.clone()));
+    }
+
+    let Some(answer) = ctx.store.calls.get(&ask) else {
+        if !ctx.api.asking(&ask) {
+            ctx.api.ask(ask);
+        }
+
+        return None;
+    };
+
+    Some(match answer["result"].as_str().and_then(chainv4::structs::hex::from_hex) {
+        Some(output) => Ok(output),
+        None => Err(answer["error"]["message"].as_str().unwrap_or("it reverted").to_string()),
+    })
+}
+
+/// An id as one ABI word.
+fn id_word(id: &str) -> Vec<u8> {
+    chainv4::structs::u256::u256::from_str_radix(id, 10).unwrap_or_default().to_be_bytes().to_vec()
+}
+
+/// The EVM form of an address, as one ABI word: an EVM address's own bytes, any other's alias.
+fn form_word(address: &str) -> Option<Vec<u8>> {
+    let address: chainv4::structs::address::Address = address.parse().ok()?;
+
+    Some([vec![0; 12], chainv4::abi::evm_address(&address).to_vec()].concat())
+}
+
+/// An address out of an ABI word, as the chain writes an EVM one.
+fn address_of(word: &[u8]) -> Option<String> {
+    Some(chainv4::structs::address::Address::Evm(word.get(12..32)?.try_into().ok()?).to_string())
+}
+
+/// One ABI string, as tokenURI and uri return it; ERC-1155's {id} filled in with the id's 64 hex
+/// digits.
+fn uri_of(output: &[u8], id: &str) -> Option<String> {
+    use chainv4::abi::{AbiType, AbiValue, decode_values};
+
+    let Some(AbiValue::String(uri)) = decode_values(&[AbiType::String], output).ok()?.pop() else {
+        return None;
+    };
+    let hex = chainv4::structs::hex::to_hex(&id_word(id));
+
+    Some(uri.replace("{id}", &hex[2..]))
 }
 
 /// The ids a holder holds of a collection, as tokens_of says, once it answered.
@@ -167,7 +231,9 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut CollectionsState, address: &
             facts.text("Symbol", collection.symbol.clone().unwrap_or_else(|| "—".to_string()));
             facts.row("Contract", |ui| super::address(ui, ctx, &collection.address));
 
-            if !collection.multi()
+            if is_evm(&collection) {
+                facts.text("Engine", "EVM: ERC-721 or ERC-1155, read through eth_call");
+            } else if !collection.multi()
                 && let Some(Ok(supply)) = called(ctx, &collection.address, "total_supply", json!([]))
                 && let Some(supply) = supply.first()
             {
@@ -216,8 +282,40 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut CollectionsState, address: &
     super::section(ui, look, "Transfers", |ui| transfers(ui, ctx, &collection));
 }
 
+/// An EVM collection's token: an ERC-721's owner, and its URI.
+fn evm_token(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection, id: &str) {
+    let look = ctx.look;
+    let owner = (!collection.multi()).then(|| evm_read(ctx, &collection.address, "ownerOf(uint256)", &[id_word(id)]));
+    let signature = if collection.multi() { "uri(uint256)" } else { "tokenURI(uint256)" };
+    let uri = evm_read(ctx, &collection.address, signature, &[id_word(id)]).and_then(Result::ok).and_then(|output| uri_of(&output, id));
+
+    super::facts(ui, look, "token facts", |facts| {
+        match owner {
+            Some(None) => facts.row("Owner", |ui| {
+                ui.spinner();
+            }),
+            Some(Some(Err(why))) => facts.text("Owner", format!("none: {why}")),
+            Some(Some(Ok(output))) => match address_of(&output) {
+                Some(owner) => facts.row("Owner", |ui| super::address(ui, ctx, &owner)),
+                None => facts.text("Owner", "it returned no address"),
+            },
+            None => facts.text("Kind", "ERC-1155: holders hold amounts of it"),
+        }
+
+        if let Some(uri) = &uri {
+            facts.row("Token URI", |ui| {
+                super::copyable(ui, uri);
+            });
+        }
+    });
+}
+
 /// One token: its owner, or how many exist, and its URI.
 fn token(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection, id: &str) {
+    if is_evm(collection) {
+        return evm_token(ui, ctx, collection, id);
+    }
+
     let look = ctx.look;
     let first = |answer: Option<Result<Vec<String>, String>>| answer.map(|answer| answer.map(|values| values.into_iter().next().unwrap_or_default()));
     let held = match collection.multi() {
@@ -246,8 +344,83 @@ fn token(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection, id: &str
     });
 }
 
+/// What a holder holds of an EVM collection: the ids its logs name the holder's EVM form in, each
+/// checked by ownerOf or balanceOf.
+fn evm_holdings(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection, holder: &str) {
+    let look = ctx.look;
+    let Some(form) = form_word(holder) else {
+        super::note(ui, look, "That is not an address.");
+
+        return;
+    };
+    let query = EventQuery::topic(&chainv4::structs::hex::to_hex(&form), Some(&collection.address)).limited(EVENTS);
+    let asked = Ask::Events { query: query.clone(), cursor: None };
+
+    if !ctx.store.events.contains_key(&query) && !ctx.api.asking(&asked) && !ctx.store.failures.contains_key(&asked) {
+        ctx.api.ask(asked.clone());
+    }
+
+    let Some(events) = ctx.store.events.get(&query).map(|found| found.items.clone()) else {
+        match ctx.store.failures.get(&asked) {
+            Some(failure) if failure.status == 404 => super::note(ui, look, "The node keeps no event index: start it with --index-events to find what an address holds of an EVM collection."),
+            _ => super::waiting(ui, ctx, &asked),
+        }
+
+        return;
+    };
+    let mut ids: Vec<String> = Vec::new();
+
+    for moved in events.iter().filter_map(|event| evm_moved(event, collection.multi())) {
+        if !ids.contains(&moved.id) {
+            ids.push(moved.id);
+        }
+    }
+
+    let mut held = Vec::new();
+
+    for id in &ids {
+        let answer = match collection.multi() {
+            false => evm_read(ctx, &collection.address, "ownerOf(uint256)", &[id_word(id)]).map(|answer| answer.map(|output| (output.get(..32) == Some(&form[..])).then(|| "1".to_string()))),
+            true => evm_read(ctx, &collection.address, "balanceOf(address,uint256)", &[form.clone(), id_word(id)])
+                .map(|answer| answer.map(|output| output.get(..32).map(|word| chainv4::structs::u256::u256::from_be_bytes(word.try_into().expect("32 bytes"))).filter(|amount| *amount > chainv4::structs::u256::u256::ZERO).map(|amount| amount.to_string()))),
+        };
+
+        match answer {
+            None => {
+                ui.spinner();
+
+                return;
+            }
+            Some(Ok(Some(amount))) => held.push((id.clone(), amount)),
+            Some(_) => {}
+        }
+    }
+
+    if held.is_empty() {
+        super::note(ui, look, "Nothing of this collection, as its logs and its own answers say.");
+
+        return;
+    }
+
+    super::table(ui, look, ("held", holder.to_string()), if collection.multi() { &["id", "amount"] } else { &["id"] }, |ui| {
+        for (id, amount) in &held {
+            ui.monospace(id);
+
+            if collection.multi() {
+                ui.monospace(amount);
+            }
+
+            super::row_end(ui);
+        }
+    });
+}
+
 /// What a holder holds of a collection: its ids, and of a multi-token one, how many of each.
 fn holdings(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection, holder: &str) {
+    if is_evm(collection) {
+        return evm_holdings(ui, ctx, collection, holder);
+    }
+
     let look = ctx.look;
     let Some(ids) = held(ctx, &collection.address, holder) else {
         ui.spinner();
@@ -309,10 +482,37 @@ pub fn moved(event: &FoundEvent, multi: bool) -> Option<Moved> {
     Some(Moved { from, to, id, amount, height: event.height, block: event.block.clone(), tx: event.tx.clone() })
 }
 
+/// An EVM collection's log as a transfer: an ERC-721's Transfer, with four topics, or an ERC-1155's
+/// TransferSingle; addresses as the chain writes EVM ones.
+pub fn evm_moved(event: &FoundEvent, multi: bool) -> Option<Moved> {
+    use chainv4::crypto::secp256k1::keccak;
+
+    let parts: Vec<Vec<u8>> = event.data.iter().filter_map(|part| chainv4::structs::hex::from_hex(&part.text())).collect();
+    let (data, topics) = parts.split_last()?;
+    let number = |word: &[u8]| Some(chainv4::structs::u256::u256::from_be_bytes(word.get(..32)?.try_into().ok()?).to_string());
+    let (from, to, id, amount) = match (multi, topics.first().map(Vec::as_slice)) {
+        (false, Some(first)) if first == keccak(b"Transfer(address,address,uint256)") && topics.len() == 4 => (address_of(&topics[1])?, address_of(&topics[2])?, number(&topics[3])?, "1".to_string()),
+        (true, Some(first)) if first == keccak(b"TransferSingle(address,address,address,uint256,uint256)") && topics.len() == 4 => {
+            (address_of(&topics[2])?, address_of(&topics[3])?, number(data)?, number(data.get(32..)?)?)
+        }
+        _ => return None,
+    };
+
+    Some(Moved { from, to, id, amount, height: event.height, block: event.block.clone(), tx: event.tx.clone() })
+}
+
 fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
     let look = ctx.look;
     let name = if collection.multi() { "TransferSingle" } else { "Transfer" };
-    let query = EventQuery::contract(&collection.address, Some(name)).limited(EVENTS);
+    let query = match is_evm(collection) {
+        true => {
+            let signature = if collection.multi() { "TransferSingle(address,address,address,uint256,uint256)" } else { "Transfer(address,address,uint256)" };
+            let topic = chainv4::structs::hex::to_hex(&chainv4::crypto::secp256k1::keccak(signature.as_bytes()));
+
+            EventQuery::topic(&topic, Some(&collection.address)).limited(EVENTS)
+        }
+        false => EventQuery::contract(&collection.address, Some(name)).limited(EVENTS),
+    };
     let newest = Ask::Events { query: query.clone(), cursor: None };
     let found = ctx.store.events.get(&query);
 
@@ -328,7 +528,7 @@ fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
 
         return;
     };
-    let moves: Vec<Moved> = events.iter().filter_map(|event| moved(event, collection.multi())).collect();
+    let moves: Vec<Moved> = events.iter().filter_map(|event| if is_evm(collection) { evm_moved(event, collection.multi()) } else { moved(event, collection.multi()) }).collect();
 
     if moves.is_empty() {
         super::note(ui, look, "Nothing moved yet.");
@@ -337,7 +537,8 @@ fn transfers(ui: &mut Ui, ctx: &mut Ctx, collection: &RegisteredCollection) {
     }
 
     let zero = chainv4::structs::address::Address::Ed25519([0; 32]).to_string();
-    let party = |ui: &mut Ui, ctx: &mut Ctx, text: &str, what: &str| match text == zero {
+    let evm_zero = chainv4::structs::address::Address::Evm([0; 20]).to_string();
+    let party = |ui: &mut Ui, ctx: &mut Ctx, text: &str, what: &str| match text == zero || text == evm_zero {
         true => {
             ui.label(RichText::new(what).color(look.palette.muted));
         }

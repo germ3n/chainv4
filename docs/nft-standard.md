@@ -202,6 +202,26 @@ both.
 `refresh_collection()` in the SDK: `tokens.refresh()` and `refresh_token()` by another name, as
 one request asks again for both registries.
 
+### EVM collections
+
+ERC-721 and ERC-1155 contracts on the chain's own [EVM](evm.md) are listed too, beside native ones.
+Every contract the EVM creates, by a transaction's own deploy or by another contract's `CREATE`
+or `CREATE2`, as a factory makes them, is asked what it is once the transaction stands, with
+ERC-165's `supportsInterface`: one that says it is ERC-165 (`0x01ffc9a7` yes, `0xffffffff` no) and
+ERC-721 (`0x80ac58cd`) is an NFT collection, one that says ERC-1155 (`0xd9b67a26`) a multi-token
+one. Its `name()` and `symbol()`, which ERC-721's metadata extension has and many ERC-1155s add,
+are kept when each is one string within the registry's limits, else left out
+(`Contracts::refresh`).
+
+Unlike a native collection's, these questions never fail the transaction, which runs as it would
+on Ethereum: each runs on a throwaway copy of state with at most `EVM_QUESTION_GAS`, 60,000 gas,
+ERC-165's 30,000 for `supportsInterface` and what the call costs, paid out of what the transaction
+has left; when too little is left, or a question fails, the contract is not a collection. A
+contract the EVM destroys leaves the registry. A chain without `collections` lists none.
+
+What an account holds of one is proven as the EVM proves anything: its `ownerOf` or `balanceOf`,
+run over proven state ([In the wallet](wallet.md#nfts)). Where to look comes from its logs.
+
 **Reading it:**
 - `GET /collections` lists them by symbol, ignoring ASCII case, with a search by how a symbol
   starts;

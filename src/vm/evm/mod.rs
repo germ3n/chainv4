@@ -94,7 +94,12 @@ fn alias_key(alias: &[u8; 20]) -> Vec<u8> {
     [ALIAS, alias].concat()
 }
 
-fn delegation_key(bytes: &[u8; 20]) -> Vec<u8> {
+#[document(
+    summary = "Where an account's EIP-7702 delegation is kept, in Column::Storage, by its 20 bytes: what a light client proves to say whose code the account runs.",
+    category = "VM",
+    see_also = "delegation, delegated_to",
+)]
+pub fn delegation_key(bytes: &[u8; 20]) -> Vec<u8> {
     [DELEGATION, bytes].concat()
 }
 
@@ -584,7 +589,7 @@ pub fn run(
                 state.merge(crossed.changes.clone());
             }
 
-            apply(state, &outcome.state, caller, Some(nonce), sender)?;
+            let created = apply(state, &outcome.state, caller, Some(nonce), sender)?;
             let logs = logs
                 .iter()
                 .map(|log| Event {
@@ -600,7 +605,8 @@ pub fn run(
                 .collect();
             let placed = Placed { standing: standing.iter().map(|(index, crossed)| (*index, crossed.log_at, crossed.events.len())).collect() };
             let trace = traced_run(state, &frames, native_hops, fuel_per_gas, Some(&placed))?;
-            let refresh_tokens = standing.iter_mut().flat_map(|(_, crossed)| std::mem::take(&mut crossed.refresh)).collect();
+            // The contracts it created, at any depth, are asked what they are as a deploy's are.
+            let refresh_tokens = standing.iter_mut().flat_map(|(_, crossed)| std::mem::take(&mut crossed.refresh)).chain(created).collect();
             let events = native::interleave(logs, &mut standing);
             let moved = paid.borrow().clone();
             let payments = native::interleave_payments(state, moved, &mut standing)?;
@@ -761,9 +767,11 @@ pub(super) fn revert_reason(output: &[u8]) -> String {
 
 /// Writes what a successful EVM transaction changed: balances, nonces but the sender's, which the
 /// chain keeps, new contracts' code, and storage. Also how a native call sees what the EVM did so
-/// far. The native precompile's marker slots are the journal's alone, and never written.
-fn apply(state: &State, changes: &EvmState, caller: [u8; 20], shown: Option<u64>, sender: &Address) -> Result<(), DbError> {
+/// far. The native precompile's marker slots are the journal's alone, and never written. Returns
+/// the contracts it created that stand, in the order the EVM's changes list them.
+fn apply(state: &State, changes: &EvmState, caller: [u8; 20], shown: Option<u64>, sender: &Address) -> Result<Vec<Address>, DbError> {
     let accounts = Accounts::new(state);
+    let mut created = Vec::new();
 
     for (bytes, account) in changes {
         if !account.is_touched() {
@@ -784,6 +792,7 @@ fn apply(state: &State, changes: &EvmState, caller: [u8; 20], shown: Option<u64>
 
             state.delete(Column::Contracts, address_key(&address));
             accounts.set(&address, &Default::default());
+            crate::registry::collections::Collections::new(state).unregister(&address)?;
 
             continue;
         }
@@ -843,6 +852,7 @@ fn apply(state: &State, changes: &EvmState, caller: [u8; 20], shown: Option<u64>
                 layout: Default::default(),
             };
             state.put_value(Column::Contracts, address_key(&address), &record);
+            created.push(address);
         }
 
         for (slot, value) in account.changed_storage_slots().filter(|_| !marks) {
@@ -855,7 +865,7 @@ fn apply(state: &State, changes: &EvmState, caller: [u8; 20], shown: Option<u64>
         }
     }
 
-    Ok(())
+    Ok(created)
 }
 
 #[cfg(test)]

@@ -545,6 +545,14 @@ restart, is in no header it holds. So it fetches the headers between, a stretch 
 a time, and proves each by its link to the one above (see
 [Light client](light-client.md#saving-and-resuming)). Then the transaction checks, and is final.
 
+**An Ethereum account's delegation.** An Ethereum key's account that an
+[EIP-7702](evm.md#eip-7702-delegations) transaction delegated runs a contract's code when it is
+called, so a call to it, or what it signs, may do what that code says. The wallet proves each
+secp256k1 address's delegation at the tip, from its entry in the chain's storage
+(`vm::evm::delegation_key`), and Overview says which contract it runs, with how far it is proven.
+Activity names a type-4 transaction by what it set: an account delegated to a contract, a
+delegation cleared, or how many.
+
 ## Read from checked blocks
 
 Settings → **Read from checked blocks** has the wallet take what it shows from final blocks it
@@ -713,9 +721,12 @@ contract or EVM call shows as much as a batch's step does, never a one-line summ
 value or recipient out. A multisig member reading a bundle or a proposal sees its inner transaction
 the same way, with the fee the multisig pays and the chain the bundle is for.
 
-**MetaMask cannot sign a batch.** It would show one opaque hash for all the steps, so the wallet says
-so instead of asking, and the chain refuses one anyway: send it from an account this wallet or the
-offline signer holds.
+**MetaMask signs a batch step by step.** Its typed form writes each step out, a call by its
+function's name (see [Typed data](crypto.md#typed-data-eip-712)). The names come with the
+transaction from the page that made it, the function typed on the Contracts page or a step added in
+the batch builder, or from those the history knows; a call to a function the wallet knows no name
+for would show as its hash, so the wallet says so instead of asking. A multisig's batch has no such
+form at all: send those from an account this wallet or the offline signer holds.
 
 Activity lists a batch once, opened to each step and what came of it: done, or undone, failed and not
 run. Which step failed is proven; why is the node's word, which the [explorer](explorer.md#pages) shows.
@@ -984,6 +995,28 @@ actions.
   change's kind's, which the chain checks: a vote naming a version that has moved on fails and
   changes nothing.
 
+## Authorize
+
+The **Authorize** page signs a token's [signed authorizations](token-standard.md#signed-authorizations)
+for someone else to send and pay for, and sends one signed for you:
+- **Sign one:** an allowance, as `permit`, or a transfer, as `transfer_with_authorization`, from one
+  of the account's addresses whose key this wallet holds, of a token the registry lists, to an
+  address or a name, of an amount, holding for so many hours, 24 unless set. **Prepare** asks the
+  token for its text, `permit_message` or `transfer_message`, and for an allowance the owner's next
+  nonce. The wallet writes the same text from the terms itself
+  (`registry::tokens::authorization`), shows it, and signs only when the token wrote exactly that:
+  a token whose text differs is not one whose signatures this page makes. A transfer's nonce is 32
+  random bytes. What it signed is handed on as text, to copy, and as a QR code.
+- **Send one:** paste one. It shows the token, who signed it, whom it lets spend or pays, how much
+  and until when, and checks it as the token will: the key controls the signer's address and the
+  signature is over its text on this chain. One that does not hold, or has lapsed, is not sent;
+  one that does goes to the Send page as a call of `permit` or `transfer_with_authorization`, from
+  whichever account sends it.
+
+The keys sign text by their own scheme's rules, as `crypto.verify` checks: an account on the
+offline signer, or in MetaMask, whose `personal_sign` puts a prefix of its own before the text,
+signs none here.
+
 ## Faucet
 
 On a node that runs a [faucet](faucet.md), as a dev or test chain's may, the Overview has a
@@ -1019,6 +1052,12 @@ engine, from the address picked.
   hex with its ABI, whose constructor's parameters get fields. It keeps the contract under the
   address it will land at, worked out from the sender's next nonce, and prepares the deploy for
   the Send page.
+- **Remove it,** folded under a Lua or WebAssembly contract, removes it for good
+  ([removal](contracts.md#lifecycle-hooks)): its balance to the beneficiary named, this account unless
+  another, its code and storage deleted, its address never deployed at again. It goes only once
+  `remove` is typed, then to the Send page's review; the chain asks the contract's `check_perms`.
+  The batch builder has the same step, **Remove a contract**, typed out the same way. An EVM
+  contract is removed by its own code, as Ethereum's are.
 
 What a read answers comes from the node, as a dry run does: it is not proven.
 
@@ -1039,8 +1078,9 @@ for it. The wallet proves its balance and builds what it sends as for any accoun
   The account sits beside the others, as `metamask` in the vault, with its public key alone.
 - **Sending:** Review reads **Sign with MetaMask**. MetaMask shows the transaction as EIP-712
   typed data, each field by name: a transfer's from, to, amount, nonce and fee, a token
-  transfer's token too. Its signature is recovered, checked to be the account's and to hold on
-  this chain, and sent.
+  transfer's token too, a contract call's contract, function and each argument by its type and
+  value, and every step of a batch. Its signature is recovered, checked to be the account's and to
+  hold on this chain, and sent with the function names beside it.
 - **Bound to the chain:** the typed data's domain is salted with the genesis id, so what MetaMask
   signs for this chain holds on no other. See [Typed data (EIP-712)](crypto.md#typed-data-eip-712).
 - **The desktop and Android apps** reach no MetaMask: its accounts are the browser's.
@@ -1171,8 +1211,20 @@ its router, the EVM's, switched with **Native** and **EVM** beside the page's tw
   minimum received and route of the best route, through one pool or two; slippage, offered or
   typed; and one button, which says what it waits for until it can trade.
 - **Pools:** what each holds, one opening to its price, a native pool's price chart from its `Sync`
-  events, and adding to it or taking your shares out; under them, folded, **Open a new pool**, at
-  the price its first deposit sets.
+  events and its time-weighted price, and adding to it or taking your shares out; under them,
+  folded, **Open a new pool**, at the price its first deposit sets and the fee tier picked among
+  those the chain offers, 0.3% unless another is picked: one pool to a pair and tier, so a tier
+  taken already says to add to that pool instead.
+- **Both DEXes at once:** when the chain's directory names the split router, `router.lua`, and
+  dividing a trade between the native DEX and the EVM's pays more than the DEX shown alone
+  (`dex::best_split`), the trade offers **Divide it between both DEXes**, with what each part
+  trades and the minimum both pay together. It goes as one call to the router, after letting the
+  router move a token, as the CLI's `dex swap --split` does.
+- **Time-weighted price:** a native pool's cumulative prices, read through `pool()` at the light
+  client's final block and at its tip, a hundred blocks back under no finality: what its first
+  side was worth in the other on average between them (`dex::twap`), which one block's trades
+  cannot move far, as they can its last price. Each read names its block and is proven there when
+  the light client holds that block.
 
 Approving a token, trading, adding and taking out are calls the Send page reviews and signs,
 from the address the From picker names: what it holds of each asset and each pool's shares is what
@@ -1214,6 +1266,16 @@ The **NFTs** page shows what the account holds of the chain's [collections](nft-
 - **Sending several at once:** **Add to a batch** on a multi-token id puts it with others of the
   same collection and holder; the batch card sends them all in one `batch_transfer_from`, or
   `safe_batch_transfer_from` to a contract.
+- **EVM collections:** ERC-721 and ERC-1155 contracts on the chain's own EVM, which the registry
+  lists too ([EVM collections](nft-standard.md#evm-collections)). They have no `tokens_of`: where to
+  look comes from the node's event index, each collection's logs naming one of the account's EVM
+  forms, the ids a `Transfer`, `TransferSingle` or `TransferBatch` names, ten pages of 200 at most.
+  What is so is proven otherwise than a native collection's: `ownerOf` or `balanceOf` runs at the
+  block the light client checked last, over the entries it reads, proven, and again here, as
+  [watched tokens](#sites) are; one that could only be the node's word says so. `tokenURI`, or
+  `uri` with ERC-1155's `{id}` filled in, and `royaltyInfo` are read the same way. Sending one is an
+  EVM call from the holder's EVM form: `safeTransferFrom`, or `safeBatchTransferFrom` for a batch of
+  ERC-1155 ids. A node with no event index lists none, and the page says why.
 
 ### Bridge
 

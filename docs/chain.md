@@ -251,12 +251,14 @@ chainv4 send batch \
 
 A `deploy` takes `lua`, `wasm`, or `evm` with `constructor` and `args`. An `evm_call` takes `function`
 and `args`, or `data`. A name's `action` is `register`, `renew`, `transfer`, `target`, `text` or
-`subname`, with that command's fields. A field nothing asks for is an error, not a default. `--eip712`
-is refused: see below.
+`subname`, with that command's fields. A field nothing asks for is an error, not a default.
 
-**EIP-712.** A batch is never signed as typed data: MetaMask or a hardware wallet would show one
-opaque hash for all its steps. `SignedTx::verify_on` refuses one, or a multisig's, or an approval of
-one, under `Signature::Secp256k1Eip712`; the same key signs it the chain's own way.
+**EIP-712.** A batch signed as typed data shows its signer every step: its `Batch` form writes each
+transfer, call and EVM call out, a call by its function's name, which travels beside the signature
+(see [Typed data](crypto.md#typed-data-eip-712)), and anything else as its kind and bytes;
+`--eip712` signs one. A multisig's batch, carried or approved, has no such form, and
+`SignedTx::verify_on` refuses one under `Signature::Secp256k1Eip712`; the same key signs it the
+chain's own way.
 
 ## Running transactions side by side
 

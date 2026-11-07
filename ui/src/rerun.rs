@@ -49,11 +49,15 @@ impl Engines {
 }
 
 /// The request's body as sent: the read, at the block the light client checked last, by its id,
-/// with the entries it reads proven.
+/// unless it names a block of its own, as a time-weighted price's earlier observation does; with
+/// the entries it reads proven.
 pub fn proving(body: &str, block: &str) -> Option<String> {
     let mut body: Value = serde_json::from_str(body).ok()?;
     body["prove"] = true.into();
-    body["block"] = block.into();
+
+    if body.get("block").is_none_or(Value::is_null) {
+        body["block"] = block.into();
+    }
 
     Some(body.to_string())
 }
@@ -191,6 +195,10 @@ mod tests {
         let sent: Value = serde_json::from_str(&proving(&body, "0xabc").unwrap()).unwrap();
         assert_eq!((sent["prove"].as_bool(), sent["block"].as_str(), sent["function"].as_str()), (Some(true), Some("0xabc"), Some("balance_of")));
         assert!(proving("not json", "0xabc").is_none());
+
+        // A read that names its own block is proven there.
+        let earlier = json!({ "contract": "contract:0x01", "function": "pool", "args": [], "block": 40 }).to_string();
+        assert_eq!(serde_json::from_str::<Value>(&proving(&earlier, "0xabc").unwrap()).unwrap()["block"], json!(40));
 
         let rules = Rules { dex: DexSettings::DEFAULT, evm_spec: None };
         let answer = json!({ "status": "returned", "values": [{ "type": "i64", "value": "1" }] });

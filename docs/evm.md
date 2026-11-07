@@ -411,7 +411,11 @@ sender may carry its own, for its nonce after the transaction's.
   recovers no key leaves its account as it was.
 - **Needs Prague:** a chain whose `evm_spec` is earlier refuses type 4.
 
-JSON-RPC shows a type-4 transaction with its `authorizationList`.
+JSON-RPC shows a type-4 transaction with its `authorizationList`. The API's own JSON shows it with
+`authorizations`, each the account that signed it, as `secp256k1:0x…`, the contract it now runs,
+or none for one cleared, and its chain id and nonce; `GET /accounts/{address}` says an account's
+delegation, in `delegated_to`. The explorer explains a type-4 transaction and shows the account's
+delegation on its page; the wallet proves its own accounts' (see [Wallet](wallet.md#what-it-proves)).
 
 ## Not yet
 

@@ -377,7 +377,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut GovernanceState, send: &mut 
                 state.reviewing = false;
                 // What the vote changes shows once back.
                 state.asked = None;
-                let prepared = Prepared { from: pending.from, tx: pending.tx, what: pending.what, about: pending.words, coin: u256::ZERO };
+                let prepared = Prepared { from: pending.from, tx: pending.tx, what: pending.what, about: pending.words, coin: u256::ZERO, functions: Vec::new() };
 
                 match prepared.from {
                     Address::Multisig(_) => {
@@ -1627,6 +1627,7 @@ fn stated(change: &Change, coin: &Coin) -> String {
                 (directory.swap.is_some(), "the swap contract".to_string()),
                 (directory.dex.is_some(), "the DEX".to_string()),
                 (directory.dex_router.is_some(), "the DEX's EVM router".to_string()),
+                (directory.dex_split.is_some(), "the DEX's split router".to_string()),
                 (directory.nft_factory.is_some(), "the NFT factory".to_string()),
             ];
             let named: Vec<String> = named.into_iter().filter(|(set, _)| *set).map(|(_, what)| what).collect();
@@ -2011,6 +2012,7 @@ mod tests {
             swap: None,
             dex: Some(Address::Contract([2; 32])),
             dex_router: None,
+            dex_split: None,
             nft_factory: None,
         };
         value["in_force"]["finality"] = json!({ "value": change_json(&Change::Finality(FinalityConfig::Depth(DepthConfig { depth: 6 })))["finality"], "decided": null });
@@ -2201,6 +2203,7 @@ mod tests {
                     swap: None,
                     dex: Some(Address::Contract([2; 32])),
                     dex_router: None,
+                    dex_split: None,
                     nft_factory: None,
                 }),
                 "Directory: announce the gateway, 1 EVM gateway, the DEX",

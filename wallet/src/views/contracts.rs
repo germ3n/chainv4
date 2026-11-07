@@ -54,6 +54,9 @@ type Picked = Arc<Mutex<Option<Result<(String, Vec<u8>), String>>>>;
 pub struct ContractsState {
     /// The address reads and calls go from: one of the account's.
     from: Option<Address>,
+    /// Removing the contract open: who gets its balance, as typed, and the word typed to say so.
+    beneficiary: String,
+    removing: String,
     /// The contract open, by address.
     open: Option<String>,
     add_address: String,
@@ -337,6 +340,67 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &Address
         };
     });
 
+    // A Lua or WebAssembly contract may be removed, if its check_perms says this sender may.
+    if prepared.is_none() && !matches!(address, Address::Evm(_)) {
+        theme::section_gap(ui);
+        prepared = remove(ui, ctx, state, from, contract, address);
+    }
+
+    prepared
+}
+
+/// The word typed to remove a contract: it cannot be undone.
+pub const REMOVE_WORD: &str = "remove";
+
+/// Removing a contract for good: its balance to a beneficiary, its code and storage deleted, its
+/// address never used again. Typed out first, then reviewed on Send.
+fn remove(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &Address, contract: &SavedContract, address: Address) -> Option<Prepared> {
+    let palette = *ctx.palette;
+    let mut prepared = None;
+
+    theme::card(ui, &palette, |ui| {
+        egui::CollapsingHeader::new(RichText::new("Remove it").color(palette.bad)).id_salt(("remove", &contract.address)).show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new("For good: its balance goes to whom you name, its code and every entry it keeps are deleted, each for a fee, and nothing is ever deployed at its address again. Only if its check_perms lets this account.")
+                        .small()
+                        .color(palette.muted),
+                )
+                .wrap(),
+            );
+            super::row(ui, &palette, "Its balance to", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut state.beneficiary).hint_text("this account, unless you name another").desired_width(f32::INFINITY));
+            });
+            let beneficiary = match state.beneficiary.trim() {
+                "" => Some(*from),
+                text => text.parse::<Address>().ok().or_else(|| ctx.chain.resolve(text).and_then(|resolved| resolved.target())),
+            };
+
+            if beneficiary.is_none() {
+                ui.colored_label(palette.bad, "Not an address, nor a name proven to point at one.");
+            }
+
+            super::row(ui, &palette, "Type remove", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut state.removing).hint_text(REMOVE_WORD).desired_width(120.0));
+            });
+            let sure = state.removing.trim() == REMOVE_WORD;
+
+            if theme::primary(ui, &palette, "Review the removal", sure && beneficiary.is_some()).clicked()
+                && let Some(beneficiary) = beneficiary
+            {
+                state.removing.clear();
+                prepared = Some(Prepared {
+                    from: *from,
+                    tx: Tx::Remove { contract: address, beneficiary },
+                    what: format!("Remove {}", contract.name),
+                    about: format!("its balance to {}", crate::format::short(&beneficiary.to_string())),
+                    coin: u256::ZERO,
+                    functions: Vec::new(),
+                });
+            }
+        });
+    });
+
     prepared
 }
 
@@ -413,6 +477,7 @@ fn native_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from
                             what: format!("Call {function} on {}", contract.name),
                             about: contract.address.clone(),
                             coin: *sent,
+                            functions: vec![function.to_string()],
                         });
                     }
                     (Err(why), _) | (_, Err(why)) => {
@@ -518,6 +583,7 @@ fn evm_functions(ui: &mut Ui, ctx: &mut Ctx, state: &mut ContractsState, from: &
                         what: format!("Call {} on {}", function.name, contract.name),
                         about: contract.address.clone(),
                         coin: *sent,
+                        functions: Vec::new(),
                     });
                 }
                 (Err(why), _) | (_, Err(why)) if read || write => {
@@ -702,6 +768,7 @@ fn deploy_tx(ctx: &mut Ctx, state: &ContractsState, from: &Address, abi: Option<
         what,
         about: format!("lands at {lands}"),
         coin: u256::ZERO,
+        functions: Vec::new(),
     })
 }
 

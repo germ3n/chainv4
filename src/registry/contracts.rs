@@ -3,7 +3,7 @@ use {
     crate::crypto::hashable::Hashable,
     crate::db::{Column, Committed, DbError, State, address_key},
     crate::registry::Standards,
-    crate::registry::collections::{COLLECTION_METADATA_FUNCTIONS, Collection, Collections},
+    crate::registry::collections::{COLLECTION_METADATA_FUNCTIONS, Collection, CollectionKind, Collections},
     crate::registry::tokens::{METADATA_FUNCTIONS, Token, Tokens},
     crate::structs::address::Address,
     crate::structs::code::{Code, Engine},
@@ -66,6 +66,13 @@ pub struct Removal {
 }
 
 impl Hashable for Removal {}
+
+#[document(
+    summary = "The most EVM gas each question the collection registry asks of a new EVM contract may use, intrinsic gas included: ERC-165's 30,000 for supportsInterface and what the call itself costs. Paid out of what the transaction has left.",
+    category = "Registries",
+    see_also = "Contracts::refresh, Collections",
+)]
+pub const EVM_QUESTION_GAS: u64 = 60_000;
 
 #[document(
     summary = "Where a removed contract's Removal is kept in Column::Contracts: 0xff and then the address's own key, which no address's key starts with.",
@@ -356,6 +363,13 @@ impl<'a> Contracts<'a> {
         }
 
         let record = self.record(contract)?;
+
+        // An EVM contract exports no functions by name: ERC-165 says what it is.
+        #[cfg(feature = "evm")]
+        if record.engine == Engine::Evm {
+            return self.refresh_evm(vm, contract, sender, limits, standards, block).map_err(|err| Failed { error: RegistryError::Db(err), fuel_used: 0, trace: Trace::default() });
+        }
+
         let exports = |function: &str| record.functions.iter().any(|name| name == function);
         let token = !standards.tokens.is_empty() && standards.tokens.iter().all(|function| exports(function));
         let kind = standards.collections.as_ref().and_then(|functions| functions.kind(exports));
@@ -428,6 +442,86 @@ impl<'a> Contracts<'a> {
         }
 
         Ok((fuel_used, trace))
+    }
+
+    /// The collection registry's entry for an EVM contract, by ERC-165: one that says it is
+    /// ERC-165 and ERC-721 (0x80ac58cd) is an NFT collection, ERC-1155 (0xd9b67a26) a
+    /// multi-token one, with what its name() and symbol() answer when they are strings a
+    /// collection may have; any other is taken off. Each question runs on a throwaway copy of
+    /// state with at most EVM_QUESTION_GAS, paid out of what the transaction has left; when too
+    /// little is left, or a question fails, it is not a collection. An EVM transaction runs as it
+    /// would on Ethereum: these never fail it.
+    #[cfg(feature = "evm")]
+    fn refresh_evm(&self, vm: &Arc<Vm>, contract: &Address, sender: Address, limits: Limits, standards: &Standards, block: BlockAt) -> Result<(u64, Trace), DbError> {
+        use crate::vm::evm::{self, EvmAction, EvmBlock, EvmReturned};
+
+        let collections = Collections::new(self.state);
+
+        if standards.collections.is_none() {
+            return Ok((0, Trace::default()));
+        }
+
+        let fuel_per_gas = block.fuel_per_gas.max(1);
+        let evm_block = EvmBlock {
+            height: block.height,
+            timestamp: block.time,
+            producer: block.producer,
+            chain_id: vm.chain_id(),
+            names: vm.names().cloned(),
+            hash: vm.hash(),
+            vm: block.vm,
+        };
+        let scratch = Arc::new(State::new(self.state.clone()));
+        let nonce = crate::registry::accounts::Accounts::new(&scratch).get(&sender)?.nonce;
+        let mut fuel_used = 0u64;
+        let mut ask = |input: Vec<u8>| -> Result<Option<Vec<u8>>, DbError> {
+            if limits.fuel.saturating_sub(fuel_used) / fuel_per_gas < EVM_QUESTION_GAS {
+                return Ok(None);
+            }
+
+            let layer = Arc::new(State::new(scratch.clone()));
+            let action = EvmAction::Call { to: *contract, value: u256::ZERO, input };
+            let ran = evm::run(&layer, &sender, nonce, action, &[], &[], EVM_QUESTION_GAS, limits.memory as u64, evm_block.clone(), None)?;
+            fuel_used += ran.gas_used.saturating_mul(fuel_per_gas);
+
+            Ok(match ran.result {
+                Ok(EvmReturned::Output(output)) => Some(output),
+                _ => None,
+            })
+        };
+        let mut supports = |interface: [u8; 4]| -> Result<bool, DbError> {
+            let mut input = vec![0x01, 0xff, 0xc9, 0xa7];
+            input.extend(interface);
+            input.extend([0; 28]);
+
+            // A bool, as the ABI writes one: 31 zeros and a one.
+            Ok(ask(input)?.is_some_and(|output| output.len() >= 32 && output[..31].iter().all(|byte| *byte == 0) && output[31] == 1))
+        };
+        let erc165 = supports([0x01, 0xff, 0xc9, 0xa7])? && !supports([0xff; 4])?;
+        let kind = match erc165 {
+            true if supports([0x80, 0xac, 0x58, 0xcd])? => Some(CollectionKind::Nft),
+            true if supports([0xd9, 0xb6, 0x7a, 0x26])? => Some(CollectionKind::Multi),
+            _ => None,
+        };
+        let Some(kind) = kind else {
+            collections.unregister(contract)?;
+
+            return Ok((fuel_used, Trace::default()));
+        };
+        let mut text = |selector: [u8; 4], max: usize| -> Result<Option<String>, DbError> {
+            Ok(ask(selector.to_vec())?
+                .and_then(|output| crate::abi::decode_values(&[crate::abi::AbiType::String], &output).ok())
+                .and_then(|mut values| match values.pop() {
+                    Some(crate::abi::AbiValue::String(text)) => Some(text),
+                    _ => None,
+                })
+                .and_then(|text| crate::registry::collections::text("name", &[TxCallArgumentType::String(text)], max).ok()))
+        };
+        let name = text([0x06, 0xfd, 0xde, 0x03], crate::registry::tokens::MAX_NAME)?;
+        let symbol = text([0x95, 0xd8, 0x9b, 0x41], crate::registry::tokens::MAX_SYMBOL)?;
+        collections.register(&Collection { address: *contract, kind, name, symbol })?;
+
+        Ok((fuel_used, Trace::default()))
     }
 
     /// Refreshes the registries for a contract a deploy or upgrade just left, after what it did

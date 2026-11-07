@@ -154,8 +154,12 @@ fn the_same_keys_sending_the_same_thing_on_another_chain_make_another_id_with_th
 
     let (one, other) = (wincode::serialize(&one).unwrap(), wincode::serialize(&other).unwrap());
 
+    // The signature is the 64 bytes before the function names, none.
+    let names = wincode::serialize(&Vec::<String>::new()).unwrap().len();
+
     assert_eq!(one.len(), other.len());
-    assert_eq!(one[..one.len() - 64], other[..other.len() - 64]);
+    assert_eq!(one[..one.len() - 64 - names], other[..other.len() - 64 - names]);
+    assert_eq!(one[one.len() - names..], other[other.len() - names..]);
 }
 
 #[test]
@@ -2112,7 +2116,7 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
     let genesis_id = chain.genesis();
     let base = chain.next_base_price();
     // An Ed25519 transfer's gas exactly; other schemes' cost less.
-    let gas_limit = 3_620;
+    let gas_limit = 3_700;
     let txs: Vec<SignedTx> = keys
         .iter()
         .enumerate()
@@ -2127,7 +2131,7 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
     let mut block = chain.build(txs, Vec::new(), producer().address(&[]), now).unwrap();
     block.seal = producer().seal(&block.header).unwrap();
 
-    // The block's gas limit binds, at 13,812 transfers with Ed25519 keys: over 4 MiB in memory.
+    // The block's gas limit binds, at 13,513 transfers with Ed25519 keys: over 4 MiB in memory.
     let block_gas_limit = genesis.fees.as_ref().unwrap().block_gas_limit;
 
     assert!(block.txs.len() < keys.len());
@@ -2135,7 +2139,7 @@ fn a_full_block_past_wincodes_default_limit_builds_imports_and_reads_back() {
     assert!(block.txs.len() * std::mem::size_of::<SignedTx>() > 4 << 20);
 
     if cfg!(feature = "ed25519") {
-        assert_eq!(block.txs.len(), 13_812);
+        assert_eq!(block.txs.len(), 13_513);
     }
 
     // Encoded as any list is: the transactions' own encoding right after the header.

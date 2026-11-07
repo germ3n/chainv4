@@ -91,12 +91,20 @@ fn signed_for_no_chain(tx: Tx) -> SignedTx {
     let bytes = [b"chainv4 transaction".as_slice(), &tx.hashable_bytes_with_tag(), &nonce.to_le_bytes(), &fee.hashable_bytes_with_tag(), &signer.hashable_bytes_with_tag()].concat();
     let signature = key().sign(&bytes);
 
-    SignedTx { tx, nonce, fee, signer, signature }
+    SignedTx { tx, nonce, fee, signer, signature, functions: Vec::new() }
+}
+
+/// What a signed transaction ends with since typed signatures carried their calls' names: the
+/// empty list of them, after the signature, for every other signature.
+#[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
+fn no_names() -> Vec<u8> {
+    wincode::serialize(&Vec::<String>::new()).unwrap()
 }
 
 // A signature now names its chain, which changes what it signs and so every transaction's id. No
 // byte of how a transaction is encoded moved, and this is what shows it: the bytes pinned stand as
-// they were, and so does each id, from a signature made as it was then.
+// they were, and so does each id, from a signature made as it was then, of all a signed
+// transaction holds before the function names it carries since batch 15, which changed every id.
 #[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
 #[test]
 fn every_old_transaction_keeps_its_exact_bytes_and_id() {
@@ -104,28 +112,31 @@ fn every_old_transaction_keeps_its_exact_bytes_and_id() {
         assert_eq!(to_hex(&wincode::serialize(&tx).unwrap()), bytes, "{tx:?}");
         assert_eq!(wincode::deserialize::<Tx>(&from_hex(bytes).unwrap()).unwrap(), tx);
 
-        let signed = signed_for_no_chain(tx);
+        let signed = wincode::serialize(&signed_for_no_chain(tx)).unwrap();
+        let (before, names) = signed.split_at(signed.len() - no_names().len());
 
-        assert_eq!(signed.id(HashType::default_chain()).to_string(), id, "{signed:?}");
+        assert_eq!(names, no_names(), "the names last, none");
+        assert_eq!(crate::crypto::hasher::Hasher::digest(HashType::default_chain(), before).to_string(), id);
     }
 }
 
-// The same transactions signed as they are now, for the chain chain() names: what changing the
-// bytes a signature covers would change shows here, as a new genesis is the only way to do that.
+// The same transactions signed as they are now, for the chain chain() names, with no function names
+// after their signatures: what changing the bytes a signature covers, or what a signed transaction
+// holds, would change shows here, as a new genesis is the only way to do that.
 #[cfg(all(feature = "blake3", feature = "ed25519", feature = "xxh3"))]
 #[test]
 fn every_transaction_signed_for_a_chain_differs_from_the_old_one_in_its_signature_alone() {
     let ids = [
-        "0x101c6210787596850b8919291b20ae698e5654558cab2bc814c6cfd3772f7828",
-        "0x82ba4509071dc632b5b2c66518be0c4a2d6c332dc3e161fb24d85018ed906ba1",
-        "0x1115111ba10d2329ee83707a05ce9cfe7feba2f74b548407c234ff749b3687db",
-        "0x08adda65df652d19b1bec02c3b12e213520e6fa72bf8008c808853f538d6868a",
-        "0x18a25d38b38d3e5d05cc3a333024288d6f03060213dd964dce395d2c3fb36014",
-        "0x8a3dd07ddfa52022ab152bf1f04327975c36577131ee1c218a2ccc3eace19686",
-        "0x1255e363cd49ce7a0cac3efe48e8805e17380377ad15b7fb15890b801c321428",
-        "0x4c183f277f6d9abc38695366d319689543e52df563b76097beee274adfa0ecfb",
-        "0x1aa75b0de476c79494207c11e86b794cebd34415be3e85389b1fbb3ff34de53b",
-        "0xceb92caf22a8f091ae94f9ff5921612f71f89d1ea920736c41aacb0d5ef02719",
+        "0x99cc03b0df2ea4cbd414e43c0052db8d41daac61297009d4957d67fcfee67c2b",
+        "0xa120efa21de39bd443b2e1afab9e4cc1d5c21a47426f3138fa57db950a32dff3",
+        "0xfbe72a1cc4a4ea6b7782e446eec868591ab6980553c3fed0395ebe46b223a061",
+        "0x5d7fd5c155a1a4d55237ff37ddbd2766405332b92b003dc115fd9fe452fafeba",
+        "0xe07ce4d812e069215672cce39cc6d8086def755a640634485e5bb64a0fd14e19",
+        "0x8c4a27b4cd87624260c7c14f863e80269ef7cca5165b58aebb39a2d669e3a4b4",
+        "0x1a4ad8e193e6a95036f765daf027d104d0f1dcce6f3c116f0458148f73305ae5",
+        "0x575dd324211d66bdb81490a3c7afc660b0a57f9e8fdfaf52f5cef0d343b41335",
+        "0x223ceaed0df0dd751a3974d8c565dbbb009f73cddf878b57e5739320b5e89549",
+        "0x015cd9b0dbb5912f4d7dd86209b178b960b6a4e60f948c2f3be69943f0e1848e",
     ];
 
     assert_eq!(old().len(), ids.len());
@@ -134,12 +145,15 @@ fn every_transaction_signed_for_a_chain_differs_from_the_old_one_in_its_signatur
         let then = wincode::serialize(&signed_for_no_chain(tx.clone())).unwrap();
         let signed = SignedTx::sign(tx, 3, fee(), &key(), &chain());
         let now = wincode::serialize(&signed).unwrap();
+        // The signature is the 64 bytes before the names, none.
+        let (names, signature) = (no_names().len(), 64 + no_names().len());
 
         assert_eq!(signed.id(HashType::default_chain()).to_string(), id, "{signed:?}");
         assert_ne!(old_id, id);
         assert_eq!(now.len(), then.len());
-        assert_eq!(now[..now.len() - 64], then[..then.len() - 64], "the tag, the transaction, nonce, fee offer and signer stand");
-        assert_ne!(now[now.len() - 64..], then[then.len() - 64..]);
+        assert_eq!(now[..now.len() - signature], then[..then.len() - signature], "the tag, the transaction, nonce, fee offer and signer stand");
+        assert_ne!(now[now.len() - signature..now.len() - names], then[then.len() - signature..then.len() - names]);
+        assert_eq!(now[now.len() - names..], then[then.len() - names..], "neither names a function");
         assert_eq!(signed.verify_on(&chain()), Ok(()));
     }
 }

@@ -27,6 +27,8 @@ use {
     std::collections::HashMap,
 };
 
+mod evm;
+
 /// How often the collections, and what the account holds of them, are asked again.
 const ASK_EVERY: f64 = 20.0;
 /// The most ids asked of a collection for one address: tokens_of's page.
@@ -148,6 +150,8 @@ pub struct NftsState {
     /// Ids of one multi-token collection put together to send at once, with the address holding
     /// them, each with how many.
     batch: Option<Batch>,
+    /// What the account holds of the EVM collections.
+    evm: evm::EvmState,
 }
 
 /// Several ids of one multi-token collection, from one holder, sent in one batch_transfer_from.
@@ -195,8 +199,17 @@ impl NftsState {
         self.collections = listed(&serde_json::json!({ "collections": entries }));
     }
 
+    /// Takes a page of an EVM collection's logs, with the next page to ask, if any.
+    pub fn logs(&mut self, ask: &Ask, result: &Result<Value, crate::node::Failure>) -> Option<Ask> {
+        self.evm.logs(ask, result)
+    }
+
     /// Takes the collections' answers; false for anyone else's.
     pub fn answered(&mut self, ask: &Ask, result: &Result<Value, crate::node::Failure>) -> bool {
+        if self.evm.answered(ask, result) {
+            return true;
+        }
+
         let Ask::Call(body) = ask else {
             return false;
         };
@@ -265,7 +278,7 @@ impl NftsState {
     pub fn wanted(&self) -> Vec<Held> {
         let mut wanted = Vec::new();
 
-        for listed in &self.collections {
+        for listed in self.collections.iter().filter(|listed| !evm::is_evm(listed)) {
             for id in self.ids(listed) {
                 match listed.kind {
                     CollectionKind::Nft => wanted.push(Held { collection: listed.address.clone(), id, multi: false, holder: String::new() }),
@@ -364,6 +377,8 @@ fn want(ctx: &mut Ctx, state: &mut NftsState, uri: &str) {
 
 fn refresh(ctx: &mut Ctx, state: &mut NftsState, time: f64) {
     state.addresses = ctx.addresses();
+    let collections = state.collections.clone();
+    state.evm.refresh(ctx, &collections);
 
     if time - state.asked < ctx.settings.pace().every(ASK_EVERY) {
         return;
@@ -372,7 +387,7 @@ fn refresh(ctx: &mut Ctx, state: &mut NftsState, time: f64) {
     // The registry's collections come from the light client's listing of it, which it proves.
     state.asked = time;
 
-    for listed in state.collections.clone() {
+    for listed in state.collections.clone().into_iter().filter(|listed| !evm::is_evm(listed)) {
         for address in ctx.addresses() {
             let args = json!([
                 { "type": "address", "value": address },
@@ -393,14 +408,23 @@ fn refresh(ctx: &mut Ctx, state: &mut NftsState, time: f64) {
     }
 }
 
-/// One NFT as a row of the grid shows it: what the light client proved of it for this holder.
+/// One NFT as a row of the grid shows it: what was proven of it for this holder.
 struct Card {
     listed: Listed,
     id: String,
     holder: String,
     /// How many: 1 for an NFT.
     amount: u256,
-    assurance: chainv4::light::Assurance,
+    proof: Proof,
+}
+
+/// How a card's holding is known.
+enum Proof {
+    /// The light client proved the collection's own entry.
+    Light(chainv4::light::Assurance),
+    /// An EVM collection's ownerOf or balanceOf, run here over proven state at this height; None
+    /// when only the node ran it.
+    Rerun(Option<u64>),
 }
 
 /// The NFTs proven held by the account's addresses: each at the address its proof names, whichever
@@ -410,14 +434,14 @@ fn cards(ctx: &Ctx, state: &NftsState) -> Vec<Card> {
     let mine = ctx.holder().map(|holder| holder.addresses()).unwrap_or_default();
     let mut cards = Vec::new();
 
-    for listed in &state.collections {
+    for listed in state.collections.iter().filter(|listed| !evm::is_evm(listed)) {
         for id in state.ids(listed) {
             match listed.kind {
                 CollectionKind::Nft => {
                     let owned = ctx.chain.nft_owners.get(&(listed.address.clone(), id.clone())).and_then(|proven| Some((proven.value.filter(|owner| mine.contains(owner))?, proven.assurance)));
 
                     if let Some((owner, assurance)) = owned {
-                        cards.push(Card { listed: listed.clone(), id, holder: owner.to_string(), amount: u256::from(1u64), assurance });
+                        cards.push(Card { listed: listed.clone(), id, holder: owner.to_string(), amount: u256::from(1u64), proof: Proof::Light(assurance) });
                     }
                 }
                 CollectionKind::Multi => {
@@ -425,13 +449,15 @@ fn cards(ctx: &Ctx, state: &NftsState) -> Vec<Card> {
                         let held = ctx.chain.multi_balances.get(&(listed.address.clone(), id.clone(), holder.to_string())).filter(|proven| proven.value > u256::ZERO);
 
                         if let Some(proven) = held {
-                            cards.push(Card { listed: listed.clone(), id: id.clone(), holder: holder.to_string(), amount: proven.value, assurance: proven.assurance });
+                            cards.push(Card { listed: listed.clone(), id: id.clone(), holder: holder.to_string(), amount: proven.value, proof: Proof::Light(proven.assurance) });
                         }
                     }
                 }
             }
         }
     }
+
+    cards.extend(state.evm.cards(ctx, &state.collections));
 
     cards
 }
@@ -451,10 +477,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
 
     let cards = cards(ctx, state);
     state.follow(&cards);
-    let waiting = cards.is_empty() && !state.wanted().is_empty();
+    let waiting = cards.is_empty() && (!state.wanted().is_empty() || state.evm.reading());
 
     for card in &cards {
-        if let Some(uri) = state.uris.get(&(card.listed.address.clone(), card.id.clone())).cloned() {
+        if let Some(uri) = uri_of(state, &card.listed.address, &card.id).cloned() {
             want(ctx, state, &uri);
 
             if let Some(Media::Metadata(metadata)) = state.media.get(&uri)
@@ -480,6 +506,10 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
 
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "Held");
+
+        if let Some(why) = &state.evm.unlisted {
+            ui.add(egui::Label::new(RichText::new(format!("EVM collections: {why}.")).small().color(palette.warn)).wrap());
+        }
 
         // What a list that did not come leaves out is not known to be gone: say whose.
         for (address, why) in state.unasked.iter().filter(|(address, _)| state.addresses.contains(address)) {
@@ -531,9 +561,17 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, send: &mut SendSt
     }
 }
 
+/// A token's URI, as its collection answered it: a native one's token_uri, an EVM one's tokenURI
+/// or uri.
+fn uri_of<'a>(state: &'a NftsState, collection: &str, id: &str) -> Option<&'a String> {
+    let at = (collection.to_string(), id.to_string());
+
+    state.uris.get(&at).or_else(|| state.evm.uris.get(&at)).filter(|uri| !uri.is_empty())
+}
+
 /// What a token's metadata says of it, once read.
 fn metadata<'a>(state: &'a NftsState, card: &Card) -> Option<&'a Metadata> {
-    match state.media.get(state.uris.get(&(card.listed.address.clone(), card.id.clone()))?) {
+    match state.media.get(uri_of(state, &card.listed.address, &card.id)?) {
         Some(Media::Metadata(metadata)) => Some(metadata),
         _ => None,
     }
@@ -624,7 +662,7 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
     let palette = *ctx.palette;
     let texture = picture(ui, state, card);
     let name = title(state, card);
-    let uri = state.uris.get(&(card.listed.address.clone(), card.id.clone())).cloned();
+    let uri = uri_of(state, &card.listed.address, &card.id).cloned();
     let read = metadata(state, card).cloned();
 
     theme::card(ui, &palette, |ui| {
@@ -664,7 +702,16 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
                 CollectionKind::Multi => ui.label(format!("{} of it, by", card.amount)),
             };
             super::address(ui, &palette, &card.holder);
-            super::assurance(ui, &palette, &card.assurance);
+
+            match &card.proof {
+                Proof::Light(assurance) => super::assurance(ui, &palette, assurance),
+                Proof::Rerun(Some(height)) => {
+                    theme::pill(ui, "Proven", palette.accent).on_hover_text(format!("Its EVM read run here over state proven at block {height}"));
+                }
+                Proof::Rerun(None) => {
+                    theme::pill(ui, "The node's word", palette.warn).on_hover_text("This build or this read could not run it over proven state");
+                }
+            }
         });
 
         for (trait_type, value) in read.as_ref().map(|read| read.attributes.clone()).unwrap_or_default() {
@@ -675,7 +722,15 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
 
         let at = (card.listed.address.clone(), card.id.clone());
 
-        match state.royalties.get(&at) {
+        let royalty = match evm::is_evm(&card.listed) {
+            true => {
+                state.evm.royalty(ctx, &card.listed.address, &card.id);
+                Some(state.evm.royalties.get(&at).cloned().flatten())
+            }
+            false => state.royalties.get(&at).cloned(),
+        };
+
+        match &royalty {
             None => ctx.node.ask(call_ask(&card.listed.address, "royalty_info", json!([{ "type": "u256", "value": card.id }, { "type": "u256", "value": "10000" }]))),
             Some(Some((receiver, share))) => super::row(ui, &palette, "Royalty", |ui| {
                 ui.label(format!("{}.{:02}% of a sale, to", share / u256::from(100u64), share % u256::from(100u64)));
@@ -725,6 +780,7 @@ fn opened(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, card: &Card, prepar
             && let (Some(to), Some(amount)) = (to, amount)
         {
             match (card.holder.parse::<Address>(), card.listed.address.parse::<Address>()) {
+                (Ok(from), Ok(collection @ Address::Evm(_))) => *prepared = Some(evm_transfer(from, collection, card.listed.kind, &card.id, to, amount)),
                 (Ok(from), Ok(collection)) => *prepared = Some(transfer(from, collection, card.listed.kind, &card.id, to, amount)),
                 _ => state.trouble = Some("An address that does not read.".to_string()),
             }
@@ -794,6 +850,7 @@ fn batch_card(ui: &mut Ui, ctx: &mut Ctx, state: &mut NftsState, prepared: &mut 
             && let Some(to) = to
         {
             match (batch.holder.parse::<Address>(), batch.collection.parse::<Address>()) {
+                (Ok(from), Ok(collection @ Address::Evm(_))) => *prepared = Some(evm_batch_transfer(from, collection, &batch.items, to)),
                 (Ok(from), Ok(collection)) => *prepared = Some(batch_transfer(from, collection, &batch.items, to)),
                 _ => state.trouble = Some("An address that does not read.".to_string()),
             }
@@ -827,6 +884,7 @@ pub fn batch_transfer(from: Address, collection: Address, items: &[(String, u256
         what: format!("Send a batch of {} ids", items.len()),
         about: collection.to_string(),
         coin: u256::ZERO,
+        functions: vec![function.to_string()],
     }
 }
 
@@ -859,6 +917,39 @@ pub fn transfer(from: Address, collection: Address, kind: CollectionKind, id: &s
         what,
         about: collection.to_string(),
         coin: u256::ZERO,
+        functions: vec![function.to_string()],
+    }
+}
+
+/// Sending a token of an EVM collection: safeTransferFrom, an EVM call from the holder.
+pub fn evm_transfer(from: Address, collection: Address, kind: CollectionKind, id: &str, to: Address, amount: u256) -> Prepared {
+    let id = u256::from_str_radix(id, 10).unwrap_or(u256::ZERO);
+    let what = match kind {
+        CollectionKind::Nft => format!("Send NFT #{id}"),
+        CollectionKind::Multi => format!("Send {amount} of #{id}"),
+    };
+
+    Prepared {
+        from,
+        tx: Tx::EvmCall { to: collection, value: Amount::U128(0), input: evm::transfer_input(kind, &from, &to, id, amount) },
+        what,
+        about: collection.to_string(),
+        coin: u256::ZERO,
+        functions: Vec::new(),
+    }
+}
+
+/// Sending several ids of an ERC-1155 collection at once: safeBatchTransferFrom.
+pub fn evm_batch_transfer(from: Address, collection: Address, items: &[(String, u256)], to: Address) -> Prepared {
+    let items: Vec<(u256, u256)> = items.iter().map(|(id, amount)| (u256::from_str_radix(id, 10).unwrap_or(u256::ZERO), *amount)).collect();
+
+    Prepared {
+        from,
+        tx: Tx::EvmCall { to: collection, value: Amount::U128(0), input: evm::batch_input(&from, &to, &items) },
+        what: format!("Send a batch of {} ids", items.len()),
+        about: collection.to_string(),
+        coin: u256::ZERO,
+        functions: Vec::new(),
     }
 }
 

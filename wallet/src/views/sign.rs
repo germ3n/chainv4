@@ -399,6 +399,28 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 /// A multisig's transaction laid out: what it does, from which multisig, at which nonce and fee,
 /// who signed already, and the key to sign with as a member. Whether that key is one of the
 /// multisig's members the signer cannot know: the chain checks it.
+/// An EVM chain's name, as the swaps know them, or chain and its id in a build without swaps.
+fn evm_chain(chain_id: u64) -> String {
+    #[cfg(feature = "swap")]
+    return chainv4::swap::evm::chain_name(chain_id);
+
+    #[cfg(not(feature = "swap"))]
+    format!("chain {chain_id}")
+}
+
+/// An EVM chain's coin's symbol, as the swaps know them, or ETH.
+fn evm_symbol(chain_id: u64) -> &'static str {
+    #[cfg(feature = "swap")]
+    return chainv4::swap::evm::symbol(chain_id);
+
+    #[cfg(not(feature = "swap"))]
+    {
+        let _ = chain_id;
+
+        "ETH"
+    }
+}
+
 /// A multisig's call on an EVM chain, laid out before the key it names signs it: the chain, the
 /// contract, whom it calls with what, its nonce, and whose approval it is when it is another
 /// multisig's.
@@ -429,12 +451,12 @@ fn evm_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     theme::card(ui, &palette, |ui| {
         theme::caps(ui, &palette, "A multisig's call on an EVM chain");
         super::row(ui, &palette, "Chain", |ui| {
-            ui.label(chainv4::swap::evm::chain_name(bundle.chain_id));
+            ui.label(evm_chain(bundle.chain_id));
         });
         super::row(ui, &palette, "Its contract", |ui| super::address(ui, &palette, &hex(&bundle.contract)));
         super::row(ui, &palette, "Calls", |ui| super::address(ui, &palette, &hex(&bundle.to)));
         super::row(ui, &palette, "Sends", |ui| {
-            ui.label(format::amount(&bundle.value.to_string(), 18, chainv4::swap::evm::symbol(bundle.chain_id)));
+            ui.label(format::amount(&bundle.value.to_string(), 18, evm_symbol(bundle.chain_id)));
         });
 
         if !bundle.data.is_empty() {
@@ -471,7 +493,7 @@ fn evm_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 match ctx.holders.iter().find_map(|holder| holder.keys.iter().find(|held| held.public() == request.signer)) {
                     Some(keypair) => match request.sign(keypair) {
                         Ok(signed) => {
-                            note(ctx, &format!("Multisig on {} · call", chainv4::swap::evm::chain_name(bundle.chain_id)), &hex(&bundle.to), &request.signer.address().to_string());
+                            note(ctx, &format!("Multisig on {} · call", evm_chain(bundle.chain_id)), &hex(&bundle.to), &request.signer.address().to_string());
                             let answer = chainv4::abi::multisig::EvmRequest { bundle: signed, ..(**request).clone() };
                             next = Some(Step::Signed { message: Box::new(Message::Evm(Box::new(answer))) });
                         }

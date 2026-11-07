@@ -396,6 +396,7 @@ pub fn probe(tx: Tx, nonce: u64, signer: PublicKey) -> SignedTx {
         fee: FeeOffer::NONE,
         signer,
         signature,
+        functions: Vec::new(),
     }
 }
 

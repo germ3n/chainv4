@@ -709,6 +709,7 @@ fn details(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, value: &Value,
                             what: "Withdraw an approval".to_string(),
                             about: format::short(&account.to_string()),
                             coin: u256::ZERO,
+                            functions: Vec::new(),
                         };
                         *prepared = Some(approve_as(ctx, member, withdrawal));
                     }
@@ -1072,6 +1073,7 @@ fn approval(from: Address, account: Address, nonce: u64, fee: FeeOffer, tx: Tx) 
         what: format!("Approve the multisig's transaction {nonce}"),
         about: format::short(&account.to_string()),
         coin: u256::ZERO,
+        functions: Vec::new(),
     }
 }
 
@@ -1235,7 +1237,7 @@ mod tests {
         assert!(matches!(&probe.tx, Tx::Multisig { tx, signatures, .. } if matches!(**tx, Tx::Batch { .. }) && signatures.len() == 2));
 
         let mut state = MultisigState::default();
-        state.propose(Prepared { from: account, tx: body.tx.clone(), what: String::new(), about: String::new(), coin: u256::ZERO });
+        state.propose(Prepared { from: account, tx: body.tx.clone(), what: String::new(), about: String::new(), coin: u256::ZERO, functions: Vec::new() });
 
         assert_eq!(state.selected, Some(account.to_string()));
         assert!(state.incoming.is_some());

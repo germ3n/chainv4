@@ -170,7 +170,10 @@ nonce: 0x<the 32 bytes, lowercase hex>
 ```
 
 Addresses are in their text form. A wallet calls the message function, shows the text, and signs
-exactly it.
+exactly it. `registry::tokens::authorization` writes the same text from the terms alone, signs it,
+checks a signed one as the token will, and makes the call that sends it; the wallet's
+[Authorize](wallet.md#authorize) page signs one only when the token's text is that, and hands it
+on as text and a QR code, or sends one pasted in.
 
 **The key** comes with the signature: the token checks that the key controls the owner's address
 (`crypto.address`), then the signature. A contract's address signs nothing. Each is bound to the

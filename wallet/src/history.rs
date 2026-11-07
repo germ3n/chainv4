@@ -26,7 +26,7 @@ use {
 
 /// Functions a call may name, so the history says which one ran; a call to any other says only
 /// whom it called.
-const KNOWN: [&str; 10] = ["transfer", "transfer_from", "approve", "mint", "burn", "sign", "tip", "ping", "greet", "upgrade"];
+pub(crate) const KNOWN: [&str; 10] = ["transfer", "transfer_from", "approve", "mint", "burn", "sign", "tip", "ping", "greet", "upgrade"];
 
 /// The most of a transaction's calldata, and of all its logs, that is kept, in hex digits. A log
 /// takes a few hundred at most in anything common. Past this, what is kept says how long it was; a
@@ -574,9 +574,18 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::PrimaryName { name: Some(name) }, _) => format!("Made {name} the primary name"),
         (Tx::PrimaryName { name: None }, _) => "Cleared the primary name".to_string(),
         (Tx::Ethereum { .. }, CommittedOutcome::Deployed(contract)) => format!("Deployed {} from an Ethereum wallet", format::short(&contract.to_string())),
-        (Tx::Ethereum { raw }, _) => match chainv4::crypto::ethereum::decode(raw).ok().and_then(|ethereum| ethereum.to) {
-            Some(to) => format!("Sent from an Ethereum wallet to {}", format::short(&chainv4::structs::hex::to_hex(&to))),
-            None => "Deploy from an Ethereum wallet".to_string(),
+        (Tx::Ethereum { raw }, _) => match chainv4::crypto::ethereum::decode(raw).ok() {
+            // EIP-7702's type 4: each authorization sets whose code an account runs, or clears it.
+            Some(ethereum) if !ethereum.authorizations.is_empty() => match ethereum.authorizations.as_slice() {
+                [one] if one.address == [0; 20] => "Cleared an account's delegation, from an Ethereum wallet".to_string(),
+                [one] => format!("Delegated an account to {}, from an Ethereum wallet", format::short(&Address::Evm(one.address).to_string())),
+                many => format!("Set {} accounts' delegations, from an Ethereum wallet", many.len()),
+            },
+            Some(ethereum) => match ethereum.to {
+                Some(to) => format!("Sent from an Ethereum wallet to {}", format::short(&chainv4::structs::hex::to_hex(&to))),
+                None => "Deploy from an Ethereum wallet".to_string(),
+            },
+            None => "Sent from an Ethereum wallet".to_string(),
         },
         (Tx::Multisig { account, tx, .. }, _) => format!("{} · by the multisig {}", action(tx, outcome), format::short(&account.to_string())),
         (Tx::CreateMultisig { members, threshold, .. }, CommittedOutcome::Deployed(account)) => {
@@ -1091,6 +1100,38 @@ mod batch_tests {
         let batch = checked(Tx::Batch { steps: steps() }, CommittedOutcome::BatchFailed { step: 0 });
 
         assert_eq!(serde_json::from_str::<Checked>(&serde_json::to_string(&batch).unwrap()).unwrap(), batch);
+    }
+
+    #[test]
+    fn an_eip_7702_transaction_says_whose_code_an_account_now_runs() {
+        use chainv4::crypto::ethereum::{Authorization, EthereumKind, EthereumTx};
+
+        let secret = [0x47; 32];
+        let raw = |addresses: &[[u8; 20]]| {
+            let authorizations = addresses.iter().map(|address| Authorization { chain_id: u256::ONE, address: *address, nonce: 1, parity: 0, signature: [0; 64] }.signed(&secret)).collect();
+            let tx = EthereumTx {
+                kind: EthereumKind::SetCode,
+                chain_id: 1,
+                nonce: 0,
+                max_price: u256::ONE,
+                tip: u256::ZERO,
+                gas_limit: 100_000,
+                to: Some([1; 20]),
+                value: u256::ZERO,
+                input: Vec::new(),
+                access_list: Vec::new(),
+                signature: [0; 64],
+                parity: 0,
+                authorizations,
+            };
+
+            Tx::Ethereum { raw: tx.signed(&secret).encode() }
+        };
+        let said = |addresses: &[[u8; 20]]| action(&raw(addresses), &CommittedOutcome::Done);
+
+        assert_eq!(said(&[[0xd7; 20]]), format!("Delegated an account to {}, from an Ethereum wallet", format::short(&Address::Evm([0xd7; 20]).to_string())));
+        assert_eq!(said(&[[0; 20]]), "Cleared an account's delegation, from an Ethereum wallet");
+        assert_eq!(said(&[[0xd7; 20], [0xd8; 20]]), "Set 2 accounts' delegations, from an Ethereum wallet");
     }
 }
 
