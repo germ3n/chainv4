@@ -170,6 +170,13 @@ fn members(ui: &mut Ui, ctx: &mut Ctx, multisig: &MultisigView) {
 
                 if let Some(evm) = &member.evm {
                     facts.row("EVM", |ui| super::copyable(ui, evm));
+
+                    // What signs there for it, when it is not an EVM key.
+                    match member.evm_kind.as_deref() {
+                        Some("contract") => facts.text("EVM owner", "a contract, ERC-1271"),
+                        Some(kind) if kind.starts_with("ed25519:") => facts.row("EVM owner", |ui| super::copyable(ui, kind)),
+                        _ => {}
+                    }
                 }
             });
         });

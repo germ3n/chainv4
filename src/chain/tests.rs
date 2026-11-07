@@ -1337,6 +1337,46 @@ return M
     assert_eq!(version(&mut chain, 4), Ok(Effect::Returned(vec![TxCallArgumentType::I64(2)])));
 }
 
+#[test]
+fn a_remove_transaction_pays_the_balance_out_and_leaves_a_provable_tombstone() {
+    const OWNED: &str = r#"
+local M = {}
+function M.init() storage.set("owner", ctx.sender:hex()) end
+function M.check_perms(permission, who, beneficiary) return permission == "remove" and who:hex() == storage.get("owner") end
+function M.deposit() end
+return M
+"#;
+    let db = Arc::new(MemoryDb::default());
+    let mut chain = open(&db);
+    let genesis_id = chain.genesis();
+    let owner = authority();
+    let receiver = stranger().public().address();
+    let contract = contract_address(&owner.public().address(), 0, HashType::default_chain());
+    let send = |chain: &mut Chain, tx: Tx| {
+        let signed = SignedTx::sign(tx, nonce(chain, &owner), FeeOffer::NONE, &owner, &genesis_id);
+
+        advance(chain, vec![signed]).remove(0)
+    };
+    send(&mut chain, Tx::Deploy { code: Code::Lua(OWNED.to_string()) });
+    send(&mut chain, Tx::ContractCall { to: contract, func: Hash::Xxh3_64(selector("deposit")), amount: Amount::U128(700), data: Vec::new() });
+    let before = balance(&chain, &receiver);
+
+    let removed = send(&mut chain, Tx::Remove { contract, beneficiary: receiver });
+    assert_eq!(removed.result, Ok(Effect::Done), "{:?}", removed.result);
+    assert_eq!(removed.payments, [crate::structs::receipt::Payment { from: contract, to: receiver, amount: u256::new(700) }]);
+    assert_eq!(balance(&chain, &receiver), before + u256::new(700));
+    let state = Arc::new(chain.state());
+    let removal = crate::registry::Contracts::new(&state).removed(&contract).unwrap().unwrap();
+    assert_eq!((removal.height, removal.by, removal.beneficiary), (chain.tip().height, owner.public().address(), receiver));
+    // In the state the header commits to, so a light client proves it.
+    assert!(state.get(Column::Contracts, &crate::registry::contracts::removed_key(&contract)).unwrap().is_some());
+
+    let again = send(&mut chain, Tx::Remove { contract, beneficiary: receiver });
+    assert!(matches!(&again.result, Err(failure) if failure.to_string().contains("was removed")), "{:?}", again.result);
+    let evm = send(&mut chain, Tx::Remove { contract: Address::Evm([1; 20]), beneficiary: receiver });
+    assert!(matches!(&evm.result, Err(failure) if failure.to_string().contains("their own code")), "{:?}", evm.result);
+}
+
 /// A proof-of-work chain that hashes everything, its work included, with one algorithm.
 fn hashed_with(algorithm: HashType) -> Genesis {
     let mut genesis = pow_genesis();

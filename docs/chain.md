@@ -55,6 +55,7 @@ signature, and takes the chain.
 | `ContractCall` | Calls a contract function by its XXH3-64 selector, with arguments and value. |
 | `Deploy` | Deploys Luau source or a WebAssembly module, at an address from the sender and nonce. |
 | `Upgrade` | Replaces a contract's code, if its `check_perms` says the sender may. |
+| `Remove` | Removes a Lua or WebAssembly contract for good, its balance to a beneficiary, if its `check_perms` says the sender may (see [Contracts](contracts.md#lifecycle-hooks)). |
 | `Bond`, `Unbond`, `Withdraw` | FFG staking (see [Finality](finality.md)). |
 | `Slash` | Reports two conflicting votes, under FFG. |
 | `ApproveSigners` | Approves a new set of authority finality signers. |
@@ -184,7 +185,7 @@ contract caught the error.
 step failing undoes every step, and the fee is charged as for any failed transaction. The nonce is
 used and the fee paid either way.
 
-**What it may hold:** a transfer, contract call, EVM call, deploy, upgrade, name, primary name, burn
+**What it may hold:** a transfer, contract call, EVM call, deploy, upgrade, removal, name, primary name, burn
 or claim. Anything else makes the whole transaction invalid before it runs, in the mempool and in a
 block alike: validators' and governance's transactions, a multisig's administration, a mint, an
 Ethereum-signed transaction, which has a signature and a nonce of its own, a multisig's own

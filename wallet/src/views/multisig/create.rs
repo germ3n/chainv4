@@ -15,7 +15,7 @@ use {
     chainv4::crypto::verifiable::Verifiable,
     chainv4::registry::multisig::{MAX_MEMBERS, MultisigMember, MultisigPolicy},
     chainv4::structs::address::{Address, multisig_address},
-    chainv4::structs::hex::from_hex,
+    chainv4::structs::hex::to_hex,
     chainv4::structs::tx::Tx,
     chainv4::structs::u256::u256,
     crate::views::send::Prepared,
@@ -193,22 +193,24 @@ pub fn reach_errors(rows: &[Row], reach: Reach, testnet: bool) -> Errors {
 
     for (index, row) in rows.iter().enumerate() {
         let evm = row.evm.trim();
+        // ed25519 alone names the member's own key, so it is read against it.
+        let key = row.key.trim().parse::<PublicKey>().unwrap_or(PublicKey::Ed25519([0; 32]));
 
-        match from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()) {
+        match chainv4::registry::multisig::parse_evm_owner(evm, &key) {
             _ if !reach.evm() => {}
             _ if evm.is_empty() => {
                 errors.insert((Some(index), "evm"), "Required once it reaches EVM chains, of every member.".to_string());
             }
-            None => {
-                errors.insert((Some(index), "evm"), "Not an EVM address: 0x and 40 hex digits.".to_string());
+            Err(_) => {
+                errors.insert((Some(index), "evm"), "Not an owner on EVM chains: an EVM address, 0x and 40 hex digits; contract:0x… for a contract, such as another multisig's; or ed25519 for this member's own Ed25519 key.".to_string());
             }
-            Some(address) if address == [0; 20] => {
+            Ok((address, _)) if address == [0; 20] => {
                 errors.insert((Some(index), "evm"), "Not the zero address.".to_string());
             }
-            Some(_) if evm_seen.iter().any(|known| known.eq_ignore_ascii_case(evm)) => {
-                errors.insert((Some(index), "evm"), "Another member has named this address.".to_string());
+            Ok((address, _)) if evm_seen.iter().any(|known| *known == to_hex(&address)) => {
+                errors.insert((Some(index), "evm"), "Another member has named this owner.".to_string());
             }
-            Some(_) => evm_seen.push(evm.to_string()),
+            Ok((address, _)) => evm_seen.push(to_hex(&address)),
         }
 
         if !reach.bitcoin() {
@@ -276,16 +278,19 @@ pub fn policy(wizard: &Wizard) -> Result<MultisigPolicy, String> {
 
     let member = |row: &Row| -> Result<MultisigMember, String> {
         let key = row.key.trim().parse::<PublicKey>().map_err(|_| "Not a key.".to_string())?;
-        let evm = match wizard.reach.evm() {
-            false => None,
-            true => Some(from_hex(row.evm.trim()).and_then(|bytes| bytes.try_into().ok()).ok_or("Not an EVM address.")?),
+        let (evm, evm_kind) = match wizard.reach.evm() {
+            false => (None, chainv4::registry::multisig::EvmKind::Key),
+            true => {
+                let (address, kind) = chainv4::registry::multisig::parse_evm_owner(row.evm.trim(), &key)?;
+                (Some(address), kind)
+            }
         };
         let bitcoin = match wizard.reach.bitcoin() {
             true => Some(parse_xpub(row.xpub.trim()).map_err(|why| why.to_string())?.0),
             false => None,
         };
 
-        Ok(MultisigMember { key, bitcoin, evm })
+        Ok(MultisigMember { key, bitcoin, evm, evm_kind })
     };
     let members = wizard.rows.iter().map(member).collect::<Result<Vec<_>, _>>()?;
     let policy = MultisigPolicy { members, threshold: wizard.threshold, testnet: wizard.reach.bitcoin() && wizard.testnet };
@@ -544,11 +549,11 @@ fn reach(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
     }
 
     if wizard.reach.bitcoin() {
-        hint(ui, &palette, "A Bitcoin account key is not a Bitcoin address: it is the member's multisig account key, xpub… (tpub… on the test networks) with its origin, such as [73c5da0a/48h/0h/0h/2h]xpub…, from which the multisig's addresses are made with every other member's. A member finds theirs on this wallet's Pair page, under As a multisig's member, or in Sparrow, Nunchuk or a hardware wallet as its multisig key for native segwit, BIP48. Each member's comes from its own words: two accounts of the same words have the same one.");
+        hint(ui, &palette, "A Bitcoin account key is not a Bitcoin address: it is the member's multisig account key, xpub… (tpub… on the test networks) with its origin, such as [73c5da0a/48h/0h/0h/2h]xpub…, from which the multisig's addresses are made with every other member's. A member finds theirs on this wallet's Pair page, under As a multisig's member, or in Sparrow, Nunchuk or a hardware wallet as its multisig key for native segwit, BIP48. Each account of a member's words has its own, so two accounts of the same words may both be members.");
     }
 
     if wizard.reach.evm() {
-        hint(ui, &palette, "An EVM address is the member's Ethereum account, 0x… and 40 hex digits: its key signs the contract's calls. In this wallet it is an account's Ethereum address on Receive.");
+        hint(ui, &palette, "An EVM address is the member's Ethereum account, 0x… and 40 hex digits: its key signs the contract's calls. In this wallet it is an account's Ethereum address on Receive. A member whose key here is Ed25519 may sign with it instead: write ed25519. A contract may be a member too, such as another multisig's: contract:0x….");
     }
 
     let mine = wallet_keys(ctx);
@@ -586,8 +591,8 @@ fn reach(ui: &mut Ui, ctx: &mut Ctx, wizard: &mut Wizard, errors: &Errors) {
             }
 
             if wizard.reach.evm() {
-                ui.label(RichText::new("EVM address · required for this choice").small().color(palette.soft));
-                ui.add(egui::TextEdit::singleline(&mut row.evm).hint_text("0x…").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
+                ui.label(RichText::new("Owner on EVM chains · required for this choice").small().color(palette.soft));
+                ui.add(egui::TextEdit::singleline(&mut row.evm).hint_text("0x…, contract:0x… or ed25519").font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
                 bad(ui, &palette, errors.get(&(Some(index), "evm")));
             }
 
@@ -801,7 +806,13 @@ mod tests {
         filled[0].evm = "0x12".to_string();
         filled[0].xpub = "xpub123".to_string();
         let errors = reach_errors(&filled, Reach::Both, false);
-        assert!(errors[&(Some(0), "evm")].starts_with("Not an EVM address") && errors[&(Some(0), "xpub")].starts_with("Not a Bitcoin account key"));
+        assert!(errors[&(Some(0), "evm")].starts_with("Not an owner on EVM chains") && errors[&(Some(0), "xpub")].starts_with("Not a Bitcoin account key"));
+
+        // An owner that is a contract, or the member's own Ed25519 key, the rows' keys being Ed25519.
+        filled[0].evm = format!("contract:0x{}", "ab".repeat(20));
+        filled[1].evm = "ed25519".to_string();
+        let errors = reach_errors(&filled, Reach::Evm, false);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]
@@ -819,6 +830,11 @@ mod tests {
         let made = policy(&wizard).unwrap();
         assert_eq!(made.members[1].evm, Some([0x22; 20]));
         assert!(made.members.iter().all(|member| member.bitcoin.is_none()));
+        wizard.rows[1].evm = "ed25519".to_string();
+        let own = policy(&wizard).unwrap();
+        let chainv4::crypto::keypair::PublicKey::Ed25519(key) = own.members[1].key else { panic!("the rows' keys are Ed25519") };
+        assert_eq!((own.members[1].evm, own.members[1].evm_kind), (Some(chainv4::registry::multisig::ed25519_owner(&key)), chainv4::registry::multisig::EvmKind::Ed25519(key)));
+        wizard.rows[1].evm = evm(0x22);
 
         wizard.reach = Reach::Both;
         wizard.rows[1].xpub = other_xpub(false);

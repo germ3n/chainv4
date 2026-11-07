@@ -760,8 +760,8 @@ as lists those multisigs too. What the node says of a
 multisig is shown as its word; nothing signed rests on it. The offline signer reads a bundle on
 Sign and shows it back signed. For a multisig on Bitcoin it shows the descriptor and fresh
 addresses, and with an Esplora API makes, combines and broadcasts its PSBTs; the offline signer
-signs a multisig's Bitcoin input at m/48'/coin'/0'/2', and its Pair page shows each account's member
-line, for whichever of its keys is picked. For one on EVM chains it shows its contract, and on a chain Settings reaches what it holds and
+signs a multisig's Bitcoin input at m/48'/coin'/n'/2', account n's, and its Pair page shows each account's member
+line, each account with its own xpub, for whichever of its keys is picked. For one on EVM chains it shows its contract, and on a chain Settings reaches what it holds and
 its owners; its calls are bundles signed with the account's EVM key or by the offline signer as
 EIP-712 typed data, deployed and sent from the account. The Swaps page swaps as a followed
 multisig too, its EVM locks going to the Multisig page as its contract's calls.

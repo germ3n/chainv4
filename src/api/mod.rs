@@ -1278,7 +1278,7 @@ async fn multisig(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
         "threshold": policy.threshold,
         "testnet": policy.testnet,
         "bitcoin": bitcoin_side(&policy),
-        "evm": evm_side(&address, &policy, multisigs.evm_start(&address)?),
+        "evm": evm_side(&address, &policy, multisigs.evm_start(&address)?, crate::crypto::ethereum::chain_id(&api.genesis.block().id())),
         "nonce": account.nonce,
         "balance": account.balance.to_string(),
         "proposals": open.proposals.iter().map(|proposal| json!({
@@ -1316,22 +1316,24 @@ fn bitcoin_side(policy: &crate::registry::multisig::MultisigPolicy) -> Value {
 /// A multisig's contract on EVM chains: its address, the owners and threshold it starts with, and
 /// the ones its members name now, which its owners should be; null while they name no EVM
 /// addresses.
-fn evm_side(address: &Address, policy: &crate::registry::multisig::MultisigPolicy, start: Option<crate::registry::multisig::EvmStart>) -> Value {
+fn evm_side(address: &Address, policy: &crate::registry::multisig::MultisigPolicy, start: Option<crate::registry::multisig::EvmStart>, home: u64) -> Value {
     #[cfg(all(feature = "abi", feature = "secp256k1"))]
     if let Some(start) = start {
         let owners = |start: &crate::registry::multisig::EvmStart| json!({
-            "owners": start.owners.iter().map(|owner| to_hex(owner)).collect::<Vec<_>>(),
+            "owners": start.owners.iter().map(|owner| to_hex(&owner.address)).collect::<Vec<_>>(),
+            "kinds": start.owners.iter().map(|owner| owner.kind.text()).collect::<Vec<_>>(),
             "threshold": start.threshold,
         });
 
         return json!({
-            "contract": to_hex(&crate::abi::multisig::multisig_contract(address, &start)),
+            "contract": to_hex(&crate::abi::multisig::multisig_contract(address, &start, home)),
+            "home": home,
             "start": owners(&start),
             "now": policy.evm().as_ref().map(owners),
         });
     }
 
-    let _ = (address, policy, start);
+    let _ = (address, policy, start, home);
 
     Value::Null
 }
@@ -2557,9 +2559,13 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
     let db = api.db;
     let address = parse_address(&address)?;
     let state = Arc::new(State::new(db));
-    let record = Contracts::new(&state)
-        .get(&address)?
-        .ok_or_else(|| ApiError::NotFound(format!("no contract at {address}")))?;
+    let contracts = Contracts::new(&state);
+    let Some(record) = contracts.get(&address)? else {
+        return Err(match contracts.removed(&address)? {
+            Some(removal) => ApiError::NotFound(format!("the contract at {address} was removed in block {}, by {}, its balance of {} to {}", removal.height, removal.by, removal.balance, removal.beneficiary)),
+            None => ApiError::NotFound(format!("no contract at {address}")),
+        });
+    };
     let token = Tokens::new(&state).get(&address)?;
     let collection = Collections::new(&state).get(&address)?;
 
@@ -2888,7 +2894,7 @@ async fn offer(Shared(api): Shared<Api>, body: Bytes) -> Answer {
     let open = api.fees.as_ref().map_or(0, |fees| fees.offer_times(base, api.tx_fuel, &probe, OfferChoice::default(), api.tuned.suggest).gas_limit);
     // What runs code, or names, is tried first: what it would use, and whether it would fail.
     let ran = match &probe.tx {
-        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } | Tx::Batch { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
+        Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Remove { .. } | Tx::Name { .. } | Tx::PrimaryName { .. } | Tx::Batch { .. } => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
         // A multisig's batch is tried as its members will send it.
         Tx::Multisig { tx, .. } if matches!(**tx, Tx::Batch { .. }) => Some(dry_run_off_loop(&api, probe.clone(), open, base).await?),
         _ => None,

@@ -311,6 +311,6 @@ fn mint(to: Address, amount: U256) -> Result<bool, &'static str> {
 
 /// Asked by the chain before an upgrade: only the owner may.
 #[export]
-fn check_perms(permission: String, who: Address) -> bool {
+fn check_perms(permission: String, who: Address, _detail: Value) -> bool {
     permission == "upgrade" && owner() == Some(who)
 }

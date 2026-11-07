@@ -164,7 +164,7 @@ fn swap_codes_and_multisig_bundles_decode_as_the_wallet_writes_them() {
     elsewhere.genesis = Hash::from_bytes(HASH, &[8; 32]).unwrap();
     assert!(!decode::bundle_signatures(&elsewhere)[0].2, "signed for another chain");
 
-    let evm = EvmBundle { chain_id: 1, contract: [1; 20], to: [2; 20], value: u256::ZERO, data: Vec::new(), nonce: u256::ZERO, signatures: Vec::new() };
+    let evm = EvmBundle::new(1, [1; 20], [2; 20], u256::ZERO, Vec::new(), u256::ZERO);
     assert_eq!(decode::decode(&evm.to_text()), Ok(decode::Decoded::EvmBundle(Box::new(evm))));
     assert_eq!(decode::decode("ur:chainv4-pairing/aeae").unwrap_err(), "a chainv4-pairing code, which the explorer does not read");
 }

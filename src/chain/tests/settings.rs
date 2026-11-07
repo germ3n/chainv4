@@ -170,7 +170,7 @@ fn contract_limits_rise_never_fall_and_bound_the_transaction_and_multisig() {
 
     // A multisig of three is past the two the chain allows now.
     let members = [Keypair::from_seed([41; 32]), Keypair::from_seed([42; 32]), Keypair::from_seed([43; 32])];
-    let create = Tx::CreateMultisig { members: members.iter().map(|key| crate::registry::multisig::MultisigMember { key: key.public(), bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
+    let create = Tx::CreateMultisig { members: members.iter().map(|key| crate::registry::multisig::MultisigMember { key: key.public(), bitcoin: None, evm: None, evm_kind: crate::registry::multisig::EvmKind::Key }).collect(), threshold: 2, testnet: false };
     decide(&mut chain, Change::Limits(crate::params::BlockLimits { multisig_members: Some(2), ..standing }));
     let signed = SignedTx::sign(create, nonce(&chain, &authority()), FeeOffer::NONE, &authority(), &chain.genesis());
     let receipt = advance(&mut chain, vec![signed]).remove(0);

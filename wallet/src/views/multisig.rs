@@ -360,8 +360,8 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut MultisigState, send: &mut Se
             }
 
             #[cfg(feature = "swap")]
-            if let Some((start, now)) = evm::side_of(&value) {
-                evm::show(ui, ctx, &mut state.evm, &selected, &start, now.as_ref());
+            if let Some(side) = evm::side_of(&value) {
+                evm::show(ui, ctx, &mut state.evm, &selected, &side);
             }
         }
     }
@@ -1097,7 +1097,8 @@ pub(super) fn other_chains(holder: &Holder, seed: Option<&chainv4::crypto::mnemo
         _ => None,
     });
     let network = network(testnet);
-    let xpub = seed.filter(|_| holder.number().is_some()).map(|seed| chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(network.coin(), 0), network));
+    // Each account of the words its own, at m/48'/coin'/n'/2' for account n.
+    let xpub = holder.number().zip(seed).map(|(account, seed)| chainv4::crypto::bitcoin::multisig::xpub_text(&seed.multisig_account(network.coin(), account), network));
 
     (evm, xpub)
 }
@@ -1204,7 +1205,7 @@ mod tests {
 
         let palette = chainv4_ui::theme::LIGHT;
         let keys: Vec<PublicKey> = (1..=3u8).map(|seed| Keypair::from_seed([seed; 32]).public()).collect();
-        let policy = MultisigPolicy { members: keys.iter().map(|key| MultisigMember { key: *key, bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
+        let policy = MultisigPolicy { members: keys.iter().map(|key| MultisigMember { key: *key, bitcoin: None, evm: None, evm_kind: chainv4::registry::multisig::EvmKind::Key }).collect(), threshold: 2, testnet: false };
         let members: Vec<Value> = policy.members.iter().map(|member| chainv4::structs::json::multisig_member(member, false)).collect();
         let assurance = chainv4::light::Assurance { block: chainv4::structs::hash::Hash::zero(chainv4::structs::hash::HashType::default_chain()), height: 9, final_: true };
         let proven = |value| crate::chain::Proven { value, assurance };

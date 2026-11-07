@@ -519,5 +519,12 @@ fn evm_bundle(ui: &mut Ui, ctx: &mut Ctx, bundle: &EvmBundle) {
                 }
             });
         });
+
+        // Owners that are other multisigs' contracts, and how many of their own owners approved.
+        for nested in &bundle.nested {
+            facts.row(&format!("approved for {}", evm::show_address(&nested.owner)), |ui| {
+                ui.label(format!("by {}", nested.signatures.len()));
+            });
+        }
     });
 }

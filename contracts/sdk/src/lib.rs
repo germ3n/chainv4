@@ -460,6 +460,32 @@ pub fn selector(name: &str) -> u64 {
     u64::from_be_bytes(digest.try_into().unwrap_or_else(|_| abort("xxh3 gives 8 bytes")))
 }
 
+/// The permission the chain asks check_perms about before an upgrade; its detail is the new
+/// code's hash, as bytes, the chain's hash of them.
+pub const UPGRADE: &str = "upgrade";
+
+/// The permission the chain asks check_perms about before it removes the contract; its detail
+/// is the beneficiary, who gets the balance.
+pub const REMOVE: &str = "remove";
+
+/// Stops the call with "not permitted: <permission>" unless allowed: what a contract's own
+/// privileged function says after asking its check_perms, as Lua's perms.require does.
+///
+/// ```ignore
+/// #[export]
+/// fn check_perms(permission: String, who: Address, _detail: Value) -> bool { who == owner() }
+///
+/// #[export]
+/// fn mint(to: Address, amount: U256) {
+///     require(check_perms("mint".into(), sender(), Value::Nil), "mint");
+/// }
+/// ```
+pub fn require(allowed: bool, permission: &str) {
+    if !allowed {
+        abort(&alloc::format!("not permitted: {permission}"));
+    }
+}
+
 /// Stops the call with an error. Nothing it wrote is kept.
 pub fn abort(message: &str) -> ! {
     unsafe { sys::abort(message.as_ptr(), message.len() as u32) }

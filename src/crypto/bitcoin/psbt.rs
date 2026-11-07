@@ -366,7 +366,7 @@ impl MultisigWallet {
 
         for xpub in &self.xpubs {
             let key = member_key(xpub, chain, index)?;
-            let path = account_path(self.network).into_iter().chain([chain, index]);
+            let path = account_path(self.network, xpub.account).into_iter().chain([chain, index]);
             let value = xpub.fingerprint.iter().copied().chain(path.flat_map(u32::to_le_bytes)).collect();
             pairs.push(Pair { key: [&[derivation_key][..], &key].concat(), value });
         }

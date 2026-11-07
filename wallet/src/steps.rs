@@ -160,7 +160,7 @@ pub fn of(steps: &[Tx], coin: &Shown, known: &dyn Fn(&Address) -> Known, landing
         total: (format::amount(&total.to_string(), coin.decimals, &coin.symbol), total.to_string()),
         coin: total,
         burns_names: steps.iter().any(|tx| matches!(tx, Tx::Name { action: chainv4::registry::names::NameAction::Register { .. } | chainv4::registry::names::NameAction::Renew { .. }, .. })),
-        runs_code: steps.iter().any(|tx| matches!(tx, Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. })),
+        runs_code: steps.iter().any(|tx| matches!(tx, Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Remove { .. })),
         steps: laid,
     }
 }
@@ -262,6 +262,12 @@ fn step(tx: &Tx, coin: &Shown, known: &dyn Fn(&Address) -> Known, lands: Option<
             laid.kind = "Upgrade a contract".to_string();
             laid.rows.push(Row::address("Contract", contract));
             laid.rows.push(Row::text("New code", format!("{} bytes of {}", code.bytes().len(), code.engine().name())));
+        }
+        Tx::Remove { contract, beneficiary } => {
+            laid.kind = "Remove a contract for good".to_string();
+            laid.rows.push(Row::address("Contract", contract));
+            laid.rows.push(Row::address("Its balance to", beneficiary));
+            laid.rows.push(Row::text("What goes", "Its code and all its storage, for good. Nothing is deployed at its address again."));
         }
         Tx::Name { name, action } => {
             laid.kind = crate::airgap::name_kind(action);

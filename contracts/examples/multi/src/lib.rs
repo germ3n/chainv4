@@ -418,6 +418,6 @@ fn royalty_info(id: U256, price: U256) -> Result<(Address, U256), &'static str> 
 
 /// Asked by the chain before an upgrade: only the owner may.
 #[export]
-fn check_perms(permission: String, who: Address) -> bool {
+fn check_perms(permission: String, who: Address, _detail: Value) -> bool {
     permission == "upgrade" && storage::own().get_text(OWNER) == Some(who.text())
 }

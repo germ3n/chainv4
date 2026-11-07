@@ -538,7 +538,7 @@ fn a_multisig_sends_a_batch_on_one_bundle_of_its_members_signatures() {
     let members = [Keypair::from_seed([31; 32]), Keypair::from_seed([32; 32]), Keypair::from_seed([33; 32])];
     let mut chain = open(&Arc::new(MemoryDb::default()));
     let genesis_id = chain.genesis();
-    let create = Tx::CreateMultisig { members: members.iter().map(|key| MultisigMember { key: key.public(), bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
+    let create = Tx::CreateMultisig { members: members.iter().map(|key| MultisigMember { key: key.public(), bitcoin: None, evm: None, evm_kind: crate::registry::multisig::EvmKind::Key }).collect(), threshold: 2, testnet: false };
     let at = nonce(&chain, &authority());
     assert!(advance(&mut chain, vec![SignedTx::sign(create, at, FeeOffer::NONE, &authority(), &genesis_id)])[0].result.is_ok());
     let account = multisig_address(&me(), at, chain.hash());

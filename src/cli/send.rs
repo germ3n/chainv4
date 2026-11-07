@@ -139,6 +139,20 @@ pub enum TxArgs {
         #[arg(long = "arg", requires = "constructor")]
         constructor_args: Vec<String>,
     },
+    /// Removes a Lua or WebAssembly contract for good: its code and storage are deleted, its
+    /// balance goes to --to, and nothing is ever deployed at its address again. The contract's
+    /// check_perms must allow the signer for "remove". Asks for yes, unless --yes.
+    Remove {
+        /// The contract, such as contract:0x….
+        #[arg(long)]
+        contract: Address,
+        /// Who gets its balance: any address, credited and not called.
+        #[arg(long)]
+        to: Address,
+        /// Remove without asking.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Replaces a contract's code. The contract's check_perms must allow the signer.
     Upgrade {
         /// The contract, such as contract:0x….
@@ -302,10 +316,12 @@ pub enum TxArgs {
     /// key here, and for a multisig that reaches Bitcoin and EVM chains its Bitcoin multisig
     /// account xpub with its origin and its EVM address, after commas:
     /// ed25519:0x…,[73c5da0a/48'/0'/0'/2']xpub…,0x…, every member naming each or none; one on EVM
-    /// chains alone leaves the xpub out, ed25519:0x…,,0x…. A tpub makes it a multisig on
-    /// Bitcoin's test networks.
+    /// chains alone leaves the xpub out, ed25519:0x…,,0x…. Its EVM owner is an EVM key's address,
+    /// 0x…; a contract answering ERC-1271, contract:0x…, such as another multisig's; or an Ed25519
+    /// key, ed25519 for the member's own or ed25519:0x…. A tpub makes it a multisig on Bitcoin's
+    /// test networks.
     CreateMultisig {
-        /// A member: KEY, KEY,,EVM_ADDRESS, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS. Repeat for each, 1 to 20.
+        /// A member: KEY, KEY,,EVM, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM, EVM being 0x…, contract:0x… or ed25519. Repeat for each, 1 to 20.
         #[arg(long = "member", required = true, value_parser = parse_member)]
         members: Vec<Member>,
         /// How many members each of its transactions needs.
@@ -750,29 +766,35 @@ pub(super) fn batch_deploys(steps: &[Tx], sender: &Address, nonce: u64, hash: Ha
 #[derive(Clone, Debug)]
 pub struct Member(crate::registry::multisig::MultisigMember, Option<bool>);
 
-/// A multisig member as --member takes it: KEY, KEY,,EVM_ADDRESS for EVM chains alone,
-/// KEY,[fingerprint/48'/0'/0'/2']xpub… for Bitcoin alone, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS for both.
+/// A multisig member as --member takes it: KEY, KEY,,EVM for EVM chains alone,
+/// KEY,[fingerprint/48'/0'/0'/2']xpub… for Bitcoin alone, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM for both.
+/// EVM is the owner on its EVM contract: an EVM key's address, 0x…; a contract answering ERC-1271,
+/// contract:0x…; or an Ed25519 key, ed25519:0x… and 64 hex digits, or ed25519 alone for the
+/// member's own Ed25519 key.
 pub(super) fn parse_member(text: &str) -> Result<Member, String> {
+    use crate::registry::multisig::{EvmKind, MultisigMember, parse_evm_owner};
+
     let parts: Vec<&str> = text.split(',').map(str::trim).collect();
     let key: PublicKey = parts[0].parse().map_err(|_| format!("{} is not a public key", parts[0]))?;
-
-    let evm = |evm: &str| from_hex(evm).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{evm} is not an EVM address, 20 bytes in hex"));
+    let evm = |text: &str| -> Result<(Option<[u8; 20]>, EvmKind), String> {
+        match text {
+            "" => Ok((None, EvmKind::Key)),
+            text => parse_evm_owner(text, &key).map(|(address, kind)| (Some(address), kind)),
+        }
+    };
+    let member = |bitcoin, (evm, evm_kind): (Option<[u8; 20]>, EvmKind)| MultisigMember { key, bitcoin, evm, evm_kind };
 
     match parts[1..] {
-        [] | ["", ""] | [""] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: None }, None)),
-        ["", address] => Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: None, evm: Some(evm(address)?) }, None)),
-        // On Bitcoin alone, KEY,XPUB or KEY,XPUB, with no EVM address; or on both.
+        [] | ["", ""] | [""] => Ok(Member(member(None, (None, EvmKind::Key)), None)),
+        ["", owner] => Ok(Member(member(None, evm(owner)?), None)),
+        // On Bitcoin alone, KEY,XPUB or KEY,XPUB, with no EVM owner; or on both.
         #[cfg(feature = "bitcoin")]
         [xpub] | [xpub, _] => {
             let (bitcoin, network) = crate::crypto::bitcoin::multisig::parse_xpub(xpub)?;
-            let evm = match parts.get(2).copied().unwrap_or_default() {
-                "" => None,
-                address => Some(evm(address)?),
-            };
 
-            Ok(Member(crate::registry::multisig::MultisigMember { key, bitcoin: Some(bitcoin), evm }, Some(network == crate::crypto::bitcoin::tx::Network::Test)))
+            Ok(Member(member(Some(bitcoin), evm(parts.get(2).copied().unwrap_or_default())?), Some(network == crate::crypto::bitcoin::tx::Network::Test)))
         }
-        _ => Err("a member is KEY, KEY,,EVM_ADDRESS, KEY,[fingerprint/48'/0'/0'/2']xpub…, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM_ADDRESS".to_string()),
+        _ => Err("a member is KEY, KEY,,EVM, KEY,[fingerprint/48'/0'/0'/2']xpub…, or KEY,[fingerprint/48'/0'/0'/2']xpub…,EVM, EVM being 0x…, contract:0x… or ed25519".to_string()),
     }
 }
 
@@ -970,6 +992,13 @@ pub(super) fn typed_yes(question: &str, yes: bool, input: &mut dyn std::io::BufR
     }
 }
 
+/// Asks before a contract is removed: its code and storage go for good.
+pub(super) fn removing(contract: &Address, to: &Address, yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
+    let question = format!("Removing {contract} deletes its code and every entry of its storage for good, sends its balance to {to}, and keeps the address from any other contract. Tokens it holds in other contracts stay there, where nothing can move them.");
+
+    typed_yes(&question, yes, input, "the contract is kept")
+}
+
 /// Asks before the directory's admin role is given up: nobody sets the directory again after.
 pub(super) fn renouncing(yes: bool, input: &mut dyn std::io::BufRead) -> CliResult<()> {
     typed_yes("Renouncing leaves the directory as it is for good: nobody may set it again.", yes, input, "the role is kept")
@@ -1062,6 +1091,11 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             code: evm_code(&path, constructor.as_deref(), &constructor_args)?,
         },
         TxArgs::Deploy { lua, wasm, .. } => Tx::Deploy { code: code(lua, wasm)? },
+        TxArgs::Remove { contract, to, yes } => {
+            removing(&contract, &to, yes, &mut std::io::stdin().lock())?;
+
+            Tx::Remove { contract, beneficiary: to }
+        }
         TxArgs::Upgrade { contract, lua, wasm } => Tx::Upgrade {
             contract,
             code: code(lua, wasm)?,

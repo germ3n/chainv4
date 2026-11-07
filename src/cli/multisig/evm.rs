@@ -1,17 +1,19 @@
 //! chainv4 multisig evm: a native multisig's MultiSig.sol on EVM chains, at one address on every
-//! one. Its members' EVM keys sign its calls as bundles, written one a line to a file; anyone
-//! deploys it, through the deterministic deployment proxy, and anyone sends a call once threshold
-//! of its owners signed. When the members change here, sync proposes the matching change of
-//! owners there, which the owners before sign.
+//! one. Its members sign its calls as bundles, written one a line to a file, each as its kind of
+//! owner: an EVM key, an Ed25519 key, or a contract, another multisig's MultiSig.sol whose own
+//! members approve the call for it, or anything else answering ERC-1271 with the bytes it gives.
+//! Anyone deploys it, through the deterministic deployment proxy, and anyone sends a call once
+//! threshold of its owners signed. When the members change here, sync proposes the matching change
+//! of owners there, which the owners before sign.
 
 use {
     super::super::CliResult,
     super::super::send::ok,
     super::super::swap::rpc::Rpc,
     super::plural,
-    crate::abi::multisig::{EvmBundle, change_owners_input, multisig_contract, multisig_deployment, multisig_read, multisig_reads},
+    crate::abi::multisig::{ERC1271_VALID, EvmBundle, change_owners_input, ed25519_holds, execute_signer, is_valid_signature_input, multisig_contract, multisig_deployment, multisig_read, multisig_reads},
     crate::crypto::keypair::{Keypair, PrivateKey},
-    crate::registry::multisig::EvmStart,
+    crate::registry::multisig::{EvmKind, EvmStart},
     crate::structs::address::Address,
     crate::structs::hex::from_hex,
     crate::structs::u256::u256,
@@ -68,12 +70,34 @@ pub enum EvmAction {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Signs every call in a bundle's file as --key, one of its owners. Needs no node or chain.
+    /// Signs every call in a bundle's file as --key, one of its owners: an EVM key or an Ed25519
+    /// key. Needs no node or chain.
     Sign {
         bundle: PathBuf,
         /// Sign without asking, for scripts: it still shows what it signs.
         #[arg(long)]
         yes: bool,
+    },
+    /// Approves every call in another multisig's bundle for this one, whose contract is an owner
+    /// of that one's: --key signs as one of this one's owners, over the call wrapped in this
+    /// contract's domain, and once enough of them have, the bundle carries their approvals as this
+    /// contract's signature. Needs no node or chain beyond this multisig's owners.
+    Approve {
+        bundle: PathBuf,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Adds a contract owner's signature to every call in a bundle's file as given: the bytes its
+    /// isValidSignature reads, as a Safe or a smart-account wallet makes them. submit asks the
+    /// contract before it counts them.
+    AddSignature {
+        bundle: PathBuf,
+        /// The owner contract, 0x and 40 hex digits.
+        #[arg(long)]
+        owner: String,
+        /// Its signature, 0x and hex.
+        #[arg(long)]
+        signature: String,
     },
     /// Sends a bundle's calls in order, each once threshold of the owners signed it, deploying the
     /// contract first if it is not yet; --key pays the gas, and need not be an owner.
@@ -90,12 +114,12 @@ pub(crate) struct EvmSide {
     pub start: EvmStart,
     pub now: Option<EvmStart>,
     pub contract: [u8; 20],
+    /// chainv4's chain id, which the contract's init code names.
+    pub home: u64,
 }
 
 fn owners(value: &Value) -> CliResult<EvmStart> {
-    let owners = value["owners"].as_array().ok_or("the node sent no owners")?.iter().map(|owner| parse_address(owner.as_str().unwrap_or_default())).collect::<Result<Vec<_>, _>>()?;
-
-    Ok(EvmStart { owners, threshold: u32::try_from(value["threshold"].as_u64().ok_or("the node sent no threshold")?)? })
+    Ok(crate::structs::json::evm_start(value).ok_or("the node sent no owners, or ones that do not read")?)
 }
 
 /// A multisig's side on EVM chains, as the node says its members' EVM addresses are; its contract's
@@ -114,7 +138,9 @@ pub(crate) fn evm_side(agent: &Agent, node: &str, account: &Address) -> CliResul
         false => Some(owners(&evm["now"])?),
     };
 
-    Ok(EvmSide { contract: multisig_contract(account, &start), start, now })
+    let home = evm["home"].as_u64().ok_or("the node sent no chain id for the contract")?;
+
+    Ok(EvmSide { contract: multisig_contract(account, &start, home), start, now, home })
 }
 
 /// The contract as it stands on a chain: its owners and threshold, and its nonce; None before it
@@ -145,7 +171,7 @@ fn deploy(rpc: &Rpc, account: &Address, side: &EvmSide, secret: &[u8; 32]) -> Cl
         return Err("this chain has no deterministic deployment proxy, so the contract cannot sit at its address here".into());
     }
 
-    let call = Call { to: DEPLOYMENT_PROXY, value: u256::ZERO, input: multisig_deployment(account, &side.start), what: "Deploy the multisig's contract" };
+    let call = Call { to: DEPLOYMENT_PROXY, value: u256::ZERO, input: multisig_deployment(account, &side.start, side.home), what: "Deploy the multisig's contract" };
     rpc.send(&call, false, secret)?;
 
     match rpc.has_code(&side.contract)? {
@@ -157,8 +183,15 @@ fn deploy(rpc: &Rpc, account: &Address, side: &EvmSide, secret: &[u8; 32]) -> Cl
 pub(crate) fn evm_secret(keypair: &Keypair) -> CliResult<zeroize::Zeroizing<[u8; 32]>> {
     match keypair.private() {
         PrivateKey::Secp256k1(secret) => Ok(zeroize::Zeroizing::new(*secret)),
-        _ => Err("an EVM chain takes a secp256k1 key: give --key a member's EVM key file".into()),
+        _ => Err("an EVM chain takes a secp256k1 key to pay its gas: give --key an EVM key file".into()),
     }
+}
+
+/// Signs a bundle as one of its owners.
+fn sign_as(bundle: &mut EvmBundle, keypair: &Keypair) -> CliResult<()> {
+    bundle.sign_with(keypair)?;
+
+    Ok(())
 }
 
 fn read(path: &Path) -> CliResult<Vec<EvmBundle>> {
@@ -190,35 +223,56 @@ pub(crate) fn review(bundles: &[EvmBundle], yes: bool, input: &mut dyn std::io::
     crate::cli::send::typed_yes("Sign this?", yes, input, "nothing is signed")
 }
 
-/// How many of the owners signed a bundle.
-fn signed_by(bundle: &EvmBundle, owners: &EvmStart) -> usize {
-    bundle.signers().iter().filter(|(signer, _)| owners.owners.contains(signer)).count()
+/// How many of the owners signed a bundle: an EVM key or Ed25519 key's signatures checked here, a
+/// contract owner's asked of the contract when a chain is at hand, and counted as given otherwise.
+fn signed_by(rpc: Option<&Rpc>, bundle: &EvmBundle, owners: &EvmStart) -> CliResult<usize> {
+    let digest = bundle.digest();
+    let mut count = 0;
+
+    for (signer, signature) in bundle.signers() {
+        let Some(owner) = owners.owners.iter().find(|owner| owner.address == signer) else {
+            continue;
+        };
+        let holds = match owner.kind {
+            EvmKind::Key => <[u8; 65]>::try_from(signature.as_slice()).ok().and_then(|signature| execute_signer(&digest, &signature)) == Some(signer),
+            EvmKind::Ed25519(key) => ed25519_holds(&key, &digest, &signature),
+            EvmKind::Contract => match rpc {
+                // A refusal is an answer too: an eth_call that reverts holds nothing.
+                Some(rpc) => rpc.call(&signer, &is_valid_signature_input(&digest, &signature)).is_ok_and(|answer| answer.get(..4) == Some(&ERC1271_VALID[..])),
+                None => true,
+            },
+        };
+
+        count += usize::from(holds);
+    }
+
+    Ok(count)
 }
 
 /// Proposes calls by a multisig's contract, one after another from its next nonce: --key signs
 /// each as an owner, and they are sent at once when that is enough, or else written to out, or
 /// printed, for the others.
-pub(crate) fn propose_calls(rpc: &Rpc, account: &Address, side: &EvmSide, calls: &[Call], secret: &[u8; 32], first: Option<u64>, out: Option<&Path>) -> CliResult<()> {
+pub(crate) fn propose_calls(rpc: &Rpc, account: &Address, side: &EvmSide, calls: &[Call], keypair: &Keypair, first: Option<u64>, out: Option<&Path>) -> CliResult<()> {
     let chain_id = rpc.chain_id()?;
     let (owners, next) = standing(rpc, side)?;
     let first = first.map_or(next, u256::from);
-    let bundles: Vec<EvmBundle> = calls
-        .iter()
-        .zip(0u64..)
-        .map(|(call, offset)| {
-            let mut bundle = EvmBundle { chain_id, contract: side.contract, to: call.to, value: call.value, data: call.input.clone(), nonce: first + u256::from(offset), signatures: Vec::new() };
-            bundle.sign(secret);
-            bundle
-        })
-        .collect();
-    let signed = signed_by(&bundles[0], &owners);
+    let mut bundles = Vec::new();
+
+    for (call, offset) in calls.iter().zip(0u64..) {
+        let mut bundle = EvmBundle::new(chain_id, side.contract, call.to, call.value, call.input.clone(), first + u256::from(offset));
+        sign_as(&mut bundle, keypair)?;
+        bundles.push(bundle);
+    }
+
+    let signed = signed_by(Some(rpc), &bundles[0], &owners)?;
 
     if signed == 0 {
         eprintln!("the key is none of the contract's owners: its signature counts for nothing");
     }
 
-    if signed >= owners.threshold as usize && first == next {
-        return submit(rpc, account, side, &bundles, secret);
+    // Sent at once when that is enough and the key can pay the gas: an Ed25519 key cannot.
+    if let (true, Ok(secret)) = (signed >= owners.threshold as usize && first == next, evm_secret(keypair)) {
+        return submit(rpc, account, side, &bundles, &secret);
     }
 
     match out {
@@ -254,7 +308,7 @@ fn submit(rpc: &Rpc, account: &Address, side: &EvmSide, bundles: &[EvmBundle], s
             return Err(format!("a call at nonce {}, and the contract is at {nonce}: send the ones before it first", bundle.nonce).into());
         }
 
-        let signed = signed_by(bundle, &owners);
+        let signed = signed_by(Some(rpc), bundle, &owners)?;
 
         if signed < owners.threshold as usize {
             return Err(format!("{signed} of the contract's owners signed the call at nonce {nonce}, and it needs {}", owners.threshold).into());
@@ -268,7 +322,17 @@ fn submit(rpc: &Rpc, account: &Address, side: &EvmSide, bundles: &[EvmBundle], s
 }
 
 fn show_owners(owners: &EvmStart) -> String {
-    format!("{} of {}", owners.threshold, owners.owners.iter().map(show_address).collect::<Vec<_>>().join(", "))
+    let shown: Vec<String> = owners
+        .owners
+        .iter()
+        .map(|owner| match owner.kind {
+            EvmKind::Key => show_address(&owner.address),
+            EvmKind::Contract => format!("{} (a contract)", show_address(&owner.address)),
+            EvmKind::Ed25519(key) => format!("{} (Ed25519 {})", show_address(&owner.address), crate::structs::hex::to_hex(&key)),
+        })
+        .collect();
+
+    format!("{} of {}", owners.threshold, shown.join(", "))
 }
 
 pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypair, action: EvmAction) -> CliResult<()> {
@@ -313,7 +377,7 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
                 None => Vec::new(),
             };
             let call = Call { to: parse_address(&to)?, value, input: data, what: "Execute" };
-            propose_calls(&rpc(&eth_rpc), account, &side, &[call], &*evm_secret(keypair)?, nonce, Some(&out))?;
+            propose_calls(&rpc(&eth_rpc), account, &side, &[call], keypair, nonce, Some(&out))?;
         }
         EvmAction::Sync { eth_rpc, out } => {
             let (side, rpc) = (evm_side(agent, node, account)?, rpc(&eth_rpc));
@@ -327,16 +391,47 @@ pub(super) fn evm(agent: &Agent, node: &str, account: &Address, keypair: &Keypai
 
             println!("from {} to {}", show_owners(&owners), show_owners(&now));
             let call = Call { to: side.contract, value: u256::ZERO, input: change_owners_input(&now), what: "Execute" };
-            propose_calls(&rpc, account, &side, &[call], &*evm_secret(keypair)?, None, Some(&out))?;
+            propose_calls(&rpc, account, &side, &[call], keypair, None, Some(&out))?;
         }
         EvmAction::Sign { bundle: path, yes } => {
-            let secret = evm_secret(keypair)?;
             let mut bundles = read(&path)?;
             review(&bundles, yes, &mut std::io::stdin().lock())?;
-            bundles.iter_mut().for_each(|bundle| bundle.sign(&secret));
+
+            for bundle in &mut bundles {
+                sign_as(bundle, keypair)?;
+            }
+
             write(&path, &bundles)?;
             let counts: Vec<String> = bundles.iter().map(|bundle| bundle.signers().len().to_string()).collect();
             println!("signed {} call{}; signatures each: {}", bundles.len(), plural(bundles.len()), counts.join(", "));
+        }
+        EvmAction::Approve { bundle: path, yes } => {
+            // This multisig's contract is the owner; its own owners now, or as it starts.
+            let side = evm_side(agent, node, account)?;
+            let ours = side.now.clone().unwrap_or_else(|| side.start.clone());
+            let mut bundles = read(&path)?;
+            println!("approving for {}, an owner of the contract each call is to:", show_address(&side.contract));
+            review(&bundles, yes, &mut std::io::stdin().lock())?;
+
+            for bundle in &mut bundles {
+                let signer = bundle.approve_with(side.contract, keypair)?;
+
+                if !ours.owners.iter().any(|owner| owner.address == signer) {
+                    eprintln!("the key is none of {}'s owners: its approval counts for nothing", show_address(&side.contract));
+                }
+            }
+
+            write(&path, &bundles)?;
+            let counts: Vec<String> = bundles.iter().map(|bundle| bundle.nested.iter().find(|nested| nested.owner == side.contract).map_or(0, |nested| nested.signatures.len()).to_string()).collect();
+            println!("approved {} call{} for {}; of the {} it needs, each has: {}", bundles.len(), plural(bundles.len()), show_address(&side.contract), ours.threshold, counts.join(", "));
+        }
+        EvmAction::AddSignature { bundle: path, owner, signature } => {
+            let owner = parse_address(&owner)?;
+            let signature = from_hex(&signature).ok_or_else(|| format!("{signature} is not 0x and hex"))?;
+            let mut bundles = read(&path)?;
+            bundles.iter_mut().for_each(|bundle| bundle.add_contract(owner, signature.clone()));
+            write(&path, &bundles)?;
+            println!("added {}'s signature to {} call{}: submit asks it before counting it", show_address(&owner), bundles.len(), plural(bundles.len()));
         }
         EvmAction::Submit { bundle: path, eth_rpc } => {
             let side = evm_side(agent, node, account)?;

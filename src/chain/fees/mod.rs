@@ -264,10 +264,10 @@ impl Fees {
         };
         let gas_limit = chosen.gas_limit.unwrap_or_else(|| {
             let fuel = match &probe.tx {
-                Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } => self.schedule.for_fuel(tx_fuel),
+                Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Ethereum { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Remove { .. } => self.schedule.for_fuel(tx_fuel),
                 // One allowance for a batch, as its steps share it, if any of them runs anything. A
                 // member's approval of one only stores it.
-                tx if !matches!(tx, Tx::ApproveMultisig { .. }) && tx.batch_steps().is_some_and(|steps| steps.iter().any(|step| matches!(step, Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. }))) => self.schedule.for_fuel(tx_fuel),
+                tx if !matches!(tx, Tx::ApproveMultisig { .. }) && tx.batch_steps().is_some_and(|steps| steps.iter().any(|step| matches!(step, Tx::ContractCall { .. } | Tx::EvmCall { .. } | Tx::Deploy { .. } | Tx::Upgrade { .. } | Tx::Remove { .. }))) => self.schedule.for_fuel(tx_fuel),
                 _ => 0,
             };
 

@@ -331,6 +331,16 @@ pub enum Tx {
     )]
     #[wincode(tag = 27)]
     Anchor { proof: crate::structs::tx::AnchorProof },
+    #[document(
+        summary = "Removes a Lua or WebAssembly contract for good. The contract decides: its check_perms must return true for \"remove\", the sender and the beneficiary. Its balance goes to the beneficiary, its code and every entry of its storage are deleted, each entry for a fee in fuel, it leaves the token and collection registries, and its address is kept as removed, so nothing is ever deployed or cloned there again. EVM contracts are removed by their own code, as Ethereum's are.",
+        params = {
+            contract = "The contract to remove.",
+            beneficiary = "Who gets its balance: any address, a contract's too, which is credited and not called.",
+        },
+        see_also = "Contracts::remove, Removal, CHECK_PERMS",
+    )]
+    #[wincode(tag = 28)]
+    Remove { contract: Address, beneficiary: Address },
 }
 
 #[document(
@@ -746,6 +756,10 @@ impl Verifiable for Tx {
             }
             // Whether the source compiles is decided when the transaction runs.
             Tx::Deploy { .. } | Tx::Upgrade { .. } => Ok(()),
+            Tx::Remove { contract, beneficiary } => {
+                contract.verify()?;
+                beneficiary.verify()
+            }
             Tx::Bond { voter, amount } => {
                 voter.verify()?;
                 amount.verify()?;
@@ -901,6 +915,7 @@ impl Tx {
             | Tx::EvmCall { .. }
             | Tx::Deploy { .. }
             | Tx::Upgrade { .. }
+            | Tx::Remove { .. }
             | Tx::Name { .. }
             | Tx::PrimaryName { .. }
             | Tx::Burn { .. }

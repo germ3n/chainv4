@@ -185,6 +185,7 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),
         Tx::Deploy { .. } => touched.push(Touch::Address(contract_address(&sender, nonce, hash))),
         Tx::Upgrade { contract, .. } => touched.push(Touch::Address(*contract)),
+        Tx::Remove { contract, beneficiary } => touched.extend([Touch::Address(*contract), Touch::Address(*beneficiary)]),
         Tx::Burn { .. } => {}
         Tx::Bond { .. } | Tx::Unbond { .. } | Tx::Withdraw { .. } | Tx::Slash { .. } => touched.push(Touch::Staking),
         Tx::ApproveSigners { .. } | Tx::WithdrawApproval { .. } => touched.push(Touch::Signers),

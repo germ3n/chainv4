@@ -310,8 +310,8 @@ mod tests {
         let known = known_abis();
         let token = chainv4::abi::parse_signature("transfer(address,uint256)").unwrap();
         let held = [token.0.unwrap().to_vec(), chainv4::abi::encode_values(&token.1, &[AbiValue::Address([0xab; 20]), AbiValue::Uint(u256::new(5))]).unwrap()].concat();
-        let execute = chainv4::abi::parse_signature("execute(address,uint256,bytes,bytes)").unwrap();
-        let input = [execute.0.unwrap().to_vec(), chainv4::abi::encode_values(&execute.1, &[AbiValue::Address([1; 20]), AbiValue::Uint(u256::ZERO), AbiValue::Bytes(held), AbiValue::Bytes(vec![0xee; 65])]).unwrap()].concat();
+        let execute = chainv4::abi::parse_signature("execute(address,uint256,bytes,address[],bytes[])").unwrap();
+        let input = [execute.0.unwrap().to_vec(), chainv4::abi::encode_values(&execute.1, &[AbiValue::Address([1; 20]), AbiValue::Uint(u256::ZERO), AbiValue::Bytes(held), AbiValue::Array(vec![AbiValue::Address([2; 20])]), AbiValue::Array(vec![AbiValue::Bytes(vec![0xee; 65])])]).unwrap()].concat();
         let read = read_call(None, &known, &input).unwrap();
         let (text, _) = drawn(&Store::default(), |ui, ctx| call(ui, ctx, Some(TOKEN), &read));
 

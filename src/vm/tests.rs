@@ -2248,6 +2248,8 @@ fn a_webassembly_contract_clones_through_the_host() {
 
 mod collections;
 
+mod removal;
+
 // Every test in it needs secp256k1, which Ethereum and the federation sign with.
 #[cfg(feature = "secp256k1")]
 mod crypto;

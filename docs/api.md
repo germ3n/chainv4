@@ -308,7 +308,7 @@ curl 'http://127.0.0.1:8080/accounts/ed25519:0x3b6a…/multisigs'
 What a contract is:
 - `address`, `deployer`, `engine` and `code_size`;
 - its exported `functions`, and which are `reentrant`;
-- whether it is `upgradable`, that is, whether it exports `check_perms`;
+- whether it is `upgradable`, that is, whether it exports `check_perms`, which removal asks too;
 - its storage `layout`, empty for code that declares none. Each namespace its code declares has
   its `name` and `shape`:
   - `map`, with the `kind` of its values;
@@ -318,6 +318,9 @@ What a contract is:
 - what the token registry holds for it in `token`: its `address`, `name`, `symbol` and
   `decimals`, each `null` when it exports none; `token` is `null` for a contract that is not a
   token.
+
+A contract that was [removed](contracts.md#lifecycle-hooks) answers 404, saying in which block,
+by whom, and its balance to whom.
 
 ### `GET /light`
 
@@ -819,11 +822,13 @@ Under `authority`, `validators` is empty and `active` lists the signers, each we
 ### `GET /multisig/{address}`
 
 A [multisig](multisig.md): its `members`, each a `key`, its `bitcoin` xpub with its origin as a
-descriptor writes it and its `evm` address in hex, each or `null`, its `threshold`, `testnet`, and
+descriptor writes it and its `evm` address in hex, each or `null`, with its `evm_kind`, `key`,
+`contract` or `ed25519:0x…` and the key; its `threshold`, `testnet`, and
 `bitcoin`: `null`, or its `network`, its `receiving` and `change` descriptors with their checksums
 and its `first_address`; `evm`: `null`, or its contract on EVM chains, its `contract` address,
-the `start` owners and threshold its address commits to and those its members name `now`, each
-`owners` in hex and a `threshold`; its next `nonce` and `balance`, and the `proposals` open on chain
+`home`, the chain id its init code names, the `start` owners and threshold its address commits to
+and those its members name `now`, each `owners` in hex with their `kinds` beside them and a
+`threshold`; its next `nonce` and `balance`, and the `proposals` open on chain
 for that nonce, each with its `id`, the `tx` as JSON and `encoded` in hex, its `fee` offer and the
 member keys that `approvals` back it. 404 for an address that is not one.
 

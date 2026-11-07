@@ -53,12 +53,26 @@ pub const INIT: &str = "init";
 pub const MIGRATE: &str = "migrate";
 
 #[document(
-    summary = "The function the chain asks before a privileged action on a contract, with the permission's name and the address asking, such as (\"upgrade\", ed25519:0x…). Only a single true lets the action through, and what it writes is thrown away. A contract that does not export it can never be upgraded.",
+    summary = "The function the chain asks before a privileged action on a contract, with the permission's name, the address asking and what it is for: (\"upgrade\", who, the new code's hash as bytes) or (\"remove\", who, the beneficiary). Only a single true lets the action through, and what it writes is thrown away. A contract that does not export it can never be upgraded or removed. Contracts ask it about their own privileged functions too, through perms.check in Lua, with names of their own such as \"mint\", so a contract's roles live in one place the apps can ask.",
     category = "VM",
-    see_also = "Contracts::upgrade",
-    example = "function M.check_perms(permission, who)\n    return permission == \"upgrade\" and who:hex() == storage.get(\"owner\")\nend",
+    see_also = "Contracts::upgrade, Contracts::remove, UPGRADE, REMOVE",
+    example = "function M.check_perms(permission, who, detail)\n    return who:hex() == storage.get(\"owner\")\nend",
 )]
 pub const CHECK_PERMS: &str = "check_perms";
+
+#[document(
+    summary = "The permission check_perms is asked about before Tx::Upgrade replaces a contract's code; its detail is the new code's hash, the chain's hash of its bytes.",
+    category = "VM",
+    see_also = "CHECK_PERMS, Contracts::upgrade",
+)]
+pub const UPGRADE: &str = "upgrade";
+
+#[document(
+    summary = "The permission check_perms is asked about before Tx::Remove removes a contract; its detail is the beneficiary.",
+    category = "VM",
+    see_also = "CHECK_PERMS, Contracts::remove",
+)]
+pub const REMOVE: &str = "remove";
 
 #[document(
     summary = "The hook the chain runs when a call names a function the contract does not export: it gets the function's selector, as a u64, in front of the call's arguments, and answers in its place. What makes generic proxies possible: delegate the selector and arguments to an implementation. Only the chain may run it.",
@@ -571,6 +585,8 @@ pub enum VmError {
     BadReturn(String),
     #[document(summary = "A contract called an address that holds no contract.")]
     NoSuchContract(Address),
+    #[document(summary = "A contract called an address whose contract was removed.")]
+    Removed(Address),
     #[document(summary = "A transaction or contract called a hook only the chain runs: init or migrate.")]
     Reserved(String),
     #[document(summary = "A contract called one that is already running further up the chain of calls, and the function it called is not marked reentrant.")]
@@ -602,6 +618,7 @@ impl fmt::Display for VmError {
             VmError::BadArgument(text) => write!(f, "bad argument: {text}"),
             VmError::BadReturn(text) => write!(f, "bad return value: {text}"),
             VmError::NoSuchContract(address) => write!(f, "no contract at {address}"),
+            VmError::Removed(address) => write!(f, "the contract at {address} was removed"),
             VmError::Reserved(name) => write!(f, "{name} is only run by the chain"),
             VmError::Reentrant(address) => {
                 write!(f, "{address} is already running and the function is not reentrant")

@@ -87,6 +87,11 @@ pub fn tx(transaction: &Tx) -> Value {
 
             value
         }
+        Tx::Remove { contract, beneficiary } => json!({
+            "type": "remove",
+            "contract": contract.to_string(),
+            "beneficiary": beneficiary.to_string(),
+        }),
         Tx::Bond { voter, amount } => json!({
             "type": "bond",
             "voter": voter.to_string(),
@@ -181,7 +186,29 @@ pub fn multisig_member(member: &crate::registry::multisig::MultisigMember, testn
         "key": member.key.to_string(),
         "bitcoin": bitcoin,
         "evm": member.evm.map(|address| to_hex(&address)),
+        "evm_kind": member.evm.map(|_| member.evm_kind.text()),
     })
+}
+
+/// A multisig's EVM owners as GET /multisig writes them, `owners` and their `kinds` beside them,
+/// read back: what its contract starts with or should have now. Kinds left out, as older nodes
+/// leave them, are EVM keys. None for JSON that is not one.
+pub fn evm_start(value: &Value) -> Option<crate::registry::multisig::EvmStart> {
+    use crate::registry::multisig::{EvmKind, EvmOwner, EvmStart};
+
+    let owners = value["owners"].as_array()?;
+    let kinds: Vec<Option<EvmKind>> = match value["kinds"].as_array() {
+        Some(kinds) if kinds.len() == owners.len() => kinds.iter().map(|kind| kind.as_str().and_then(EvmKind::parse)).collect(),
+        Some(_) => return None,
+        None => owners.iter().map(|_| Some(EvmKind::Key)).collect(),
+    };
+    let owners = owners
+        .iter()
+        .zip(kinds)
+        .map(|(owner, kind)| Some(EvmOwner { address: crate::structs::hex::from_hex(owner.as_str()?)?.try_into().ok()?, kind: kind? }))
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(EvmStart { owners, threshold: u32::try_from(value["threshold"].as_u64()?).ok()? })
 }
 
 /// The Bitcoin network a multisig's xpubs are for.

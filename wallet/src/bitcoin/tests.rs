@@ -419,6 +419,31 @@ fn the_signer_signs_its_part_of_a_multisig_spend_and_sees_its_change_come_back()
     assert!(forged.review(&ours).unwrap_err().contains("does not hold"));
 }
 
+#[test]
+fn two_accounts_of_one_phrase_are_two_members_and_the_signer_signs_as_both() {
+    use chainv4::crypto::bitcoin::psbt::{MultisigCoin, MultisigWallet};
+    use chainv4::crypto::bitcoin::tx::{TxIn, TxOut, p2wsh};
+
+    let ours = seed();
+    let other = Phrase::parse("legal winner thank year wave sausage worth useful legal winner thank yellow").unwrap().seed("");
+    // Accounts 0 and 1 of these words, and another's: 2 of 3, both of ours enough.
+    let xpubs = vec![ours.multisig_account(1, 0), ours.multisig_account(1, 1), other.multisig_account(1, 0)];
+    let wallet = MultisigWallet { threshold: 2, xpubs, network: Network::Test };
+    let change = p2wsh(&chainv4::crypto::bitcoin::multisig::witness_script(2, &wallet.xpubs, 1, 0).unwrap());
+    let tx = Transaction {
+        version: 2,
+        inputs: vec![TxIn { txid: [7; 32], vout: 0, script_sig: Vec::new(), sequence: 0xffff_fffd, witness: Vec::new() }],
+        outputs: vec![TxOut { value: 60_000, script: p2wpkh(&[0x11; 20]) }, TxOut { value: 38_000, script: change }],
+        lock_time: 0,
+    };
+    let psbt = Psbt::for_multisig(&tx, &wallet, &[MultisigCoin { value: 100_000, chain: 0, index: 0 }], &[(1, 0)]).unwrap();
+
+    assert_eq!(psbt.review(&ours).unwrap().inputs[0].yours.as_deref(), Some("m/48'/1'/0'/2'/0/0"), "the first named");
+    let signed = psbt.sign(&ours).unwrap();
+    assert_eq!(signed.multisig_progress(), vec![(2, 2)], "both its accounts' signatures");
+    assert_eq!(signed.finish_multisig().unwrap().inputs[0].witness.len(), 4);
+}
+
 /// The words of a second seed in the wallet.
 fn second() -> Seed {
     Phrase::parse("test test test test test test test test test test test junk").unwrap().seed("")

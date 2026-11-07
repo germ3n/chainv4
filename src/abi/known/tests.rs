@@ -134,7 +134,7 @@ fn token_moves_see_mints_and_burns_erc1155_and_nothing_else() {
 fn a_call_held_in_a_multisig_s_bytes_reads_too() {
     let known = known_abis();
     let inner = call("transfer(address,uint256)", &[AbiValue::Address([0xab; 20]), AbiValue::Uint(u256::new(5))]);
-    let outer = call("execute(address,uint256,bytes,bytes)", &[AbiValue::Address([1; 20]), AbiValue::Uint(u256::ZERO), AbiValue::Bytes(inner), AbiValue::Bytes(vec![0xee; 65])]);
+    let outer = call("execute(address,uint256,bytes,address[],bytes[])", &[AbiValue::Address([1; 20]), AbiValue::Uint(u256::ZERO), AbiValue::Bytes(inner), AbiValue::Array(vec![AbiValue::Address([2; 20])]), AbiValue::Array(vec![AbiValue::Bytes(vec![0xee; 65])])]);
     let read = read_call(None, &known, &outer).unwrap();
 
     assert_eq!(read.by.label(), "read as MultiSig.sol");

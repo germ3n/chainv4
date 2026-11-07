@@ -667,7 +667,7 @@ fn a_multisig_s_proposal_is_priced_for_its_heaviest_quorum_whoever_proposes_sign
     let (ed, secp, other) = (key(31), Keypair::from_private(PrivateKey::Secp256k1([32; 32])), key(33));
     let keys: Vec<PublicKey> = [&ed, &secp, &other].iter().map(|keypair| keypair.public()).collect();
     let account = multisig_address(&alice.public().address(), nonce(&chain, &alice), chain.hash());
-    let create = Tx::CreateMultisig { members: keys.iter().map(|key| MultisigMember { key: *key, bitcoin: None, evm: None }).collect(), threshold: 2, testnet: false };
+    let create = Tx::CreateMultisig { members: keys.iter().map(|key| MultisigMember { key: *key, bitcoin: None, evm: None, evm_kind: crate::registry::multisig::EvmKind::Key }).collect(), threshold: 2, testnet: false };
     let fund = Tx::Transfer { from: alice.public().address(), to: account, amount: Amount::U128(u128::from(COIN) / 10) };
     let txs = signed(&chain, &alice, vec![create, fund], offer(&chain, 100_000));
     assert!(advance(&mut chain, txs).1.iter().all(|receipt| receipt.result.is_ok()));

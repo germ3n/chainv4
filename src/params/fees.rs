@@ -210,6 +210,7 @@ pub const TX_KINDS: &[&str] = &[
     "call",
     "deploy",
     "upgrade",
+    "remove",
     "bond",
     "unbond",
     "withdraw",

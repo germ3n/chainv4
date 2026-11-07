@@ -1,7 +1,7 @@
 use {
     super::RegistryError,
     crate::crypto::hashable::Hashable,
-    crate::db::{Column, DbError, State, address_key},
+    crate::db::{Column, Committed, DbError, State, address_key},
     crate::registry::Standards,
     crate::registry::collections::{COLLECTION_METADATA_FUNCTIONS, Collection, Collections},
     crate::registry::tokens::{METADATA_FUNCTIONS, Token, Tokens},
@@ -12,7 +12,7 @@ use {
     crate::structs::trace::Trace,
     crate::structs::tx::TxCallArgumentType,
     crate::structs::u256::u256,
-    crate::vm::{BlockAt, CHECK_PERMS, CallContext, INIT, Layout, Limits, MIGRATE, Outcome, Vm, VmError},
+    crate::vm::{BlockAt, CHECK_PERMS, CallContext, INIT, Layout, Limits, MIGRATE, Outcome, REMOVE, UPGRADE, Vm, VmError},
     r#macro::document,
     std::sync::Arc,
     wincode::{SchemaRead, SchemaWrite},
@@ -42,6 +42,42 @@ pub struct ContractRecord {
 }
 
 impl Hashable for ContractRecord {}
+
+#[document(
+    summary = "What the chain keeps of a removed contract, at removed_key in Column::Contracts, so light clients prove it and nothing is deployed or cloned at its address again: when, by whom, and where its balance went.",
+    category = "Registries",
+    see_also = "Tx::Remove, Contracts::remove, removed_key",
+)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct Removal {
+    #[document(summary = "The block that removed it.")]
+    pub height: u64,
+    #[document(summary = "Who removed it: the sender check_perms allowed.")]
+    pub by: Address,
+    #[document(summary = "Who got its balance.")]
+    pub beneficiary: Address,
+    #[document(summary = "The balance it had, in the coin's smallest unit.")]
+    #[wincode(with = "crate::structs::u256::U256Le")]
+    pub balance: u256,
+    #[document(summary = "The engine that ran it.")]
+    pub engine: Engine,
+    #[document(summary = "How many entries of its storage were deleted, plain and namespaced.")]
+    pub entries: u64,
+}
+
+impl Hashable for Removal {}
+
+#[document(
+    summary = "Where a removed contract's Removal is kept in Column::Contracts: 0xff and then the address's own key, which no address's key starts with.",
+    category = "Registries",
+    see_also = "Removal, Contracts::removed",
+)]
+pub fn removed_key(address: &Address) -> Vec<u8> {
+    let mut key = vec![0xff];
+    key.extend_from_slice(&address_key(address));
+
+    key
+}
 
 #[document(
     summary = "Deployed contracts by address: deploys them and calls them against the state it was given, whichever engine runs them.",
@@ -95,6 +131,10 @@ impl<'a> Contracts<'a> {
             return Err(RegistryError::AlreadyDeployed(address).into());
         }
 
+        if self.removed(&address)?.is_some() {
+            return Err(RegistryError::Removed(address).into());
+        }
+
         let (record, loaded) = load(vm, *deployer, code, limits, &block)?;
         self.state.put_value(Column::Contracts, address_key(&address), &record);
         let context = CallContext {
@@ -138,14 +178,17 @@ impl<'a> Contracts<'a> {
         standards: &Standards,
         block: BlockAt,
     ) -> Result<Hooked, Failed> {
-        let current = self.get(contract)?.ok_or(RegistryError::NoSuchContract(*contract))?;
+        let current = self.record(contract)?;
         let context = CallContext {
             sender: *sender,
             contract: *contract,
             value: u256::ZERO,
             block,
         };
-        let (asked, mut trace) = self.permits(vm, &current, context, "upgrade", limits)?;
+        // What check_perms is shown of the new code: the chain's hash of its bytes, as the
+        // contract's own hash function gives it.
+        let hash = crate::crypto::hasher::Hasher::digest(vm.hash(), code.bytes()).to_bytes();
+        let (asked, mut trace) = self.permits(vm, &current, context, UPGRADE, TxCallArgumentType::Bytes(hash), limits)?;
         let (record, loaded) = load(vm, current.deployer, code, spent(limits, asked), &block)
             .map_err(|failed| failed.after(asked, trace.clone()))?;
         let before = asked + loaded;
@@ -168,6 +211,119 @@ impl<'a> Contracts<'a> {
         self.register(vm, context, limits, standards, &mut hooked)?;
 
         Ok(hooked)
+    }
+
+    #[document(
+        parent = "Contracts",
+        summary = "Removes a Lua or WebAssembly contract for good, as Tx::Remove asks. Its check_perms is asked with \"remove\", the sender and the beneficiary, on a throwaway copy of state, and must return true. Then every entry of its storage, plain and namespaced, is deleted, each for the fuel a storage write costs; its balance goes to the beneficiary; its code is deleted; it leaves the token and collection registries; and a Removal is kept at removed_key, so the address is never deployed or cloned to again. If anything fails, nothing changes.",
+        params = {
+            vm = "The chain's engines.",
+            sender = "Who asks for the removal.",
+            contract = "The contract to remove.",
+            beneficiary = "Who gets its balance: credited, never called.",
+            limits = "What check_perms and the deleting may use together.",
+        },
+        returns = "What it did: the fuel check_perms and the deleting burned, where check_perms went, and the balance paid to the beneficiary.",
+        panics = "NotPermitted when the contract has no check_perms or it does not return true, NoSuchContract when no contract lives there, Removed when it was removed already, Vm(OutOfFuel) when its storage is more than the limit deletes: clear some first, through its own functions.",
+        see_also = "Tx::Remove, Removal, removed_key, CHECK_PERMS",
+    )]
+    pub fn remove(&self, vm: &Arc<Vm>, sender: &Address, contract: &Address, beneficiary: &Address, limits: Limits, block: BlockAt) -> Result<Removed, Failed> {
+        let record = self.record(contract)?;
+        let context = CallContext {
+            sender: *sender,
+            contract: *contract,
+            value: u256::ZERO,
+            block,
+        };
+        let (asked, trace) = self.permits(vm, &record, context, REMOVE, TxCallArgumentType::Address(*beneficiary), limits)?;
+        let per_entry = block.vm.costs.storage_write.max(1);
+        let mut fuel_used = asked;
+        let mut doomed = Vec::new();
+        let prefix = address_key(contract);
+
+        // Every entry it keeps, plain and in namespaces, its own space too: counted before any
+        // goes, so a contract with more than the fuel deletes is left whole.
+        for column in [Column::Storage, Column::Namespaces] {
+            let mut short = false;
+            self.state.scan(column, &prefix, &[], &mut |key, _| {
+                if fuel_used.saturating_add(per_entry) > limits.fuel {
+                    short = true;
+
+                    return false;
+                }
+
+                fuel_used += per_entry;
+                doomed.push((column, key.to_vec()));
+
+                true
+            })?;
+
+            if short {
+                return Err(Failed {
+                    error: RegistryError::Vm(VmError::OutOfFuel),
+                    fuel_used: limits.fuel,
+                    trace,
+                });
+            }
+        }
+
+        let entries = doomed.len() as u64;
+
+        for (column, key) in doomed {
+            self.state.delete(column, key);
+        }
+
+        let accounts = crate::registry::accounts::Accounts::new(self.state);
+        let balance = accounts.get(contract)?.balance;
+
+        if balance != u256::ZERO {
+            accounts.transfer(contract, beneficiary, balance).map_err(Failed::from)?;
+        }
+
+        self.state.delete(Column::Contracts, address_key(contract));
+        Tokens::new(self.state).unregister(contract)?;
+        Collections::new(self.state).unregister(contract)?;
+        let removal = Removal {
+            height: block.height,
+            by: *sender,
+            beneficiary: *beneficiary,
+            balance,
+            engine: record.engine,
+            entries,
+        };
+        self.state.put_value(Column::Contracts, removed_key(contract), &removal);
+
+        Ok(Removed { fuel_used, trace, balance })
+    }
+
+    #[document(
+        parent = "Contracts",
+        summary = "What the chain keeps of a removed contract.",
+        returns = "Its Removal, or None when nothing was removed at the address.",
+    )]
+    pub fn removed(&self, address: &Address) -> Result<Option<Removal>, DbError> {
+        self.state.get_value(Column::Contracts, &removed_key(address))
+    }
+
+    /// A contract's record, or why there is none: never one, or one removed.
+    fn record(&self, address: &Address) -> Result<ContractRecord, RegistryError> {
+        match self.get(address)? {
+            Some(record) => Ok(record),
+            None => Err(self.missing(address)),
+        }
+    }
+
+    #[document(
+        parent = "Contracts",
+        summary = "Why no contract lives at an address, as a call to it fails: removed, or never there.",
+        returns = "RegistryError::Removed for a removed contract, else NoSuchContract; Db when the read failed.",
+    )]
+    pub fn missing(&self, address: &Address) -> RegistryError {
+        match self.removed(address) {
+            Ok(Some(_)) => RegistryError::Removed(*address),
+            Ok(None) => RegistryError::NoSuchContract(*address),
+            Err(err) => RegistryError::Db(err),
+        }
     }
 
     #[document(
@@ -199,7 +355,7 @@ impl<'a> Contracts<'a> {
             return Ok((0, Trace::default()));
         }
 
-        let record = self.get(contract)?.ok_or(RegistryError::NoSuchContract(*contract))?;
+        let record = self.record(contract)?;
         let exports = |function: &str| record.functions.iter().any(|name| name == function);
         let token = !standards.tokens.is_empty() && standards.tokens.iter().all(|function| exports(function));
         let kind = standards.collections.as_ref().and_then(|functions| functions.kind(exports));
@@ -286,15 +442,16 @@ impl<'a> Contracts<'a> {
         Ok(())
     }
 
-    /// Asks a contract's check_perms whether context.sender has a permission, on a throwaway
-    /// copy of state. Returns the fuel the question burned and where it went when the answer is
-    /// yes; a no burned it all the same.
+    /// Asks a contract's check_perms whether context.sender has a permission, with what it is for,
+    /// on a throwaway copy of state. Returns the fuel the question burned and where it went when
+    /// the answer is yes; a no burned it all the same.
     fn permits(
         &self,
         vm: &Arc<Vm>,
         record: &ContractRecord,
         context: CallContext,
         permission: &str,
+        detail: TxCallArgumentType,
         limits: Limits,
     ) -> Result<(u64, Trace), Failed> {
         if !record.functions.iter().any(|name| name == CHECK_PERMS) {
@@ -305,6 +462,7 @@ impl<'a> Contracts<'a> {
         let args = [
             TxCallArgumentType::String(permission.to_string()),
             TxCallArgumentType::Address(context.sender),
+            detail,
         ];
         let mut outcome = vm.run(&scratch, record, context, CHECK_PERMS, &args, limits);
         // What it emitted was thrown away with the scratch state.
@@ -383,12 +541,25 @@ impl<'a> Contracts<'a> {
         args: &[TxCallArgumentType],
         limits: Limits,
     ) -> Result<Outcome, RegistryError> {
-        let record = self
-            .get(&context.contract)?
-            .ok_or(RegistryError::NoSuchContract(context.contract))?;
+        let record = self.record(&context.contract)?;
 
         Ok(vm.call(self.state, &record, *context, func, args, limits))
     }
+}
+
+#[document(
+    summary = "What a removal did: the fuel check_perms and the deleting burned, where check_perms went, and the balance the beneficiary got.",
+    category = "Registries",
+    see_also = "Contracts::remove",
+)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Removed {
+    #[document(summary = "Fuel burned by check_perms and by deleting each entry of storage.")]
+    pub fuel_used: u64,
+    #[document(summary = "Where check_perms went.")]
+    pub trace: Trace,
+    #[document(summary = "What went to the beneficiary.")]
+    pub balance: u256,
 }
 
 #[document(

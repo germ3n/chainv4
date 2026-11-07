@@ -578,7 +578,7 @@ mod tests {
         // `invalidated`, so none forgets anything on its own.
         for (page, source, checks) in [
             ("send", include_str!("views/send.rs"), 1),
-            ("sign", include_str!("views/sign.rs"), 4),
+            ("sign", include_str!("views/sign.rs"), 5),
             ("dapp", include_str!("views/dapp.rs"), 1),
             ("evm", include_str!("views/evm.rs"), 1),
         ] {

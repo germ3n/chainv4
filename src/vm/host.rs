@@ -360,7 +360,7 @@ impl Host {
         let contracts = Contracts::new(&self.state);
         let layout = |address: &Address| match contracts.get(address) {
             Ok(Some(record)) => Ok(record.layout),
-            Ok(None) => Err(VmError::NoSuchContract(*address)),
+            Ok(None) => Err(self.missing(address)),
             Err(err) => Err(self.fail(err)),
         };
         let (old, new) = (layout(from)?, layout(to)?);
@@ -571,7 +571,7 @@ impl Host {
 
         let record = match Contracts::new(&self.state).get(target) {
             Ok(Some(record)) => record,
-            Ok(None) => return Outcome::failed(VmError::NoSuchContract(*target)),
+            Ok(None) => return Outcome::failed(self.missing(target)),
             Err(err) => return Outcome::failed(self.fail(err)),
         };
 
@@ -786,7 +786,7 @@ impl Host {
 
         let record = match Contracts::new(&self.state).get(target) {
             Ok(Some(record)) => record,
-            Ok(None) => return Outcome::failed(VmError::NoSuchContract(*target)),
+            Ok(None) => return Outcome::failed(self.missing(target)),
             Err(err) => return Outcome::failed(self.fail(err)),
         };
         let (function, args) = match route(&record, function, args, false) {
@@ -868,13 +868,20 @@ impl Host {
         let contracts = Contracts::new(&self.state);
         let template = match contracts.get(template) {
             Ok(Some(record)) => record,
-            Ok(None) => return Outcome::failed(VmError::NoSuchContract(*template)),
+            Ok(None) => return Outcome::failed(self.missing(template)),
             Err(err) => return Outcome::failed(self.fail(err)),
         };
 
         match contracts.get(&address) {
             Ok(None) => {}
             Ok(Some(_)) => return Outcome::failed(VmError::Runtime(format!("a contract lives at {address} already: clone with another salt"))),
+            Err(err) => return Outcome::failed(self.fail(err)),
+        }
+
+        // A removed contract's address stays its own.
+        match contracts.removed(&address) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Outcome::failed(VmError::Runtime(format!("the contract at {address} was removed, and no other goes there: clone with another salt"))),
             Err(err) => return Outcome::failed(self.fail(err)),
         }
 
@@ -1019,6 +1026,15 @@ impl Host {
 
     fn close(&self, hop: Option<usize>, outcome: &Outcome) {
         close(&self.trace, hop, outcome);
+    }
+
+    /// Why no contract lives at an address a call named: removed, or never there.
+    fn missing(&self, address: &Address) -> VmError {
+        match Contracts::new(&self.state).missing(address) {
+            RegistryError::Removed(address) => VmError::Removed(address),
+            RegistryError::Db(err) => self.fail(err),
+            _ => VmError::NoSuchContract(*address),
+        }
     }
 
     fn fail(&self, err: DbError) -> VmError {

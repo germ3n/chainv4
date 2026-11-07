@@ -108,7 +108,7 @@ Four function names mean something to the chain.
 | Function | When it runs |
 | --- | --- |
 | `init` | Once at deploy, with the deployer as sender and no arguments. Record an owner or mint a supply here. If it fails, the deploy fails. |
-| `check_perms(permission, who)` | Asked before a privileged action, so far only `"upgrade"`. Only a single `true` lets it through, and what it writes is thrown away. A contract without it can never be upgraded. |
+| `check_perms(permission, who, detail)` | Asked before a privileged action: by the chain, `"upgrade"` and `"remove"`; by the contract itself, any names it has, through [permissions](#permissions). Only a single `true` lets it through, and what the chain's questions write is thrown away. A contract without it can never be upgraded or removed. |
 | `migrate` | Once after an upgrade to code that exports it, with the upgrader as sender. Move storage to a new layout here. If it fails, the upgrade fails. |
 | `fallback(selector, ...)` | When a call names a function the contract does not export. It gets the selector as a `u64` in front of the call's arguments, and answers in its place. |
 
@@ -125,6 +125,60 @@ address, storage and balance. They:
    and decimals again.
 
 If anything fails, nothing changes.
+
+**Removal** (`Tx::Remove`, `chainv4 send remove --contract … --to …`) takes a Lua or WebAssembly
+contract away for good. It:
+1. asks its `check_perms("remove", sender, beneficiary)`;
+2. deletes every entry of its storage, plain and in every namespace, its own space too, each for
+   what a storage write costs in fuel (`storage_write`, 100 by default);
+3. pays its balance to the beneficiary, which is credited and not called: the receipt lists it as
+   a payment;
+4. deletes its code, and takes it out of the token and collection registries;
+5. keeps a `Removal` at `removed_key(address)` in the contracts column, in chain state: the
+   block, who removed it, the beneficiary, the balance and how many entries went.
+
+If anything fails, nothing changes, including when its storage is more than the transaction's
+fuel deletes: clear some first, through its own functions. After it:
+- **calls fail** with `the contract at … was removed`, from a transaction or another contract;
+- **the address stays its own:** nothing is deployed or cloned there again, the same salt
+  included, and `GET /contracts/{address}` says when it went and where its balance did;
+- **what it held elsewhere stays there:** tokens and NFTs it holds in other contracts, and
+  names pointing at it, are not moved. Move them out first;
+- **EVM contracts** are removed by their own code, as Ethereum's are; `Tx::Remove` refuses them.
+
+The CLI says what goes and asks for `yes` first, or takes `--yes`. A batch may hold a removal.
+
+## Permissions
+
+`check_perms(permission, who, detail)` is a contract's one place for who may do what:
+- **The chain asks** `"upgrade"`, with the new code's hash as `detail` (the chain's hash of its
+  bytes, what `hash.<algorithm>(source):bytes()` gives), and `"remove"`, with the beneficiary.
+  Its questions run on a throwaway copy of state.
+- **The contract asks** about its own functions with names of its own, such as `"mint"` or
+  `"pause"`: `perms.check(permission, who, detail)` in Lua, true only for a single `true` from
+  `check_perms`, and `perms.require`, which raises `not permitted: mint` otherwise. `who` is
+  `ctx.sender` unless given. These run within the call, so keep `check_perms` to reading.
+- **The apps ask** by calling it, as any read: the explorer's **Reading** tool and `POST /call`
+  answer whether an account may do something.
+
+```lua
+function M.check_perms(permission, who, detail)
+    if permission == "mint" then
+        return storage.get("minter:" .. who:hex()) ~= nil and detail <= 1000
+    end
+
+    return who:hex() == storage.get("owner") and permission ~= "remove"
+end
+
+function M.mint(to, amount)
+    perms.require("mint", nil, amount)
+    -- ...
+end
+```
+
+In Rust, `check_perms` takes the detail as a `Value`, and a privileged function asks it
+directly: `require(check_perms("mint".into(), sender(), Value::Nil), "mint")`. `UPGRADE` and
+`REMOVE` name the chain's two.
 
 ## Storage namespaces
 
@@ -545,6 +599,7 @@ and `debug` are not there at all.
 | `accounts` | `accounts.balance(address)`, `accounts.transfer(to, amount)` from the contract's balance, `accounts.burn(amount)`: coin out of the contract's balance and out of the supply, as the chain's fees burn it, kept only if the call succeeds. |
 | `contracts` | `contracts.call(address, name, ...)`, `contracts.call_value(address, value, name, ...)`, `contracts.delegate(address, name_or_selector, ...)`, `contracts.check_layout(from, to)`, `contracts.selector(name)`, `contracts.clone(template, salt, ...)`, `contracts.cloned_at(salt)`. |
 | `events` | `events.emit(name, ...)`. |
+| `perms` | `perms.check(permission, who, detail)` and `perms.require(…)`: the contract's own `check_perms`, asked about its own functions. See [Permissions](#permissions). |
 | `tokens` | `tokens.refresh()`: asks the token registry to ask this token's name, symbol and decimals again once the transaction succeeds. |
 | `collections` | `collections.refresh()`: the same request, for a [collection](nft-standard.md) renamed; one asks again for both registries. |
 | `names` | `names.resolve(name)`, the address a name such as `alice.dev` resolves to, or `nil`; `names.name_of(address)`, the name an address goes by. At the block's time. See [Names](names.md#names-in-contracts). |
@@ -805,7 +860,9 @@ order, and what it returns becomes the call's return values (`chainv4_sdk::args`
 **What else it offers:**
 - `#[export(reentrant)]` also marks a function reentrant;
 - `sender`, `this`, `value`, `balance`, `transfer`;
-- `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`,
+- `require(allowed, permission)`, which aborts with `not permitted: …`, and `UPGRADE` and
+  `REMOVE`, the permissions the chain asks [check_perms](#permissions) about;
+- `call` and `call_with_value`, `delegate`, `check_layout`, `emit`, `hash`, `abort`, `burn`,
   `refresh_token`, `resolve_name` and `name_of`, `evm_call`, `abi_encode` and `abi_decode`,
   `verify`, `recover`, `key_address`, `ripemd160`, `hash160`, `sha256d`, `sha256`,
   `check_state`, `check_merkle`, `fast_aggregate_verify`, `federation` and `chain_id`, and

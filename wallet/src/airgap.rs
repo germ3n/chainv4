@@ -38,6 +38,10 @@ pub const SIGNED_TYPE: &str = "chainv4-signed";
 /// A multisig's transaction on its way round the members: the same bundle chainv4 multisig
 /// passes as text, read by the signer to add its member's signature, and shown back.
 pub const MULTISIG_TYPE: &str = "chainv4-multisig";
+/// A multisig's call on an EVM chain, for the signer to sign as one of its contract's owners, or
+/// as an owner of another multisig that owns it: asked and answered as the same request, the
+/// answer's bundle holding the signature.
+pub const EVM_TYPE: &str = "chainv4-multisig-evm";
 
 /// The most bytes of a message one code holds, about 700 characters: as many as a token transfer's
 /// request takes, the chain it names included. A code that stays still may be denser than one of
@@ -142,6 +146,8 @@ pub enum Message {
     Swap(Box<chainv4::swap::Terms>),
     /// A multisig's transaction and the members' signatures so far: to sign, and signed.
     Multisig(Box<chainv4::registry::multisig::MultisigBundle>),
+    /// A multisig's call on an EVM chain, with the key to sign it with: to sign, and signed.
+    Evm(Box<chainv4::abi::multisig::EvmRequest>),
 }
 
 impl Message {
@@ -157,6 +163,7 @@ impl Message {
             #[cfg(feature = "swap")]
             Message::Swap(_) => chainv4::swap::UR_TYPE,
             Message::Multisig(_) => MULTISIG_TYPE,
+            Message::Evm(_) => EVM_TYPE,
         }
     }
 
@@ -173,6 +180,7 @@ impl Message {
             }),
             Message::Signed(signed) => wincode::serialize(signed),
             Message::Multisig(bundle) => wincode::serialize(bundle),
+            Message::Evm(request) => wincode::serialize(request),
             Message::MetaMask(request) => return request.to_cbor().expect("a request read always writes back"),
             Message::EthSignature(signature) => return signature.to_cbor().expect("a signature always writes"),
             Message::Bitcoin(request) => return request.to_cbor(),
@@ -194,6 +202,7 @@ impl Message {
             SIGN_TYPE => request(bytes).map(Message::Sign),
             SIGNED_TYPE => whole::<SignedTx>(bytes).map(Message::Signed),
             MULTISIG_TYPE => whole::<chainv4::registry::multisig::MultisigBundle>(bytes).map(|bundle| Message::Multisig(Box::new(bundle))),
+            EVM_TYPE => whole::<chainv4::abi::multisig::EvmRequest>(bytes).map(|request| Message::Evm(Box::new(request))),
             crate::hardware::REQUEST_TYPE => crate::hardware::SignRequest::from_cbor(bytes).map(|request| Message::MetaMask(Box::new(request))),
             crate::hardware::SIGNATURE_TYPE => crate::hardware::Signature::from_cbor(bytes).map(|signature| Message::EthSignature(Box::new(signature))),
             #[cfg(feature = "swap")]
@@ -234,6 +243,7 @@ impl Message {
             #[cfg(feature = "swap")]
             Message::Swap(_) => "a swap's terms",
             Message::Multisig(_) => "a multisig's transaction",
+            Message::Evm(_) => "a multisig's call on an EVM chain",
         }
     }
 }

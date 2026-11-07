@@ -152,7 +152,7 @@ pub enum BitcoinAction {
     },
     /// Signs a PSBT as a member: shows each output's address and amount and the fee, asks for yes,
     /// then reads its seed phrase from input and signs the inputs it names this seed's keys for, at
-    /// m/48'/coin'/0'/2'. A spend it cannot say that of is refused.
+    /// m/48'/coin'/n'/2', any account n. A spend it cannot say that of is refused.
     #[cfg(feature = "mnemonic")]
     Sign {
         psbt: PathBuf,

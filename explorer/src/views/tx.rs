@@ -307,6 +307,11 @@ fn means(tx: &TxView) -> Option<String> {
             "Shows that Bitcoin block {} holds an anchor of one of this chain's checkpoints, which the chain records and may pay for",
             tx.tx["btc_block"].as_str().map_or_else(|| "?".to_string(), format::short),
         )),
+        "remove" => Some(format!(
+            "Removes contract {} for good: its code and storage are deleted, its balance goes to {}, and nothing is deployed at its address again",
+            tx.tx["contract"].as_str().map_or_else(|| "?".to_string(), format::short),
+            tx.tx["beneficiary"].as_str().map_or_else(|| "?".to_string(), format::short),
+        )),
         "set_directory" => Some("The directory's admin sets the chain's directory: the contracts the apps use".to_string()),
         "hand_directory" => Some(match tx.tx["to"].as_str() {
             Some(to) => format!("The directory's admin hands the role to {}", format::short(to)),

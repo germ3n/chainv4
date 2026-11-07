@@ -797,10 +797,30 @@ Every node on a chain must agree on all of these. Change one on purpose, never b
   module, or the init code decoded from its `.bin` hex) and the address it lands at; `--full` shows
   the code. The API's JSON, `structs::json::tx`, still carries Lua's `source`: the CLI drops it for
   the review alone. A build without `sha256` names the chain's own hash in `code_hash` instead.
-- **A member's xpub is its words', not its account's.** `Seed::multisig_account` is at
-  m/48'/coin'/0'/2' for every account of a phrase, so two accounts of one phrase cannot both be
-  members of one multisig on Bitcoin, which names each xpub once. A `bitcoin:` member key, at
-  m/84'/…, gives an xpub from the same words all the same.
+- **MultiSig.sol changed, and so did every address.** Its init code now names chainv4's chain id
+  and each owner's kind, so a multisig made from now has another contract address than one made
+  before, on every EVM chain. The tools read a contract's owners with `getOwnerKeys` and send
+  `execute` the signers and their signatures as two lists, so they speak to these contracts
+  alone: one deployed before, which the regenesis after batch 15 leaves none of, needs the tools of
+  its day. Bundles from before do not read either.
+- **An Ed25519 owner is cheap at home and dear elsewhere.** About 112,000 gas for a whole
+  execute on chainv4 against roughly 400,000 more per Ed25519 signature on any other chain, where
+  Solidity checks it. A chain with a block gas limit of a few million holds a handful of them.
+- **The precompile is trusted only at home.** On a chain whose id is not the one the init code
+  names, MultiSig.sol never calls `0x…4e56`, whatever answers there.
+- **A contract owner can only read while it answers.** isValidSignature is a static call: an
+  owner that writes when asked, as some smart wallets count uses, reverts and counts as not
+  signed.
+- **A nested approval is the inner multisig's owners signing a wrapped digest:** Message(bytes32
+  hash) under the inner contract's domain, never the outer call's digest itself, so nobody can
+  turn an inner multisig's own execute signatures into an approval.
+- **An Ed25519 owner pays no gas.** Its account needs an EVM key, or another member's, to send
+  what it signed; the wallet says so and offers the text to copy.
+- **A member's xpub is its account's.** Account n of a phrase names m/48'/coin'/n'/2', and the
+  policy keeps n with the xpub (`BitcoinXpub::account`), so two accounts of one phrase may both be
+  members of one multisig on Bitcoin, and a signer holding both signs as both. Account 0's xpub,
+  and so its descriptors, are what they were. A `bitcoin:` member key, at m/84'/…, gives the xpub
+  of the account it is from.
 - **A multisig's EVM contract address commits to its first EVM owners.** `Multisigs::evm_start`
   keeps the owners and threshold from when the members first named EVM addresses, written once at
   creation or the first change that names them, never after, since `multisig_contract` hashes them
@@ -955,8 +975,22 @@ voting finality it now goes back to the checkpoint and follows the node from the
 - **Four functions are special:**
   - `init`, run at deploy;
   - `migrate`, run after an upgrade;
-  - `check_perms`, asked before an upgrade;
+  - `check_perms`, asked before an upgrade or a removal, and by the contract itself;
   - `fallback`, which answers functions a contract does not export.
+- **check_perms takes three arguments now:** the permission, who, and what it is for, the new
+  code's hash for `"upgrade"` and the beneficiary for `"remove"`. Lua's take what they name and
+  drop the rest, so two-argument ones go on working. A Rust one must take the third, as a `Value`:
+  the SDK refuses a call with more arguments than a function takes, so one with two can no longer
+  be upgraded or removed.
+- **A contract that allows "remove" can be emptied.** Removal pays its whole balance to whoever
+  check_perms accepts as beneficiary and deletes everything it holds: a token or a vault should
+  refuse it, as the reference token and NFT do by allowing only `"upgrade"`.
+- **Removal is bounded by fuel, not by size.** Each entry of storage costs a storage write to
+  delete, all in one transaction; a contract holding more than that fails whole and must be
+  cleared through its own functions first.
+- **A removed address is never reused.** Deploys derive new addresses anyway, but a factory
+  cloning with the same salt is refused too, so nothing can stand in for a removed contract at its
+  address. Names pointing at it keep pointing there.
 
   Transactions and other contracts cannot call `init`, `migrate` or `fallback`, nor delegate to
   them. A contract without `check_perms` can never be upgraded. See [Contracts](contracts.md).

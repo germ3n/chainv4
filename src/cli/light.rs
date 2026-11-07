@@ -232,6 +232,7 @@ fn summary(tx: &Tx) -> String {
         Tx::EvmCall { to, value, input } => format!("EVM call to {to} with {} bytes of input, sending {}", input.len(), value.to_u256()),
         Tx::Deploy { .. } => "deploy a contract".to_string(),
         Tx::Upgrade { contract, .. } => format!("upgrade {contract}"),
+        Tx::Remove { contract, beneficiary } => format!("remove {contract}, its balance to {beneficiary}"),
         Tx::Bond { voter, amount } => format!("bond {} for voter {voter}", amount.to_u256()),
         Tx::Unbond { voter } => format!("unbond voter {voter}"),
         Tx::Withdraw { voter } => format!("withdraw voter {voter}'s bond"),

@@ -3,13 +3,13 @@
 //! co-sign the same coins:
 //!
 //! ```text
-//! wsh(sortedmulti(M,[fingerprint/48'/coin'/0'/2']xpub…/<0;1>/*,…))
+//! wsh(sortedmulti(M,[fingerprint/48'/coin'/account'/2']xpub…/<0;1>/*,…))
 //! ```
 //!
-//! Each member names its account xpub at BIP48's path for native segwit multisig, m/48'/0'/0'/2'
-//! on Bitcoin or m/48'/1'/0'/2' on its test networks. Receiving address n takes every member's key
-//! at 0/n, change address n at 1/n, sorted (BIP67), so the same members make the same address
-//! whatever order they are listed in.
+//! Each member names its account xpub at BIP48's path for native segwit multisig, m/48'/0'/a'/2'
+//! on Bitcoin or m/48'/1'/a'/2' on its test networks, a the account of its seed. Receiving address
+//! n takes every member's key at 0/n, change address n at 1/n, sorted (BIP67), so the same members
+//! make the same address whatever order they are listed in.
 
 use {
     super::sha256d,
@@ -28,12 +28,12 @@ const BIP48_PURPOSE: u32 = 48;
 const BIP48_P2WSH: u32 = 2;
 
 #[document(
-    summary = "The path a member's multisig account xpub sits at: m/48'/coin'/0'/2', BIP48's for native segwit multisig, coin 0 on Bitcoin and 1 on its test networks.",
+    summary = "The path a member's multisig account xpub sits at: m/48'/coin'/account'/2', BIP48's for native segwit multisig, coin 0 on Bitcoin and 1 on its test networks.",
     category = "Bitcoin",
-    params = { network = "Which network." },
+    params = { network = "Which network.", account = "Which account of the seed, below 2^31." },
 )]
-pub fn account_path(network: Network) -> [u32; 4] {
-    [BIP48_PURPOSE | HARDENED, network.coin() | HARDENED, HARDENED, BIP48_P2WSH | HARDENED]
+pub fn account_path(network: Network, account: u32) -> [u32; 4] {
+    [BIP48_PURPOSE | HARDENED, network.coin() | HARDENED, account | HARDENED, BIP48_P2WSH | HARDENED]
 }
 
 /// An xpub's version bytes on a network, as base58 writes them: xpub… or tpub….
@@ -53,7 +53,7 @@ fn multisig_version(network: Network) -> [u8; 4] {
 }
 
 #[document(
-    summary = "A member's xpub as wallets write it, with its origin: [fingerprint/48'/coin'/0'/2']xpub… or tpub…, what a descriptor names it by.",
+    summary = "A member's xpub as wallets write it, with its origin: [fingerprint/48'/coin'/account'/2']xpub… or tpub…, what a descriptor names it by.",
     category = "Bitcoin",
     params = { xpub = "The member's account xpub.", network = "Which network it is for." },
 )]
@@ -63,7 +63,7 @@ pub fn xpub_text(xpub: &BitcoinXpub, network: Network) -> String {
 
 /// Its origin, as a descriptor writes it: the seed's fingerprint and the path, h for hardened.
 fn origin(xpub: &BitcoinXpub, network: Network) -> String {
-    let steps: Vec<String> = account_path(network).iter().map(|step| format!("{}h", step - HARDENED)).collect();
+    let steps: Vec<String> = account_path(network, xpub.account).iter().map(|step| format!("{}h", step - HARDENED)).collect();
 
     format!("{}/{}", crate::structs::hex::to_hex(&xpub.fingerprint).trim_start_matches("0x"), steps.join("/"))
 }
@@ -82,7 +82,7 @@ fn base58_xpub(xpub: &BitcoinXpub, network: Network) -> String {
 }
 
 #[document(
-    summary = "Reads a member's xpub with its origin, [fingerprint/48'/coin'/0'/2']xpub…, as a descriptor names it, with ' or h for hardened, and xpub/tpub or SLIP-0132's Zpub/Vpub. The origin must be BIP48's native segwit multisig account on the network the xpub's version says.",
+    summary = "Reads a member's xpub with its origin, [fingerprint/48'/coin'/account'/2']xpub…, as a descriptor names it, with ' or h for hardened, and xpub/tpub or SLIP-0132's Zpub/Vpub. The origin must be a BIP48 native segwit multisig account, any account, on the network the xpub's version says.",
     category = "Bitcoin",
     returns = "The xpub, and the network it is for; why it is not one, otherwise.",
 )]
@@ -113,9 +113,11 @@ pub fn parse_xpub(text: &str) -> Result<(BitcoinXpub, Network), String> {
         })
         .collect();
 
-    if steps.as_deref() != Some(&account_path(network)[..]) {
-        return Err(format!("a multisig account sits at m/48'/{}'/0'/2', BIP48's native segwit, on {}", network.coin(), network.name()));
-    }
+    // Any account of the seed, BIP48's third step, hardened.
+    let account = match steps.as_deref() {
+        Some([_, _, account, _]) if *account >= HARDENED && steps.as_deref() == Some(&account_path(network, account - HARDENED)[..]) => account - HARDENED,
+        _ => return Err(format!("a multisig account sits at m/48'/{}'/n'/2', BIP48's native segwit, on {}", network.coin(), network.name())),
+    };
 
     if bytes[4] != 4 || bytes[9..13] != (BIP48_P2WSH | HARDENED).to_be_bytes() {
         return Err("an xpub whose depth or child is not the account's, 4 down at 2'".to_string());
@@ -126,6 +128,7 @@ pub fn parse_xpub(text: &str) -> Result<(BitcoinXpub, Network), String> {
         parent: bytes[5..9].try_into().expect("4 bytes"),
         chain_code: bytes[13..45].try_into().expect("32 bytes"),
         public: bytes[45..78].try_into().expect("33 bytes"),
+        account,
     };
 
     if k256::PublicKey::from_sec1_bytes(&xpub.public).is_err() {
@@ -369,6 +372,7 @@ mod tests {
                 parent: bytes[5..9].try_into().unwrap(),
                 chain_code: bytes[13..45].try_into().unwrap(),
                 public: bytes[45..78].try_into().unwrap(),
+                account: 0,
             },
             (),
         )
@@ -388,7 +392,12 @@ mod tests {
 
         let main = xpub_text(&xpub, Network::Main);
 
-        assert!(parse_xpub(&main.replace("/48h/0h", "/48h/1h")).unwrap_err().contains("m/48'/0'/0'/2'"), "a testnet path on a mainnet xpub");
+        assert!(parse_xpub(&main.replace("/48h/0h", "/48h/1h")).unwrap_err().contains("m/48'/0'/n'/2'"), "a testnet path on a mainnet xpub");
+        // Any account of the seed, kept with the key.
+        let fifth = parse_xpub(&main.replace("/48h/0h/0h/", "/48h/0h/5h/")).unwrap().0;
+        assert_eq!(fifth, BitcoinXpub { account: 5, ..xpub });
+        assert!(xpub_text(&fifth, Network::Main).contains("/48h/0h/5h/2h]"));
+        assert!(parse_xpub(&main.replace("/48h/0h/0h/", "/48h/0h/5/")).is_err(), "an account is hardened");
         assert!(parse_xpub(&main.replace("/2h]", "/1h]")).is_err(), "nested segwit's account");
         assert!(parse_xpub(&main[..main.len() - 1]).is_err(), "its checksum caught");
         assert!(parse_xpub(main.split(']').nth(1).unwrap()).is_err(), "no origin");
@@ -401,7 +410,7 @@ mod tests {
                 let secret = [seed; 32];
                 let public = crate::crypto::secp256k1::public_key(&secret).unwrap();
 
-                BitcoinXpub { fingerprint: [seed; 4], parent: [0; 4], public, chain_code: [seed; 32] }
+                BitcoinXpub { fingerprint: [seed; 4], parent: [0; 4], public, chain_code: [seed; 32], account: 0 }
             })
             .collect();
         let reversed: Vec<BitcoinXpub> = xpubs.iter().rev().copied().collect();

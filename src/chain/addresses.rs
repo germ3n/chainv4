@@ -100,6 +100,9 @@ fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
         Tx::Upgrade { contract, .. } => {
             touched.insert(*contract);
         }
+        Tx::Remove { contract, beneficiary } => {
+            touched.extend([*contract, *beneficiary]);
+        }
         Tx::EvmCall { to, .. } => {
             touched.insert(*to);
         }

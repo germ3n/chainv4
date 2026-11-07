@@ -248,13 +248,14 @@ impl Seed {
         let public = |node: &Node| crate::crypto::secp256k1::public_key(&node.secret).expect("a BIP32 key is a valid secret");
         let master = bip32_node(&self.0, &[]).expect("a master key for every seed but one in 2^127");
         let parent = bip32_node(&self.0, &path[..3]).expect("a key at every index but one in 2^127");
-        let account = bip32_node(&self.0, &path).expect("a key at every index but one in 2^127");
+        let node = bip32_node(&self.0, &path).expect("a key at every index but one in 2^127");
 
         crate::registry::multisig::BitcoinXpub {
             fingerprint: fingerprint(&public(&master)),
             parent: fingerprint(&public(&parent)),
-            public: public(&account),
-            chain_code: account.chain,
+            public: public(&node),
+            chain_code: node.chain,
+            account,
         }
     }
 
@@ -577,10 +578,13 @@ mod tests {
             assert_eq!(crate::crypto::bitcoin::multisig::member_key(&xpub, chain, index), Some(key));
         }
 
-        // Each account its own key under the same seed. A policy keeps no account with an xpub yet,
-        // so only account 0's is named in one (docs/todo.md).
+        // Each account its own key under the same seed, named at its own path, and read back as it.
         let second = seed.multisig_account(0, 1);
         assert_eq!(second.fingerprint, xpub.fingerprint, "the seed's fingerprint");
+        assert_eq!(second.account, 1);
+        let text = crate::crypto::bitcoin::multisig::xpub_text(&second, crate::crypto::bitcoin::tx::Network::Main);
+        assert!(text.starts_with("[73c5da0a/48h/0h/1h/2h]xpub"), "{text}");
+        assert_eq!(crate::crypto::bitcoin::multisig::parse_xpub(&text).unwrap(), (second, crate::crypto::bitcoin::tx::Network::Main));
         assert_ne!((second.public, second.parent), (xpub.public, xpub.parent));
         let crate::crypto::keypair::PublicKey::Bitcoin(key) = seed.multisig_key(0, 1, 0, 3).public() else { unreachable!("a bitcoin key") };
         assert_eq!(crate::crypto::bitcoin::multisig::member_key(&second, 0, 3), Some(key));

@@ -555,7 +555,7 @@ fn parties_as(ctx: &Ctx, known: &HashMap<String, Value>, holder: &Holder, multis
         }
     };
 
-    let evm = super::multisig::evm::side_of(value).map(|(start, _)| chainv4::abi::multisig::multisig_contract(&address, &start));
+    let evm = super::multisig::evm::side_of(value).map(|side| chainv4::abi::multisig::multisig_contract(&address, &side.start, side.home));
 
     Ok(Parties { chain: Some(address), bitcoin, evm })
 }

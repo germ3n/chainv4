@@ -20,7 +20,7 @@ fn init() {
 }
 
 #[export]
-fn check_perms(permission: String, who: Address) -> bool {
+fn check_perms(permission: String, who: Address, _detail: Value) -> bool {
     permission == "upgrade" && LEDGER.get_address(b"owner") == Some(who)
 }
 

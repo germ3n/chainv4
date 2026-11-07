@@ -1057,6 +1057,22 @@ fn run(
                 Err(failed) => failed_hooks(failed),
             }
         }
+        Tx::Remove { contract: Address::Evm(_), .. } => (
+            Err(Failure::Contract(VmError::Runtime("EVM contracts are removed by their own code, as Ethereum's are, not by Remove".to_string()))),
+            Contracted::default(),
+        ),
+        Tx::Remove { contract, beneficiary } => match Contracts::new(layer).remove(vm, &sender, contract, beneficiary, limits, block_at(rules, context)) {
+            Ok(removed) => {
+                let payments = match removed.balance == u256::ZERO {
+                    true => Vec::new(),
+                    false => vec![Payment { from: *contract, to: *beneficiary, amount: removed.balance }],
+                };
+                let contracted = Contracted { fuel_used: removed.fuel_used, events: Vec::new(), trace: removed.trace, payments, kept: None };
+
+                (Ok(Effect::Done), contracted)
+            }
+            Err(failed) => failed_hooks(failed),
+        },
         #[cfg(feature = "staking")]
         Tx::Bond { .. } if rules.staking.as_ref().is_some_and(|staking| !staking.bonding) => (Err(Failure::BondingClosed), Contracted::default()),
         #[cfg(feature = "staking")]

@@ -849,17 +849,24 @@ with.
   chains swaps reach, a Bitcoin P2WSH M-of-N and an EVM Safe-style contract, so one quorum
   controls funds on all of them; the wallet and the offline signer collect signatures, and
   swaps can be made from a multisig.
-- [ ] **Owners of other key kinds on a multisig's EVM contract.** MultiSig.sol checks secp256k1
-  signatures alone, `ecrecover`'s, so every member names a secp256k1 EVM address. It could take
-  P-256 owners, passkeys, where a chain has RIP-7212's precompile; contract owners through
-  ERC-1271, another Safe or a smart-account wallet; or Ed25519 checked in Solidity, at hundreds of
-  thousands of gas a signature. Each changes the contract, and so the address, for multisigs made
-  after.
+- [x] **Owners of other key kinds on a multisig's EVM contract.** Done 2026-11-07 in batch 14:
+  MultiSig.sol takes EVM keys, ERC-1271 contracts (through a static call) and Ed25519 keys, checked
+  by chainv4's crypto precompile at its home chain and by `contracts/evm/Ed25519.sol` elsewhere,
+  about 400,000 gas; it answers ERC-1271 itself, so one multisig owns another, and the CLI, the
+  wallet and the offline signer sign as each kind and gather a nested multisig's approvals. See
+  [Multisig](multisig.md#on-evm-chains). Left: P-256 passkey owners through RIP-7212 / EIP-7951,
+  which the apps hold no keys for.
 - [x] **Delegate calls and fallback.** `contracts.delegate` / `delegate` run another contract's code
   on the caller's storage, like `delegatecall`; `fallback` answers functions a contract does not
   export. Together they make proxies, upgradable without the built-in upgrade, with examples in
   Lua and Rust.
-- [ ] **No contract removal.** May be the right call; decide on purpose.
+- [x] **Contract removal, decided.** Done 2026-11-07 in batch 14: `Tx::Remove` asks the contract's
+  `check_perms("remove", sender, beneficiary)`, deletes its code and every entry of its storage for
+  fuel, pays its balance to the beneficiary, takes it out of the registries, and keeps a provable
+  `Removal` so nothing is deployed or cloned at the address again. EVM contracts stay removed by
+  their own code. See [Contracts](contracts.md#lifecycle-hooks). Left for the apps, with batch 15:
+  a Remove button on the wallet's Contracts page and in its batch builder (the wallet and the
+  offline signer already review one).
 - [x] **Lua contracts can pass values on untouched.** `ctx.args` is the call's arguments as a
   values list, which `contracts.call`, `call_value`, `delegate` and `events.emit` take in place
   of loose values; a call given one returns one, and a function returning one returns its values
@@ -920,8 +927,11 @@ with.
   on the other side, and for another userdata type, so `u256(5) == 5` and `u64(1) < u256(2)`.
 - [x] **Signed big integers everywhere.** The `i128` and `i256` kinds and an `i256` argument
   type, in the CLI, the JSON API and the explorer.
-- [ ] **Only one permission exists.** `check_perms` is only ever asked about `"upgrade"`. Other
-  privileged actions, such as removal, would ask with their own names.
+- [x] **Permissions beyond upgrade.** Done 2026-11-07 in batch 14: the chain asks
+  `check_perms(permission, who, detail)` about `"upgrade"`, with the new code's hash, and
+  `"remove"`, with the beneficiary; contracts route their own privileged functions through it with
+  `perms.check` and `perms.require` in Lua and `require` in the SDK, so a contract's roles live in
+  one place the apps can ask. See [Contracts](contracts.md#permissions).
 - [x] **A token registry.** A contract that exports every function genesis names in
   `token_functions`, ERC-20's six by default, is registered as it deploys or upgrades, with what
   its optional `name()`, `symbol()` and `decimals()` answer; `GET /tokens` lists them by symbol.
@@ -1308,13 +1318,10 @@ with.
   not proven on the Multisig page; proving the policy (`Multisigs::policy_key`) as a balance is
   proven would make the page as sure as the rest. Done 2026-11-06 for the policy: the wallet proves
   the shown multisig's policy and compares it with the listing; the member index stays the node's word.
-- [ ] **Per-account Bitcoin multisig xpubs.** Every account of one phrase names the same BIP48
-  xpub, at account 0', so two of them cannot be members of one multisig on Bitcoin. Deriving at
-  m/48'/coin'/n'/2' for account n would let them, once the offline signer signs there too.
-  Found 2026-11-06: `BitcoinXpub` in a policy keeps no account, and descriptors and PSBT paths
-  write `0'`, so naming account n's xpub needs an `account` field in it: a change to chain state,
-  for the consensus batches. The library and the signers take any account already
-  (`Seed::multisig_account(coin, account)`, the signer reading it from the path).
+- [x] **Per-account Bitcoin multisig xpubs.** Done 2026-11-07 in batch 14: `BitcoinXpub` keeps its
+  `account`, descriptors and PSBTs write m/48'/coin'/n'/2', any account parses, wallet account n
+  names its own xpub, and a signer holding two accounts that are both members signs as both.
+  Account 0's xpub is what it was. See [Multisig](multisig.md).
 - [x] **Wallet pages send from any of the account's addresses, and read NFTs' transfers as NFTs.** Done
   2026-11-03. The review read every `transfer(to, n)` with no coin as a token's, so sending an NFT
   showed its id as "n units of the token". Steps now read a call by what the light client proved its

@@ -68,6 +68,8 @@ pub enum RegistryError {
     AlreadyDeployed(Address),
     #[document(summary = "No contract lives at the address.")]
     NoSuchContract(Address),
+    #[document(summary = "The contract at the address was removed, for good.")]
+    Removed(Address),
     #[document(summary = "The contract does not let this address do that: it has no check_perms, or check_perms did not return true.")]
     NotPermitted,
     #[document(summary = "A bond under the chain's minimum, which it carries.")]
@@ -158,6 +160,7 @@ impl fmt::Display for RegistryError {
                 write!(f, "a contract already lives at {address}")
             }
             RegistryError::NoSuchContract(address) => write!(f, "no contract at {address}"),
+            RegistryError::Removed(address) => write!(f, "the contract at {address} was removed"),
             RegistryError::NotPermitted => write!(f, "the contract does not permit it"),
             RegistryError::BondTooSmall(min) => write!(f, "a bond must be at least {min}"),
             RegistryError::AlreadyBonded => write!(f, "that voting key is already bonded"),

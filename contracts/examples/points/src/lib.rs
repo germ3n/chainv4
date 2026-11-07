@@ -9,7 +9,7 @@ extern crate alloc;
 
 use {
     alloc::{format, string::String},
-    chainv4_sdk::{Address, U256, abort, export, namespace, retired, sender},
+    chainv4_sdk::{Address, U256, Value, abort, export, namespace, retired, sender},
 };
 
 // Version 2's layout, line for line.
@@ -73,6 +73,6 @@ fn title() -> Option<String> {
 }
 
 #[export]
-fn check_perms(permission: String, who: Address) -> bool {
+fn check_perms(permission: String, who: Address, _detail: Value) -> bool {
     permission == "upgrade" && who == owner()
 }

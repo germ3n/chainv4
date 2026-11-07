@@ -359,7 +359,7 @@ fn the_signer_signs_a_multisig_s_evm_call_as_typed_data_and_the_bundle_counts_it
     use chainv4::abi::multisig::EvmBundle;
     use chainv4::structs::u256::u256;
 
-    let mut bundle = EvmBundle { chain_id: 11_155_111, contract: [9; 20], to: [7; 20], value: u256::new(5), data: Vec::new(), nonce: u256::ONE, signatures: Vec::new() };
+    let mut bundle = EvmBundle::new(11_155_111, [9; 20], [7; 20], u256::new(5), Vec::new(), u256::ONE);
     let signature = request(DataKind::TypedData, bundle.typed_data().to_string().into_bytes(), 0).sign(&seed()).unwrap();
     let (rs, parity) = signature.parts().unwrap();
     let mut whole = [0; 65];

@@ -93,6 +93,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::EvmCall { to, .. } => ("evm_call", *to),
         Tx::Deploy { .. } => ("deploy", sender),
         Tx::Upgrade { contract, .. } => ("upgrade", *contract),
+        Tx::Remove { contract, .. } => ("remove", *contract),
         Tx::Bond { .. } => ("bond", sender),
         Tx::Unbond { .. } => ("unbond", sender),
         Tx::Withdraw { .. } => ("withdraw", sender),

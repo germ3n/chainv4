@@ -538,6 +538,7 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Deploy { .. }, CommittedOutcome::Deployed(contract)) => format!("Deployed {}", format::short(&contract.to_string())),
         (Tx::Deploy { .. }, _) => "Deploy".to_string(),
         (Tx::Upgrade { contract, .. }, _) => format!("Upgraded {}", format::short(&contract.to_string())),
+        (Tx::Remove { contract, .. }, _) => format!("Removed {}", format::short(&contract.to_string())),
         (Tx::Bond { .. }, _) => "Bonded a voter".to_string(),
         (Tx::Unbond { .. }, _) => "Unbonded a voter".to_string(),
         (Tx::Withdraw { .. }, _) => "Withdrew a bond".to_string(),

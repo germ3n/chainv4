@@ -34,16 +34,122 @@ pub const MAX_MEMBERS: usize = 20;
 pub struct MultisigMember {
     #[document(summary = "Its key on this chain, any kind the chain takes: what it signs and approves the multisig's transactions with.")]
     pub key: PublicKey,
-    #[document(summary = "Its multisig account xpub on Bitcoin, at m/48'/coin'/0'/2' on the policy's network, for the matching P2WSH M-of-N, or None. Every member names one, or none does.")]
+    #[document(summary = "Its multisig account xpub on Bitcoin, at m/48'/coin'/n'/2' on the policy's network, n its account, for the matching P2WSH M-of-N, or None. Every member names one, or none does.")]
     pub bitcoin: Option<BitcoinXpub>,
-    #[document(summary = "Its address on EVM chains, for the matching Safe-style contract, or None. Every member names one, or none does.")]
+    #[document(summary = "Its address on EVM chains, for the matching Safe-style contract, or None. Every member names one, or none does. For an Ed25519 owner, its key's chainv4 EVM address.")]
     pub evm: Option<[u8; 20]>,
+    #[document(summary = "What owns the contract for it at that address: an EVM key, a contract answering ERC-1271, or an Ed25519 key. Key when it names no EVM address.")]
+    pub evm_kind: EvmKind,
 }
 
 impl Hashable for MultisigMember {}
 
 #[document(
-    summary = "A member's multisig account on Bitcoin: its extended public key at m/48'/coin'/0'/2', BIP48's for native segwit multisig, and where it sits, so the multisig's addresses derive below it and Bitcoin's wallets name it as the member's own does.",
+    summary = "What kind of owner a member is on its multisig's EVM contract, MultiSig.sol, and so how its signature is checked there.",
+    category = "Multisig",
+    see_also = "MultisigMember, EvmOwner",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum EvmKind {
+    #[document(summary = "An EVM key, secp256k1: its address signs, checked by ecrecover.")]
+    #[wincode(tag = 0)]
+    #[default]
+    Key,
+    #[document(summary = "A contract that answers ERC-1271's isValidSignature: a Safe, a smart-account wallet, or another multisig's MultiSig.sol.")]
+    #[wincode(tag = 1)]
+    Contract,
+    #[document(summary = "An Ed25519 key, by its 32 bytes: its signature over the digest is checked by chainv4's crypto precompile on chainv4, and in Solidity elsewhere. Its address is its chainv4 account's EVM address.")]
+    #[wincode(tag = 2)]
+    Ed25519([u8; 32]),
+}
+
+impl EvmKind {
+    #[document(parent = "EvmKind", summary = "The number MultiSig.sol names the kind by, and the 32-byte key it is given: the address in its last 20 bytes, or an Ed25519 key.")]
+    pub fn contract_key(&self, address: &[u8; 20]) -> (u8, [u8; 32]) {
+        let mut word = [0; 32];
+        word[12..].copy_from_slice(address);
+
+        match self {
+            EvmKind::Key => (0, word),
+            EvmKind::Contract => (1, word),
+            EvmKind::Ed25519(key) => (2, *key),
+        }
+    }
+
+    #[document(parent = "EvmKind", summary = "As the API and the tools write it: key, contract, or ed25519:0x and the key's 64 hex digits.")]
+    pub fn text(&self) -> String {
+        match self {
+            EvmKind::Key => "key".to_string(),
+            EvmKind::Contract => "contract".to_string(),
+            EvmKind::Ed25519(key) => format!("ed25519:{}", crate::structs::hex::to_hex(key)),
+        }
+    }
+
+    #[document(parent = "EvmKind", summary = "Reads text back; None for text that is not a kind.")]
+    pub fn parse(text: &str) -> Option<EvmKind> {
+        match text.trim() {
+            "key" => Some(EvmKind::Key),
+            "contract" => Some(EvmKind::Contract),
+            other => crate::structs::hex::from_hex(other.strip_prefix("ed25519:")?).and_then(|bytes| bytes.try_into().ok()).map(EvmKind::Ed25519),
+        }
+    }
+}
+
+#[document(
+    summary = "The EVM address an Ed25519 key owns a multisig's contract at: its chainv4 account's, the last 20 bytes of the keccak256 of the account's tag, 0, and the key, as MultiSig.sol works it out.",
+    category = "Multisig",
+    see_also = "EvmKind::Ed25519",
+)]
+#[cfg(feature = "abi")]
+pub fn ed25519_owner(key: &[u8; 32]) -> [u8; 20] {
+    crate::abi::evm_address(&Address::Ed25519(*key))
+}
+
+#[document(
+    summary = "A member's owner on its multisig's EVM contract as people write it: an EVM key's address, 0x and 40 hex digits; a contract answering ERC-1271, contract:0x…; or an Ed25519 key, ed25519:0x and 64 hex digits, or ed25519 alone for the member's own Ed25519 key.",
+    category = "Multisig",
+    params = { text = "What was written.", member = "The member's own key here, which ed25519 alone names." },
+    returns = "The owner's address there and its kind, or why the text is none.",
+)]
+#[cfg(feature = "abi")]
+pub fn parse_evm_owner(text: &str, member: &PublicKey) -> Result<([u8; 20], EvmKind), String> {
+    let address = |text: &str| crate::structs::hex::from_hex(text).and_then(|bytes| <[u8; 20]>::try_from(bytes).ok()).ok_or_else(|| format!("{text} is not an EVM address, 0x and 40 hex digits"));
+
+    match text.trim() {
+        "ed25519" => match member {
+            PublicKey::Ed25519(own) => Ok((ed25519_owner(own), EvmKind::Ed25519(*own))),
+            #[allow(unreachable_patterns)]
+            _ => Err("the member's key is not an Ed25519 key: name the owner's, ed25519:0x…".to_string()),
+        },
+        text if text.starts_with("ed25519:") => match EvmKind::parse(text) {
+            Some(EvmKind::Ed25519(key)) => Ok((ed25519_owner(&key), EvmKind::Ed25519(key))),
+            _ => Err(format!("{text} is not an Ed25519 key, ed25519:0x and 64 hex digits")),
+        },
+        text => match text.strip_prefix("contract:") {
+            Some(contract) => Ok((address(contract)?, EvmKind::Contract)),
+            None => Ok((address(text)?, EvmKind::Key)),
+        },
+    }
+}
+
+#[document(
+    summary = "One owner of a multisig's EVM contract: its address there, and its kind.",
+    category = "Multisig",
+    see_also = "EvmStart, EvmKind",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, SchemaWrite, SchemaRead)]
+pub struct EvmOwner {
+    #[document(summary = "Its address there, what the owners are sorted by.")]
+    pub address: [u8; 20],
+    #[document(summary = "What it is.")]
+    pub kind: EvmKind,
+}
+
+impl Hashable for EvmOwner {}
+
+#[document(
+    summary = "A member's multisig account on Bitcoin: its extended public key at m/48'/coin'/n'/2', BIP48's for native segwit multisig, n the account of its seed, and where it sits, so the multisig's addresses derive below it and Bitcoin's wallets name it as the member's own does.",
     category = "Multisig",
     see_also = "MultisigMember, MultisigPolicy::testnet",
 )]
@@ -51,12 +157,14 @@ impl Hashable for MultisigMember {}
 pub struct BitcoinXpub {
     #[document(summary = "The fingerprint of the member's seed, its master key: what a PSBT names the key's origin by.")]
     pub fingerprint: [u8; 4],
-    #[document(summary = "The fingerprint of the key one step up, at m/48'/coin'/0'.")]
+    #[document(summary = "The fingerprint of the key one step up, at m/48'/coin'/n'.")]
     pub parent: [u8; 4],
     #[document(summary = "The account's compressed key.")]
     pub public: [u8; 33],
     #[document(summary = "Its chain code.")]
     pub chain_code: [u8; 32],
+    #[document(summary = "Which account of the member's seed it is, the n of m/48'/coin'/n'/2', below 2^31: each of a phrase's wallet accounts names its own, so two of them may be members of one multisig.")]
+    pub account: u32,
 }
 
 impl Hashable for BitcoinXpub {}
@@ -123,6 +231,19 @@ impl MultisigPolicy {
 
         if evm.contains(&[0; 20]) {
             return Some("a member's EVM address is not zero");
+        }
+
+        for member in &self.members {
+            match (member.evm, member.evm_kind) {
+                (None, EvmKind::Key) => {}
+                (None, _) => return Some("a member names its EVM owner's kind only with its EVM address"),
+                #[cfg(feature = "abi")]
+                (Some(address), EvmKind::Ed25519(key)) if address != ed25519_owner(&key) => return Some("an Ed25519 owner's EVM address is its key's chainv4 account's"),
+                // Its address is a keccak256 this build cannot work out, so it cannot check one.
+                #[cfg(not(feature = "abi"))]
+                (Some(_), EvmKind::Ed25519(_)) => return Some("an Ed25519 EVM owner needs a build with the abi feature to check"),
+                (Some(_), _) => {}
+            }
         }
 
         None
@@ -242,8 +363,8 @@ pub struct Multisigs<'a> {
 )]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct EvmStart {
-    #[document(summary = "The members' EVM addresses as it was made, sorted.")]
-    pub owners: Vec<[u8; 20]>,
+    #[document(summary = "The members' EVM owners as it was made, sorted by address.")]
+    pub owners: Vec<EvmOwner>,
     #[document(summary = "Its threshold as it was made.")]
     pub threshold: u32,
 }
@@ -251,9 +372,9 @@ pub struct EvmStart {
 impl Hashable for EvmStart {}
 
 impl MultisigPolicy {
-    #[document(parent = "MultisigPolicy", summary = "Its members' EVM addresses, sorted, and its threshold: what its EVM contract's owners should be; None when its members name none.")]
+    #[document(parent = "MultisigPolicy", summary = "Its members' EVM owners, sorted by address, and its threshold: what its EVM contract's owners should be; None when its members name none.")]
     pub fn evm(&self) -> Option<EvmStart> {
-        let mut owners = self.members.iter().map(|member| member.evm).collect::<Option<Vec<_>>>()?;
+        let mut owners = self.members.iter().map(|member| member.evm.map(|address| EvmOwner { address, kind: member.evm_kind })).collect::<Option<Vec<_>>>()?;
         owners.sort();
 
         Some(EvmStart { owners, threshold: self.threshold })

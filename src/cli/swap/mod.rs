@@ -400,7 +400,7 @@ pub fn swap(args: SwapArgs) -> CliResult<()> {
 
                     let contract = evm_side(&agent(&action.tls)?, action.node.trim_end_matches('/'), &multisig)?;
                     let calls = leg.lock_calls(&terms.hash, terms.deadline(side))?;
-                    propose_calls(&evm_rpc(&action, leg)?, &multisig, &contract, &calls, &*evm_secret(&keypair)?, None, action.out.as_deref())?;
+                    propose_calls(&evm_rpc(&action, leg)?, &multisig, &contract, &calls, &keypair, None, action.out.as_deref())?;
                 }
                 Leg::Evm(leg) => {
                     let (rpc, secret) = (evm_rpc(&action, leg)?, evm_secret(&keypair)?);

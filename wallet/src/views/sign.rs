@@ -51,6 +51,9 @@ enum Step {
     BitcoinSigned { message: Box<Message> },
     /// A multisig's transaction, read, with the key to sign it with as a member.
     Multisig { bundle: Box<chainv4::registry::multisig::MultisigBundle>, key: Option<chainv4::crypto::keypair::PublicKey>, trouble: Option<String> },
+    /// A multisig's call on an EVM chain, read, to sign as one of its contract's owners with the
+    /// key it names, or as an owner of another multisig that owns it.
+    Evm { request: Box<chainv4::abi::multisig::EvmRequest>, trouble: Option<String> },
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
@@ -66,6 +69,7 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
         Step::MetaMask { .. } => metamask(ui, ctx, state),
         Step::Bitcoin { .. } => bitcoin_review(ui, ctx, state),
         Step::Multisig { .. } => multisig_review(ui, ctx, state),
+        Step::Evm { .. } => evm_review(ui, ctx, state),
         Step::BitcoinSigned { message } => {
             let message = message.clone();
             theme::card(ui, &palette, |ui| {
@@ -263,6 +267,11 @@ fn reading(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
                 let trouble = refused.or(trouble);
                 state.step = Step::Multisig { bundle, key, trouble };
             }
+            Some(Message::Evm(request)) => {
+                let held = ctx.holders.iter().flat_map(|holder| holder.keys.iter()).any(|key| key.public() == request.signer);
+                let trouble = (!held).then(|| format!("This wallet holds no key {}: the request is for another's.", format::short(&request.signer.to_string())));
+                state.step = Step::Evm { request, trouble };
+            }
             Some(other) => state.scan.refuse(&other, "a request to sign, this wallet's, MetaMask's or a Bitcoin wallet's"),
             None => {}
         }
@@ -390,6 +399,100 @@ fn review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
 /// A multisig's transaction laid out: what it does, from which multisig, at which nonce and fee,
 /// who signed already, and the key to sign with as a member. Whether that key is one of the
 /// multisig's members the signer cannot know: the chain checks it.
+/// A multisig's call on an EVM chain, laid out before the key it names signs it: the chain, the
+/// contract, whom it calls with what, its nonce, and whose approval it is when it is another
+/// multisig's.
+fn evm_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
+    let palette = *ctx.palette;
+    let Step::Evm { request, trouble } = &mut state.step else {
+        return;
+    };
+    let mut next = None;
+    let mut confirmed = false;
+
+    if let Some(came) = state.confirming.as_ref().and_then(Check::take) {
+        state.confirming = None;
+
+        match came {
+            Ok(_) => confirmed = true,
+            Err(Failure::Canceled) => {}
+            Err(Failure::Invalidated) => {
+                *ctx.lock = Some(biometrics::invalidated(ctx.wake, ctx.settings));
+            }
+            Err(Failure::Failed(why)) => *trouble = Some(why),
+        }
+    }
+
+    let bundle = &request.bundle;
+    let hex = chainv4::structs::hex::to_hex;
+
+    theme::card(ui, &palette, |ui| {
+        theme::caps(ui, &palette, "A multisig's call on an EVM chain");
+        super::row(ui, &palette, "Chain", |ui| {
+            ui.label(chainv4::swap::evm::chain_name(bundle.chain_id));
+        });
+        super::row(ui, &palette, "Its contract", |ui| super::address(ui, &palette, &hex(&bundle.contract)));
+        super::row(ui, &palette, "Calls", |ui| super::address(ui, &palette, &hex(&bundle.to)));
+        super::row(ui, &palette, "Sends", |ui| {
+            ui.label(format::amount(&bundle.value.to_string(), 18, chainv4::swap::evm::symbol(bundle.chain_id)));
+        });
+
+        if !bundle.data.is_empty() {
+            super::row(ui, &palette, "Data", |ui| {
+                ui.label(theme::mono(format!("{} · {} bytes", hex(&bundle.data[..bundle.data.len().min(4)]), bundle.data.len())));
+            });
+        }
+
+        super::row(ui, &palette, "At nonce", |ui| {
+            ui.label(bundle.nonce.to_string());
+        });
+        super::row(ui, &palette, "Signs as", |ui| super::address(ui, &palette, &request.signer.to_string()));
+
+        if let Some(owner) = request.owner {
+            ui.label(RichText::new(format!("As an owner of {}, another multisig's contract, which is one of this call's owners: the signature approves the call for it.", format::short(&hex(&owner)))).color(palette.warn));
+        }
+
+        egui::CollapsingHeader::new(RichText::new("The data in full").color(palette.soft)).id_salt("evm-call-data").show(ui, |ui| {
+            ui.add(egui::Label::new(theme::mono(hex(&bundle.data)).color(palette.soft)).wrap());
+        });
+
+        if let Some(why) = trouble.as_ref() {
+            ui.colored_label(palette.bad, why.as_str());
+        }
+
+        ui.add_space(12.0);
+        ui.horizontal_wrapped(|ui| {
+            let tapped = theme::primary(ui, &palette, "Sign", trouble.is_none() && state.confirming.is_none()).clicked();
+            let biometric = biometrics::enrolled(ctx.wake, ctx.settings);
+
+            if tapped && !confirmed && let Some((enrolled, _)) = biometric {
+                state.confirming = Some(Check::start(ctx.wake, &enrolled, "Sign this multisig call"));
+            } else if tapped || confirmed {
+                match ctx.holders.iter().find_map(|holder| holder.keys.iter().find(|held| held.public() == request.signer)) {
+                    Some(keypair) => match request.sign(keypair) {
+                        Ok(signed) => {
+                            note(ctx, &format!("Multisig on {} · call", chainv4::swap::evm::chain_name(bundle.chain_id)), &hex(&bundle.to), &request.signer.address().to_string());
+                            let answer = chainv4::abi::multisig::EvmRequest { bundle: signed, ..(**request).clone() };
+                            next = Some(Step::Signed { message: Box::new(Message::Evm(Box::new(answer))) });
+                        }
+                        Err(why) => *trouble = Some(why),
+                    },
+                    None => *trouble = Some("the key is gone from this wallet".to_string()),
+                }
+            }
+
+            if theme::quiet(ui, &palette, "Cancel").clicked() {
+                next = Some(Step::Reading);
+                state.confirming = None;
+            }
+        });
+    });
+
+    if let Some(next) = next {
+        state.step = next;
+    }
+}
+
 fn multisig_review(ui: &mut Ui, ctx: &mut Ctx, state: &mut SignState) {
     let palette = *ctx.palette;
     let Step::Multisig { bundle, key, trouble } = &mut state.step else {

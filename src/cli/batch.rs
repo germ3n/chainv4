@@ -118,6 +118,12 @@ fn step(value: &Value, sender: Address, agent: &Agent, node: &str) -> CliResult<
             constructor: fields.text("constructor")?,
             constructor_args: fields.strings("args")?,
         },
+        // Asked about as chainv4 send remove asks, when the step is read.
+        "remove" => TxArgs::Remove {
+            contract: fields.address("contract")?,
+            to: fields.address("to")?,
+            yes: false,
+        },
         "upgrade" => TxArgs::Upgrade {
             contract: fields.address("contract")?,
             lua: fields.path("lua")?,
@@ -162,7 +168,7 @@ fn step(value: &Value, sender: Address, agent: &Agent, node: &str) -> CliResult<
 
             return Ok(Tx::Claim { height, to, earned, index, path });
         }
-        other => return Err(format!("a batch holds transfer, burn, call, evm_call, deploy, upgrade, name, primary_name and claim steps, not {other}").into()),
+        other => return Err(format!("a batch holds transfer, burn, call, evm_call, deploy, upgrade, remove, name, primary_name and claim steps, not {other}").into()),
     };
     fields.done()?;
 

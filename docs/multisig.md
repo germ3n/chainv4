@@ -47,9 +47,8 @@ a member.
   KEY,[73c5da0a/48'/0'/0'/2']xpub…`. So a multisig reaches EVM chains, Bitcoin, or both. Every
   member names an xpub, or none does, and an EVM address, or none does.
 - **A `bitcoin:` member names an xpub too,** from the same words: its key here derives at BIP84's
-  m/84'/0'/0'/0/n, its xpub at BIP48's m/48'/coin'/0'/2', apart. The xpub is the words', not the
-  account's: two accounts of the same words name the same xpub, so they cannot both be members of
-  one multisig on Bitcoin.
+  m/84'/0'/0'/0/n, its xpub at BIP48's m/48'/coin'/n'/2', apart, n its account. Each account of
+  the words names its own xpub, so two of them may both be members of one multisig on Bitcoin.
 - **Its Bitcoin network:** the members' xpubs say it, xpub for Bitcoin or tpub for its test
   networks, all the same; a test multisig and a real one are separate multisigs.
 - **Threshold:** at least 1, at most the members.
@@ -66,8 +65,9 @@ hardware wallet watch and co-sign it (`src/crypto/bitcoin/multisig.rs`):
 wsh(sortedmulti(M,[fingerprint/48'/0'/0'/2']xpub…/0/*,…))#checksum
 ```
 
-- **Each member's xpub** is its account at BIP48's path for native segwit multisig, m/48'/0'/0'/2'
-  on Bitcoin and m/48'/1'/0'/2' on its test networks, with its seed's fingerprint.
+- **Each member's xpub** is its account at BIP48's path for native segwit multisig, m/48'/0'/n'/2'
+  on Bitcoin and m/48'/1'/n'/2' on its test networks, n the account of its words, with its seed's
+  fingerprint. The policy keeps n with it, and the descriptor writes it in the origin.
 - **Fresh addresses:** receiving address n takes every member's key at 0/n, change at 1/n, sorted
   (BIP67), so the same members make the same addresses in any order. The descriptor, with its
   BIP380 checksum, imports into other wallets unchanged; `GET /multisig/{address}` shows both and
@@ -93,15 +93,37 @@ be dust. PSBT files are base64, as other wallets pass them.
 
 ## On EVM chains
 
-A multisig whose members name EVM addresses has a contract on EVM chains its members' EVM keys
-control, M of N: `contracts/evm/MultiSig.sol`, Safe-style, built with solc for Paris so it runs
-on chains without PUSH0 (`src/abi/multisig.rs` speaks to it).
+A multisig whose members name EVM owners has a contract on EVM chains they control, M of N:
+`contracts/evm/MultiSig.sol`, Safe-style, built with solc for Paris so it runs on chains without
+PUSH0 (`src/abi/multisig.rs` speaks to it).
 
+- **Its owners are of three kinds** (`EvmKind`), each member naming one:
+
+  | Kind | `--member` | Signs with | Checked by |
+  | --- | --- | --- | --- |
+  | An EVM key | `KEY,,0x…` | 65 bytes, r, s, v | `ecrecover`, low s |
+  | A contract | `KEY,,contract:0x…` | whatever its `isValidSignature` reads | ERC-1271, through a static call |
+  | An Ed25519 key | `KEY,,ed25519` (the member's own) or `KEY,,ed25519:0x…` | 64 bytes, over the digest | chainv4's crypto precompile at home, `contracts/evm/Ed25519.sol` elsewhere |
+
+  An Ed25519 owner's address there is its chainv4 account's EVM address, the last 20 bytes of
+  `keccak256(0x00 || key)`, which the contract works out from the key.
+- **Ed25519 costs where the precompile is not.** On chainv4's own EVM, the chain whose id the
+  contract's init code names (its *home*), the precompile at `0x…4e56` checks a signature for a few
+  thousand gas. Everywhere else `Ed25519.sol` does, SHA-512 and the curve in Solidity and Yul,
+  about 400,000 gas a signature, held to RFC 8032's vectors and to Rust's signatures. The contract
+  trusts the precompile only at home, so no other chain's code at that address can stand in for it.
+- **A contract owner** is a Safe, a smart-account wallet, or another multisig's MultiSig.sol. It is
+  asked through a static call, so it changes nothing, here or anywhere, while it answers.
+- **It answers ERC-1271 itself:** `isValidSignature(hash, signature)` holds when threshold of its
+  owners signed `messageDigest(hash)`, EIP-712's digest of `Message(bytes32 hash)` under its own
+  domain, the signature being `abi.encode(address[] signers, bytes[] signatures)`. So one multisig
+  owns another, and its owners' signatures of its own calls never count as approvals of anything
+  else.
 - **One address everywhere.** It is deployed through the deterministic deployment proxy,
-  `0x4e59…956c`, with no salt, its init code naming the chainv4 multisig and the owners and
-  threshold it starts with. So its address, `multisig_contract`, is the same on every chain with
-  the proxy, known before it is deployed, and coin sent there first waits for it. Nobody but those
-  owners can be the ones at it.
+  `0x4e59…956c`, with no salt, its init code naming the chainv4 multisig, chainv4's chain id, and
+  the owners, each with its kind, and threshold it starts with. So its address, `multisig_contract`,
+  is the same on every chain with the proxy, known before it is deployed, and coin sent there first
+  waits for it. Nobody but those owners can be the ones at it.
 - **Its first owners are kept.** The address commits to the members' EVM addresses and threshold
   when they first named them, at its making or a change since, so the chain keeps those as
   they were (`Multisigs::evm_start`), whatever the members become. `GET /multisig/{address}`
@@ -110,12 +132,15 @@ on chains without PUSH0 (`src/abi/multisig.rs` speaks to it).
   alone. Whoever sends pays the gas, and need not be an owner.
 - **A call is signed by its owners.** Each signs EIP-712's digest of `Execute(to, value, data,
   nonce)` under the domain `chainv4 MultiSig`, version 1, of the contract on its chain, so a
-  signature holds for one call, on one chain, once. `execute` takes threshold of them, by owner
-  address ascending, low s, runs the call as the contract, and moves its nonce; a call that fails
+  signature holds for one call, on one chain, once. `execute(to, value, data, signers,
+  signatures)` takes threshold of them, the signers by address ascending, each with its signature
+  as its kind takes it, runs the call as the contract, and moves its nonce; a call that fails
   reverts it all. A hardware wallet, MetaMask or the offline signer signs the same call as typed
-  data (`EvmBundle::typed_data`).
+  data (`EvmBundle::typed_data`); an Ed25519 owner signs the digest itself.
 - **Bundles** carry a call round the owners, `chainv4-multisig-evm:0x…` as text, one a line in a
-  file, until enough signed.
+  file, until enough signed. A bundle also gathers the approvals of each owner that is another
+  multisig's contract, its own owners signing `nested_digest`, and packs them as that contract's
+  signature once they are there (`EvmBundle::nested`).
 - **Its owners change through itself.** `changeOwners` runs only as one of its own calls, signed
   by the owners before. When the members change on chainv4, nothing moves on the EVM chains by
   itself: `status` says the owners there are not the members' now, and `sync` proposes the
@@ -132,10 +157,17 @@ chainv4 multisig --key alice-evm.key evm multisig:0x… propose --eth-rpc … --
 chainv4 multisig --key bob-evm.key evm multisig:0x… sign pay.evm             # shows each call, asks for yes; needs no node or chain
 chainv4 multisig --key anyone-evm.key evm multisig:0x… submit pay.evm --eth-rpc …
 chainv4 multisig --key alice-evm.key evm multisig:0x… sync --eth-rpc … --out owners.evm
+chainv4 multisig --key carol.key evm multisig:0x… sign pay.evm               # an Ed25519 owner signs with its own key
+chainv4 multisig --key dave-evm.key evm multisig:0xINNER… approve pay.evm   # as an owner of a multisig whose contract owns this one
+chainv4 multisig --key anyone.key evm multisig:0x… add-signature pay.evm --owner 0x… --signature 0x…   # a Safe's bytes
 ```
 
-`--key` is a secp256k1 key file, the member's EVM key, which signs; `submit` and `deploy` pay gas
-with it. `propose --nonce` lines calls up past the next one.
+`--key` signs as an owner: a secp256k1 key file, the member's EVM key, or an Ed25519 key file for
+an Ed25519 owner. `submit` and `deploy` pay gas, so they take an EVM key, owner or not; a proposal
+an Ed25519 key signed is written for another to send. `propose --nonce` lines calls up past the
+next one. `approve` runs on the multisig whose contract is the owner: its members each sign, and
+the bundle carries their approvals, passed back to the other multisig's members. `submit` asks
+each contract owner's `isValidSignature` before it counts it.
 
 ## Swaps
 
@@ -299,18 +331,22 @@ approval from or send. With Read from checked blocks on, the node is asked none 
 
 For a multisig on EVM chains, the page shows its contract's address, and on a chain whose JSON-RPC
 URL Settings names, whether it is deployed, what it holds, its owners and next nonce. **Make the
-bundle** proposes a call, a payment or call data; **Sign** signs it with the account's EVM key,
-**Ask the signer** shows it to the offline signer as EIP-712 typed data and reads its signature
-back, and a member's pasted bundle adds what it signed. **Deploy it here first** and **Send it**
-go out as the account's own EVM transactions, priced and signed as on the Swaps page. When its
-members changed, it offers the change of owners for the owners before to sign.
+bundle** proposes a call, a payment or call data; **Sign** signs it with the account's key, its
+EVM key or, for an Ed25519 owner, its Ed25519 key; **Ask the signer** shows it to the offline
+signer, as EIP-712 typed data for an EVM key or as the bundle for an Ed25519 key, and reads its
+answer back; and a member's pasted bundle adds what it signed, approvals for contract owners
+too. **Deploy it here first** and **Send it** go out as the account's own EVM transactions, from
+its EVM key, priced and signed as on the Swaps page. When its members changed, it offers the
+change of owners for the owners before to sign. **Approve another multisig's call**, on the page
+of a multisig whose contract is an owner of another's, signs that one's pasted bundle for it, here
+or on the offline signer, and copies it back.
 
 For a multisig on Bitcoin, the page shows its descriptor, a fresh receiving address, and, with an
 Esplora API in Settings, what its addresses hold. **Pay from it on Bitcoin** makes the PSBT; **Sign
 with these words** signs it here, **Ask the signer** shows it as `ur:crypto-psbt` and reads the
 signed one back, a member's base64 PSBT pasted is combined in, and **Finish and broadcast** sends it
 through Esplora once every input holds its threshold. The offline signer signs a multisig's input
-as any of its own, at m/48'/coin'/0'/2', once its witness script holds the key and is the coins',
+as any of its own, at m/48'/coin'/n'/2', every account's, once its witness script holds the key and is the coins',
 and shows change back to the multisig as its own.
 
 The **offline signer** reads a bundle on Sign, shows what the multisig's transaction does, from
@@ -335,7 +371,8 @@ bundle back. It cannot know whether the key is a member's: the chain checks that
 - **The EVM contract's owners are the members' EVM addresses as the node says them**, unproven:
   its address commits to the first ones, so a node lying about them names an address nobody
   controls, not one someone else does; and the owners there are what the contract says.
-- **A member is one key on each EVM chain:** `ecrecover` checks secp256k1 alone, so a member whose
-  key here is Ed25519 names its EVM address from its words.
+- **A member is one owner on each EVM chain:** an EVM key, its own Ed25519 key here, or a
+  contract. An Ed25519 owner costs about 400,000 gas a signature on chains other than chainv4,
+  and pays no gas itself: an EVM key sends what it signed.
 - **The carrier's key does not matter** to the chain: it signs the envelope so a node takes it,
   and pays nothing.

@@ -16,7 +16,7 @@ fn members() -> [Keypair; 3] {
 }
 
 fn member(keypair: &Keypair) -> MultisigMember {
-    MultisigMember { key: keypair.public(), bitcoin: None, evm: None }
+    MultisigMember { key: keypair.public(), bitcoin: None, evm: None, evm_kind: crate::registry::multisig::EvmKind::Key }
 }
 
 /// Makes a 2-of-3 multisig of members(), funded with 1,000 from the authority.
@@ -245,6 +245,7 @@ fn multisig_policies_are_checked() {
             parent: [0; 4],
             public: crate::crypto::secp256k1::public_key(&[seed; 32]).unwrap(),
             chain_code: [seed; 32],
+            account: 0,
         };
         let with = |keypair: &Keypair, seed: u8| MultisigMember { bitcoin: Some(xpub(seed)), evm: Some([seed; 20]), ..member(keypair) };
 
@@ -305,7 +306,8 @@ fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
     let first = Tx::ChangeMultisig { members: vec![named(&alice, 3), named(&bob, 1), named(&carol, 2)], threshold: 2, testnet: false };
     let sent = sign(&chain, first);
     advance(&mut chain, vec![sent]);
-    let start = crate::registry::multisig::EvmStart { owners: vec![[1; 20], [2; 20], [3; 20]], threshold: 2 };
+    let key = |address: [u8; 20]| crate::registry::multisig::EvmOwner { address, kind: crate::registry::multisig::EvmKind::Key };
+    let start = crate::registry::multisig::EvmStart { owners: vec![key([1; 20]), key([2; 20]), key([3; 20])], threshold: 2 };
 
     assert_eq!(Multisigs::new(&chain.state()).evm_start(&account).unwrap(), Some(start.clone()), "sorted");
 
@@ -317,7 +319,7 @@ fn its_evm_contracts_first_owners_are_kept_whatever_its_members_become() {
     let multisigs = Multisigs::new(&state);
 
     assert_eq!(multisigs.evm_start(&account).unwrap(), Some(start));
-    assert_eq!(multisigs.get(&account).unwrap().unwrap().evm().unwrap().owners, [[3; 20], [4; 20]]);
+    assert_eq!(multisigs.get(&account).unwrap().unwrap().evm().unwrap().owners, [key([3; 20]), key([4; 20])]);
 }
 
 /// A key of a scheme, from a seed: one of each for a multisig whose members use every scheme.
@@ -402,7 +404,7 @@ fn a_multisig_reaches_here_evm_alone_bitcoin_alone_or_both() {
         let members = keys
             .iter()
             .enumerate()
-            .map(|(place, keypair)| MultisigMember { key: keypair.public(), bitcoin: bitcoin.then_some(xpubs[place]), evm: evm.then_some([place as u8 + 1; 20]) })
+            .map(|(place, keypair)| MultisigMember { key: keypair.public(), bitcoin: bitcoin.then_some(xpubs[place]), evm: evm.then_some([place as u8 + 1; 20]), evm_kind: crate::registry::multisig::EvmKind::Key })
             .collect();
         let at = nonce(&chain, &creator);
         let create = SignedTx::sign(Tx::CreateMultisig { members, threshold: 2, testnet: false }, at, FeeOffer::NONE, &creator, &chain.genesis());

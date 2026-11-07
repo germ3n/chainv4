@@ -26,7 +26,7 @@ fn wallet(seeds: &[Seed], network: Network) -> MultisigWallet {
 /// What a member's words sign with, at a path below its multisig account.
 fn secret(seed: &Seed) -> impl Fn(&[u32]) -> Option<[u8; 32]> + '_ {
     move |path| match *path {
-        [_, coin, _, _, chain, index] => match seed.multisig_key(coin - HARDENED, 0, chain, index).private() {
+        [_, coin, account, _, chain, index] => match seed.multisig_key(coin - HARDENED, account - HARDENED, chain, index).private() {
             PrivateKey::Bitcoin(secret) => Some(*secret),
             _ => None,
         },
@@ -45,6 +45,23 @@ fn spend(wallet: &MultisigWallet, txid: [u8; 32], vout: u32, value: u64, to: Vec
     };
 
     Psbt::for_multisig(&tx, wallet, &[MultisigCoin { value, chain: 0, index: 0 }], &[(1, 0)]).unwrap()
+}
+
+#[test]
+fn two_accounts_of_one_seed_are_two_members_each_at_its_own_path() {
+    let seeds = seeds();
+    let xpubs = vec![seeds[0].multisig_account(1, 0), seeds[0].multisig_account(1, 1), seeds[1].multisig_account(1, 0)];
+    let wallet = MultisigWallet { threshold: 2, xpubs, network: Network::Test };
+    let mut psbt = spend(&wallet, [7; 32], 0, 100_000, vec![0x00, 0x14, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11]);
+
+    // The descriptor names each by its own account, as other wallets read it.
+    let described = descriptor(2, &wallet.xpubs, Network::Test, 0);
+    assert!(described.contains("/48h/1h/0h/2h]") && described.contains("/48h/1h/1h/2h]"), "{described}");
+
+    // One seed signs as both of its accounts, enough on its own.
+    assert_eq!(psbt.sign_multisig(seeds[0].multisig_account(1, 0).fingerprint, secret(&seeds[0])).unwrap(), 2);
+    assert_eq!(psbt.multisig_progress(), vec![(2, 2)]);
+    psbt.finish_multisig().unwrap();
 }
 
 #[test]

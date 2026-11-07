@@ -3422,7 +3422,7 @@ fn an_address_s_multisigs_are_listed_from_the_member_index_by_its_address_or_its
     let alice = Keypair::from_seed([41; 32]);
     let ethereum = Keypair::from_private(crate::crypto::keypair::PrivateKey::Secp256k1([42; 32]));
     let make = |keys: &[&Keypair], nonce: u64| {
-        let members = keys.iter().map(|keypair| MultisigMember { key: keypair.public(), bitcoin: None, evm: None }).collect();
+        let members = keys.iter().map(|keypair| MultisigMember { key: keypair.public(), bitcoin: None, evm: None, evm_kind: crate::registry::multisig::EvmKind::Key }).collect();
 
         SignedTx::sign(Tx::CreateMultisig { members, threshold: 1, testnet: false }, nonce, FeeOffer::NONE, &authority, &genesis_id)
     };

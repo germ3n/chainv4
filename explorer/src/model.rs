@@ -609,6 +609,10 @@ pub struct MultisigMemberView {
     pub bitcoin: Option<String>,
     #[serde(default)]
     pub evm: Option<String>,
+    /// What owns its multisig's EVM contract for it: key, contract, or ed25519:0x… and its key;
+    /// none from older nodes, whose owners are all keys.
+    #[serde(default)]
+    pub evm_kind: Option<String>,
 }
 
 /// A transaction proposed for a multisig's next nonce, and the members' keys that approve it.
