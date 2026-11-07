@@ -359,9 +359,18 @@ offline; these would make that hold up as a treasury.
      the prover. It is checked by a verifier contract on Ethereum.
   3. **Bridges and light clients by proof:** the gateways and the light client take a proven state root
      in place of the federation's word or a vote count.
-  Questions for when it starts: which zkVM; proving every block or batches; who pays for proving; and
-  whether the engines can be proven at all at a sane cost, Luau's C++ VM above all. A large project,
-  queued after the todo, with the second pentest.
+  **Answers (owner, 2026-11-07), all three stages scheduled for later, none started:**
+  - **Stage 1 checks secp256k1 + keccak:** a consensus change, shipped as a fork (the first real
+    one, through the fork schedule): validators also sign a keccak commitment of each checkpoint
+    with a secp256k1 key, so a contract on Ethereum checks finality with `ecrecover`, cheaply. Each
+    validator needs a secp256k1 voting key beside its own.
+  - **Stage 2 uses SP1,** Succinct's zkVM: Rust on RISC-V, revm already proven with it.
+  - **Proofs are made locally, by hand,** on this Mac by a command; tests run SP1's execute or mock
+    mode only, never a GPU. A prover network can come later. SP1's toolchain and Groth16 wrapping
+    need disk room and RAM.
+  Still to ask when it starts: proving every block or batches, who pays for proving, and whether the
+  engines can be proven at a sane cost, Luau's C++ VM above all. Queued after the todo, with the
+  second pentest.
 - [ ] **Anchoring: next.**
   - [x] **Ethereum anchors that count** (2026-11-05). `ethlight` and `eth_relay` follow the beacon
     chain. `Tx::Anchor` proves an Ethereum anchor against the relay with the finality update that
