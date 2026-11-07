@@ -22,3 +22,15 @@ pub struct Account {
 }
 
 impl Hashable for Account {}
+
+/// The prefix an EIP-7702 delegation's key starts with, in Column::Storage.
+const DELEGATION: &[u8] = b"evm delegation";
+
+#[r#macro::document(
+    summary = "Where an account's EIP-7702 delegation is kept, in Column::Storage, by its 20 bytes: what a light client proves to say whose code the account runs. Here, apart from the VM, so the apps' web builds prove it too.",
+    category = "VM",
+    see_also = "delegation, delegated_to",
+)]
+pub fn delegation_key(bytes: &[u8; 20]) -> Vec<u8> {
+    [DELEGATION, bytes].concat()
+}

@@ -507,7 +507,7 @@ impl Chain {
 
             // An Ethereum key's account may run a contract's code, by EIP-7702: proven at the tip.
             if let Address::Secp256k1(bytes) = holder {
-                targets.push((Column::Storage, chainv4::vm::evm::delegation_key(bytes), Target::Delegation(holder.to_string()), vec![tip]));
+                targets.push((Column::Storage, chainv4::structs::account::delegation_key(bytes), Target::Delegation(holder.to_string()), vec![tip]));
             }
 
             if self.has_names == Some(true) {

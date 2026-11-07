@@ -153,7 +153,15 @@ pub fn execute_signer(digest: &[u8; 32], signature: &[u8; 65]) -> Option<[u8; 20
     category = "Multisig",
 )]
 pub fn ed25519_holds(key: &[u8; 32], digest: &[u8; 32], signature: &[u8]) -> bool {
-    crate::vm::crypto::check_signature("ed25519", key, digest, signature).unwrap_or(false)
+    // As crypto.verify checks one, without the VM, which the apps' web builds leave out.
+    #[cfg(feature = "ed25519")]
+    if let Ok(signature) = <[u8; 64]>::try_from(signature) {
+        return PublicKey::Ed25519(*key).verify_signature(digest, &crate::crypto::keypair::Signature::Ed25519(signature)).is_ok();
+    }
+
+    let _ = (key, digest, signature);
+
+    false
 }
 
 #[document(

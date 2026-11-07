@@ -256,7 +256,7 @@ pub fn stored_tokens(
     Ok((tokens, next))
 }
 
-#[cfg(all(feature = "vm", feature = "json"))]
+#[cfg(feature = "json")]
 pub mod authorization;
 
 #[cfg(test)]

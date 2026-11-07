@@ -176,6 +176,38 @@ fn raw(key: &PublicKey, signature: &Signature) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((key, signature))
 }
 
+/// A key from its own bytes, by its address's scheme, as crypto.verify reads one: here rather than
+/// through the VM, so the apps' web builds, which run no contracts, check authorizations too.
+fn key_of(scheme: &str, key: &[u8]) -> Option<PublicKey> {
+    match scheme {
+        #[cfg(feature = "ed25519")]
+        "ed25519" => Some(PublicKey::Ed25519(key.try_into().ok()?)),
+        #[cfg(feature = "edblake")]
+        "edblake" => Some(PublicKey::EdBlake(key.try_into().ok()?)),
+        #[cfg(feature = "secp256k1")]
+        "secp256k1" => Some(PublicKey::Secp256k1(key.try_into().ok()?)),
+        #[cfg(feature = "bitcoin")]
+        "bitcoin" => Some(PublicKey::Bitcoin(key.try_into().ok()?)),
+        _ => None,
+    }
+}
+
+/// A 64-byte signature as the key's scheme takes it.
+fn key_signature(key: &PublicKey, signature: &[u8]) -> Option<Signature> {
+    let signature: [u8; 64] = signature.try_into().ok()?;
+
+    Some(match key {
+        #[cfg(feature = "ed25519")]
+        PublicKey::Ed25519(_) => Signature::Ed25519(signature),
+        #[cfg(feature = "edblake")]
+        PublicKey::EdBlake(_) => Signature::EdBlake(signature),
+        #[cfg(feature = "secp256k1")]
+        PublicKey::Secp256k1(_) => Signature::Secp256k1(signature),
+        #[cfg(feature = "bitcoin")]
+        PublicKey::Bitcoin(_) => Signature::Bitcoin(signature),
+    })
+}
+
 impl SignedAuthorization {
     #[document(
         parent = "SignedAuthorization",
@@ -206,13 +238,14 @@ impl SignedAuthorization {
             return Err("only a key's account signs".to_string());
         }
 
-        if crate::vm::crypto::key_address(scheme, &self.key).ok() != Some(owner) {
+        let Some(key) = key_of(scheme, &self.key).filter(|key| key.address() == owner) else {
             return Err("the key is not the owner's".to_string());
-        }
+        };
+        let held = key_signature(&key, &self.signature).is_some_and(|signature| key.verify_signature(self.authorization.message(chain_id).as_bytes(), &signature).is_ok());
 
-        match crate::vm::crypto::check_signature(scheme, &self.key, self.authorization.message(chain_id).as_bytes(), &self.signature) {
-            Ok(true) => Ok(()),
-            _ => Err("the signature does not hold".to_string()),
+        match held {
+            true => Ok(()),
+            false => Err("the signature does not hold".to_string()),
         }
     }
 

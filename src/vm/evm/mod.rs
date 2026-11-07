@@ -68,7 +68,6 @@ pub const LOG: &str = crate::structs::event::EVM_LOG;
 const ALIAS: &[u8] = b"evm alias";
 /// Where an account's EIP-7702 delegation is kept, by its 20 bytes: the code its authorization set,
 /// 0xef0100 and the address it runs. The account stays the account it is, with no contract record.
-const DELEGATION: &[u8] = b"evm delegation";
 
 #[document(
     summary = "The 20 bytes an address goes by inside the EVM: a secp256k1 account's or an EVM contract's own, and for any other account, the last 20 bytes of the keccak256 of its key, as stored.",
@@ -94,14 +93,7 @@ fn alias_key(alias: &[u8; 20]) -> Vec<u8> {
     [ALIAS, alias].concat()
 }
 
-#[document(
-    summary = "Where an account's EIP-7702 delegation is kept, in Column::Storage, by its 20 bytes: what a light client proves to say whose code the account runs.",
-    category = "VM",
-    see_also = "delegation, delegated_to",
-)]
-pub fn delegation_key(bytes: &[u8; 20]) -> Vec<u8> {
-    [DELEGATION, bytes].concat()
-}
+pub use crate::structs::account::delegation_key;
 
 #[document(
     summary = "The code an account's EIP-7702 delegation set: 0xef0100 and the address whose code it runs as its own. None for an account that never delegated, or cleared it.",
