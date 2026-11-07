@@ -178,15 +178,20 @@ pub enum BridgeAction {
     /// validators' attestations, printing where.
     #[cfg(feature = "secp256k1")]
     FinalityDeploy,
-    /// Shows ChainV4Finality.sol each link justified here since the one it took last, paid with
-    /// --evm-key; anyone may, as it checks the attestations itself.
+    /// Brings ChainV4Finality.sol up to chainv4's finality, paid with --evm-key, in a few links
+    /// rather than one an epoch: the newest checkpoint recorded and then finalized, two links in
+    /// a row, and any link where the validator set changes. Anyone may, as it checks the
+    /// attestations itself.
     #[cfg(feature = "secp256k1")]
     FinalityRelay {
         /// The contract, 0x and 40 hex digits.
         contract: String,
-        /// Keep relaying, this many seconds apart; without it, relay what is due and stop.
+        /// Keep relaying, this many seconds apart, such as 3600; without it, relay once and stop.
         #[arg(long)]
         every: Option<u64>,
+        /// Relay only once at least this many epochs are new, unless the set changes.
+        #[arg(long, default_value_t = 1)]
+        min_epochs: u64,
     },
     /// Takes a transfer refused for good at its destination back to who sent it, on the word of the
     /// federation's threshold, each signer's operator running this with its --evm-key. It reads both
@@ -392,7 +397,7 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         #[cfg(feature = "secp256k1")]
         BridgeAction::FinalityDeploy => bridge.finality_deploy(),
         #[cfg(feature = "secp256k1")]
-        BridgeAction::FinalityRelay { contract, every } => bridge.finality_relay(&parse_address(contract)?, *every),
+        BridgeAction::FinalityRelay { contract, every, min_epochs } => bridge.finality_relay(&parse_address(contract)?, *every, *min_epochs),
         BridgeAction::Refund { nonce, from_evm, why, yes } => bridge.refund(*nonce, *from_evm, why.as_deref(), *yes, &mut std::io::stdin().lock()),
         BridgeAction::RefundTo { nonce, recipient, from_evm } => bridge.refund_to(*nonce, recipient, *from_evm),
         BridgeAction::Btc { action } => bridge.btc(action),

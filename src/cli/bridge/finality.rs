@@ -15,6 +15,9 @@ use {
     serde_json::Value,
 };
 
+/// The most links one pass looks through for what to relay.
+const MAX_PLANNED: usize = 10_000;
+
 /// ChainV4Finality.sol's init code, as solc writes it.
 const FINALITY_CODE: &str = include_str!("../../../contracts/evm/ChainV4Finality.bin");
 
@@ -125,19 +128,72 @@ impl Bridge {
         Ok(())
     }
 
-    /// Shows ChainV4Finality.sol each link justified since the one it took last, until none is
-    /// left or one falls short; with every, goes on doing so that often.
-    pub(super) fn finality_relay(&self, contract: &[u8; 20], every: Option<u64>) -> CliResult<()> {
+    /// What to show ChainV4Finality.sol next, past the epoch it took last and by the set it holds:
+    /// the link where the set changes, which it must take before any signed by the next set; or
+    /// else the newest two links in a row, the first recording a checkpoint and the second
+    /// finalizing it; or else the newest link. Never every link: each costs gas, and any later one
+    /// its set signed will do.
+    fn finality_plan(&self, taken: u64, set: [u8; 32]) -> CliResult<Vec<Value>> {
+        let mut links: Vec<Value> = Vec::new();
+        let mut epoch = taken;
+
+        while let Some(link) = self.attested_after(epoch)? {
+            let signed_by = word(&link["set"]["hash"], "set")?;
+            let next = word(&link["next_set"]["hash"], "next set")?;
+            epoch = link["target"]["epoch"].as_u64().ok_or("GET /attestations sent no target epoch")?;
+
+            // Signed by a set the contract does not hold: the change came before, out of reach.
+            if signed_by != set {
+                break;
+            }
+
+            // The set moves after this one: it goes alone, and the next pass goes on from it.
+            if next != set {
+                return Ok(vec![link]);
+            }
+
+            links.push(link);
+
+            if links.len() >= MAX_PLANNED {
+                break;
+            }
+        }
+
+        let in_a_row = |first: &Value, second: &Value| {
+            second["source"]["epoch"] == first["target"]["epoch"] && second["target"]["epoch"].as_u64() == first["target"]["epoch"].as_u64().map(|epoch| epoch + 1)
+        };
+
+        for at in (1..links.len()).rev() {
+            if in_a_row(&links[at - 1], &links[at]) {
+                return Ok(vec![links[at - 1].clone(), links[at].clone()]);
+            }
+        }
+
+        Ok(links.pop().into_iter().collect())
+    }
+
+    /// Brings ChainV4Finality.sol up to chainv4's finality in a few links, not one an epoch: with
+    /// every, again that often, and only once at least min_epochs are new.
+    pub(super) fn finality_relay(&self, contract: &[u8; 20], every: Option<u64>, min_epochs: u64) -> CliResult<()> {
         let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
+        let read = |getter: &str| -> CliResult<[u8; 32]> {
+            let output = rpc.call(contract, &selector(getter))?;
+
+            output.get(..32).and_then(|word| word.try_into().ok()).ok_or_else(|| format!("the contract gave nothing for {getter}").into())
+        };
 
         loop {
-            loop {
-                let taken = rpc.call(contract, &selector("justifiedEpoch()"))?;
-                let taken = taken.get(..32).map(|word| u256::from_be_bytes(word.try_into().expect("32 bytes"))).ok_or("the contract gave no justified epoch")?;
-                let taken = u64::try_from(taken).map_err(|_| "the contract's justified epoch is past any chainv4 epoch")?;
-                let Some(link) = self.attested_after(taken)? else {
-                    break;
-                };
+            let taken = u256::from_be_bytes(read("justifiedEpoch()")?);
+            let taken = u64::try_from(taken).map_err(|_| "the contract's justified epoch is past any chainv4 epoch")?;
+            let plan = self.finality_plan(taken, read("setHash()")?)?;
+            let newest = plan.last().and_then(|link| link["target"]["epoch"].as_u64()).unwrap_or(taken);
+            let set_moves = plan.len() == 1 && plan[0]["next_set"]["hash"] != plan[0]["set"]["hash"];
+
+            if plan.is_empty() || (newest.saturating_sub(taken) < min_epochs && !set_moves) {
+                println!("nothing to relay yet: the contract is at epoch {taken}");
+            }
+
+            for link in plan.iter().filter(|_| set_moves || newest.saturating_sub(taken) >= min_epochs) {
                 let target = link["target"]["epoch"].as_u64().unwrap_or_default();
 
                 if link["enough"].as_bool() != Some(true) {
@@ -145,7 +201,7 @@ impl Bridge {
                     break;
                 }
 
-                rpc.send(&Call { to: *contract, value: u256::ZERO, input: submit_input(&link)?, what: "Submit a justified link" }, false, &secret)?;
+                rpc.send(&Call { to: *contract, value: u256::ZERO, input: submit_input(link)?, what: "Submit a justified link" }, false, &secret)?;
                 println!("epoch {target} justified there, state root {}", link["state_root"].as_str().unwrap_or("?"));
             }
 

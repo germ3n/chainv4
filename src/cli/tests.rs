@@ -3259,13 +3259,23 @@ mod send {
             u64::try_from(u256::from_be_bytes(output[..32].try_into().unwrap())).unwrap()
         };
         let start = read("justifiedEpoch()");
+        let justified_here = || serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/status")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap()["finality"]["justified"]["epoch"].as_u64().unwrap();
 
-        // Relayed now and then, it follows: its justified epoch moves on, and so does its final one.
-        while read("finalizedEpoch()") <= start + 1 {
-            assert!(started.elapsed() < std::time::Duration::from_secs(90), "the contract never followed past epoch {start}");
-            bridge(args(BridgeAction::FinalityRelay { contract: crate::structs::hex::to_hex(&contract), every: None })).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        // Several epochs on, one pass takes it there in two links rather than one an epoch: the
+        // newest checkpoint recorded, then finalized.
+        while justified_here() < start + 6 {
+            assert!(started.elapsed() < std::time::Duration::from_secs(90), "chainv4 never justified past epoch {}", start + 6);
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+
+        let relay = |min_epochs: u64| bridge(args(BridgeAction::FinalityRelay { contract: crate::structs::hex::to_hex(&contract), every: None, min_epochs })).unwrap();
+        relay(1);
+        let (justified, finalized) = (read("justifiedEpoch()"), read("finalizedEpoch()"));
+        assert!(justified >= start + 5 && finalized + 1 == justified, "one pass: justified {justified}, finalized {finalized}, from {start}");
+
+        // Nothing new enough: it waits.
+        relay(1_000);
+        assert_eq!(read("justifiedEpoch()"), justified);
 
         let attested = serde_json::from_str::<serde_json::Value>(&ureq::get(format!("{node}/attestations?after={start}")).call().unwrap().body_mut().read_to_string().unwrap()).unwrap();
         assert_eq!(attested["attestations"][0]["attester"], crate::structs::hex::to_hex(&attester_address));

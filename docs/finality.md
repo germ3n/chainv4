@@ -308,10 +308,13 @@ chainv4's finality cheaply (`structs::attestation`, `contracts/evm/ChainV4Finali
   ever: chainv4's own finality does not need them.
 - **On Ethereum:** `chainv4 bridge finality-deploy --eth-rpc … --evm-key …` deploys
   ChainV4Finality.sol from the finalized checkpoint; `chainv4 bridge finality-relay 0x… [--every
-  60]` shows it each link justified since, from `GET /attestations`. The contract takes a link
-  signed by attesters of two thirds of the set's whole weight, records the target as justified with
-  its height and state root, marks the source final when the target is the very next epoch, and
-  moves to the next set. It trusts two thirds of the validators, as chainv4's light clients do;
+  3600] [--min-epochs 90]` brings it up to date from `GET /attestations`. The contract takes any
+  later link signed by attesters of two thirds of the set it holds, records the target as justified
+  with its height and state root, marks the source final when the target is the very next epoch
+  and the source's own link was taken there, and moves to the next set. So the relayer does not
+  send every link, which would cost gas every epoch: each pass sends the newest two in a row,
+  recording a checkpoint and then finalizing it, and the link where the set changes when it does,
+  as the contract checks signatures by the set it holds alone. It trusts two thirds of the validators, as chainv4's light clients do;
   nothing else, so anyone may relay. A validator without an attester weighs in the whole but signs
   nothing there, so two thirds must be reached by those with one.
 

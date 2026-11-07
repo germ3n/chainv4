@@ -185,7 +185,7 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
     // Epoch 1, attested by two of three: justified there, as here.
     let mut links = Vec::new();
 
-    for epoch in 1..=2 {
+    for epoch in 1..=5 {
         grow_to(&mut chain, epoch * INTERVAL + 1);
         let mut signed = Vec::new();
 
@@ -221,4 +221,13 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
 
     // The same link again is no later checkpoint.
     assert!(call(&mut chain, contract, submit(link, set, signed)).is_err());
+
+    // It skips ahead: epoch 4's link from 3, which it never took, records 4 and finalizes
+    // nothing, as 3's root is not known there; then 5's finalizes 4.
+    let (link, set, signed) = &links[3];
+    call(&mut chain, contract, submit(link, set, signed)).unwrap();
+    assert_eq!((read(&mut chain, contract, "justifiedEpoch()"), read(&mut chain, contract, "finalizedEpoch()")), (u256::new(4), u256::ONE));
+    let (link, set, signed) = &links[4];
+    call(&mut chain, contract, submit(link, set, signed)).unwrap();
+    assert_eq!((read(&mut chain, contract, "justifiedEpoch()"), read(&mut chain, contract, "finalizedEpoch()")), (u256::new(5), u256::new(4)));
 }

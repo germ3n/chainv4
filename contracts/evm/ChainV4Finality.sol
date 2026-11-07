@@ -5,8 +5,13 @@
 // and the hashes of the attesting sets of the target's epoch and the next. This contract takes a
 // link once attesters holding two thirds of the set's whole weight signed it, as chainv4 justifies
 // a checkpoint: it records the target as justified, with its state root, and the source as final
-// when the target is the very next epoch, as Casper FFG finalizes. Then the set it checks the next
-// link by is the next epoch's, which the signers committed to, so it follows the set as it changes.
+// when the target is the very next epoch and the source's own link was taken, as Casper FFG
+// finalizes. Then the set it checks the next link by is the next epoch's, which the signers
+// committed to, so it follows the set as it changes.
+//
+// It need not take every link: any later one its set signed will do, so a relayer skips ahead,
+// taking two links in a row now and then to record a checkpoint and then finalize it, and only
+// the link where the set changes besides, which saves the gas of a link every epoch.
 //
 // It trusts what two thirds of chainv4's validators sign, as chainv4's own light clients do: what
 // it adds is that nothing else is trusted, no federation and no relayer. Anyone may submit a link.
@@ -82,7 +87,7 @@ contract ChainV4Finality {
     ) external {
         require(attesters.length == weights.length, "one weight for each attester");
         require(keccak256(abi.encode(total, attesters, weights)) == setHash, "not the set that signs the next link");
-        require(link[1] != bytes32(0) && blockAt[uint256(link[0])] == link[1], "its source is no justified checkpoint here");
+        require(link[1] != bytes32(0), "a link from no checkpoint");
         require(uint256(link[2]) > uint256(link[0]) && uint256(link[2]) > justifiedEpoch, "its target is no later checkpoint");
         require(signatures.length == signers.length * 65, "65 bytes for each signer");
         require(signed(digest(link, setHash, nextSet), attesters, weights, signers, signatures) * 3 >= total * 2, "short of two thirds of the set");
@@ -112,7 +117,8 @@ contract ChainV4Finality {
         stateRootAt[targetEpoch] = link[5];
         emit Justified(targetEpoch, link[3], uint256(link[4]), link[5]);
 
-        if (targetEpoch == sourceEpoch + 1 && sourceEpoch > finalizedEpoch) {
+        // Final only once its own link was taken here, so every final checkpoint has its root.
+        if (targetEpoch == sourceEpoch + 1 && sourceEpoch > finalizedEpoch && blockAt[sourceEpoch] == link[1]) {
             finalizedEpoch = sourceEpoch;
             finalizedBlock = link[1];
             emit Finalized(sourceEpoch, link[1]);

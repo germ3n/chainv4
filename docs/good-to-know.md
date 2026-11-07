@@ -2271,9 +2271,11 @@ contract computes, so they wait for the next regenesis (see the todo).
   moves, while chainv4 finalizes as ever.
 - **An attester counts two epochs later.** Sets are fixed two epochs ahead; set-attester changes
   the validator's record, which the next set fixed carries.
-- **The contract follows sets in order.** It checks a link by the set it holds, and moves to the
-  next one the link names; a relayer that skips the link where the set changed leaves it unable to
-  check later ones until it relays that one.
+- **The contract skips epochs, not sets.** It takes any later link its set signed, so the relayer
+  sends two links a pass, not one an epoch; but it checks signatures by the set it holds, so the
+  link where the set changes must go too, which the relayer finds and sends first.
+- **Final there means its root is there.** A source is marked final only when its own link was
+  taken, so a skipped checkpoint is never final on Ethereum, only the ones the relayer recorded.
 - **A wrong attestation is an invalid vote,** in gossip and in blocks alike: a validator whose
   `--attestation-key` is not the attester its set names simply attests nothing.
 
