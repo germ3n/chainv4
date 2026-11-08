@@ -92,14 +92,24 @@ pub enum ProveAction {
 pub fn prove(args: ProveArgs) -> CliResult<()> {
     let node = args.node.trim_end_matches('/').to_string();
     let agent = waiting(&args.tls, 3, 1_800)?;
-    let status = ok(agent.get(format!("{node}/status")).call())?;
-    let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+    // The node's status, asked for once and only by what needs the node.
+    let asked = std::cell::OnceCell::new();
+    let status = || -> CliResult<&Value> {
+        if asked.get().is_none() {
+            let _ = asked.set(ok(agent.get(format!("{node}/status")).call())?);
+        }
+
+        Ok(asked.get().expect("set just now"))
+    };
+    let hash = || -> CliResult<HashType> { Ok(status()?["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?) };
 
     // A range's input: from the file given, or built by the node.
     let input = |range: &RangeArgs| -> CliResult<Vec<u8>> {
         if let Some(path) = &range.input {
             return Ok(std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?);
         }
+
+        let status = status()?;
 
         let from = match range.from {
             Some(from) => from,
@@ -120,6 +130,7 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
 
     match args.action {
         ProveAction::Status => {
+            let status = status()?;
             let validity = &status["validity"];
             println!("{}", serde_json::to_string_pretty(&json!({
                 "settings": validity["settings"],
@@ -155,7 +166,7 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
             let bytes = input(&range)?;
             let started = std::time::Instant::now();
             let (values, cycles) = prover.execute(&bytes)?;
-            let proven = ProvenRange::from_public_values(hash, &values).ok_or("the program committed to no range")?;
+            let proven = ProvenRange::from_public_values(hash()?, &values).ok_or("the program committed to no range")?;
             println!("ran in SP1 in {} ms: {cycles} cycles", started.elapsed().as_millis());
             println!("{}", serde_json::to_string_pretty(&range_json(&proven))?);
         }
@@ -168,7 +179,7 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
             let started = std::time::Instant::now();
             println!("proving with SP1 on this machine: this takes a while");
             let (values, proof) = prover.prove(&bytes)?;
-            let proven = ProvenRange::from_public_values(hash, &values).ok_or("the program committed to no range")?;
+            let proven = ProvenRange::from_public_values(hash()?, &values).ok_or("the program committed to no range")?;
             let file = json!({
                 "kind": prover.kind().name(),
                 "program": to_hex(&prover.program()),
