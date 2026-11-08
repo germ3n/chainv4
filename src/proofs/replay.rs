@@ -131,6 +131,8 @@ pub struct Ran {
     pub end: SealedHeader,
     #[document(summary = "Every transfer's digest the gateway sent, in order.")]
     pub withdrawals: Vec<[u8; 32]>,
+    #[document(summary = "Every withdrawal's digest the Bitcoin gateway queued, in order (btc_withdrawal_digest).")]
+    pub btc_withdrawals: Vec<[u8; 32]>,
     #[document(summary = "Governance's proof settings at the end, if it set any.")]
     pub settings: Option<super::ProofSettings>,
 }
@@ -151,6 +153,7 @@ pub fn run_range(chain: &Chain, base: Arc<dyn Committed>, start: &SealedHeader, 
     let state = Arc::new(State::new(base));
     let mut parent = start.clone();
     let mut withdrawals = Vec::new();
+    let mut btc_withdrawals = Vec::new();
 
     for block in blocks {
         let header = &block.header;
@@ -163,7 +166,9 @@ pub fn run_range(chain: &Chain, base: Arc<dyn Committed>, start: &SealedHeader, 
             return Err(fail(format!("block {}'s roots are not its own", header.height)));
         }
 
-        let gateway = Changes::new(&state).directory()?.and_then(|directory| directory.gateway);
+        let directory = Changes::new(&state).directory()?;
+        let gateway = directory.as_ref().and_then(|directory| directory.gateway);
+        let btc_gateway = directory.as_ref().and_then(|directory| directory.btc_gateway);
         let (layer, receipts) = chain.run_block(&state, &parent.header, block).map_err(|err| fail(format!("block {}: {err}", header.height)))?;
 
         // What left through the gateway: its Sent events, (nonce, target, digest, sender).
@@ -174,6 +179,14 @@ pub fn run_range(chain: &Chain, base: Arc<dyn Committed>, start: &SealedHeader, 
                 && let Ok(digest) = <[u8; 32]>::try_from(digest.as_slice())
             {
                 withdrawals.push(digest);
+            }
+
+            // What it queued through the Bitcoin gateway: its WithdrawRequested events.
+            if Some(event.contract) == btc_gateway
+                && event.name == "WithdrawRequested"
+                && let Some((id, script, sats)) = super::btc_withdrawal_of(&event.data)
+            {
+                btc_withdrawals.push(super::btc_withdrawal_digest(&event.contract, id, &script, sats));
             }
         }
 
@@ -187,7 +200,7 @@ pub fn run_range(chain: &Chain, base: Arc<dyn Committed>, start: &SealedHeader, 
 
     let settings = Changes::new(&state).proofs()?;
 
-    Ok(Ran { end: parent, withdrawals, settings })
+    Ok(Ran { end: parent, withdrawals, btc_withdrawals, settings })
 }
 
 #[document(
@@ -214,6 +227,7 @@ pub fn replay(input: &RangeInput) -> Result<ProvenRange, ReplayError> {
         withdrawals: withdrawals_root(&ran.withdrawals),
         program: ran.settings.as_ref().map_or([0; 32], |settings| settings.program),
         gateway: ran.settings.as_ref().map_or(GatewayMode::default(), |settings| settings.gateway),
+        btc_withdrawals: withdrawals_root(&ran.btc_withdrawals),
     })
 }
 

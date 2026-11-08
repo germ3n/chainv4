@@ -96,6 +96,8 @@ pub struct ProofSettings {
     #[document(summary = "What is minted to whoever proves the header chain, for each epoch its proof moves the proven finalized checkpoint on: 0 pays nothing.")]
     #[wincode(with = "crate::structs::u256::U256Le")]
     pub reward_per_epoch: u256,
+    #[document(summary = "The withdrawal program: what proves a withdrawal to Bitcoin was queued, for BitVM's operators to be reimbursed by and watchers to check. Zeros for none.")]
+    pub withdrawal_program: [u8; 32],
 }
 
 impl crate::crypto::hashable::Hashable for ProofSettings {}
@@ -113,7 +115,7 @@ impl ProofSettings {
             return Some("proof systems named twice or out of order");
         }
 
-        (self.program == [0; 32] && self.finality_program == [0; 32] && self.headers_program == [0; 32]).then_some("a program of zeros names none")
+        (self.program == [0; 32] && self.finality_program == [0; 32] && self.headers_program == [0; 32] && self.withdrawal_program == [0; 32]).then_some("a program of zeros names none")
     }
 
     #[document(parent = "ProofSettings", summary = "Whether the chain takes proofs of this kind.")]
@@ -123,7 +125,7 @@ impl ProofSettings {
 }
 
 #[document(
-    summary = "What a validity proof proves: that every block from start, exclusive, to end ran by the rules of the chain with this genesis, from start's state root to end's, and what left through the bridge's gateway on the way. Its public values are eleven words, as abi.encode lays them out, which the zkVM commits to and a contract decodes.",
+    summary = "What a validity proof proves: that every block from start, exclusive, to end ran by the rules of the chain with this genesis, from start's state root to end's, and what left through the bridges' gateways on the way, the EVM gateway's and the Bitcoin gateway's. Its public values are twelve words, as abi.encode lays them out, which the zkVM commits to and a contract decodes.",
     category = "Proofs",
     see_also = "RangeEnd, ProofSystem, replay",
 )]
@@ -143,15 +145,17 @@ pub struct ProvenRange {
     pub program: [u8; 32],
     #[document(summary = "How Gateway.sol releases, as governance has it at the end.")]
     pub gateway: GatewayMode,
+    #[document(summary = "The keccak256 Merkle root of every withdrawal the directory's Bitcoin gateway queued in the range, in order (btc_withdrawal_digest), zero for none: what a BitVM operator's reimbursement is checked against.")]
+    pub btc_withdrawals: [u8; 32],
 }
 
 impl ProvenRange {
     #[document(parent = "ProvenRange", summary = "How many 32-byte words the public values are.")]
-    pub const WORDS: usize = 11;
+    pub const WORDS: usize = 12;
 
     #[document(
         parent = "ProvenRange",
-        summary = "The public values: abi.encode(chainId, genesis, startHeight, startBlock, startRoot, endHeight, endBlock, endRoot, withdrawals, program, gatewayMode), every hash a 32-byte word.",
+        summary = "The public values: abi.encode(chainId, genesis, startHeight, startBlock, startRoot, endHeight, endBlock, endRoot, withdrawals, program, gatewayMode, btcWithdrawals), every hash a 32-byte word.",
     )]
     pub fn public_values(&self) -> Vec<u8> {
         let number = |value: u64| u256::from(value).to_be_bytes();
@@ -167,6 +171,7 @@ impl ProvenRange {
             self.withdrawals,
             self.program,
             number(self.gateway.number().into()),
+            self.btc_withdrawals,
         ];
 
         words.concat()
@@ -175,7 +180,7 @@ impl ProvenRange {
     #[document(
         parent = "ProvenRange",
         summary = "A range from its public values, hashes read as the chain's.",
-        returns = "None for bytes that are not eleven words of a range.",
+        returns = "None for bytes that are not twelve words of a range.",
     )]
     pub fn from_public_values(hash: HashType, bytes: &[u8]) -> Option<ProvenRange> {
         if bytes.len() != ProvenRange::WORDS * 32 {
@@ -200,6 +205,7 @@ impl ProvenRange {
             withdrawals: words[8],
             program: words[9],
             gateway,
+            btc_withdrawals: words[11],
         })
     }
 }
@@ -284,6 +290,48 @@ pub fn withdrawal_proof(digests: &[[u8; 32]], index: usize) -> Option<Vec<[u8; 3
     }
 
     Some(proof)
+}
+
+#[cfg(feature = "secp256k1")]
+#[document(
+    summary = "A Bitcoin withdrawal's leaf in a range's btc_withdrawals tree: keccak256 of \"chainv4 btc withdrawal\", the gateway's address as chainv4 hashes it, the withdrawal's id, eight bytes big-endian, its output script's length, four bytes, and the script, then its satoshis, eight bytes. What a BitVM operator proves it paid, and anyone works out from the gateway's WithdrawRequested event.",
+    category = "Proofs",
+    see_also = "btc_withdrawal_of, ProvenRange",
+)]
+pub fn btc_withdrawal_digest(gateway: &crate::structs::address::Address, id: u64, script: &[u8], sats: u64) -> [u8; 32] {
+    use crate::crypto::hashable::Hashable as _;
+
+    let length = u32::try_from(script.len()).unwrap_or(u32::MAX).to_be_bytes();
+
+    crate::crypto::secp256k1::keccak(&[b"chainv4 btc withdrawal".as_slice(), &gateway.hashable_bytes_with_tag(), &id.to_be_bytes(), &length, script, &sats.to_be_bytes()].concat())
+}
+
+#[document(
+    summary = "A Bitcoin withdrawal as the gateway's WithdrawRequested event gives it: its id, output script and satoshis, from the event's id, script, sats and sender. None for data of another shape, which no withdrawal has.",
+    category = "Proofs",
+    see_also = "btc_withdrawal_digest",
+)]
+pub fn btc_withdrawal_of(data: &[crate::structs::tx::TxCallArgumentType]) -> Option<(u64, Vec<u8>, u64)> {
+    use crate::structs::tx::TxCallArgumentType as Value;
+
+    let id = match data.first()? {
+        Value::I64(id) => u64::try_from(*id).ok()?,
+        Value::U64(id) => *id,
+        _ => return None,
+    };
+    let script = match data.get(1)? {
+        Value::Bytes(bytes) => bytes.clone(),
+        Value::String(text) => text.as_bytes().to_vec(),
+        _ => return None,
+    };
+    let sats = match data.get(2)? {
+        Value::U256(sats) => u64::try_from(*sats).ok()?,
+        Value::U64(sats) => *sats,
+        Value::I64(sats) => u64::try_from(*sats).ok()?,
+        _ => return None,
+    };
+
+    Some((id, script, sats))
 }
 
 #[cfg(feature = "secp256k1")]

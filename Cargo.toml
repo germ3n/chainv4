@@ -16,7 +16,7 @@ members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
 exclude = ["contracts", "explorer", "proofs/sp1/program"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1", "attestations", "finality-proofs", "header-proofs"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1", "attestations", "finality-proofs", "header-proofs", "bitvm"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -146,6 +146,11 @@ finality-proofs = ["chain", "secp256k1"]
 # the one before, taken on chain by Tx::ProveHeaders and checked by the apps to sync by. A build
 # without it follows only a chain whose blocks hold none.
 header-proofs = ["finality-proofs"]
+# BitVM's side of the Bitcoin bridge, beside the federation: withdrawal proofs (a range ending at a
+# checkpoint the header chain finalized, holding the withdrawal; proofs::withdrawal), the presigned
+# transaction graph operators front withdrawals and are reimbursed by, and the operators' and
+# watchers' commands. Decides nothing of how blocks run, so it is no part of consensus.
+bitvm = ["secp256k1", "bitcoin"]
 # Validators attesting each link with a secp256k1 key for Ethereum, and checking the attestations
 # votes and blocks carry: what ChainV4Finality.sol follows the chain by. Governance turns them off
 # with Change::Attestations; a build without it follows only a chain that has them off, as it

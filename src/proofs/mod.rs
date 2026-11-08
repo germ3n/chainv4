@@ -22,6 +22,8 @@
 mod finality;
 #[cfg(feature = "secp256k1")]
 mod links;
+#[cfg(feature = "bitvm")]
+mod withdrawal;
 mod range;
 #[cfg(all(feature = "chain", feature = "secp256k1"))]
 mod replay;
@@ -37,8 +39,10 @@ pub use self::finality::{FinalityInput, LinkInput, check_link, prove_finality};
 pub use self::finality::{HeadersInput, MAX_HEADER_LINKS, prove_headers};
 #[cfg(feature = "secp256k1")]
 pub use self::links::{ChainPoint, ProvenHeaders, ProvenLink, TakenHeaders};
+#[cfg(feature = "bitvm")]
+pub use self::withdrawal::{InnerProof, ProvenWithdrawal, WithdrawalInput, prove_withdrawal};
 #[cfg(feature = "secp256k1")]
-pub use self::range::{verify_withdrawal, withdrawal_proof, withdrawals_root};
+pub use self::range::{btc_withdrawal_digest, btc_withdrawal_of, verify_withdrawal, withdrawal_proof, withdrawals_root};
 #[cfg(all(feature = "chain", feature = "secp256k1"))]
 pub use self::replay::{RangeInput, Ran, ReplayError, Witness, WitnessEntry, WitnessNode, replay, run_range};
 pub use self::state::{ProvenChain, RECORDED_BLOCKS};

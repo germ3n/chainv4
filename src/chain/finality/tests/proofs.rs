@@ -216,6 +216,7 @@ fn settings(per_block: u64, per_epoch: u64) -> ProofSettings {
         finality_program: [8; 32],
         headers_program: [9; 32],
         reward_per_epoch: u256::new(per_epoch.into()),
+        withdrawal_program: [10; 32],
     }
 }
 
@@ -230,6 +231,7 @@ fn prove_to(chain: &Chain, height: u64, program: [u8; 32]) -> Tx {
         withdrawals: [0; 32],
         program,
         gateway: GatewayMode::Both,
+        btc_withdrawals: [0; 32],
     };
     let proof = crate::proofs::TestProofs::proof(&program, &range.public_values());
 
@@ -514,4 +516,53 @@ fn the_finality_and_header_programs_run_in_sp1_to_what_the_checks_prove() {
     let (values, cycles) = crate::proofs::Sp1Prover::new(headers, ProofKind::Sp1Groth16).unwrap().execute(&input.to_bytes()).unwrap();
     assert_eq!(ProvenHeaders::from_public_values(chain.hash(), &values), Some(prove_headers(&input).unwrap()), "in {cycles} cycles");
     eprintln!("{} links from genesis in {cycles} SP1 cycles", input.links.len());
+}
+
+/// A withdrawal proof holds for a withdrawal the range queued, the range ending where the header
+/// chain finalized, both proofs holding under their programs; and for nothing else.
+#[cfg(all(feature = "bitvm", feature = "header-proofs"))]
+#[test]
+fn a_withdrawal_proof_needs_the_header_chain_a_range_ending_where_it_finalized_and_the_leaf() {
+    use crate::proofs::{HeadersInput, InnerProof, ProvenWithdrawal, TestProofs, WithdrawalInput, btc_withdrawal_digest, prove_headers, prove_withdrawal, withdrawal_proof, withdrawals_root};
+
+    let (genesis, chain) = grown();
+    let (headers_program, range_program) = ([9; 32], [5; 32]);
+    let headers = prove_headers(&HeadersInput::build(&chain, chain.db().snapshot(), json(&genesis), headers_program, None, 2).unwrap()).unwrap();
+    let gateway = key(50).public().address();
+    let leaves: Vec<[u8; 32]> = (1..=3u64).map(|id| btc_withdrawal_digest(&gateway, id, &[0x51, 0x20], 10_000 * id)).collect();
+    let range = ProvenRange {
+        chain_id: headers.chain_id,
+        genesis: chain.genesis(),
+        start: end_at(&chain, INTERVAL),
+        end: RangeEnd { height: headers.finalized.height, block: headers.finalized.checkpoint.block, state_root: headers.finalized.state_root },
+        withdrawals: [0; 32],
+        program: range_program,
+        gateway: GatewayMode::Both,
+        btc_withdrawals: withdrawals_root(&leaves),
+    };
+    let inner = |values: Vec<u8>, program: [u8; 32]| InnerProof { kind: ProofKind::Test, proof: TestProofs::proof(&program, &values), values };
+    let input = WithdrawalInput {
+        genesis: chain.genesis(),
+        headers_program,
+        range_program,
+        headers: inner(headers.public_values(), headers_program),
+        range: inner(range.public_values(), range_program),
+        digest: leaves[1],
+        path: withdrawal_proof(&leaves, 1).unwrap(),
+    };
+    let input = WithdrawalInput::from_bytes(&input.to_bytes()).unwrap();
+
+    let proven = prove_withdrawal(&input).unwrap();
+    assert_eq!((proven.epoch, proven.height, proven.digest), (2, 2 * INTERVAL, leaves[1]));
+    assert_eq!(ProvenWithdrawal::from_public_values(chain.hash(), &proven.public_values()), Some(proven));
+
+    let fails = |input: WithdrawalInput| prove_withdrawal(&input).expect_err("refused");
+    assert!(fails(WithdrawalInput { digest: [7; 32], ..input.clone() }).contains("not in the range"), "a withdrawal never queued");
+    assert!(fails(WithdrawalInput { path: withdrawal_proof(&leaves, 0).unwrap(), ..input.clone() }).contains("not in the range"), "another's path");
+    assert!(fails(WithdrawalInput { range_program: [6; 32], ..input.clone() }).contains("range proof"), "a range by another program");
+    let elsewhere = ProvenRange { end: end_at(&chain, 3 * INTERVAL), ..range };
+    assert!(fails(WithdrawalInput { range: inner(elsewhere.public_values(), range_program), ..input.clone() }).contains("not at the checkpoint"), "a range ending elsewhere");
+    let mut forged = input.clone();
+    forged.headers.proof[0] ^= 1;
+    assert!(fails(forged).contains("header-chain proof"));
 }

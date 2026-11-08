@@ -2238,7 +2238,7 @@ mod tests {
                 "Fork schedule: Fork faster-lua from block 30000, for chainv4 0.3.0 or newer",
             ),
             (
-                Change::Proofs(chainv4::proofs::ProofSettings { kinds: vec![chainv4::proofs::ProofKind::Sp1Groth16, chainv4::proofs::ProofKind::Sp1Stark], program: [7; 32], reward_per_block: u256::new(1_000_000_000_000_000_000), gateway: chainv4::proofs::GatewayMode::Both }),
+                Change::Proofs(chainv4::proofs::ProofSettings { kinds: vec![chainv4::proofs::ProofKind::Sp1Groth16, chainv4::proofs::ProofKind::Sp1Stark], program: [7; 32], reward_per_block: u256::new(1_000_000_000_000_000_000), gateway: chainv4::proofs::GatewayMode::Both, finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO, withdrawal_program: [0; 32] }),
                 "Validity proofs: by sp1-groth16 or sp1-stark of the program ",
             ),
             (Change::Attestations(false), "Attestations for Ethereum: off"),

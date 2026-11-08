@@ -1,7 +1,7 @@
 # The validity proofs' programs for SP1, built for SP1's RISC-V by ../build.sh, run by chainv4
 # prove: chainv4-proof-program (src/main.rs), chainv4's own replay of a range of blocks
-# (proofs::replay); chainv4-finality-program, a link of finality; and chainv4-headers-program, the
-# header chain. Each one's verifying key is the program governance names for it in Change::Proofs:
+# (proofs::replay); chainv4-finality-program, a link of finality; chainv4-headers-program, the header
+# chain; and chainv4-withdrawal-program, a withdrawal to Bitcoin, for BitVM. Each one's verifying key is the program governance names for it in Change::Proofs:
 # any change to how blocks run is another program.
 [package]
 name = "chainv4-proof-program"
@@ -13,7 +13,7 @@ publish = false
 
 [dependencies]
 sp1-zkvm = "=6.10.0"
-chainv4 = { path = "../../..", default-features = false, features = ["consensus"] }
+chainv4 = { path = "../../..", default-features = false, features = ["consensus", "bitvm"] }
 
 [profile.release]
 opt-level = 3

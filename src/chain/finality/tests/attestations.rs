@@ -3,7 +3,7 @@
 //! they sign, so the Rust and Solidity sides are held to the same digest and set hash.
 
 use {
-    super::voting::{INTERVAL, checkpoint, honest_vote, open, start, voters},
+    super::voting::{INTERVAL, checkpoint, honest_vote, start, voters},
     crate::structs::tx::{Tx, TxCallArgumentType},
     super::*,
     crate::abi::{AbiType, AbiValue, encode_values},
@@ -281,6 +281,7 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
         withdrawals: crate::proofs::withdrawals_root(&digests),
         program: [6; 32],
         gateway: crate::proofs::GatewayMode::Both,
+        btc_withdrawals: [0; 32],
     };
     let prove = |range: &crate::proofs::ProvenRange, program: [u8; 32], epoch: u64| {
         let values = range.public_values();
@@ -364,7 +365,7 @@ fn governance_turns_attestations_off_and_votes_and_blocks_then_carry_none() {
 
     let mut chain = governed(INTERVAL);
     let at = |chain: &Chain| crate::registry::changes::Changes::new(&chain.state()).attestations_at(chain.tip().height + 1).unwrap();
-    let proofs = |gateway: GatewayMode| Change::Proofs(ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::ZERO, gateway, finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO });
+    let proofs = |gateway: GatewayMode| Change::Proofs(ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::ZERO, gateway, finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO, withdrawal_program: [0; 32] });
 
     // Before the fork the change is no transaction; on until governance says otherwise.
     assert_eq!(vote_on(&mut chain, Change::Attestations(false)), None, "left out of the block");

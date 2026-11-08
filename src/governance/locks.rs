@@ -156,7 +156,7 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
         // Nothing stands for the fork schedule to compare a change with: fork whole freezes it,
         // fork.blocks the lead alone, and so on.
         "fork" => &["type", "name", "height", "epoch", "least", "blocks"],
-        "proofs" => &["kinds", "program", "reward_per_block", "gateway", "finality_program", "headers_program", "reward_per_epoch"],
+        "proofs" => &["kinds", "program", "reward_per_block", "gateway", "finality_program", "headers_program", "reward_per_epoch", "withdrawal_program"],
         "governance" => &["type", "members", "threshold", "approval_epochs", "quorum_permille"],
         "evm_spec" => &["spec", "from"],
         "dex" => &["tiers", "protocol_permille"],

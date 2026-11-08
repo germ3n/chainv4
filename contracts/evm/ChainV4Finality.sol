@@ -252,14 +252,15 @@ contract ChainV4Finality {
     }
 
     /// Takes a validity proof of the range from the proven tip to the final checkpoint of an epoch,
-    /// whose public values say so: eleven words, chainId, genesis, startHeight, startBlock,
-    /// startRoot, endHeight, endBlock, endRoot, withdrawals, program, gatewayMode. The end must be
+    /// whose public values say so: twelve words, chainId, genesis, startHeight, startBlock,
+    /// startRoot, endHeight, endBlock, endRoot, withdrawals, program, gatewayMode, and the root of
+    /// what left by the Bitcoin gateway, which BitVM's side reads and this contract leaves alone. The end must be
     /// the checkpoint this contract finalized, with its height and state root, so the proof shows
     /// that the state root the validators signed is the one the blocks come to.
     function prove(bytes calldata publicValues, bytes calldata proof, uint256 epoch) external {
         require(program != bytes32(0) && verifiers.length > 0, "no program to prove");
-        require(publicValues.length == 352, "eleven words of public values");
-        bytes32[11] memory v = abi.decode(publicValues, (bytes32[11]));
+        require(publicValues.length == 384, "twelve words of public values");
+        bytes32[12] memory v = abi.decode(publicValues, (bytes32[12]));
         require(uint256(v[0]) == chainId && v[1] == genesis, "a proof of another chain");
         require(uint256(v[2]) == provenHeight && v[3] == provenBlock && v[4] == provenRoot, "a range from elsewhere than the proven tip");
         require(finalAt[epoch] && blockAt[epoch] == v[6] && heightAt[epoch] == uint256(v[5]) && stateRootAt[epoch] == v[7], "a range that ends at no final checkpoint here");

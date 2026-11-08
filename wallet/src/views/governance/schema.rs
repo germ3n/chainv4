@@ -206,6 +206,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("finality_program", "Finality program", "What proves a link of finality from the voters' own votes, for ChainV4Finality.sol beside the attesters: chainv4 prove program --of finality. 0x and 64 zeros for none.", Control::Text),
             field("headers_program", "Header-chain program", "What proves the finalized checkpoints from genesis, for the apps to sync by: chainv4 prove program --of headers. 0x and 64 zeros for none.", Control::Text),
             field("reward_per_epoch", "Reward an epoch of header chain", "Minted to whoever proves the header chain, for each epoch a proof adds. None pays nothing.", Control::Amount),
+            field("withdrawal_program", "Withdrawal program", "What proves a withdrawal to Bitcoin was queued, for BitVM's operators and watchers: chainv4 prove program --of withdrawal. 0x and 64 zeros for none.", Control::Text),
         ],
         "fork" => vec![
             field("type", "What it does", "A fork changes what blocks compute from a height on. One within the lead of this vote, or passed, stays as it is.", Control::Choice(FORK_KINDS)),
@@ -441,7 +442,7 @@ pub fn defaults(kind: &str) -> Value {
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
         "fork" => json!({ "type": "schedule", "name": "", "height": null, "epoch": null, "least": "", "blocks": null }),
-        "proofs" => json!({ "kinds": ["sp1-groth16"], "program": "", "reward_per_block": "0", "gateway": "proof-or-federation", "finality_program": format!("0x{}", "00".repeat(32)), "headers_program": format!("0x{}", "00".repeat(32)), "reward_per_epoch": "0" }),
+        "proofs" => json!({ "kinds": ["sp1-groth16"], "program": "", "reward_per_block": "0", "gateway": "proof-or-federation", "finality_program": format!("0x{}", "00".repeat(32)), "headers_program": format!("0x{}", "00".repeat(32)), "reward_per_epoch": "0", "withdrawal_program": format!("0x{}", "00".repeat(32)) }),
         "attestations" => json!(true),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),
         "fees" => json!({

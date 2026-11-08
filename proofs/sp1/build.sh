@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the validity proofs' programs for SP1 into elf/ (chainv4-proof-program,
-# chainv4-finality-program and chainv4-headers-program), as every prover must for the same program
+# chainv4-finality-program, chainv4-headers-program and chainv4-withdrawal-program), as every prover must for the same program
 # ids: SP1's toolchain from sp1up --c-toolchain under $SP1_DIR (~/.sp1), its
 # RISC-V GCC for Luau's C++, climits included (Luau leaves it to Apple's clang), and unwind tables
 # for Rust frames, which a Lua error raised from a Rust callback unwinds through.

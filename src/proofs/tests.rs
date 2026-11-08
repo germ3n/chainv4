@@ -17,11 +17,12 @@ fn range() -> ProvenRange {
         withdrawals: [6; 32],
         program: [7; 32],
         gateway: GatewayMode::Both,
+        btc_withdrawals: [8; 32],
     }
 }
 
 #[test]
-fn a_ranges_public_values_are_eleven_words_as_abi_encode_lays_them_and_read_back() {
+fn a_ranges_public_values_are_twelve_words_as_abi_encode_lays_them_and_read_back() {
     let range = range();
     let values = range.public_values();
 
@@ -30,7 +31,7 @@ fn a_ranges_public_values_are_eleven_words_as_abi_encode_lays_them_and_read_back
     assert_eq!(values[32..64], [1; 32], "the genesis, as its bytes");
     assert_eq!(values[10 * 32 + 31], 1, "both, as 1");
     assert_eq!(ProvenRange::from_public_values(HashType::default_chain(), &values), Some(range));
-    assert_eq!(ProvenRange::from_public_values(HashType::default_chain(), &values[..320]), None, "short");
+    assert_eq!(ProvenRange::from_public_values(HashType::default_chain(), &values[..352]), None, "short");
 
     let mut odd = values.clone();
     odd[10 * 32 + 31] = 3;
@@ -42,8 +43,8 @@ fn a_ranges_public_values_are_eleven_words_as_abi_encode_lays_them_and_read_back
 
         let word = |bytes: [u8; 32]| AbiValue::FixedBytes(bytes.to_vec());
         let number = |value: u64| AbiValue::Uint(u256::from(value));
-        let types = [AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256)];
-        let encoded = encode_values(&types, &[number(77), word([1; 32]), number(39), word([2; 32]), word([3; 32]), number(48), word([4; 32]), word([5; 32]), word([6; 32]), word([7; 32]), number(1)]).unwrap();
+        let types = [AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32)];
+        let encoded = encode_values(&types, &[number(77), word([1; 32]), number(39), word([2; 32]), word([3; 32]), number(48), word([4; 32]), word([5; 32]), word([6; 32]), word([7; 32]), number(1), word([8; 32])]).unwrap();
         assert_eq!(encoded, values, "as the ABI encoder writes them");
     }
 }
@@ -74,7 +75,7 @@ fn every_withdrawal_proves_against_its_ranges_root_and_nothing_else_does() {
 #[cfg(feature = "chain")]
 #[test]
 fn proof_settings_cross_json_and_a_program_of_zeros_names_none() {
-    let settings = ProofSettings { kinds: vec![ProofKind::Sp1Groth16, ProofKind::Sp1Stark], program: [3; 32], reward_per_block: u256::new(1_000), gateway: GatewayMode::ProofOrFederation, finality_program: [4; 32], headers_program: [5; 32], reward_per_epoch: u256::new(7) };
+    let settings = ProofSettings { kinds: vec![ProofKind::Sp1Groth16, ProofKind::Sp1Stark], program: [3; 32], reward_per_block: u256::new(1_000), gateway: GatewayMode::ProofOrFederation, finality_program: [4; 32], headers_program: [5; 32], reward_per_epoch: u256::new(7), withdrawal_program: [6; 32] };
     let json = crate::params::json::proof_settings_json(&settings);
 
     assert_eq!(json["kinds"], serde_json::json!(["sp1-groth16", "sp1-stark"]));
@@ -83,14 +84,14 @@ fn proof_settings_cross_json_and_a_program_of_zeros_names_none() {
     assert_eq!(settings.problem(), None);
     assert!(settings.takes(ProofKind::Sp1Stark) && !settings.takes(ProofKind::Sp1Plonk));
     assert!(ProofSettings { program: [0; 32], ..settings.clone() }.problem().is_none(), "the other programs still name some");
-    assert!(ProofSettings { program: [0; 32], finality_program: [0; 32], headers_program: [0; 32], ..settings.clone() }.problem().is_some(), "every program zeros");
+    assert!(ProofSettings { program: [0; 32], finality_program: [0; 32], headers_program: [0; 32], withdrawal_program: [0; 32], ..settings.clone() }.problem().is_some(), "every program zeros");
 
     // Settings written before the finality and header programs read as naming neither.
     let mut older = json.clone();
-    for key in ["finality_program", "headers_program", "reward_per_epoch"] {
+    for key in ["finality_program", "headers_program", "reward_per_epoch", "withdrawal_program"] {
         older.as_object_mut().unwrap().remove(key);
     }
-    assert_eq!(crate::params::json::proof_settings_from_json(&older), Ok(ProofSettings { finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO, ..settings.clone() }));
+    assert_eq!(crate::params::json::proof_settings_from_json(&older), Ok(ProofSettings { finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO, withdrawal_program: [0; 32], ..settings.clone() }));
     assert!(ProofSettings { kinds: vec![], ..settings.clone() }.problem().is_some(), "no kind");
     assert!(ProofSettings { kinds: vec![ProofKind::Sp1Stark, ProofKind::Sp1Groth16], ..settings.clone() }.problem().is_some(), "out of order");
     assert!(ProofSettings { kinds: vec![ProofKind::Sp1Plonk, ProofKind::Sp1Plonk], ..settings.clone() }.problem().is_some(), "twice");

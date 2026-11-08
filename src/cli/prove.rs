@@ -36,6 +36,9 @@ pub enum Of {
     Finality,
     /// The header chain: finalized checkpoints from genesis, for the apps and Tx::ProveHeaders.
     Headers,
+    /// A withdrawal to Bitcoin: queued in a range that ends where the header chain finalized, for
+    /// BitVM's operators and watchers. From --headers-proof, --range-proof and --withdrawal.
+    Withdrawal,
 }
 
 impl Of {
@@ -45,6 +48,7 @@ impl Of {
             Of::Range => "range",
             Of::Finality => "finality",
             Of::Headers => "headers",
+            Of::Withdrawal => "withdrawal",
         }
     }
 
@@ -55,6 +59,7 @@ impl Of {
             Of::Range => "proofs/sp1/elf/chainv4-proof-program",
             Of::Finality => "proofs/sp1/elf/chainv4-finality-program",
             Of::Headers => "proofs/sp1/elf/chainv4-headers-program",
+            Of::Withdrawal => "proofs/sp1/elf/chainv4-withdrawal-program",
         }
     }
 }
@@ -76,6 +81,15 @@ pub struct RangeArgs {
     /// proven so, a proof at a time, and the last one sent.
     #[arg(long, conflicts_with = "input")]
     pub previous: Option<PathBuf>,
+    /// For --of withdrawal: the header-chain proof file, finalizing the checkpoint the range ends at.
+    #[arg(long)]
+    pub headers_proof: Option<PathBuf>,
+    /// For --of withdrawal: the range proof file, ending at that checkpoint.
+    #[arg(long)]
+    pub range_proof: Option<PathBuf>,
+    /// For --of withdrawal: the Bitcoin gateway's withdrawal id.
+    #[arg(long)]
+    pub withdrawal: Option<u64>,
     /// The height the range starts at: the chain's proven tip unless given.
     #[arg(long)]
     pub from: Option<u64>,
@@ -166,6 +180,11 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
         }
 
         let status = status()?;
+
+        if range.of == Of::Withdrawal {
+            return withdrawal_input(range, status, &|url: String| -> CliResult<Value> { ok(agent.get(format!("{node}{url}")).call()) });
+        }
+
         let url = match range.of {
             Of::Range => {
                 let from = match range.from {
@@ -189,6 +208,7 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
 
                 format!("{node}/validity/finality-input?epoch={epoch}")
             }
+            Of::Withdrawal => unreachable!("built above"),
             Of::Headers => {
                 let epoch = match range.epoch {
                     Some(epoch) => epoch,
@@ -320,6 +340,44 @@ fn witness_kind(input: &RangeInput) -> String {
     }
 }
 
+/// A withdrawal proof's input, from the header-chain and range proof files and the node's list of
+/// the range's Bitcoin withdrawals, which gives the withdrawal's path.
+#[cfg(feature = "bitvm")]
+fn withdrawal_input(range: &RangeArgs, status: &Value, get: &dyn Fn(String) -> CliResult<Value>) -> CliResult<Vec<u8>> {
+    let read = |path: &Option<PathBuf>, what: &str| -> CliResult<(crate::proofs::InnerProof, [u8; 32])> {
+        let path = path.as_ref().ok_or_else(|| format!("--of withdrawal takes --{what}"))?;
+        let file: Value = serde_json::from_slice(&std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?).map_err(|err| format!("{}: {err}", path.display()))?;
+        let (kind, values, proof) = proof_file(path)?;
+        let program = file["program"].as_str().and_then(crate::structs::hex::from_hex).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{}: no program", path.display()))?;
+
+        Ok((crate::proofs::InnerProof { kind, values, proof }, program))
+    };
+    let (headers, headers_program) = read(&range.headers_proof, "headers-proof")?;
+    let (proven, range_program) = read(&range.range_proof, "range-proof")?;
+    let id = range.withdrawal.ok_or("--of withdrawal takes --withdrawal, the gateway's withdrawal id")?;
+    let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+    let genesis = status["genesis"].as_str().and_then(crate::structs::hex::from_hex).and_then(|bytes| crate::structs::hash::Hash::from_bytes(hash, &bytes)).ok_or("the node did not say its genesis")?;
+    let span = ProvenRange::from_public_values(hash, &proven.values).ok_or("--range-proof: public values that are no range")?;
+    let listed = get(format!("/validity/btc-withdrawals?from={}&to={}", span.start.height, span.end.height))?;
+    let digests: Vec<([u8; 32], u64)> = listed["withdrawals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|withdrawal| Some((withdrawal["digest"].as_str().and_then(crate::structs::hex::from_hex)?.try_into().ok()?, withdrawal["id"].as_u64()?)))
+        .collect();
+    let at = digests.iter().position(|(_, listed)| *listed == id).ok_or_else(|| format!("withdrawal {id} was not queued in the range from {} to {}", span.start.height, span.end.height))?;
+    let leaves: Vec<[u8; 32]> = digests.iter().map(|(digest, _)| *digest).collect();
+    let path = crate::proofs::withdrawal_proof(&leaves, at).ok_or("no path")?;
+    println!("withdrawal {id}, leaf {} of {} in the range from {} to {}", at + 1, leaves.len(), span.start.height, span.end.height);
+
+    Ok(crate::proofs::WithdrawalInput { genesis, headers_program, range_program, headers, range: proven, digest: leaves[at], path }.to_bytes())
+}
+
+#[cfg(not(feature = "bitvm"))]
+fn withdrawal_input(_range: &RangeArgs, _status: &Value, _get: &dyn Fn(String) -> CliResult<Value>) -> CliResult<Vec<u8>> {
+    Err("this build makes no withdrawal proofs: build it with the bitvm feature".into())
+}
+
 /// A proof file's kind, public values and proof, as the chain would take them.
 fn proof_file(path: &std::path::Path) -> CliResult<(crate::proofs::ProofKind, Vec<u8>, Vec<u8>)> {
     let file: Value = serde_json::from_slice(&std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -368,6 +426,12 @@ fn with_previous(_range: &RangeArgs, bytes: Vec<u8>) -> CliResult<Vec<u8>> {
 /// What a finality or header-chain input holds, in a line.
 #[cfg(feature = "header-proofs")]
 fn described(of: Of, bytes: &[u8]) -> CliResult<String> {
+    #[cfg(feature = "bitvm")]
+    if of == Of::Withdrawal {
+        let decoded = crate::proofs::WithdrawalInput::from_bytes(bytes)?;
+        return Ok(format!("a withdrawal's leaf with a path of {}", decoded.path.len()));
+    }
+
     Ok(match of {
         Of::Finality => {
             let decoded = crate::proofs::FinalityInput::from_bytes(bytes)?;
@@ -383,6 +447,11 @@ fn described(of: Of, bytes: &[u8]) -> CliResult<String> {
 /// A finality or header-chain input run off the node, with no zkVM: what a proof of it proves.
 #[cfg(feature = "header-proofs")]
 fn checked(of: Of, bytes: &[u8]) -> CliResult<Value> {
+    #[cfg(feature = "bitvm")]
+    if of == Of::Withdrawal {
+        return Ok(withdrawal_json(&crate::proofs::prove_withdrawal(&crate::proofs::WithdrawalInput::from_bytes(bytes)?)?));
+    }
+
     Ok(match of {
         Of::Finality => link_json(&crate::proofs::prove_finality(&crate::proofs::FinalityInput::from_bytes(bytes)?)?),
         _ => headers_json(&crate::proofs::prove_headers(&crate::proofs::HeadersInput::from_bytes(bytes)?)?),
@@ -406,6 +475,10 @@ fn values_json(of: Of, hash: HashType, values: &[u8]) -> CliResult<Value> {
         Of::Range => range_json(&ProvenRange::from_public_values(hash, values).ok_or("the program committed to no range")?),
         Of::Finality => link_json(&crate::proofs::ProvenLink::from_public_values(hash, values).ok_or("the program committed to no link")?),
         Of::Headers => headers_json(&crate::proofs::ProvenHeaders::from_public_values(hash, values).ok_or("the program committed to no header chain")?),
+        #[cfg(feature = "bitvm")]
+        Of::Withdrawal => withdrawal_json(&crate::proofs::ProvenWithdrawal::from_public_values(hash, values).ok_or("the program committed to no withdrawal")?),
+        #[cfg(not(feature = "bitvm"))]
+        Of::Withdrawal => return Err("this build reads no withdrawal proofs".into()),
     })
 }
 
@@ -425,6 +498,22 @@ pub(super) fn link_json(link: &crate::proofs::ProvenLink) -> Value {
         "state_root": link.state_root.to_string(),
         "next_attesting_set": to_hex(&link.next_attesting_set),
         "finality_program": to_hex(&link.finality_program),
+    })
+}
+
+/// A proven withdrawal as JSON.
+#[cfg(feature = "bitvm")]
+pub(super) fn withdrawal_json(withdrawal: &crate::proofs::ProvenWithdrawal) -> Value {
+    json!({
+        "chain_id": withdrawal.chain_id,
+        "genesis": withdrawal.genesis.to_string(),
+        "headers_program": to_hex(&withdrawal.headers_program),
+        "range_program": to_hex(&withdrawal.range_program),
+        "epoch": withdrawal.epoch,
+        "block": withdrawal.block.to_string(),
+        "height": withdrawal.height,
+        "state_root": withdrawal.state_root.to_string(),
+        "digest": to_hex(&withdrawal.digest),
     })
 }
 

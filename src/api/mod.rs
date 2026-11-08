@@ -836,6 +836,7 @@ fn router(api: Api) -> Router {
         .route("/validity/input", get(validity_input))
         .route("/validity/finality-input", get(finality_input))
         .route("/validity/headers-input", get(headers_input))
+        .route("/validity/btc-withdrawals", get(btc_withdrawals))
         .route("/proofs/receipts/{id}", get(receipt_proof))
         .route("/proofs/{column}/{key}", get(state_proof))
         .route("/txs", post(submit))
@@ -1186,6 +1187,48 @@ async fn finality_input(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo
 
         Err(ApiError::NotFound("this build builds no finality proofs' inputs".to_string()))
     }
+}
+
+/// GET /validity/btc-withdrawals?from=&to=: every withdrawal the directory's Bitcoin gateway queued
+/// in the blocks after from through to, in order, each with its leaf in a range proof's
+/// btc_withdrawals tree: what an operator or watcher works a withdrawal's path out from.
+async fn btc_withdrawals(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let from = number(&query, "from")?.ok_or_else(|| ApiError::BadRequest("from is the height the range starts at".to_string()))?;
+    let to = number(&query, "to")?.ok_or_else(|| ApiError::BadRequest("to is the height the range ends at".to_string()))?;
+
+    if to <= from || to - from > MAX_VALIDITY_RANGE {
+        return Err(ApiError::BadRequest(format!("a range ends after it starts, at most {MAX_VALIDITY_RANGE} blocks on")));
+    }
+
+    let state = State::new(api.db.clone());
+    let Some(gateway) = crate::registry::changes::Changes::new(&state).directory()?.and_then(|directory| directory.btc_gateway) else {
+        return Ok(Json(json!({ "withdrawals": [] })));
+    };
+    let mut withdrawals = Vec::new();
+
+    for height in from + 1..=to {
+        let Some(block) = crate::chain::stored_block_at(&*api.db, height)? else {
+            return Err(ApiError::NotFound(format!("no block body at {height}: pruned, or past the tip")));
+        };
+
+        for tx in &block.txs {
+            let Some(receipt) = stored_receipt(&*api.db, &tx.id(api.hash))? else {
+                continue;
+            };
+
+            for event in receipt.events.iter().filter(|event| event.contract == gateway && event.name == "WithdrawRequested") {
+                if let Some((id, script, sats)) = crate::proofs::btc_withdrawal_of(&event.data) {
+                    #[cfg(feature = "secp256k1")]
+                    let digest = to_hex(&crate::proofs::btc_withdrawal_digest(&gateway, id, &script, sats));
+                    #[cfg(not(feature = "secp256k1"))]
+                    let digest = Value::Null;
+                    withdrawals.push(json!({ "id": id, "height": height, "script": to_hex(&script), "sats": sats, "digest": digest }));
+                }
+            }
+        }
+    }
+
+    Ok(Json(json!({ "gateway": gateway.to_string(), "withdrawals": withdrawals })))
 }
 
 /// GET /validity/headers-input?to=[&from=]: the input of a header-chain proof going on from the

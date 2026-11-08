@@ -1297,6 +1297,7 @@ pub fn proof_settings_json(settings: &crate::proofs::ProofSettings) -> Value {
         "finality_program": crate::structs::hex::to_hex(&settings.finality_program),
         "headers_program": crate::structs::hex::to_hex(&settings.headers_program),
         "reward_per_epoch": settings.reward_per_epoch.to_string(),
+        "withdrawal_program": crate::structs::hex::to_hex(&settings.withdrawal_program),
     })
 }
 
@@ -1332,13 +1333,14 @@ pub fn proof_settings_from_json(value: &Value) -> Result<crate::proofs::ProofSet
     };
     let finality_program = later_program("finality_program")?;
     let headers_program = later_program("headers_program")?;
+    let withdrawal_program = later_program("withdrawal_program")?;
     let reward_per_epoch = match fields.later_text("reward_per_epoch")? {
         Some(_) => fields.amount("reward_per_epoch")?,
         None => u256::ZERO,
     };
     fields.done()?;
 
-    Ok(crate::proofs::ProofSettings { kinds, program, reward_per_block, gateway, finality_program, headers_program, reward_per_epoch })
+    Ok(crate::proofs::ProofSettings { kinds, program, reward_per_block, gateway, finality_program, headers_program, reward_per_epoch, withdrawal_program })
 }
 
 /// The finality kinds this build has, for error messages.
