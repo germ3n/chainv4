@@ -63,6 +63,12 @@ const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
 )]
 pub const GRAPH_DUST: u64 = 330;
 
+#[document(
+    summary = "The most satoshis there will ever be, 21 million bitcoin: no amount in a graph may be more, so no sum of them overflows.",
+    category = "Bridges",
+)]
+pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+
 /// A number as script pushes it: its own opcode to 16, else its little-endian bytes, minimal, with a
 /// sign byte where the top bit is set, as CScriptNum has it.
 fn number(value: u64) -> Vec<u8> {
@@ -254,15 +260,20 @@ impl Graph {
         returns = "The graph, or why not: a funding output too small for the stake, the connectors and the fee, or a peg-in under its fees.",
     )]
     pub fn build(terms: GraphTerms) -> Result<Graph, String> {
+        // Every amount within Bitcoin's own bound, so what follows adds and takes away safely.
+        if [terms.funding_value, terms.peg_in_value, terms.stake, terms.fee].iter().any(|value| *value > MAX_MONEY) {
+            return Err(format!("an amount over {MAX_MONEY} satoshis, more than there will ever be"));
+        }
+
         let operator_out = p2wpkh(&hash160(&terms.operator));
         let connector = terms.fee.max(GRAPH_DUST);
-        let needed = 2 * connector + terms.stake + terms.fee;
+        let needed = connector.checked_mul(2).and_then(|both| both.checked_add(terms.stake)).and_then(|sum| sum.checked_add(terms.fee)).ok_or("amounts that overflow")?;
 
         if terms.funding_value < needed || terms.stake < GRAPH_DUST {
             return Err(format!("a funding output of {} satoshis, short of the stake, the connectors and the fee, {needed}", terms.funding_value));
         }
 
-        if terms.peg_in_value <= 2 * terms.fee + GRAPH_DUST {
+        if terms.peg_in_value <= terms.fee.saturating_mul(2).saturating_add(GRAPH_DUST) {
             return Err("a peg-in that its fees would eat".to_string());
         }
 

@@ -59,6 +59,9 @@ fn a_graph_holds_the_peg_in_to_take_after_the_window_or_to_a_verdict_after_a_cha
     // Funding short of the stake, the connectors and the fee builds nothing.
     assert!(Graph::build(GraphTerms { funding_value: 205_000, ..terms(([1; 32], 0), ([2; 32], 1)) }).is_err());
     assert!(Graph::build(GraphTerms { threshold: 4, ..terms(([1; 32], 0), ([2; 32], 1)) }).is_err());
+    // Amounts past all there will ever be, which would overflow the sums, build nothing either.
+    assert!(Graph::build(GraphTerms { stake: u64::MAX, ..terms(([1; 32], 0), ([2; 32], 1)) }).is_err());
+    assert!(Graph::build(GraphTerms { funding_value: MAX_MONEY + 1, ..terms(([1; 32], 0), ([2; 32], 1)) }).is_err());
 }
 
 #[test]

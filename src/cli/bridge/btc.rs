@@ -29,9 +29,16 @@ const SOON_BLOCKS: u32 = 3;
 
 #[cfg(feature = "anchoring-btc")]
 pub(super) mod anchor;
+#[cfg(feature = "bitvm")]
+pub(super) mod bitvm;
 
 #[derive(clap::Subcommand)]
 pub enum BtcAction {
+    /// BitVM's side, beside the federation: peg-in requests, graphs, presignatures, finished
+    /// transactions, verdicts, fronted withdrawals and takes, and a watcher's check.
+    #[cfg(feature = "bitvm")]
+    #[command(subcommand)]
+    Bitvm(bitvm::BitvmAction),
     /// The anchorer, as bridge anchor: kept here as it was first named.
     #[cfg(feature = "anchoring-btc")]
     Anchor(super::anchor::AnchorArgs),
@@ -383,6 +390,8 @@ impl Bridge {
         let number = TxCallArgumentType::U64;
 
         match action {
+            #[cfg(feature = "bitvm")]
+            BtcAction::Bitvm(action) => self.bitvm(action),
             BtcAction::RelayStart { relay, height, network } => {
                 let served = Followed::from_genesis(&self.btc_api()?.block_hash(0)?);
                 let network = match (network.as_deref().map(Followed::named).transpose()?, served) {
