@@ -16,6 +16,15 @@ use {
 )]
 pub const SIGHASH_ALL: u32 = 1;
 
+#[document(summary = "SIGHASH_NONE: signs no output.", category = "Bitcoin")]
+pub const SIGHASH_NONE: u32 = 2;
+
+#[document(summary = "SIGHASH_SINGLE: signs only the output at the input's own place.", category = "Bitcoin")]
+pub const SIGHASH_SINGLE: u32 = 3;
+
+#[document(summary = "SIGHASH_ANYONECANPAY, or'ed onto another type: signs only its own input, so others may add theirs, as a crowdfunded BitVM challenge needs.", category = "Bitcoin")]
+pub const SIGHASH_ANYONECANPAY: u32 = 0x80;
+
 #[document(
     summary = "Which Bitcoin: its own network, or its test networks, testnet, signet and regtest, whose coins are worth nothing. Their keys are others, so the one never spends the other's coins.",
     category = "Bitcoin",
@@ -266,6 +275,18 @@ impl Transaction {
         summary = "The same for an input that spends a script's native segwit output, P2WSH: its script code is the witness script itself, which the hash covers whole.",
     )]
     pub fn script_preimage(&self, index: usize, code: &[u8], value: u64) -> Vec<u8> {
+        self.sighash_preimage(index, code, value, SIGHASH_ALL)
+    }
+
+    #[document(
+        parent = "Transaction",
+        summary = "What BIP143 signs for a P2WSH input under any sighash type: SIGHASH_ALL, SIGHASH_NONE or SIGHASH_SINGLE, each with SIGHASH_ANYONECANPAY or not. ANYONECANPAY leaves the other inputs out, so others may add theirs; SINGLE covers only the output at the input's place, NONE no output, so others may add outputs too.",
+        params = { index = "The input's place.", code = "Its witness script.", value = "What it spends.", sighash = "The sighash type, as it ends the signature." },
+    )]
+    pub fn sighash_preimage(&self, index: usize, code: &[u8], value: u64, sighash: u32) -> Vec<u8> {
+        let anyone = sighash & SIGHASH_ANYONECANPAY != 0;
+        let kind = sighash & 0x1f;
+        let zero = [0u8; 32];
         let (mut prevouts, mut sequences, mut outputs) = (Vec::new(), Vec::new(), Vec::new());
 
         for input in &self.inputs {
@@ -274,23 +295,38 @@ impl Transaction {
             sequences.extend(input.sequence.to_le_bytes());
         }
 
-        for output in &self.outputs {
-            output.write(&mut outputs);
-        }
+        let hash_outputs = match kind {
+            SIGHASH_SINGLE => match self.outputs.get(index) {
+                Some(output) => {
+                    output.write(&mut outputs);
+                    sha256d(&outputs)
+                }
+                None => zero,
+            },
+            SIGHASH_NONE => zero,
+            _ => {
+                for output in &self.outputs {
+                    output.write(&mut outputs);
+                }
+                sha256d(&outputs)
+            }
+        };
+        let hash_prevouts = if anyone { zero } else { sha256d(&prevouts) };
+        let hash_sequences = if anyone || kind == SIGHASH_SINGLE || kind == SIGHASH_NONE { zero } else { sha256d(&sequences) };
 
         let input = &self.inputs[index];
         let mut out = self.version.to_le_bytes().to_vec();
-        out.extend(sha256d(&prevouts));
-        out.extend(sha256d(&sequences));
+        out.extend(hash_prevouts);
+        out.extend(hash_sequences);
         out.extend(input.txid);
         out.extend(input.vout.to_le_bytes());
         compact(&mut out, code.len());
         out.extend(code);
         out.extend(value.to_le_bytes());
         out.extend(input.sequence.to_le_bytes());
-        out.extend(sha256d(&outputs));
+        out.extend(hash_outputs);
         out.extend(self.lock_time.to_le_bytes());
-        out.extend(SIGHASH_ALL.to_le_bytes());
+        out.extend(sighash.to_le_bytes());
 
         out
     }

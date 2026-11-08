@@ -44,6 +44,8 @@ pub mod dex;
 pub mod nft;
 #[cfg(feature = "bridge")]
 pub mod bridge;
+#[cfg(feature = "bitvm")]
+pub mod bitvm;
 #[cfg(feature = "vm")]
 pub mod vm;
 

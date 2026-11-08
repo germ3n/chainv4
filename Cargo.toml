@@ -150,7 +150,7 @@ header-proofs = ["finality-proofs"]
 # checkpoint the header chain finalized, holding the withdrawal; proofs::withdrawal), the presigned
 # transaction graph operators front withdrawals and are reimbursed by, and the operators' and
 # watchers' commands. Decides nothing of how blocks run, so it is no part of consensus.
-bitvm = ["secp256k1", "bitcoin"]
+bitvm = ["secp256k1", "bitcoin", "bridge"]
 # Validators attesting each link with a secp256k1 key for Ethereum, and checking the attestations
 # votes and blocks carry: what ChainV4Finality.sol follows the chain by. Governance turns them off
 # with Change::Attestations; a build without it follows only a chain that has them off, as it
