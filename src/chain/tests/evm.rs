@@ -1567,7 +1567,7 @@ mod gateway {
     }
 
     #[test]
-    fn a_transfer_from_chainv4_arrives_by_a_proof_alone_or_with_signatures_as_the_mode_says() {
+    fn a_transfer_from_chainv4_arrives_by_a_proof_alone_with_signatures_or_by_signatures_alone_as_the_mode_says() {
         let db = Arc::new(MemoryDb::default());
         let mut chain = open(&db);
         let here = evm::chain_id(&chain.genesis());
@@ -1617,6 +1617,11 @@ mod gateway {
         refused(&run(&mut chain, gateway, 0, transfer(3).deliver_input(&signed(&transfer(3), &[1, 2]))), "a proof is needed as well");
         refused(&run(&mut chain, gateway, 0, transfer(3).deliver_proven_input([9; 32], &[], &[])), "not enough of the federation");
         assert!(run(&mut chain, gateway, 0, transfer(3).deliver_proven_input([9; 32], &[], &signed(&transfer(3), &[1, 2]))).result.is_ok());
+
+        // Federation only: a proof is refused, signatures alone arrive, as before proofs.
+        prove(&mut chain, &transfer(4), 2);
+        refused(&run(&mut chain, gateway, 0, transfer(4).deliver_proven_input([9; 32], &[], &signed(&transfer(4), &[1, 2]))), "by the federation alone");
+        assert!(run(&mut chain, gateway, 0, transfer(4).deliver_input(&signed(&transfer(4), &[1, 2]))).result.is_ok());
     }
 
     #[test]

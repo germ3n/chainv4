@@ -75,14 +75,18 @@ pub enum ProveAction {
         #[arg(long, default_value = "proofs/sp1/elf/chainv4-proof-program")]
         elf: PathBuf,
     },
-    /// Proves a range with SP1 on this machine, in Groth16, and writes the proof file: slow, and
-    /// heavy on memory.
+    /// Proves a range with SP1 on this machine and writes the proof file: slow, and heavy on
+    /// memory. Groth16 and PLONK download SP1's circuit the first time, gigabytes of it.
     #[cfg(feature = "sp1-prover")]
     Run {
         #[command(flatten)]
         range: RangeArgs,
         #[arg(long, default_value = "proofs/sp1/elf/chainv4-proof-program")]
         elf: PathBuf,
+        /// The kind of proof: sp1-groth16 or sp1-plonk, which Ethereum and the chain take, or
+        /// sp1-stark, which only the chain does. One governance names, or the chain refuses it.
+        #[arg(long, default_value = "sp1-groth16", value_parser = proof_kind)]
+        kind: crate::proofs::ProofKind,
         /// Where to write the proof.
         #[arg(long)]
         out: PathBuf,
@@ -156,13 +160,13 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
         ProveAction::Program { elf } => {
             use crate::proofs::Prover as _;
 
-            println!("{}", to_hex(&sp1(&elf)?.program()));
+            println!("{}", to_hex(&sp1(&elf, crate::proofs::ProofKind::Sp1Groth16)?.program()));
         }
         #[cfg(feature = "sp1-prover")]
         ProveAction::Execute { range, elf } => {
             use crate::proofs::Prover as _;
 
-            let prover = sp1(&elf)?;
+            let prover = sp1(&elf, crate::proofs::ProofKind::Sp1Groth16)?;
             let bytes = input(&range)?;
             let started = std::time::Instant::now();
             let (values, cycles) = prover.execute(&bytes)?;
@@ -171,13 +175,20 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
             println!("{}", serde_json::to_string_pretty(&range_json(&proven))?);
         }
         #[cfg(feature = "sp1-prover")]
-        ProveAction::Run { range, elf, out } => {
+        ProveAction::Run { range, elf, kind, out } => {
             use crate::proofs::Prover as _;
 
-            let prover = sp1(&elf)?;
+            if let Ok(status) = status()
+                && let Some(kinds) = status["validity"]["settings"]["kinds"].as_array()
+                && !kinds.iter().any(|named| named.as_str() == Some(kind.name()))
+            {
+                println!("note: the chain takes {}, not {}: a proof it refuses, unless governance names it first", kinds.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" or "), kind.name());
+            }
+
+            let prover = sp1(&elf, kind)?;
             let bytes = input(&range)?;
             let started = std::time::Instant::now();
-            println!("proving with SP1 on this machine: this takes a while");
+            println!("proving with SP1 on this machine, as {}: this takes a while", kind.name());
             let (values, proof) = prover.prove(&bytes)?;
             let proven = ProvenRange::from_public_values(hash()?, &values).ok_or("the program committed to no range")?;
             let file = json!({
@@ -198,10 +209,15 @@ pub fn prove(args: ProveArgs) -> CliResult<()> {
 }
 
 #[cfg(feature = "sp1-prover")]
-fn sp1(elf: &std::path::Path) -> CliResult<crate::proofs::Sp1Prover> {
-    let bytes = std::fs::read(elf).map_err(|err| format!("{}: {err}: build it with cargo prove build in proofs/sp1/program", elf.display()))?;
+fn sp1(elf: &std::path::Path, kind: crate::proofs::ProofKind) -> CliResult<crate::proofs::Sp1Prover> {
+    let bytes = std::fs::read(elf).map_err(|err| format!("{}: {err}: build it with proofs/sp1/build.sh", elf.display()))?;
 
-    Ok(crate::proofs::Sp1Prover::new(bytes)?)
+    Ok(crate::proofs::Sp1Prover::new(bytes, kind)?)
+}
+
+#[cfg(feature = "sp1-prover")]
+fn proof_kind(name: &str) -> Result<crate::proofs::ProofKind, String> {
+    crate::proofs::ProofKind::parse(name).ok_or_else(|| format!("{name} is not {}", crate::proofs::ProofKind::ALL.map(crate::proofs::ProofKind::name).join(", ")))
 }
 
 fn witness_kind(input: &RangeInput) -> String {

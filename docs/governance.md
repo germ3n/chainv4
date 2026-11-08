@@ -463,14 +463,29 @@ chainv4 send --key member.key vote-change --vote yes --change '{"fork":{"type":"
 ## Proofs
 
 `Change::Proofs`, from the `proofs` fork on, names which validity proofs the chain takes: the proof
-system (`sp1-groth16`), the program (its verifying key hash, from `chainv4 prove program`), what is
-minted for each block a proof covers, and how Gateway.sol releases (`proof-or-federation` or
-`both`). Each proof carries the program and the mode at its range's end, so the contracts on
+systems, one or more of `sp1-groth16`, `sp1-plonk` and `sp1-stark`, any of which it takes; the
+program (its verifying key hash, from `chainv4 prove program`, the same for all three); what is
+minted for each block a proof covers, and how Gateway.sol releases (`proof-or-federation`, `both`
+or `federation-only`). Each proof carries the program and the mode at its range's end, so the contracts on
 Ethereum follow them. Until it is decided, the chain takes no proofs. See
 [Validity proofs](proofs.md).
 
 ```sh
-chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kind":"sp1-groth16","program":"0x…","reward_per_block":"0","gateway":"proof-or-federation"}}'
+chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kinds":["sp1-groth16"],"program":"0x…","reward_per_block":"0","gateway":"proof-or-federation"}}'
+```
+
+To switch proof systems, vote the new one in beside the old (`["sp1-groth16","sp1-stark"]`), then
+the old one out, so a prover halfway through a range isn't left with a proof the chain refuses.
+
+## Attestations
+
+`Change::Attestations`, from the `proofs` fork on, says whether validators attest links for
+Ethereum: `true` as genesis has it, or `false`. Off, from the next block, no validator attests and
+blocks carry no attestations, so ChainV4Finality.sol follows the chain no further. It's refused
+while the proofs' gateway mode is `both`. See [Finality](finality.md#turning-attestations-off).
+
+```sh
+chainv4 send --key member.key vote-change --vote yes --change '{"attestations":false}'
 ```
 
 The wallet's Governance page proposes the same under **Fork schedule**: schedule or move a fork by

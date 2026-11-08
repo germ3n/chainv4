@@ -2312,6 +2312,21 @@ contract computes, so they wait for the next regenesis (see the todo).
   so a range in which any contract scans its storage takes the whole state as its witness.
 - **Proofs need history.** A range's input is built from history back to its start: an archive,
   or a `--state-history` window that reaches it.
+- **One program, three kinds.** Groth16, PLONK and the STARK prove the same program, by the same id:
+  the kind is only how the proof is wrapped. The STARK's verifier takes that id as the eight field
+  words it packs (`sp1_stark_key`).
+- **A STARK never reaches Ethereum.** It is too big for an EVM chain to check, so `bridge
+  finality-prove` refuses one. A chain that takes only `sp1-stark` proves itself to its nodes and
+  apps, and its Ethereum contracts stay on attestations and the federation.
+- **A STARK is big,** about 1.27 MB whatever the range. While the chain takes STARK proofs, the API
+  takes bodies with room for one hex-encoded, unless the chain's `max_tx_bytes` is lower.
+- **Attestations off means Ethereum stops, not the chain.** Votes still justify and finalize
+  without them. Only ChainV4Finality.sol and Gateway.sol's proofs depend on them, so set the gateway
+  mode to `federation-only` (or `proof-or-federation`) before turning them off: governance refuses
+  the change under `both`.
+- **SP1's gateways are one per wrapping.** Groth16's and PLONK's are separate contracts, so
+  ChainV4Finality.sol takes a list of them (`--sp1-verifier` again for each). A gateway refuses a
+  frozen route: SP1's PLONK route on Sepolia is frozen at the time of writing.
 
 ## Lua contract tests
 

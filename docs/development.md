@@ -176,8 +176,12 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `node` | The node, the chain and the CLI, which stops cleanly on SIGTERM and SIGINT through `signal-hook`. Brings `chain`. |
 | `chain` | The chain's state transition alone, `Chain` and running blocks, without the node: no libp2p, RocksDB, tokio or rayon, the workers running in turn. What the [validity proofs](proofs.md)' program builds. |
 | `consensus` | Every feature that decides how a block runs, the hashes, keys, engines, finality, governance and `chain` among them, and nothing else: what the proofs' program builds chainv4 with, so it runs blocks as a node of the default build does. A new feature that changes how blocks run joins it. |
-| `sp1` | SP1's validity proofs checked: Groth16 by `sp1-verifier`, pure Rust and `no_std`, for a node's `Tx::Prove` and the apps' proven tip. On by default. |
-| `sp1-prover` | Off by default: proving ranges with SP1's SDK on this machine, `chainv4 prove execute` and `run`. Heavy; no node or app needs it. Its Groth16 wrapping builds gnark with Go (`native-gnark`), once Go's modules are fetched. |
+| `attestations` | Validators attesting links for Ethereum, and checking the attestations votes and blocks carry: what ChainV4Finality.sol follows the chain by, and `GET /attestations`. On by default and part of `consensus`. A build without it follows only a chain that has them off (`Change::Attestations`). |
+| `sp1` | All three of SP1's proof kinds below, on by default. |
+| `sp1-groth16` | SP1's proofs wrapped in Groth16, checked by `sp1-verifier`, pure Rust and `no_std`, for a node's `Tx::Prove` and the apps' proven tip. |
+| `sp1-plonk` | The same wrapped in PLONK. |
+| `sp1-stark` | SP1's compressed STARK, unwrapped: `sp1-verifier`'s recursion verifier, which brings SP1's field and STARK crates. |
+| `sp1-prover` | Off by default: proving ranges with SP1's SDK on this machine, `chainv4 prove execute` and `run`, in any of the three. Heavy; no node or app needs it. Its Groth16 and PLONK wrapping builds gnark with Go (`native-gnark`), once Go's modules are fetched. |
 | `http` | The HTTP API. |
 | `stream` | `GET /stream`, and the node's `--stream`. Needs `http`. |
 | `faucet` | A [faucet](faucet.md) for dev and test chains: `--faucet-key` and `POST /faucet`. Brings `http` and `sha256`; `chainv4 faucet` comes with `client`. |

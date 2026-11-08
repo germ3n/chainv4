@@ -50,7 +50,7 @@ const REFRESH: u64 = 15_000;
 const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
-const KINDS: [&str; 21] = ["name", "bootnodes", "upgrade", "fork", "proofs", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
+const KINDS: [&str; 22] = ["name", "bootnodes", "upgrade", "fork", "proofs", "attestations", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
 
 /// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
 const KIND_LIST_HEIGHT: f32 = 620.0;
@@ -1203,8 +1203,8 @@ fn versions(value: &Value) -> Result<BTreeMap<ChangeKind, u64>, String> {
         .into_iter()
         .map(|kind| match versions.get(kind.name()).and_then(Value::as_u64) {
             Some(version) => Ok((kind, version)),
-            // A node from before locks, engines, forks or proofs has none to change.
-            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines | ChangeKind::Fork | ChangeKind::Proofs) => Ok((kind, 0)),
+            // A node from before locks, engines, forks, proofs or attestations has none to change.
+            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines | ChangeKind::Fork | ChangeKind::Proofs | ChangeKind::Attestations) => Ok((kind, 0)),
             None => Err(format!("it says no version for {}", kind.name())),
         })
         .collect()
@@ -1433,6 +1433,7 @@ fn label(kind: &str) -> &str {
         "upgrade" => "Upgrade",
         "fork" => "Fork schedule",
         "proofs" => "Validity proofs",
+        "attestations" => "Attestations for Ethereum",
         "names" => "Names",
         "token_functions" => "Tokens",
         "evm_spec" => "EVM spec",
@@ -1576,14 +1577,17 @@ fn stated(change: &Change, coin: &Coin) -> String {
         Change::Upgrade(upgrade) => format!("Upgrade: nodes older than {} stop at block {}", upgrade.least, format::thousands(&upgrade.from.to_string())),
         Change::Proofs(settings) => format!(
             "Validity proofs: by {} of the program {}, {} minted for each block proven, Gateway.sol releasing by {}",
-            settings.kind.name(),
+            settings.kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>().join(" or "),
             format::short(&chainv4::structs::hex::to_hex(&settings.program)),
             amount(&settings.reward_per_block),
             match settings.gateway {
                 chainv4::proofs::GatewayMode::ProofOrFederation => "a proof or the federation",
                 chainv4::proofs::GatewayMode::Both => "a proof and the federation both",
+                chainv4::proofs::GatewayMode::FederationOnly => "the federation alone",
             }
         ),
+        Change::Attestations(true) => "Attestations for Ethereum: validators attest each link".to_string(),
+        Change::Attestations(false) => "Attestations for Ethereum: off, so Ethereum's finality contract follows the chain no further".to_string(),
         Change::Fork(change) => {
             let said = change.describe();
 
@@ -2234,9 +2238,10 @@ mod tests {
                 "Fork schedule: Fork faster-lua from block 30000, for chainv4 0.3.0 or newer",
             ),
             (
-                Change::Proofs(chainv4::proofs::ProofSettings { kind: chainv4::proofs::ProofKind::Sp1Groth16, program: [7; 32], reward_per_block: u256::new(1_000_000_000_000_000_000), gateway: chainv4::proofs::GatewayMode::Both }),
-                "Validity proofs: by sp1-groth16 of the program ",
+                Change::Proofs(chainv4::proofs::ProofSettings { kinds: vec![chainv4::proofs::ProofKind::Sp1Groth16, chainv4::proofs::ProofKind::Sp1Stark], program: [7; 32], reward_per_block: u256::new(1_000_000_000_000_000_000), gateway: chainv4::proofs::GatewayMode::Both }),
+                "Validity proofs: by sp1-groth16 or sp1-stark of the program ",
             ),
+            (Change::Attestations(false), "Attestations for Ethereum: off"),
             (
                 Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32])], threshold: 1, approval_epochs: 8, quorum_permille: 500 }),
                 "Governance: a council of 1",

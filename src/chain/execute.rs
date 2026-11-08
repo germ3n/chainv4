@@ -523,7 +523,7 @@ fn authorize(block: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> Resul
 fn brought_by(tx: &Tx) -> Option<&'static crate::params::forks::Fork> {
     match tx {
         Tx::SetRestake { .. } => Some(&crate::params::forks::RESTAKING),
-        Tx::Prove { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_), .. } => Some(&crate::params::forks::PROOFS),
+        Tx::Prove { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_) | crate::governance::Change::Attestations(_), .. } => Some(&crate::params::forks::PROOFS),
         Tx::Multisig { tx, .. } => brought_by(tx),
         _ => None,
     }
@@ -877,8 +877,8 @@ fn prove(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Add
     let db = |err: DbError| Failure::Registry(RegistryError::Db(err));
     let settings = crate::registry::changes::Changes::new(layer).proofs().map_err(db)?.ok_or_else(|| refused("governance named no proof system".to_string()))?;
 
-    if kind != settings.kind {
-        return Err(refused(format!("a {} proof, where the chain takes {} ones", kind.name(), settings.kind.name())));
+    if !settings.takes(kind) {
+        return Err(refused(format!("a {} proof, where the chain takes {}", kind.name(), settings.kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>().join(" or "))));
     }
 
     #[cfg(feature = "secp256k1")]
@@ -1274,7 +1274,14 @@ fn run(
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
                 Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
                 Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),
-                Change::Proofs(settings) => Ok(settings.problem()),
+                // With attestations off, Ethereum takes no more proofs, so a gateway that needs both
+                // would wait on them for good.
+                Change::Proofs(settings) => Changes::new(layer).attestations_at(height + 1).map(|on| {
+                    settings.problem().or((!on && settings.gateway == crate::proofs::GatewayMode::Both).then_some("Gateway.sol cannot need proofs while attestations are off: name proof-or-federation or federation-only"))
+                }),
+                Change::Attestations(on) => Changes::new(layer).proofs().map(|settings| {
+                    (!on && settings.is_some_and(|settings| settings.gateway == crate::proofs::GatewayMode::Both)).then_some("attestations cannot go off while Gateway.sol needs proofs: set the proofs' gateway mode to proof-or-federation or federation-only first")
+                }),
                 Change::Fork(change) => Changes::new(layer).forks().map(|schedule| change.problem(&schedule, height, Some(governance.checkpoint_interval), rules.target_block_ms)),
                 Change::Name(name) => Ok(crate::governance::chain_name_problem(name)),
                 Change::Governance(config) => Ok(governance.config.change_problem(config)),

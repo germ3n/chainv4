@@ -42,6 +42,7 @@ const REJECTED: &[u8] = b"change:rejected";
 const LOCKS: &[u8] = b"change:locks";
 const FORKS: &[u8] = b"change:forks";
 const PROOFS: &[u8] = b"change:proofs";
+const ATTESTATIONS: &[u8] = b"change:attestations";
 
 /// How many changes of one kind were decided, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -87,6 +88,23 @@ pub struct DecidedAt {
     #[document(summary = "Blocks per finality epoch: where a fork scheduled by epoch starts.")]
     pub checkpoint_interval: u64,
 }
+
+#[document(
+    summary = "Whether validators attest for Ethereum, as governance decided last (Change::Attestations): on or off from a height, the block after the one that decided it, and what held before it.",
+    category = "Governance",
+    see_also = "Change::Attestations, Changes::attestations_at",
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+pub struct DecidedAttestations {
+    #[document(summary = "On or off.")]
+    pub on: bool,
+    #[document(summary = "The height it holds from.")]
+    pub from: u64,
+    #[document(summary = "What held below that height.")]
+    pub before: bool,
+}
+
+impl Hashable for DecidedAttestations {}
 
 #[document(
     summary = "The block reward governance decided last, and the height it took effect at: the block after the one that decided it, where its halvings count from.",
@@ -502,6 +520,25 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, PROOFS)
     }
 
+    #[document(parent = "Changes", summary = "Whether validators attest for Ethereum as governance decided last, with the height it holds from; None while it decided nothing, when they do.")]
+    pub fn attestations(&self) -> Result<Option<DecidedAttestations>, DbError> {
+        self.state.get_value(Column::Validators, ATTESTATIONS)
+    }
+
+    #[document(
+        parent = "Changes",
+        summary = "Whether validators attest for Ethereum in the block at a height: on unless governance turned them off by then.",
+        params = { height = "The block's height." },
+    )]
+    pub fn attestations_at(&self, height: u64) -> Result<bool, DbError> {
+        Ok(self.attestations()?.is_none_or(|decided| if height >= decided.from { decided.on } else { decided.before }))
+    }
+
+    #[document(parent = "Changes", summary = "Where whether validators attest is kept in the Validators column, for a light client to prove.")]
+    pub fn attestations_key() -> &'static [u8] {
+        ATTESTATIONS
+    }
+
     #[document(parent = "Changes", summary = "The engines decided last, or None while governance never decided any, when genesis's stand.")]
     pub fn engines(&self) -> Result<Option<Vec<crate::structs::code::Engine>>, DbError> {
         Ok(self.state.get_value::<Engines>(Column::Validators, ENGINES)?.map(|decided| decided.engines))
@@ -794,6 +831,7 @@ impl<'a> Changes<'a> {
             Some(Change::Locks(self.locks()?)),
             Some(Change::Engines(self.engines()?.unwrap_or_else(|| genesis.engines.clone()))),
             self.proofs()?.map(Change::Proofs),
+            Some(Change::Attestations(self.attestations()?.is_none_or(|decided| decided.on))),
         ];
 
         Ok(settings.into_iter().flatten().collect())
@@ -870,6 +908,7 @@ impl<'a> Changes<'a> {
             Change::Dex(dex) => self.dex()?.as_ref() == Some(dex),
             Change::Engines(engines) => self.engines()?.as_ref() == Some(engines),
             Change::Proofs(settings) => self.proofs()?.as_ref() == Some(settings),
+            Change::Attestations(on) => self.attestations()?.is_none_or(|decided| decided.on) == *on,
             Change::Anchoring(settings) => self.anchoring()?.as_ref() == Some(settings),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
@@ -969,6 +1008,14 @@ impl<'a> Changes<'a> {
             // Read by each Tx::Prove, and by a range's proof at its end, for the contracts.
             Change::Proofs(settings) => {
                 self.state.put_value(Column::Validators, PROOFS.to_vec(), &settings);
+
+                decided.consensus
+            }
+            // From the next block, as a block's attestations are checked after its transactions
+            // run: what held at this one is kept for it.
+            Change::Attestations(on) => {
+                let before = self.attestations_at(at.height)?;
+                self.state.put_value(Column::Validators, ATTESTATIONS.to_vec(), &DecidedAttestations { on, from: at.height + 1, before });
 
                 decided.consensus
             }

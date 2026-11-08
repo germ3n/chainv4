@@ -180,10 +180,11 @@ pub enum BridgeAction {
     /// none, under the program governance names, or --program.
     #[cfg(feature = "secp256k1")]
     FinalityDeploy {
-        /// The SP1 verifier gateway proofs are checked by, 0x and 40 hex digits: Succinct's on
-        /// the chain. Without it, the contract takes no proofs.
+        /// An SP1 verifier gateway proofs are checked by, 0x and 40 hex digits: Succinct's on
+        /// the chain. Give it again for each kind the chain proves in, Groth16's gateway and
+        /// PLONK's; a proof stands if any takes it. Without one, the contract takes no proofs.
         #[arg(long)]
-        sp1_verifier: Option<String>,
+        sp1_verifier: Vec<String>,
         /// The program proofs prove, 0x and 64 hex digits, where governance names none yet.
         #[arg(long)]
         program: Option<String>,
@@ -428,7 +429,7 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Sign { from_block } => bridge.sign(*from_block),
         BridgeAction::Relay => bridge.relay(),
         #[cfg(feature = "secp256k1")]
-        BridgeAction::FinalityDeploy { sp1_verifier, program } => bridge.finality_deploy(sp1_verifier.as_deref(), program.as_deref()),
+        BridgeAction::FinalityDeploy { sp1_verifier, program } => bridge.finality_deploy(sp1_verifier, program.as_deref()),
         #[cfg(feature = "secp256k1")]
         BridgeAction::FinalityRelay { contract, every, min_epochs } => bridge.finality_relay(&parse_address(contract)?, *every, *min_epochs),
         #[cfg(feature = "secp256k1")]
@@ -1065,6 +1066,12 @@ impl Bridge {
         }
 
         let mode = u8::try_from(number(&finality, "gatewayMode()", &[])?).map_err(|_| "a gateway mode past 255")?;
+
+        // Federation only: Gateway.sol refuses a proof, so the signatures go alone.
+        if mode == 2 {
+            return Ok((None, Some(mode)));
+        }
+
         let height_of = |nonce: u64| -> CliResult<u64> {
             let values = self.read(gateway, "sent", json!([{ "type": "u64", "value": nonce.to_string() }]))?;
 

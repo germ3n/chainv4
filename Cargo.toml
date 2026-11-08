@@ -16,7 +16,7 @@ members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
 exclude = ["contracts", "explorer", "proofs/sp1/program"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1", "attestations"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -129,16 +129,27 @@ pool = ["node"]
 # Genesis as JSON, and each change under governance (chain::json): what genesis files, the API and
 # the apps read and write.
 json = ["dep:serde_json"]
-# SP1's validity proofs checked: its Groth16 proofs, by sp1-verifier, pure Rust and no_std, for a
-# node's Tx::Prove and the apps' proven tip. Proving them is the CLI's sp1-prover, never a node's.
-sp1 = ["dep:sp1-verifier"]
+# SP1's validity proofs checked, for a node's Tx::Prove and the apps' proven tip, by sp1-verifier,
+# pure Rust and no_std: each kind governance can name is a feature of its own, and sp1 all three.
+# Groth16 and PLONK, its proof wrapped in BN254 as an EVM chain checks it; the STARK, unwrapped and
+# with no trusted setup, which brings SP1's recursion verifier. Proving them is the CLI's
+# sp1-prover, never a node's.
+sp1 = ["sp1-groth16", "sp1-plonk", "sp1-stark"]
+sp1-groth16 = ["dep:sp1-verifier"]
+sp1-plonk = ["dep:sp1-verifier"]
+sp1-stark = ["dep:sp1-verifier", "sp1-verifier/full"]
+# Validators attesting each link with a secp256k1 key for Ethereum, and checking the attestations
+# votes and blocks carry: what ChainV4Finality.sol follows the chain by. Governance turns them off
+# with Change::Attestations; a build without it follows only a chain that has them off, as it
+# cannot check one, and attests nothing.
+attestations = ["secp256k1"]
 # Proving ranges with SP1 on this machine, by hand: chainv4 prove. SP1's SDK, its prover and its
-# Groth16 wrapping, heavy and off by default; no node or app needs it.
-sp1-prover = ["sp1", "chain", "secp256k1", "client", "dep:sp1-sdk"]
+# Groth16 and PLONK wrapping, heavy and off by default; no node or app needs it.
+sp1-prover = ["sp1", "chain", "secp256k1", "client", "dep:sp1-sdk", "dep:bincode"]
 # Everything that decides how a block runs, without the node: what the validity proofs' program
 # builds chainv4 with, so it runs blocks as a node of the default build does. A feature added that
 # changes how blocks run goes here too.
-consensus = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "lvm", "wasm", "evm", "abi", "chain", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "sp1"]
+consensus = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "lvm", "wasm", "evm", "abi", "chain", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "sp1", "attestations"]
 # The chain itself, its state transition, without the node around it: what a validity proof runs.
 chain = ["json", "dep:log", "lvm"]
 # Releases for the apps and tools (docs/updates.md): the signed manifest of the newest chainv4,
@@ -156,6 +167,8 @@ ens-normalize = { version = "=0.1.1", optional = true }
 rocksdb = { version = "0.25.0", optional = true }
 sp1-verifier = { version = "=6.10.0", default-features = false, optional = true }
 sp1-sdk = { version = "=6.10.0", features = ["blocking", "native-gnark"], optional = true }
+# How SP1's STARK proofs are written, as sp1-verifier reads them.
+bincode = { version = "=1.3.3", optional = true }
 # A RocksDB snapshot owned with the database it reads, for the API's point-in-time reads.
 self_cell = { version = "1.2.0", optional = true }
 blake3 = { version = "1.8.7", optional = true }

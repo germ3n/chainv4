@@ -22,7 +22,7 @@ Start a node with `--http ADDR`, such as `127.0.0.1:8080`, to serve the API (`sr
 | 400 | A malformed request, or a transaction the mempool refuses for what it is: invalid, an offer that cannot pay, or a nonce too far past the account's. |
 | 404 | Nothing there, such as a transaction not on the main chain yet. |
 | 409 | A nonce already used, the same transaction already waiting, or one at its sender's nonce that does not raise both prices enough to replace the one waiting. |
-| 413 | A body past room for the chain's largest transaction, hex-encoded: 2 MiB, or more on a chain whose `max_tx_bytes` takes more (`body_cap`). |
+| 413 | A body past room for the chain's largest transaction, hex-encoded: 2 MiB, or more on a chain whose `max_tx_bytes` takes more, or that takes SP1 STARK proofs and names none (`body_cap`). |
 | 429 | A faucet asked again too soon, a client with too many requests in flight already or asking faster than `--http-rate`, with `Retry-After: 1`, or a sender with as many transactions waiting as the node keeps of one. |
 | 500 | The database failed. |
 | 503 | No node behind the API, a full mempool that this offer could not make room in, or a node that stopped. |
@@ -40,7 +40,7 @@ Where the chain stands:
 | `hash` | The chain hash, such as `blake3`. Clients need it to predict contract addresses. |
 | `coin` | The chain's coin as genesis names it: its `symbol` and `decimals`, for showing amounts. |
 | `token_functions` | The functions that make a contract a token on this chain, as genesis names them; `[]` when it keeps no token registry. |
-| `finality` | `null`, or `type`, the kind the tip's epoch runs, `epoch`, `checkpoint_interval`, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
+| `finality` | `null`, or `type`, the kind the tip's epoch runs, `epoch`, `checkpoint_interval`, `attestations`, whether validators attest for Ethereum in the next block, and the `justified` and `finalized` checkpoints, each with `epoch`, `block` and `height`. |
 | `fees` | `null`, or the fee settings in force, governance's or genesis's, as genesis files write them, with `base_price`, what a transaction sent now must offer at least, and `tx_fuel`, the chain's fuel cap per transaction. |
 | `vote_rewards` | Where vote rewards come from: `source` `mint`, or `fees` with the `pool` address and its `balance`. |
 | `max_block_bytes` | The most bytes the next block's transactions may take, encoded, as governance or genesis set it, or `null` for none. |
@@ -1025,8 +1025,9 @@ the explorer.
   sets one for them all, 10 to 10,000; its default is never above it. The apps follow `next` or
   `before` past a short page.
 - **Bodies** are at most `body_cap`: 2 MiB, room for the largest deploy hex-encoded, or room for
-  the chain's `max_tx_bytes` hex-encoded when that is more, as governance's limits stand when the
-  request comes; past it, 413.
+  the chain's `max_tx_bytes` hex-encoded when that is more, or, on a chain that names none and takes
+  SP1 STARK proofs, room for one of those (2 MiB) hex-encoded. Governance's limits and proof
+  settings count as they stand when the request comes; past it, 413.
 - **A JSON-RPC batch at `POST /rpc` holds at most 100 requests** (`--tune rpc.batch`). Each is
   answered in order on the one thread, and one may run a contract under the whole fuel cap, so a
   larger batch is refused with code -32600 rather than letting one body line up far more work than

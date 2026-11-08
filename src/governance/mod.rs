@@ -341,6 +341,9 @@ pub enum Change {
     #[document(summary = "New settings for validity proofs, replacing the last decided: the proof system and program the chain takes proofs of (Tx::Prove), what it mints for each block one covers, and how Gateway.sol releases what left here, which proofs carry to it. From the proofs fork on; until governance decides some, the chain takes no proofs.")]
     #[wincode(tag = 21)]
     Proofs(crate::proofs::ProofSettings),
+    #[document(summary = "Whether validators attest links for Ethereum: on as genesis has it, or off. Off, from the block after the one that decides it, no validator attests, nodes drop attestations from the votes they take, and a block carrying one is invalid, so ChainV4Finality.sol on Ethereum follows the chain no further. Refused while the proofs' gateway mode is both, which would leave Gateway.sol waiting on proofs that can reach it no more. From the proofs fork on.")]
+    #[wincode(tag = 22)]
+    Attestations(bool),
 }
 
 #[document(
@@ -502,6 +505,9 @@ pub enum ChangeKind {
     #[document(summary = "The validity proofs' settings.")]
     #[wincode(tag = 19)]
     Proofs,
+    #[document(summary = "Whether validators attest for Ethereum.")]
+    #[wincode(tag = 20)]
+    Attestations,
 }
 
 impl Hashable for ChangeKind {
@@ -510,7 +516,7 @@ impl Hashable for ChangeKind {
 
 impl ChangeKind {
     #[document(parent = "ChangeKind", summary = "Every kind, in tag order.")]
-    pub const ALL: [ChangeKind; 20] = [
+    pub const ALL: [ChangeKind; 21] = [
         ChangeKind::Consensus,
         ChangeKind::Bootnodes,
         ChangeKind::Names,
@@ -531,9 +537,10 @@ impl ChangeKind {
         ChangeKind::Engines,
         ChangeKind::Fork,
         ChangeKind::Proofs,
+        ChangeKind::Attestations,
     ];
 
-    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork or proofs.")]
+    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork, proofs or attestations.")]
     pub fn name(self) -> &'static str {
         match self {
             ChangeKind::Consensus => "consensus",
@@ -556,6 +563,7 @@ impl ChangeKind {
             ChangeKind::Engines => "engines",
             ChangeKind::Fork => "fork",
             ChangeKind::Proofs => "proofs",
+            ChangeKind::Attestations => "attestations",
         }
     }
 }
@@ -599,10 +607,11 @@ impl Change {
             Change::Engines(_) => ChangeKind::Engines,
             Change::Fork(_) => ChangeKind::Fork,
             Change::Proofs(_) => ChangeKind::Proofs,
+            Change::Attestations(_) => ChangeKind::Attestations,
         }
     }
 
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork or proofs.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork, proofs or attestations.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -627,6 +636,7 @@ impl Change {
             Change::Engines(_) => "engines",
             Change::Fork(_) => "fork",
             Change::Proofs(_) => "proofs",
+            Change::Attestations(_) => "attestations",
         }
     }
 }

@@ -166,12 +166,15 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
     assert_eq!(Keypair::generate(KeyType::Secp256k1).unwrap().public().key_type(), KeyType::Secp256k1);
 
     // Deployed from the genesis checkpoint, trusted, with the set that signs epoch 1, proofs
-    // starting there too, checked by the test verifier under program 5s.
+    // starting there too, checked under program 5s by a list of verifiers as SP1's gateways are:
+    // the first refuses every proof, having no verifyProof, and the test verifier after it takes
+    // them, so a proof stands when any verifier takes it.
     let genesis_header = chain.block_at(0).unwrap().unwrap().header;
+    let Address::Evm(refuses) = deploy(&mut chain, crate::structs::hex::from_hex(include_str!("../../../../contracts/evm/MockFinality.bin").trim()).unwrap()) else { panic!("an EVM contract") };
     let verifier = deploy(&mut chain, crate::structs::hex::from_hex(include_str!("../../../../contracts/evm/MockSp1Verifier.bin").trim()).unwrap());
     let Address::Evm(verifier) = verifier else { panic!("an EVM contract") };
     let constructor = encode_values(
-        &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Address, AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
+        &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
         &[
             AbiValue::Uint(u256::from(crate::crypto::ethereum::chain_id(&chain.genesis()))),
             AbiValue::Uint(u256::ZERO),
@@ -179,7 +182,7 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
             AbiValue::Uint(u256::ZERO),
             AbiValue::FixedBytes(word(&genesis_header.state_root).to_vec()),
             AbiValue::FixedBytes(chain.attesting_set(1).unwrap().unwrap().hash().to_vec()),
-            AbiValue::Address(verifier),
+            AbiValue::Array(vec![AbiValue::Address(refuses), AbiValue::Address(verifier)]),
             AbiValue::FixedBytes(word(&chain.genesis()).to_vec()),
             AbiValue::FixedBytes([5; 32].to_vec()),
             AbiValue::Uint(u256::ZERO),
@@ -275,6 +278,7 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
     assert!(call(&mut chain, contract, prove(&other_root, [5; 32], 4)).is_err(), "a root the validators did not sign");
 
     // Taken: the tip moves, the withdrawals root is kept, the program and mode follow chainv4's.
+    assert_eq!(read(&mut chain, contract, "verifierCount()"), u256::from(2u8));
     call(&mut chain, contract, prove(&range, [5; 32], 4)).unwrap();
     assert_eq!(read(&mut chain, contract, "provenHeight()"), u256::from(4 * INTERVAL));
     assert_eq!(read(&mut chain, contract, "program()"), u256::from_be_bytes([6; 32]));
@@ -299,4 +303,98 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
 
     // The same range again starts behind the tip now.
     assert!(call(&mut chain, contract, prove(&range, [6; 32], 4)).is_err());
+}
+
+/// FFG of the three voters, the first two attesting, governed by the dev key alone, with the
+/// proofs fork from a height.
+fn governed(fork: u64) -> Chain {
+    let attesters = attesters();
+    let FinalityConfig::Ffg(config) = super::voting::ffg() else { unreachable!() };
+    let validators = config.validators.iter().enumerate().map(|(at, validator)| GenesisValidator { attester: attesters.get(at).map(address_of), ..validator.clone() }).collect();
+    let genesis = Genesis {
+        finality: Some(FinalityConfig::Ffg(FfgConfig { validators, ..config })),
+        governance: Some(crate::governance::GovernanceConfig::Council { members: vec![dev().public().address()], threshold: 1, approval_epochs: 8, quorum_permille: 0 }),
+        directory_admin: None,
+        forks: crate::params::forks::ForkSchedule { forks: vec![crate::params::forks::ScheduledFork { name: crate::params::forks::PROOFS.name.to_string(), height: fork, epoch: None, least: None }], lead: None },
+        ..genesis_with(None)
+    };
+
+    Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap()
+}
+
+/// Votes Yes on a change as the council of one, in the next block, carrying the unpaid
+/// justifications: what the vote came to, None when the block left it out.
+fn vote_on(chain: &mut Chain, change: crate::governance::Change) -> Option<Result<Effect, String>> {
+    let version = crate::registry::changes::Changes::new(&chain.state()).version_of(change.kind()).unwrap();
+    let tx = SignedTx::sign(Tx::VoteChange { version, change, vote: crate::governance::ChangeVote::Yes }, super::voting::nonce(chain, &dev()), FeeOffer::NONE, &dev(), &chain.genesis());
+    let proofs = chain.unpaid_proofs().unwrap();
+
+    advance(chain, vec![tx], proofs).unwrap().first().map(|receipt| receipt.result.clone().map_err(|failure| failure.to_string()))
+}
+
+fn decided(answer: Option<Result<Effect, String>>) -> bool {
+    matches!(answer, Some(Ok(Effect::Decided { .. })))
+}
+
+#[test]
+fn governance_turns_attestations_off_and_votes_and_blocks_then_carry_none() {
+    use crate::governance::Change;
+    use crate::proofs::{GatewayMode, ProofKind, ProofSettings};
+
+    let mut chain = governed(INTERVAL);
+    let at = |chain: &Chain| crate::registry::changes::Changes::new(&chain.state()).attestations_at(chain.tip().height + 1).unwrap();
+    let proofs = |gateway: GatewayMode| Change::Proofs(ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::ZERO, gateway });
+
+    // Before the fork the change is no transaction; on until governance says otherwise.
+    assert_eq!(vote_on(&mut chain, Change::Attestations(false)), None, "left out of the block");
+    assert!(at(&chain));
+    grow_to(&mut chain, INTERVAL);
+
+    // Not off while Gateway.sol needs proofs, which could reach it no more.
+    assert!(decided(vote_on(&mut chain, proofs(GatewayMode::Both))));
+    let refused = vote_on(&mut chain, Change::Attestations(false));
+    assert!(refused.as_ref().is_some_and(|answer| answer.as_ref().is_err_and(|why| why.contains("Gateway.sol needs proofs"))), "{refused:?}");
+    assert!(decided(vote_on(&mut chain, proofs(GatewayMode::FederationOnly))));
+    assert!(decided(vote_on(&mut chain, Change::Attestations(false))));
+    assert!(!at(&chain));
+    let refused = vote_on(&mut chain, proofs(GatewayMode::Both));
+    assert!(refused.as_ref().is_some_and(|answer| answer.as_ref().is_err_and(|why| why.contains("attestations are off"))), "{refused:?}");
+    assert_eq!(crate::params::json::change_json(&Change::Attestations(false)), serde_json::json!({ "attestations": false }));
+    assert_eq!(crate::params::json::change_from_json(&serde_json::json!({ "attestations": false })), Ok(Change::Attestations(false)));
+
+    // Off: a vote's attestation, its attester's own, is dropped as the vote is taken, so the
+    // justification and the block that carries it hold none.
+    grow_to(&mut chain, 2 * INTERVAL + 1);
+    let [first, second] = attesters();
+    let voters = voters();
+    let attested = [attesting(&chain, &voters[0], &first), attesting(&chain, &voters[1], &second)];
+    let link = chain.attested_link(attested[0].vote.source, attested[0].vote.target).unwrap().unwrap();
+    for vote in attested {
+        chain.add_vote(vote).unwrap();
+    }
+    let unpaid = chain.unpaid_proofs().unwrap();
+    let justification = unpaid.iter().find(|proof| proof.target.epoch == 2).expect("epoch 2 justified");
+    assert!(justification.votes.iter().all(|vote| vote.attestation.is_none()), "dropped");
+
+    // A block carrying one anyway is invalid.
+    let mut carrying = unpaid.clone();
+    let place = carrying.iter().position(|proof| proof.target.epoch == 2).unwrap();
+    let voter = carrying[place].votes.iter().position(|vote| vote.vote.voter == voters[0].public()).unwrap();
+    carrying[place].votes[voter].attestation = Some(link.sign(&secret(&first)));
+    let why = advance(&mut chain, Vec::new(), carrying).expect_err("refused");
+    assert!(why.to_string().contains("attestations are off"), "{why}");
+    advance(&mut chain, Vec::new(), unpaid).unwrap();
+
+    // On again, from the next block: attestations ride and count as before.
+    assert!(decided(vote_on(&mut chain, Change::Attestations(true))));
+    assert!(at(&chain));
+    grow_to(&mut chain, 3 * INTERVAL + 1);
+    for (voter, attester) in voters[..2].iter().zip([&first, &second]) {
+        let vote = attesting(&chain, voter, attester);
+        chain.add_vote(vote).unwrap();
+    }
+    let unpaid = chain.unpaid_proofs().unwrap();
+    let justification = unpaid.iter().find(|proof| proof.target.epoch == 3).expect("epoch 3 justified");
+    assert!(justification.votes.iter().all(|vote| vote.attestation.is_some()), "kept");
+    advance(&mut chain, Vec::new(), unpaid).unwrap();
 }

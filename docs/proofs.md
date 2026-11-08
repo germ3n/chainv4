@@ -11,7 +11,7 @@ It comes in three stages:
 | Stage | What it gives | Where |
 | --- | --- | --- |
 | 1. Finality on Ethereum | Validators' attesters sign each link with secp256k1. ChainV4Finality.sol follows justified and final checkpoints and their state roots. | [Finality](finality.md#attestations-finality-followed-on-ethereum) |
-| 2. State roots by proof | An SP1 proof that a range of blocks ran to its end's state root. The chain takes it as `Tx::Prove` and pays for it, and ChainV4Finality.sol takes it too. | This page |
+| 2. State roots by proof | An SP1 proof that a range of blocks ran to its end's state root, in Groth16, PLONK or as SP1's STARK. The chain takes it as `Tx::Prove` and pays for it, and ChainV4Finality.sol takes the first two. | This page |
 | 3. Bridges and light clients by proof | Gateway.sol releases withdrawals by a proof of the range they left in. The apps check the latest proof themselves. | This page, [Bridges](bridges.md#withdrawals-by-proof) |
 
 Bitcoin can't check a zk proof, so the Bitcoin gateway stays with the federation. BitVM-style fraud
@@ -93,6 +93,7 @@ chainv4 prove status --node https://…          # settings, the proven tip, the
 chainv4 prove check  --node https://…          # the range from the proven tip to it, run off the node: a moment
 chainv4 prove execute --node https://…         # in SP1, unproven: the cycles it takes
 chainv4 prove run --node https://… --out p.json   # proven, in Groth16: slow, and heavy on memory
+chainv4 prove run --node https://… --kind sp1-stark --out p.json   # or as the STARK, for the chain alone
 chainv4 send --key k.key prove --proof p.json  # to the chain
 chainv4 bridge … finality-prove 0x<ChainV4Finality.sol> --proof p.json   # to Ethereum
 ```
@@ -110,17 +111,20 @@ From the `proofs` fork ([Forks](governance.md#forks)):
   at. The fork's first block starts the **proven tip** at its parent: the state the first proof
   runs from (`proofs::ProvenChain`).
 - **Governance names the proof system and program** with `Change::Proofs`, along with what is
-  minted for each block a proof covers, and how Gateway.sol releases:
+  minted for each block a proof covers, and how Gateway.sol releases (`proof-or-federation`,
+  `both` or `federation-only`, [Bridges](bridges.md#withdrawals-by-proof)):
 
   ```sh
-  chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kind":"sp1-groth16","program":"0x…","reward_per_block":"1000000000000000","gateway":"proof-or-federation"}}'
+  chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kinds":["sp1-groth16"],"program":"0x…","reward_per_block":"1000000000000000","gateway":"proof-or-federation"}}'
   ```
 
-  Until it does, the chain takes no proofs. The settings are lockable like any other.
+  `kinds` is a set: the chain takes a proof of any kind listed (see [Proof kinds](#proof-kinds)).
+  Until governance decides one, the chain takes no proofs. The settings are lockable like any other.
 - **`Tx::Prove`** takes a proof of the range from the proven tip to a later checkpoint this chain
-  recorded, of this genesis, by the kind and program governance named. It moves the tip to the
+  recorded, of this genesis, by a kind governance named and its program. It moves the tip to the
   range's end and mints the sender `reward_per_block` for each block it covers. Each node checks it
-  with the kind's verifier: SP1's Groth16 by `sp1-verifier`, a few milliseconds of pairings.
+  with the kind's verifier in `sp1-verifier`. For Groth16 and PLONK that's a few milliseconds of
+  pairings; the STARK takes longer.
 - **Before the fork,** a block holding `Tx::Prove` or `Change::Proofs` is invalid, as it is to a
   release from before it.
 
@@ -136,9 +140,18 @@ ChainV4Finality.sol takes proofs beside the attestations:
   gateway under its program. It moves the tip, keeps the range's withdrawals root by its end block,
   lists the range's end (`provenEnds`, `provenBlockAt`), and takes the program and gateway mode
   from the proof.
-- **Deploying:** `chainv4 bridge finality-deploy --sp1-verifier 0x… [--program 0x…]` starts proofs at
-  the chain's proven tip, or at its trusted checkpoint while there is none. Without a verifier it
-  takes no proofs.
+- **Deploying:** `chainv4 bridge finality-deploy --sp1-verifier 0x… [--sp1-verifier 0x…] [--program 0x…]`
+  starts proofs at the chain's proven tip, or at its trusted checkpoint while there is none. It
+  takes a list of SP1's gateways, one for each wrapping (SP1 keeps Groth16's and PLONK's apart), and
+  a proof stands if any of them takes it. Without one it takes no proofs. It never takes a STARK.
+
+## Turning Ethereum's side off
+
+Governance can stop Ethereum following the chain: `Change::Attestations` set to `false` ends the
+validators' attestations from the next block, so ChainV4Finality.sol finalizes nothing new and
+takes no more proofs. Set the gateway mode to `federation-only` first, by a proof that carries it:
+governance refuses attestations off under `both`. The chain still takes proofs itself, STARKs
+included. See [Finality](finality.md#turning-attestations-off).
 
 ## Light clients
 
@@ -152,12 +165,40 @@ The latest proof proves itself. An app asks any node for it (`GET /validity`) an
 Then it knows the chain is proven up to there. Votes still carry it past that, to the newest
 blocks.
 
+## Proof kinds
+
+A proof kind is how a proof is made and wrapped (`ProofKind`, with a pinned tag). Each one has its
+own default-on feature, and `sp1` turns on all three:
+
+| Kind | Feature | Proof | Trusted setup | Checked by |
+| --- | --- | --- | --- | --- |
+| `sp1-groth16` (0) | `sp1-groth16` | about 260 bytes | the circuit's own, from SP1's ceremony | the chain, the apps, Ethereum |
+| `sp1-plonk` (1) | `sp1-plonk` | under a kilobyte | the universal one all PLONK circuits share | the chain, the apps, Ethereum |
+| `sp1-stark` (2) | `sp1-stark` | about 1.27 MB, whatever the range | none | the chain and the apps only |
+
+- **One program for all three.** The kind is only how SP1 wraps the proof, so the program id is the
+  same for each. The STARK's verifier takes it as the eight field words it packs.
+- **The chain takes a set.** `Change::Proofs` lists the kinds, and a proof of any of them is taken.
+  To switch, vote the new kind in beside the old one, then the old one out. Then nobody is left
+  holding a proof of a range that the chain has stopped taking.
+- **Ethereum takes what SP1's gateways route.** Groth16 and PLONK each have a gateway contract of
+  their own, and ChainV4Finality.sol asks each gateway in its list. A STARK can't go there: no EVM
+  chain can afford to check one. `bridge finality-prove` refuses one, and a chain that proves only
+  in STARKs leaves its Ethereum contracts on attestations.
+- **Size:** `ProofKind::max_bytes` caps each kind in `Tx::Prove`: 4 KiB for the wrapped kinds and
+  2 MiB for the STARK. While the chain takes STARK proofs and names no `max_tx_bytes`, the API takes
+  bodies big enough for one hex-encoded. A chain that sets a `max_tx_bytes` must leave room for one.
+- **Cost, measured:** a STARK proof of one block took 246 s and 26 GB of memory on an M-series Mac's
+  CPU, and checking it took 42 ms.
+- **Proving:** `chainv4 prove run --kind`. Groth16 and PLONK download SP1's circuit files the first
+  time (6.2 GB for Groth16, 2.3 GB for PLONK, for SP1 6.10), and the STARK needs none.
+
 ## Choosing another zkVM
 
-Nothing above is SP1's but the program crate, the `sp1` and `sp1-prover` features, and one
-`ProofKind`. A proof system is a `ProofKind`, with a pinned tag, and the `ProofSystem` that checks
-its proofs. A prover is a `Prover`. Another zkVM is another kind and feature beside SP1's, and
-governance switches the chain to it with `Change::Proofs`.
+Nothing above is SP1's but the program crate, the SP1 features and the SP1 `ProofKind`s. A proof
+system is a `ProofKind` and the `ProofSystem` that checks its proofs. A prover is a `Prover`. Another
+zkVM is another kind and feature beside SP1's, and governance brings it in with `Change::Proofs`
+beside the kinds in force.
 
 ## What to keep in mind
 
@@ -170,4 +211,5 @@ governance switches the chain to it with `Change::Proofs`.
 - **Scans make big witnesses.** A range in which any contract scans its storage carries the whole
   state. Proving is slower then, though no less sound.
 - **The proven tip is chain state.** A range that holds a `Tx::Prove` proves it too, the proof
-  checked inside the zkVM by the same verifier.
+  checked inside the zkVM by the same verifier. Checking a STARK in there costs far more cycles
+  than checking a wrapped proof.

@@ -1278,31 +1278,44 @@ fn fork_change_from_json(value: &Value) -> Result<crate::params::forks::ForkChan
     Ok(change)
 }
 
-/// Validity proofs' settings as JSON: { "kind": "sp1-groth16", "program": "0x…32 bytes",
+/// Validity proofs' settings as JSON: { "kinds": ["sp1-groth16", …], "program": "0x…32 bytes",
 /// "reward_per_block": "…", "gateway": "proof-or-federation" or "both" }, the reward a whole
 /// amount in the coin's smallest units.
 pub fn proof_settings_json(settings: &crate::proofs::ProofSettings) -> Value {
     json!({
-        "kind": settings.kind.name(),
+        "kinds": settings.kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>(),
         "program": crate::structs::hex::to_hex(&settings.program),
         "reward_per_block": settings.reward_per_block.to_string(),
         "gateway": settings.gateway.name(),
     })
 }
 
-/// Validity proofs' settings from JSON, as proof_settings_json writes them.
+/// Validity proofs' settings from JSON, as proof_settings_json writes them, the kinds in any order
+/// but each once.
 pub fn proof_settings_from_json(value: &Value) -> Result<crate::proofs::ProofSettings, String> {
+    use crate::proofs::ProofKind;
+
     let mut fields = Fields::of(value, "proofs")?;
-    let kind = fields.text("kind")?;
-    let kind = crate::proofs::ProofKind::parse(&kind).ok_or_else(|| format!("proofs.kind: {kind} is not {}", crate::proofs::ProofKind::ALL.map(crate::proofs::ProofKind::name).join(" or ")))?;
+    let mut kinds = Vec::new();
+    for kind in fields.strings("kinds")? {
+        let kind = ProofKind::parse(&kind).ok_or_else(|| format!("proofs.kinds: {kind} is not {}", ProofKind::ALL.map(ProofKind::name).join(" or ")))?;
+        if kinds.contains(&kind) {
+            return Err(format!("proofs.kinds: {} twice", kind.name()));
+        }
+        kinds.push(kind);
+    }
+    if kinds.is_empty() {
+        return Err("proofs.kinds: name at least one".to_string());
+    }
+    kinds.sort_by_key(|kind| ProofKind::ALL.iter().position(|known| known == kind));
     let program = fields.text("program")?;
     let program: [u8; 32] = crate::structs::hex::from_hex(&program).and_then(|bytes| bytes.try_into().ok()).ok_or("proofs.program: 32 bytes of hex")?;
     let reward_per_block = fields.amount("reward_per_block")?;
     let gateway = fields.text("gateway")?;
-    let gateway = crate::proofs::GatewayMode::parse(&gateway).ok_or_else(|| format!("proofs.gateway: {gateway} is not proof-or-federation or both"))?;
+    let gateway = crate::proofs::GatewayMode::parse(&gateway).ok_or_else(|| format!("proofs.gateway: {gateway} is not proof-or-federation, both or federation-only"))?;
     fields.done()?;
 
-    Ok(crate::proofs::ProofSettings { kind, program, reward_per_block, gateway })
+    Ok(crate::proofs::ProofSettings { kinds, program, reward_per_block, gateway })
 }
 
 /// The finality kinds this build has, for error messages.
@@ -1390,6 +1403,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::Upgrade(upgrade) => json!({ "upgrade": { "least": upgrade.least.to_string(), "from": upgrade.from } }),
         Change::Fork(change) => json!({ "fork": fork_change_json(change) }),
         Change::Proofs(settings) => json!({ "proofs": proof_settings_json(settings) }),
+        Change::Attestations(on) => json!({ "attestations": on }),
         Change::Name(name) => json!({ "name": name }),
         Change::Governance(config) => json!({ "governance": governance_json(config) }),
         Change::TokenFunctions(functions) => json!({ "token_functions": functions }),
@@ -1486,6 +1500,7 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
         }
         "fork" => Change::Fork(fork_change_from_json(value)?),
         "proofs" => Change::Proofs(proof_settings_from_json(value)?),
+        "attestations" => Change::Attestations(value.as_bool().ok_or("attestations: true or false")?),
         "upgrade" => {
             let mut fields = Fields::of(value, "upgrade")?;
             let least = fields.text("least")?.parse().map_err(|why| format!("upgrade.least: {why}"))?;

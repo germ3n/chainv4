@@ -80,6 +80,8 @@ pub enum Control {
     Version,
     /// One of a few.
     Choice(Options),
+    /// Some of a few, at least one: written as a list of their names, in the order listed.
+    Choices(Options),
     /// One of a few, or null, named off: what genesis set, say.
     MaybeChoice { off: &'static str, options: Options },
     /// A whole number, or null: on or off, named, with the number beside on.
@@ -152,8 +154,8 @@ const FINALITIES: Options = &[("ffg", "FFG"), ("authority", "Authority"), ("dept
 const VOTE_REWARD_SOURCES: Options = &[("mint", "Minted"), ("fees", "Reward pool")];
 const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, by signers")];
 const GOVERNANCES: Options = &[("council", "A council"), ("electorate", "Finality's voters")];
-const PROOF_KINDS: Options = &[("sp1-groth16", "SP1, wrapped in Groth16")];
-const GATEWAY_MODES: Options = &[("proof-or-federation", "A proof, or the federation's signatures"), ("both", "A proof and the federation's signatures")];
+const PROOF_KINDS: Options = &[("sp1-groth16", "SP1 in Groth16"), ("sp1-plonk", "SP1 in PLONK"), ("sp1-stark", "SP1's STARK, chain only")];
+const GATEWAY_MODES: Options = &[("proof-or-federation", "A proof, or the federation's signatures"), ("both", "A proof and the federation's signatures"), ("federation-only", "The federation's signatures alone")];
 const EVM_SPECS: Options = &[("shanghai", "Shanghai"), ("cancun", "Cancun"), ("prague", "Prague"), ("osaka", "Osaka")];
 
 const VALIDATOR: &[Column] = &[Column { name: "account", label: "Account", cell: Cell::Account }, Column { name: "voter", label: "Voting key", cell: Cell::Key }, Column { name: "bond", label: "Bond", cell: Cell::Amount }, Column { name: "attester", label: "Attester, for Ethereum", cell: Cell::MaybeEvm }];
@@ -197,7 +199,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("from", "From block", "Must be ahead of the block that decides it.", Control::Whole),
         ],
         "proofs" => vec![
-            field("kind", "Proof system", "The zkVM and wrapping proofs are made with.", Control::Choice(PROOF_KINDS)),
+            field("kinds", "Proof systems", "The kinds of proof the chain takes, any of them. Groth16 and PLONK go to Ethereum too; the STARK needs no trusted setup but only the chain checks it. To switch, vote the new one in beside the old, then the old one out.", Control::Choices(PROOF_KINDS)),
             field("program", "Program", "Its verifying key hash, 0x and 64 hex digits, as chainv4 prove program prints it. Each release that runs blocks otherwise is another.", Control::Text),
             field("reward_per_block", "Reward a block proven", "Minted to whoever proves, for each block a proof covers. None pays nothing.", Control::Amount),
             field("gateway", "Gateway.sol releases by", "How withdrawals to EVM chains arrive: each proof carries this to Ethereum.", Control::Choice(GATEWAY_MODES)),
@@ -406,6 +408,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("btc.repay_pct", "A release repays what children cost, up to this percent of its fee", "0 never repays.", Control::Whole).under("Bitcoin").when(WHEN_BTC).most(100),
             field("btc.repay_most", "The most one withdrawal repays of it, in sats", "Within what it agreed to lose.", Control::Whole).under("Bitcoin").when(WHEN_BTC),
         ],
+        "attestations" => vec![field("", "Validators attest for Ethereum", "Off, no validator attests links any more and blocks carry no attestations, so ChainV4Finality.sol on Ethereum follows the chain no further. Not while the proofs' gateway mode is both.", Control::Flag { off: "Off", on: "On" })],
         "locks" => vec![field("", "Paths to lock", "Each a setting no vote may change from then on, such as reward or anchoring.enforce. Nothing unlocks one, and a lock on locks freezes the set.", Control::List(Line::Path))],
         "directory" => vec![
             field("gateway", "The bridges' gateway", "", Control::MaybeContract),
@@ -433,7 +436,8 @@ pub fn defaults(kind: &str) -> Value {
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
         "fork" => json!({ "type": "schedule", "name": "", "height": null, "epoch": null, "least": "", "blocks": null }),
-        "proofs" => json!({ "kind": "sp1-groth16", "program": "", "reward_per_block": "0", "gateway": "proof-or-federation" }),
+        "proofs" => json!({ "kinds": ["sp1-groth16"], "program": "", "reward_per_block": "0", "gateway": "proof-or-federation" }),
+        "attestations" => json!(true),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),
         "fees" => json!({
             "block_gas_limit": 50_000_000,

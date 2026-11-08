@@ -41,9 +41,9 @@ tls = ["ureq/rustls"]
 # an index on a shelf, in files or in IndexedDB (src/blocks.rs, src/shelf.rs): what the wallet and the
 # explorer read a chain by when told to rest on nothing else. Off by default, as chainv4 is C by way of
 # blake3 on Android, which the ui workflow has no sysroot for.
-# Validity proofs checked here (src/validity.rs): the latest proof a node gives, by SP1's verifier,
+# Validity proofs checked here (src/validity.rs): the latest proof a node gives, by SP1's verifier for its kind,
 # pure Rust, so the chain's proven tip is the app's own finding.
-validity = ["dep:chainv4", "chainv4/sp1"]
+validity = ["dep:chainv4", "chainv4/sp1", "dep:getrandom02"]
 blocks = ["dep:chainv4", "dep:serde", "dep:wincode", "web-sys/IdbFactory", "web-sys/IdbDatabase", "web-sys/IdbOpenDbRequest", "web-sys/IdbRequest", "web-sys/IdbObjectStore", "web-sys/IdbTransaction", "web-sys/IdbTransactionMode", "web-sys/DomException", "web-sys/DomStringList", "web-sys/Event", "web-sys/EventTarget"]
 # Reading a transfer that left a bridge's gateway back as the signers signed it (src/bridge.rs),
 # as both apps' Bridge pages do. Off by default, for blocks' reason.
@@ -84,6 +84,9 @@ ehttp = { version = "0.7.2", features = ["streaming"] }
 # Biometrics in the browser: a passkey, through WebAuthn and its PRF extension, whose output wraps
 # the secret.
 getrandom = { version = "0.4", features = ["wasm_js"] }
+# SP1's STARK verifier reaches getrandom 0.2 through its field crates, which needs this to build for
+# the browser, though checking a proof draws nothing random.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"], optional = true }
 js-sys = "0.3.85"
 wasm-bindgen = "0.2.108"
 web-sys = { version = "0.3.85", features = ["Window", "Navigator", "CredentialsContainer", "Location"] }

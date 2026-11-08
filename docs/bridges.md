@@ -199,7 +199,11 @@ Once Gateway.sol follows a ChainV4Finality.sol, a transfer from chainv4 can also
 - **The mode,** as chainv4's governance sets it in `Change::Proofs` and each proof carries:
   - `proof-or-federation`: a proof alone, or the federation's signatures through `deliver`
     while the range is not proven yet;
-  - `both`: a proof and the signatures together, and `deliver` alone is refused.
+  - `both`: a proof and the signatures together, and `deliver` alone is refused;
+  - `federation-only`: the federation's signatures alone, as before proofs, and `deliverProven` is
+    refused. The last proof Ethereum takes carries it there. It's the mode to set before
+    attestations go off ([Finality](finality.md#turning-attestations-off)), as no proof reaches
+    Ethereum after that.
 - **Following a finality:** `chainv4 bridge … gateway-finality 0x<Gateway.sol> 0x<ChainV4Finality.sol>`,
   by Gateway.sol's owner, once. After that only the federation's signatures replace it
   (`replaceFinality`), so no single key picks what proves withdrawals.

@@ -16,17 +16,18 @@
 // It trusts what two thirds of chainv4's validators sign, as chainv4's own light clients do: what
 // it adds is that nothing else is trusted, no federation and no relayer. Anyone may submit a link.
 //
-// Validity proofs check what they sign. A proof, SP1's checked by SP1's verifier, shows that every
+// Validity proofs check what they sign. A proof, SP1's checked by SP1's verifiers, shows that every
 // block from the proven tip to a final checkpoint ran by chainv4's rules, from the tip's state root
 // to the checkpoint's: once one is taken, a checkpoint's state root is no longer only the
 // validators' word. Each proof also gives the root of what left chainv4 through its gateway in its
 // range, which Gateway.sol releases withdrawals by, and the program and gateway mode chainv4's
 // governance names, which this contract follows.
 //
-// Built with: solc --evm-version prague --optimize --bin --abi ChainV4Finality.sol
+// Built with: solc --evm-version prague --optimize --via-ir --bin --abi ChainV4Finality.sol
 pragma solidity ^0.8.24;
 
-/// SP1's verifier, or its gateway, which routes a proof to the verifier of its version.
+/// SP1's verifier, or its gateway, which routes a proof to the verifier of its version: SP1 keeps a
+/// gateway for each wrapping, Groth16 and PLONK.
 interface ISP1Verifier {
     function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
 }
@@ -59,9 +60,10 @@ contract ChainV4Finality {
     mapping(uint256 => bytes32) public stateRootAt;
     mapping(uint256 => bool) public finalAt;
 
-    /// What checks validity proofs, the genesis id they are of, and the program they prove, as
-    /// chainv4's governance names it: zero for none yet, when no proof is taken.
-    ISP1Verifier public immutable verifier;
+    /// What checks validity proofs, any one of them: SP1's gateways, one for each kind of proof
+    /// this chain takes, set at deployment. Then the genesis id they are of, and the program they
+    /// prove, as chainv4's governance names it: zero for none yet, when no proof is taken.
+    ISP1Verifier[] public verifiers;
     bytes32 public immutable genesis;
     bytes32 public program;
 
@@ -90,7 +92,8 @@ contract ChainV4Finality {
     /// Starts from a checkpoint the deployer trusts as final, and the hash of the attesting set
     /// that signs the next link: what a chainv4 node it trusts says. Proofs start from the proven
     /// point given, which chainv4 keeps as its own proven tip, under the program given, both zero
-    /// while chainv4 takes no proofs; and are checked by the SP1 verifier given.
+    /// while chainv4 takes no proofs; and are checked by the SP1 verifiers given, a proof standing
+    /// if any of them takes it: none, and no proof is taken.
     constructor(
         uint256 chainId_,
         uint256 epoch,
@@ -98,7 +101,7 @@ contract ChainV4Finality {
         uint256 height,
         bytes32 stateRoot,
         bytes32 setHash_,
-        ISP1Verifier verifier_,
+        ISP1Verifier[] memory verifiers_,
         bytes32 genesis_,
         bytes32 program_,
         uint256 provenHeight_,
@@ -107,7 +110,7 @@ contract ChainV4Finality {
     ) {
         chainId = chainId_;
         setHash = setHash_;
-        verifier = verifier_;
+        verifiers = verifiers_;
         genesis = genesis_;
         program = program_;
         provenHeight = provenHeight_;
@@ -192,21 +195,37 @@ contract ChainV4Finality {
         }
     }
 
+    /// How many verifiers it has, which verifiers(i) lists.
+    function verifierCount() external view returns (uint256) {
+        return verifiers.length;
+    }
+
+    /// Whether any verifier takes the proof under the program: each is asked in turn, as each of
+    /// SP1's gateways refuses a proof of another kind.
+    function verified(bytes calldata publicValues, bytes calldata proof) internal view returns (bool) {
+        for (uint256 i = 0; i < verifiers.length; i++) {
+            try verifiers[i].verifyProof(program, publicValues, proof) {
+                return true;
+            } catch {}
+        }
+        return false;
+    }
+
     /// Takes a validity proof of the range from the proven tip to the final checkpoint of an epoch,
     /// whose public values say so: eleven words, chainId, genesis, startHeight, startBlock,
     /// startRoot, endHeight, endBlock, endRoot, withdrawals, program, gatewayMode. The end must be
     /// the checkpoint this contract finalized, with its height and state root, so the proof shows
     /// that the state root the validators signed is the one the blocks come to.
     function prove(bytes calldata publicValues, bytes calldata proof, uint256 epoch) external {
-        require(program != bytes32(0) && address(verifier) != address(0), "no program to prove");
+        require(program != bytes32(0) && verifiers.length > 0, "no program to prove");
         require(publicValues.length == 352, "eleven words of public values");
         bytes32[11] memory v = abi.decode(publicValues, (bytes32[11]));
         require(uint256(v[0]) == chainId && v[1] == genesis, "a proof of another chain");
         require(uint256(v[2]) == provenHeight && v[3] == provenBlock && v[4] == provenRoot, "a range from elsewhere than the proven tip");
         require(finalAt[epoch] && blockAt[epoch] == v[6] && heightAt[epoch] == uint256(v[5]) && stateRootAt[epoch] == v[7], "a range that ends at no final checkpoint here");
         require(uint256(v[5]) > provenHeight, "a range that ends after it starts");
-        require(uint256(v[10]) <= 1, "no such gateway mode");
-        verifier.verifyProof(program, publicValues, proof);
+        require(uint256(v[10]) <= 2, "no such gateway mode");
+        require(verified(publicValues, proof), "no verifier here takes the proof");
 
         provenHeight = uint256(v[5]);
         provenBlock = v[6];

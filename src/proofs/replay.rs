@@ -212,8 +212,8 @@ pub fn replay(input: &RangeInput) -> Result<ProvenRange, ReplayError> {
         start: end_of(start),
         end: end_of(&ran.end),
         withdrawals: withdrawals_root(&ran.withdrawals),
-        program: ran.settings.map_or([0; 32], |settings| settings.program),
-        gateway: ran.settings.map_or(GatewayMode::default(), |settings| settings.gateway),
+        program: ran.settings.as_ref().map_or([0; 32], |settings| settings.program),
+        gateway: ran.settings.as_ref().map_or(GatewayMode::default(), |settings| settings.gateway),
     })
 }
 

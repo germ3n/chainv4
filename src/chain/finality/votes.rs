@@ -121,6 +121,20 @@ impl Hashable for OwnVotes {}
 
 /// Where a counted vote lives: by target epoch, so a scan visits them oldest first, then voter.
 /// A voter has at most one vote counted per epoch; a second is evidence instead.
+/// Whether validators attest in the next block, as governance has it at the tip: while off, a vote
+/// is taken without its attestation, which its signature does not cover.
+fn attesting(chain: &View) -> Result<bool, DbError> {
+    crate::registry::changes::Changes::new(&chain.state()).attestations_at(chain.tip().height + 1)
+}
+
+/// A vote as this node takes it: without its attestation while governance has attestations off.
+fn taken(chain: &View, vote: SignedVote) -> Result<SignedVote, DbError> {
+    Ok(match attesting(chain)? {
+        true => vote,
+        false => SignedVote { attestation: None, ..vote },
+    })
+}
+
 fn counted_key(vote: &SignedVote) -> Vec<u8> {
     let mut key = epoch_key(COUNTED, vote.vote.target.epoch);
     key.extend_from_slice(&vote.vote.voter.hashable_bytes_with_tag());
@@ -408,9 +422,15 @@ impl<E: Electorate> Votes<E> {
         let Some(attestation) = vote.attestation else {
             return Ok(());
         };
+
+        // Off, it is dropped as the vote is taken, so what it says counts for nothing.
+        if !attesting(chain)? {
+            return Ok(());
+        }
+
         let attester = attester.ok_or(FinalityError::Invalid(crate::crypto::verifiable::VerifyError::BadAttestation))?;
 
-        #[cfg(feature = "secp256k1")]
+        #[cfg(feature = "attestations")]
         {
             let link = self.link_of(chain, vote.vote.source, vote.vote.target)?.ok_or(FinalityError::Unverifiable("its attestation's sets are not known here"))?;
 
@@ -497,6 +517,7 @@ impl<E: Electorate> Votes<E> {
     /// all is only known once it can be placed, so until then it is held but not remembered, and
     /// a key that does not vote can neither fill memory nor the evidence log.
     fn count(&mut self, chain: &View, vote: SignedVote) -> Result<FinalityUpdate, FinalityError> {
+        let vote = taken(chain, vote)?;
         let (source, target) = (vote.vote.source, vote.vote.target);
 
         if let Some(evidence) = self.conflict(&vote) {
@@ -631,7 +652,9 @@ impl<E: Electorate> Finality for Votes<E> {
         }
 
         let validators = Validators::new(state);
-        let restaking = crate::registry::changes::Changes::new(state).forks()?.at(block.header.height).has(&crate::params::forks::RESTAKING);
+        let changes = crate::registry::changes::Changes::new(state);
+        let restaking = changes.forks()?.at(block.header.height).has(&crate::params::forks::RESTAKING);
+        let attesting = changes.attestations_at(block.header.height)?;
         // Bundles are taken from after_epochs epochs without a proven checkpoint, one epoch before
         // the leak starts, so the first leak already sees who voted.
         let bundling = match leak {
@@ -687,17 +710,22 @@ impl<E: Electorate> Finality for Votes<E> {
                 paid.push((vote.vote.voter, member.account));
                 previous = Some(vote.vote.voter);
 
+                // While governance has attestations off, a block carries none.
+                if !attesting && vote.attestation.is_some() {
+                    return Err(bad(format!("an attestation while attestations are off, for epoch {}", target.epoch)));
+                }
+
                 // From the restaking fork, an attestation in a block holds as a gossiped one must.
                 if restaking && let Some(attestation) = vote.attestation {
                     let attester = member.attester.ok_or_else(|| bad(format!("an attestation by a validator that names no attester, for epoch {}", target.epoch)))?;
-                    #[cfg(feature = "secp256k1")]
+                    #[cfg(feature = "attestations")]
                     let holds = {
                         let header = crate::chain::stored_header(&**state, &target.block)?.ok_or_else(|| bad(format!("epoch {}'s checkpoint is not held here", target.epoch)))?.header;
                         let link = self.link_in(state, &header, source, target)?.ok_or_else(|| bad(format!("epoch {}'s attesting sets are not known here", target.epoch)))?;
 
                         link.attester(&attestation) == Some(attester)
                     };
-                    #[cfg(not(feature = "secp256k1"))]
+                    #[cfg(not(feature = "attestations"))]
                     let holds = {
                         let _ = (attestation, attester);
                         false
@@ -857,6 +885,10 @@ impl<E: Electorate> Finality for Votes<E> {
     /// Stores a checked justification, moves the latest justified checkpoint, and finalizes the
     /// source when the target is its direct successor.
     fn justify(&mut self, chain: &View, justification: Justification) -> Result<FinalityUpdate, FinalityError> {
+        let mut justification = justification;
+        for vote in &mut justification.votes {
+            *vote = taken(chain, *vote)?;
+        }
         let (source, target) = (justification.source, justification.target);
         let mut update = FinalityUpdate {
             justified: vec![target],
@@ -1011,6 +1043,16 @@ impl<E: Electorate> Finality for Votes<E> {
                 if news {
                     let votes = tally.votes.values().copied().collect();
                     proofs.push(Justification { source: *source, target: *target, votes });
+                }
+            }
+        }
+
+        // Built while attestations are off, a block carries none, though votes stored before
+        // still hold theirs.
+        if !attesting(chain)? {
+            for proof in &mut proofs {
+                for vote in &mut proof.votes {
+                    vote.attestation = None;
                 }
             }
         }

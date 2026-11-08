@@ -422,7 +422,33 @@ offline; these would make that hold up as a treasury.
   - [ ] SP1's precompile patches for sha2, k256, curve25519 and bn, which make proving faster but
     change nothing it proves; and a BLAKE3 one, as SP1 has none.
   - [ ] BitVM-style fraud proofs, for Bitcoin's side.
+  - [ ] **Swaps and DEXes by zk, where it holds up (owner, 2026-11-08):** use the proofs for the
+    swap contracts, Swap.sol and the DEXes wherever it makes them need less trust or less waiting.
+    To look into, each to be asked about before it starts:
+    - **Swaps to EVM chains by proof:** Swap.sol on Ethereum settles a chainv4 side it reads from
+      ChainV4Finality.sol's proven state root (a state proof of the swap's entry under the proven
+      root), so its refund window can follow proof time rather than a fixed timelock.
+    - **Swaps the other way:** chainv4 taking a proof of an Ethereum or Bitcoin event in place of
+      its relays (a zk light client of Ethereum's sync committee, or of Bitcoin's headers), so the
+      swap contract and the anchoring trust no relayer.
+    - **The DEX:** matching batches off chain and proving them (one proof for many swaps), and
+      maybe private orders; or leave the on-chain DEX as is, if the proof costs more than the gas
+      it saves. Measure first.
+    - **The bridges' DEX routes:** a proven withdrawal (Gateway.sol's deliverProven) feeding a DEX
+      swap on arrival, in one step.
+    What can't work with zk (for example, Bitcoin script checking a proof) stays as it is, as
+    Bitcoin's gateway does.
   - [ ] Schedule the `proofs` fork on the devnet, with restaking, and name the program.
+  - [x] **Proof kinds interchangeable (owner, 2026-11-08):** Groth16, PLONK and SP1's STARK, each
+    a `ProofKind` with a pinned tag under its own default-on feature; `Change::Proofs` names a set
+    of kinds, so a switch votes the new one in before the old one out; ChainV4Finality.sol takes a
+    list of SP1 gateways, a proof standing if any takes it. Into the `proofs` fork, before it was
+    scheduled. SP1's PLONK route on Sepolia is frozen for now, so Sepolia lists Groth16's gateway
+    alone.
+  - [x] **Ethereum's side switchable (owner, 2026-11-08):** `Change::Attestations` turns validators'
+    attestations off or on for the whole chain from the next block (refused under the `both`
+    gateway mode); the `attestations` feature, default and in `consensus`; and the
+    `federation-only` gateway mode, under which Gateway.sol refuses proofs. In the `proofs` fork.
 - [ ] **Anchoring: next.**
   - [x] **Ethereum anchors that count** (2026-11-05). `ethlight` and `eth_relay` follow the beacon
     chain. `Tx::Anchor` proves an Ethereum anchor against the relay with the finality update that

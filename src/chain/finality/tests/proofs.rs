@@ -206,7 +206,7 @@ fn a_range_that_scans_carries_the_whole_state_and_what_left_is_in_its_root() {
 }
 
 fn settings(reward: u64) -> ProofSettings {
-    ProofSettings { kind: ProofKind::Test, program: [5; 32], reward_per_block: u256::new(reward.into()), gateway: GatewayMode::Both }
+    ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::new(reward.into()), gateway: GatewayMode::Both }
 }
 
 /// A test proof of the range from the proven tip to a height, as the replay would prove it.
@@ -321,9 +321,47 @@ fn the_sp1_program_runs_a_range_to_what_the_replay_proves() {
 
     let input = RangeInput::build(&chain, chain.db().snapshot(), json(&genesis), from, to).unwrap();
     let replayed = replay(&input).unwrap();
-    let prover = crate::proofs::Sp1Prover::new(elf).unwrap();
+    let prover = crate::proofs::Sp1Prover::new(elf, ProofKind::Sp1Groth16).unwrap();
     let (values, cycles) = prover.execute(&input.to_bytes()).unwrap();
 
     assert_eq!(ProvenRange::from_public_values(chain.hash(), &values), Some(replayed), "in {cycles} cycles");
     eprintln!("{} blocks in {cycles} SP1 cycles", to - from);
+}
+
+/// A real proof, by SP1's CPU prover, of a short range, of the kind CHAINV4_PROVE_KIND names
+/// (sp1-stark unless set), checked by this build's verifier for the kind as a node checks
+/// Tx::Prove, and its size said. Ignored: it takes minutes and many GB of memory, and Groth16 and
+/// PLONK download SP1's circuit the first time. Run by hand: cargo test --release --features
+/// sp1-prover -- --ignored a_range_proven_by_sp1_is_checked_by_the_kind --nocapture.
+#[cfg(feature = "sp1-prover")]
+#[test]
+#[ignore = "SP1's prover: minutes and many GB of memory"]
+fn a_range_proven_by_sp1_is_checked_by_the_kinds_verifier() {
+    use crate::proofs::Prover as _;
+
+    let kind = std::env::var("CHAINV4_PROVE_KIND").ok().map_or(ProofKind::Sp1Stark, |name| ProofKind::parse(&name).expect("a kind"));
+    let elf = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs/sp1/elf/chainv4-proof-program")).expect("the program, from proofs/sp1/build.sh");
+    let genesis = genesis(2 * INTERVAL);
+    let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
+    finalize_through(&mut chain, 1);
+    let from = chain.tip().height;
+    send_all(&mut chain, vec![Tx::Transfer { from: dev().public().address(), to: key(77).public().address(), amount: crate::structs::amount::Amount::U128(9) }]);
+    let to = chain.tip().height;
+
+    let input = RangeInput::build(&chain, chain.db().snapshot(), json(&genesis), from, to).unwrap();
+    let prover = crate::proofs::Sp1Prover::new(elf, kind).unwrap();
+    let started = std::time::Instant::now();
+    let (values, proof) = prover.prove(&input.to_bytes()).unwrap();
+    eprintln!("{}: {} blocks proven in {} s, {} bytes of proof", kind.name(), to - from, started.elapsed().as_secs(), proof.len());
+
+    assert_eq!(ProvenRange::from_public_values(chain.hash(), &values), Some(replay(&input).unwrap()));
+    assert!(proof.len() <= kind.max_bytes(), "{} bytes, over {}", proof.len(), kind.max_bytes());
+    let verifier = crate::proofs::verifier(kind).expect("this build checks the kind");
+    let checked = std::time::Instant::now();
+    verifier.verify(&prover.program(), &values, &proof).unwrap();
+    eprintln!("checked in {} ms", checked.elapsed().as_millis());
+    assert!(verifier.verify(&[1; 32], &values, &proof).is_err(), "another program");
+    let mut other = values.clone();
+    other[40] ^= 1;
+    assert!(verifier.verify(&prover.program(), &other, &proof).is_err(), "other public values");
 }

@@ -9,7 +9,8 @@
 // are deployed once, as templates, and each wrapped asset is a minimal proxy of one (EIP-1167), so the
 // gateway stays under the EVM's size limit. Once it follows ChainV4Finality.sol, a transfer from
 // chainv4 may instead arrive by a validity proof of the range it left in, with the federation's
-// signatures as well when chainv4's governance says both. Built with
+// signatures as well when chainv4's governance says both, and never once it says federation-only.
+// Built with
 // solc 0.8 for Paris, through the IR pipeline:
 //
 //   solc --evm-version paris --optimize --via-ir --bin --abi Gateway.sol -o build
@@ -436,7 +437,7 @@ contract Gateway {
     /// Once it follows a finality whose proofs say both, a transfer needs a proof as well:
     /// deliverProven.
     function deliver(Transfer calldata t, bytes[] calldata signatures) external {
-        require(address(finality) == address(0) || finality.gatewayMode() == 0, "a proof is needed as well: deliverProven");
+        require(address(finality) == address(0) || finality.gatewayMode() != 1, "a proof is needed as well: deliverProven");
         bytes32 key = admit(t);
         bytes32 digest = digestOf(t);
         check(digest, signatures);
@@ -449,6 +450,7 @@ contract Gateway {
     /// otherwise signatures may be empty.
     function deliverProven(Transfer calldata t, bytes32 endBlock, bytes32[] calldata path, bytes[] calldata signatures) external {
         require(address(finality) != address(0), "no finality to prove by");
+        require(finality.gatewayMode() != 2, "chainv4 releases by the federation alone: deliver");
         bytes32 key = admit(t);
         bytes32 digest = digestOf(t);
         require(finality.withdrew(endBlock, digest, path), "not in that proven range");

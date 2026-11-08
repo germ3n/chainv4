@@ -97,16 +97,21 @@ pub const MAX_BODY: usize = 2 * 1024 * 1024;
 const BODY_SLACK: usize = 64 * 1024;
 
 #[document(
-    summary = "The largest request body the API takes for a chain's most bytes a transaction may take: room for one hex-encoded in its JSON, and never less than MAX_BODY. Past it, 413.",
+    summary = "The largest request body the API takes for a chain's most bytes a transaction may take: room for one hex-encoded in its JSON, and never less than MAX_BODY. Past it, 413. A chain that names no max_tx_bytes gets room for the largest proof it takes, an SP1 STARK's megabyte or so.",
     category = "Node",
-    params = { max_tx_bytes = "The chain's max_tx_bytes as it stands, or None when its limits name none." },
+    params = {
+        max_tx_bytes = "The chain's max_tx_bytes as it stands, or None when its limits name none.",
+        largest_proof = "The most bytes a proof of any kind governance names may be (ProofKind::max_bytes), 0 for none.",
+    },
     see_also = "MAX_BODY",
 )]
-pub fn body_cap(max_tx_bytes: Option<u64>) -> usize {
-    match max_tx_bytes {
-        Some(bytes) => usize::try_from(bytes).unwrap_or(usize::MAX).saturating_mul(2).saturating_add(BODY_SLACK).max(MAX_BODY),
-        None => MAX_BODY,
-    }
+pub fn body_cap(max_tx_bytes: Option<u64>, largest_proof: usize) -> usize {
+    let largest = match max_tx_bytes {
+        Some(bytes) => usize::try_from(bytes).unwrap_or(usize::MAX),
+        None => largest_proof,
+    };
+
+    largest.saturating_mul(2).saturating_add(BODY_SLACK).max(MAX_BODY)
 }
 
 #[document(
@@ -568,17 +573,27 @@ impl Api {
         let genesis = self.rules.vm.max_tx_bytes;
 
         if self.rules.governance.is_none() {
-            return body_cap(genesis);
+            return body_cap(genesis, 0);
         }
 
         let state = State::new(self.live.snapshot());
+        let changes = Changes::new(&state);
+        // The largest proof the chain takes, for a Tx::Prove that carries one.
+        let largest_proof = match changes.proofs() {
+            Ok(settings) => settings.map_or(0, |settings| settings.kinds.iter().map(|kind| kind.max_bytes()).max().unwrap_or(0)),
+            Err(err) => {
+                log::warn!("[http] reading the chain's proof settings for a body's size: {err}");
 
-        match Changes::new(&state).limits() {
-            Ok(limits) => body_cap(limits.and_then(|limits| limits.max_tx_bytes).or(genesis)),
+                0
+            }
+        };
+
+        match changes.limits() {
+            Ok(limits) => body_cap(limits.and_then(|limits| limits.max_tx_bytes).or(genesis), largest_proof),
             Err(err) => {
                 log::warn!("[http] reading the chain's limits for a body's size: {err}");
 
-                body_cap(genesis)
+                body_cap(genesis, largest_proof)
             }
         }
     }
@@ -1016,6 +1031,8 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
                 "type": crate::registry::changes::Changes::new(&State::new(db.clone())).finality_in(config.epoch_of(tip.header.height), config)?.name(),
                 "epoch": config.epoch_of(tip.header.height),
                 "checkpoint_interval": config.checkpoint_interval(),
+                // Whether validators attest for Ethereum in the next block, as governance has it.
+                "attestations": crate::registry::changes::Changes::new(&State::new(db.clone())).attestations_at(tip.header.height + 1)?,
                 "justified": checkpoint_at(&*db, &justified.unwrap_or(start))?,
                 "finalized": checkpoint_at(&*db, &finalized.unwrap_or(start))?,
             })
@@ -2836,13 +2853,14 @@ async fn justifications(Shared(api): Shared<Api>, Query(query): Query<HashMap<St
 const MAX_PROOF_JUSTIFICATIONS: u64 = 64;
 
 /// The most epochs GET /attestations looks through for one with a justification.
+#[cfg(feature = "attestations")]
 const ATTESTATION_SCAN: u64 = 1_024;
 
 /// What a relayer shows ChainV4Finality.sol: the first main-chain checkpoint justified after an
 /// epoch, its link, its height and state root, the attesting sets of its epoch and the next, and
 /// the attestations its justification carried that recover to the set's attesters.
 async fn attestations(Shared(api): Shared<Api>, Query(query): Query<HashMap<String, String>>) -> Answer {
-    #[cfg(feature = "secp256k1")]
+    #[cfg(feature = "attestations")]
     {
         use crate::structs::attestation::{AttestedLink, AttestingSet, word};
 
@@ -2924,7 +2942,7 @@ async fn attestations(Shared(api): Shared<Api>, Query(query): Query<HashMap<Stri
         Err(ApiError::NotFound(format!("no checkpoint justified after epoch {after} yet")))
     }
 
-    #[cfg(not(feature = "secp256k1"))]
+    #[cfg(not(feature = "attestations"))]
     {
         let _ = (api, query);
 

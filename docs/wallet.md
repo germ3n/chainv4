@@ -563,7 +563,8 @@ restake setting turned on or off.
 On a chain that takes [validity proofs](proofs.md), the overview says how far the chain is proven:
 `The chain is proven through block H, the proof checked here`. The wallet proves governance's
 proof settings from state like the directory and the federation, takes the latest proof from the
-node, and checks it on the device by SP1's verifier against the program those settings name. The
+node, and checks it on the device with the verifier for its kind, Groth16, PLONK or the STARK,
+against the program those settings name. The
 node's word adds nothing, as a proof that holds proves itself. Votes still carry the wallet past
 that block, to the newest ones.
 

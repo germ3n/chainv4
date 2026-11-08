@@ -3246,7 +3246,7 @@ mod send {
         let started = std::time::Instant::now();
 
         // Once the finalized checkpoint has a justified link out of it, the contract starts there.
-        while bridge(args(BridgeAction::FinalityDeploy { sp1_verifier: None, program: None })).is_err() {
+        while bridge(args(BridgeAction::FinalityDeploy { sp1_verifier: vec![], program: None })).is_err() {
             assert!(started.elapsed() < std::time::Duration::from_secs(60), "never a link to start from");
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

@@ -1007,14 +1007,22 @@ fn run(args: NodeArgs) -> Result<(), Box<dyn std::error::Error>> {
         node = node.validate(voter);
 
         if let Some(path) = args.attestation_key.as_deref() {
-            let attester = cli::signer_with(Some(path), args.key_passphrase_file.as_deref())?;
-
-            if attester.public().key_type() != chainv4::crypto::keypair::KeyType::Secp256k1 {
-                return Err("--attestation-key needs a secp256k1 key: Ethereum checks attestations with ecrecover".into());
+            #[cfg(not(feature = "attestations"))]
+            {
+                let _ = path;
+                return Err("--attestation-key: this build attests nothing, as it was built without the attestations feature".into());
             }
+            #[cfg(feature = "attestations")]
+            {
+                let attester = cli::signer_with(Some(path), args.key_passphrase_file.as_deref())?;
 
-            log::info!("[node] attesting for Ethereum as {}", attester.public().address());
-            node = node.attest(attester);
+                if attester.public().key_type() != chainv4::crypto::keypair::KeyType::Secp256k1 {
+                    return Err("--attestation-key needs a secp256k1 key: Ethereum checks attestations with ecrecover".into());
+                }
+
+                log::info!("[node] attesting for Ethereum as {}", attester.public().address());
+                node = node.attest(attester);
+            }
         }
     }
 

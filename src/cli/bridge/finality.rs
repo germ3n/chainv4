@@ -100,12 +100,12 @@ impl Bridge {
 
     /// Deploys ChainV4Finality.sol on the EVM chain of --eth-rpc, from the finalized checkpoint
     /// the node names, with the attesting set that signs the link from it.
-    pub(super) fn finality_deploy(&self, sp1_verifier: Option<&str>, program: Option<&str>) -> CliResult<()> {
+    pub(super) fn finality_deploy(&self, sp1_verifiers: &[String], program: Option<&str>) -> CliResult<()> {
         let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
         let status = self.status()?;
         let finalized = status["finality"]["finalized"]["epoch"].as_u64().ok_or("the node's finality does not vote")?;
         let bytes20 = |text: &str, what: &str| -> CliResult<[u8; 20]> { from_hex(text).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{what}: 0x and 40 hex digits").into()) };
-        let verifier = sp1_verifier.map(|text| bytes20(text, "--sp1-verifier")).transpose()?.unwrap_or([0; 20]);
+        let verifiers = sp1_verifiers.iter().map(|text| bytes20(text, "--sp1-verifier")).collect::<CliResult<Vec<_>>>()?;
         let validity = &status["validity"];
         let program = match program {
             Some(text) => from_hex(text).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()).ok_or("--program: 0x and 64 hex digits")?,
@@ -129,7 +129,7 @@ impl Bridge {
         };
         let genesis = word(&status["genesis"], "the genesis")?;
         let constructor = encode_values(
-            &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Address, AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
+            &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
             &[
                 AbiValue::Uint(number(&link["chain_id"], "chain id")?),
                 AbiValue::Uint(u256::from(finalized)),
@@ -137,7 +137,7 @@ impl Bridge {
                 AbiValue::Uint(number(&source["height"], "source height")?),
                 AbiValue::FixedBytes(word(&source["state_root"], "source state root")?.to_vec()),
                 AbiValue::FixedBytes(word(&link["set"]["hash"], "set")?.to_vec()),
-                AbiValue::Address(verifier),
+                AbiValue::Array(verifiers.iter().map(|verifier| AbiValue::Address(*verifier)).collect()),
                 AbiValue::FixedBytes(genesis.to_vec()),
                 AbiValue::FixedBytes(program.to_vec()),
                 AbiValue::Uint(proven.0),
@@ -149,7 +149,7 @@ impl Bridge {
         let receipt = rpc.send(&Call { to: [0; 20], value: u256::ZERO, input: init, what: "Deploy ChainV4Finality.sol" }, true, &secret)?;
         println!("finality {} from epoch {finalized}", receipt["contractAddress"].as_str().ok_or("the deploy's receipt names no contract")?);
 
-        if verifier == [0; 20] || program == [0; 32] {
+        if verifiers.is_empty() || program == [0; 32] {
             println!("it takes no validity proofs: give --sp1-verifier, and --program while governance names none");
         }
 
@@ -246,6 +246,13 @@ impl Bridge {
         let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
         let file: Value = serde_json::from_slice(&std::fs::read(proof).map_err(|err| format!("{}: {err}", proof.display()))?).map_err(|err| format!("{}: {err}", proof.display()))?;
         let field = |name: &str| file[name].as_str().and_then(from_hex).ok_or_else(|| format!("{}: no {name}", proof.display()));
+
+        if let Some(kind) = file["kind"].as_str().and_then(crate::proofs::ProofKind::parse)
+            && !kind.on_evm()
+        {
+            return Err(format!("{}: a {} proof, which no EVM chain can check: prove the range with --kind sp1-groth16 or sp1-plonk for Ethereum", proof.display(), kind.name()).into());
+        }
+
         let height = file["range"]["end"]["height"].as_u64().ok_or_else(|| format!("{}: no range end", proof.display()))?;
         let interval = self.status()?["finality"]["checkpoint_interval"].as_u64().filter(|interval| *interval > 0).ok_or("the node's finality has no checkpoints")?;
 

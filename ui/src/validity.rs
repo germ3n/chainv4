@@ -79,7 +79,7 @@ mod tests {
         let genesis = format!("0x{}", "11".repeat(32));
 
         assert_eq!(proven(&serde_json::json!({ "settings": null, "tip": null, "proof": null }), &genesis, hash, None), Proven::Off);
-        let settings = serde_json::json!({ "kind": "sp1-groth16", "program": format!("0x{}", "22".repeat(32)), "reward_per_block": "0", "gateway": "both" });
+        let settings = serde_json::json!({ "kinds": ["sp1-groth16"], "program": format!("0x{}", "22".repeat(32)), "reward_per_block": "0", "gateway": "both" });
         assert_eq!(proven(&serde_json::json!({ "settings": settings, "tip": null, "proof": null }), &genesis, hash, None), Proven::NoneYet);
 
         let garbled = serde_json::json!({ "settings": settings, "proof": { "kind": "sp1-groth16", "public_values": "0x00", "proof": "0x00" } });

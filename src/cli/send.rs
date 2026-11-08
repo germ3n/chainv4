@@ -1474,11 +1474,13 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::Fork(change) => change.describe(),
                 crate::governance::Change::Proofs(settings) => format!(
                     "validity proofs by {} of the program {}, {} minted a block proven, Gateway.sol releasing by {}",
-                    settings.kind.name(),
+                    settings.kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>().join(" or "),
                     crate::structs::hex::to_hex(&settings.program),
                     settings.reward_per_block,
                     settings.gateway.name()
                 ),
+                crate::governance::Change::Attestations(true) => "validators attesting for Ethereum".to_string(),
+                crate::governance::Change::Attestations(false) => "no attestations for Ethereum: ChainV4Finality.sol follows the chain no further".to_string(),
             };
             println!("voting {} on {what}, from version {version}", vote.name());
 

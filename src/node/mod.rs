@@ -1483,11 +1483,12 @@ impl Node {
         }
     }
 
-    /// This validator's attestation of the link it votes for, when it attests and the target
-    /// epoch's fixed set names its attester's address for it.
+    /// This validator's attestation of the link it votes for, when it attests, governance has
+    /// attestations on, and the target epoch's fixed set names its attester's address for it.
     fn attestation(&self, vote: &crate::structs::vote::Vote) -> Result<Option<[u8; 65]>, NodeError> {
-        #[cfg(feature = "secp256k1")]
+        #[cfg(feature = "attestations")]
         if let Some(attester) = &self.attester
+            && crate::registry::changes::Changes::new(&self.chain.state()).attestations_at(self.chain.tip().height + 1)?
             && let crate::crypto::keypair::PrivateKey::Secp256k1(secret) = attester.private()
         {
             let address = attester.public().address();

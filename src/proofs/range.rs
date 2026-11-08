@@ -26,7 +26,7 @@ pub struct RangeEnd {
 }
 
 #[document(
-    summary = "How Gateway.sol on an EVM chain releases what left here, as governance sets it: by a proof or the federation's signatures, either, or only by both.",
+    summary = "How Gateway.sol on an EVM chain releases what left here, as governance sets it: by a proof or the federation's signatures, either; only by both; or by the federation's alone, proofs refused.",
     category = "Proofs",
     see_also = "ProofSettings",
 )]
@@ -40,20 +40,27 @@ pub enum GatewayMode {
     #[document(summary = "A proof and the federation's signatures both.")]
     #[wincode(tag = 1)]
     Both,
+    #[document(summary = "The federation's signatures alone, as before proofs: Gateway.sol refuses a release by proof. The last proof Ethereum takes carries it there, and from then on it follows proofs no more.")]
+    #[wincode(tag = 2)]
+    FederationOnly,
 }
 
 impl GatewayMode {
-    #[document(parent = "GatewayMode", summary = "Its name as JSON and the CLI write it: proof-or-federation or both.")]
+    #[document(parent = "GatewayMode", summary = "Every mode, by its number.")]
+    pub const ALL: [GatewayMode; 3] = [GatewayMode::ProofOrFederation, GatewayMode::Both, GatewayMode::FederationOnly];
+
+    #[document(parent = "GatewayMode", summary = "Its name as JSON and the CLI write it: proof-or-federation, both or federation-only.")]
     pub fn name(self) -> &'static str {
         match self {
             GatewayMode::ProofOrFederation => "proof-or-federation",
             GatewayMode::Both => "both",
+            GatewayMode::FederationOnly => "federation-only",
         }
     }
 
     #[document(parent = "GatewayMode", summary = "The mode a name names.")]
     pub fn parse(name: &str) -> Option<GatewayMode> {
-        [GatewayMode::ProofOrFederation, GatewayMode::Both].into_iter().find(|mode| mode.name() == name)
+        GatewayMode::ALL.into_iter().find(|mode| mode.name() == name)
     }
 
     /// Its number, as the public values and Gateway.sol hold it.
@@ -61,19 +68,20 @@ impl GatewayMode {
         match self {
             GatewayMode::ProofOrFederation => 0,
             GatewayMode::Both => 1,
+            GatewayMode::FederationOnly => 2,
         }
     }
 }
 
 #[document(
-    summary = "What governance sets for validity proofs (Change::Proofs): the proof system and program the chain takes proofs of, what it mints for each block a proof covers, and how Gateway.sol releases. Unset, the chain takes no proofs.",
+    summary = "What governance sets for validity proofs (Change::Proofs): the proof systems and program the chain takes proofs of, what it mints for each block a proof covers, and how Gateway.sol releases. Unset, the chain takes no proofs.",
     category = "Proofs",
     see_also = "ProofKind, GatewayMode, Tx::Prove",
 )]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[derive(Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
 pub struct ProofSettings {
-    #[document(summary = "The proof system proofs are made with.")]
-    pub kind: crate::proofs::ProofKind,
+    #[document(summary = "The proof systems the chain takes proofs made with, any of them, in the order ProofKind::ALL lists them: a switch from one to another votes the new one in beside the old, then the old one out, so no prover is left with a range half proven.")]
+    pub kinds: Vec<crate::proofs::ProofKind>,
     #[document(summary = "The program proven, as the system names it: SP1's verifying key hash. A release whose replay runs otherwise is another program, which governance names in turn.")]
     pub program: [u8; 32],
     #[document(summary = "What is minted to whoever proves, for each block a proof covers: 0 pays nothing.")]
@@ -86,9 +94,24 @@ pub struct ProofSettings {
 impl crate::crypto::hashable::Hashable for ProofSettings {}
 
 impl ProofSettings {
-    #[document(parent = "ProofSettings", summary = "Why no chain takes these settings, if none does: a program of zeros, which names none.")]
+    #[document(parent = "ProofSettings", summary = "Why no chain takes these settings, if none does: no kind, kinds out of order or twice, or a program of zeros, which names none.")]
     pub fn problem(&self) -> Option<&'static str> {
+        let rank = |kind: &crate::proofs::ProofKind| crate::proofs::ProofKind::ALL.iter().position(|known| known == kind).unwrap_or(usize::MAX);
+
+        if self.kinds.is_empty() {
+            return Some("no proof system named");
+        }
+
+        if !self.kinds.windows(2).all(|pair| rank(&pair[0]) < rank(&pair[1])) {
+            return Some("proof systems named twice or out of order");
+        }
+
         (self.program == [0; 32]).then_some("a program of zeros names none")
+    }
+
+    #[document(parent = "ProofSettings", summary = "Whether the chain takes proofs of this kind.")]
+    pub fn takes(&self, kind: crate::proofs::ProofKind) -> bool {
+        self.kinds.contains(&kind)
     }
 }
 
@@ -158,6 +181,7 @@ impl ProvenRange {
         let gateway = match number(10)? {
             0 => GatewayMode::ProofOrFederation,
             1 => GatewayMode::Both,
+            2 => GatewayMode::FederationOnly,
             _ => return None,
         };
 

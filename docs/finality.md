@@ -318,6 +318,34 @@ chainv4's finality cheaply (`structs::attestation`, `contracts/evm/ChainV4Finali
   nothing else, so anyone may relay. A validator without an attester weighs in the whole but signs
   nothing there, so two thirds must be reached by those with one.
 
+### Turning attestations off
+
+Ethereum following the chain can be turned off for the whole chain at once, by governance or by
+building without it:
+
+- **Governance:** `Change::Attestations`, from the `proofs` fork on. It's on until decided otherwise.
+  Off, from the block after the one that decides it:
+  - no validator attests;
+  - nodes drop the attestation from each vote they take (the vote's own signature doesn't cover
+    it), so justifications and the blocks a node builds carry none;
+  - a block carrying one is invalid.
+
+  So ChainV4Finality.sol follows the chain no further: it has nothing to take. Turning them on again
+  works the same way, from the next block. `GET /status` says which in `finality.attestations`.
+
+  ```sh
+  chainv4 send --key member.key vote-change --vote yes --change '{"attestations":false}'
+  ```
+
+  It is refused while the proofs' gateway mode is `both`, as Gateway.sol would then wait for proofs
+  that can no longer reach Ethereum. Set it to `proof-or-federation` or `federation-only` first
+  ([Bridges](bridges.md#withdrawals-by-proof)).
+- **The `attestations` feature,** on by default and part of `consensus`: signing, checking and
+  `GET /attestations`. A build without it attests nothing and can't check an attestation, so it
+  follows only a chain that has them off. Its `--attestation-key` is an error.
+- **One validator alone** still stops by dropping `--attestation-key`, or with
+  `set-attester --attester none`.
+
 This is the first stage of the [validity proofs](proofs.md): what the validators sign, checked
 cheaply elsewhere. The later stages prove the blocks themselves: ChainV4Finality.sol also takes a
 proof that a range ran to a final checkpoint's state root (`prove`), so the root it records is no

@@ -363,9 +363,9 @@ pub enum Tx {
     #[document(
         summary = "A validity proof of a range of blocks, from the chain's proven tip to a later checkpoint on this chain: checked by the proof system governance named (Change::Proofs) against the program it named, it moves the proven tip to the range's end and mints the sender the reward for each block it covers. Taken from the proofs fork on; before it, a block holding one is invalid.",
         params = {
-            kind = "The proof system it was made with: the one governance named.",
+            kind = "The proof system it was made with: one governance named.",
             range = "What it proves.",
-            proof = "The proof, as the system writes it, at most MAX_PROOF_BYTES.",
+            proof = "The proof, as the system writes it, at most its kind's ProofKind::max_bytes.",
         },
         see_also = "ProvenRange, ProofSettings, replay",
     )]
@@ -376,13 +376,6 @@ pub enum Tx {
         proof: Vec<u8>,
     },
 }
-
-#[document(
-    summary = "The most bytes a Tx::Prove's proof holds: 4,096, far more than a Groth16 proof's 260.",
-    category = "Transactions",
-    see_also = "Tx::Prove",
-)]
-pub const MAX_PROOF_BYTES: usize = 4_096;
 
 #[document(
     summary = "What Tx::Anchor carries, and the chain keeps with each entry so any node can show it to a peer: the proof that Bitcoin, or Ethereum, holds an anchor.",
@@ -857,7 +850,7 @@ impl Verifiable for Tx {
                 nonzero(amount)
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } | Tx::SetAttester { voter, .. } | Tx::SetRestake { voter, .. } => voter.verify(),
-            Tx::Prove { proof, .. } => match proof.len() <= MAX_PROOF_BYTES {
+            Tx::Prove { kind, proof, .. } => match proof.len() <= kind.max_bytes() {
                 true => Ok(()),
                 false => Err(VerifyError::BadProof),
             },
@@ -872,7 +865,7 @@ impl Verifiable for Tx {
             },
             // Whether the list is one a chain takes is decided when the transaction runs, and so are
             // name prices and collection standards.
-            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Anchoring(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_) | Change::Locks(_) | Change::Engines(_) | Change::Fork(_) | Change::Proofs(_), .. } => Ok(()),
+            Tx::VoteChange { change: Change::Bootnodes(_) | Change::Names(_) | Change::TokenFunctions(_) | Change::EvmSpec { .. } | Change::Dex(_) | Change::Anchoring(_) | Change::Collections(_) | Change::Federation(_) | Change::Directory(_) | Change::Fees(_) | Change::Reward(_) | Change::Limits(_) | Change::Finality(_) | Change::SwitchFinality { .. } | Change::Upgrade(_) | Change::Name(_) | Change::Governance(_) | Change::Locks(_) | Change::Engines(_) | Change::Fork(_) | Change::Proofs(_) | Change::Attestations(_), .. } => Ok(()),
             // The members' signatures are checked when it runs, against the chain's genesis id and
             // the policy in state.
             Tx::Multisig { account, tx, signatures } => {

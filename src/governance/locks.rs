@@ -12,7 +12,7 @@ use r#macro::document;
     category = "Governance",
     see_also = "path_problem, Change::Locks",
 )]
-pub const ROOTS: [&str; 22] = [
+pub const ROOTS: [&str; 23] = [
     "consensus",
     "bootnodes",
     "names",
@@ -31,7 +31,7 @@ pub const ROOTS: [&str; 22] = [
     "evm_spec",
     "dex",
     "anchoring",
-    "locks", "engines", "fork", "proofs"];
+    "locks", "engines", "fork", "proofs", "attestations"];
 
 /// Fees' fields, each variant's and its host costs' among them.
 const FEES: [&str; 48] = [
@@ -156,12 +156,12 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
         // Nothing stands for the fork schedule to compare a change with: fork whole freezes it,
         // fork.blocks the lead alone, and so on.
         "fork" => &["type", "name", "height", "epoch", "least", "blocks"],
-        "proofs" => &["kind", "program", "reward_per_block", "gateway"],
+        "proofs" => &["kinds", "program", "reward_per_block", "gateway"],
         "governance" => &["type", "members", "threshold", "approval_epochs", "quorum_permille"],
         "evm_spec" => &["spec", "from"],
         "dex" => &["tiers", "protocol_permille"],
         "anchoring" => &["bitcoin", "ethereum", "enforce", "relay", "btc_start.header", "btc_start.height", "btc_start.network", "eth_relay", "eth_start.root", "eth_start.network", "depth", "every", "reward"],
-        "bootnodes" | "name" | "token_functions" | "switch_finality" | "locks" | "engines" => &[],
+        "bootnodes" | "name" | "token_functions" | "switch_finality" | "locks" | "engines" | "attestations" => &[],
         _ => return None,
     })
 }

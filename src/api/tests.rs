@@ -3544,9 +3544,15 @@ fn post_bytes(address: SocketAddr, bytes: usize) -> u16 {
 
 #[test]
 fn a_body_is_held_to_room_for_the_chains_largest_transaction_and_never_less_than_max_body() {
-    assert_eq!(body_cap(None), MAX_BODY);
-    assert_eq!(body_cap(Some(100_000)), MAX_BODY, "a small max_tx_bytes never lowers it");
-    assert_eq!(body_cap(Some(4 * 1024 * 1024)), 8 * 1024 * 1024 + 64 * 1024, "room for one hex-encoded");
+    assert_eq!(body_cap(None, 0), MAX_BODY);
+    assert_eq!(body_cap(Some(100_000), 0), MAX_BODY, "a small max_tx_bytes never lowers it");
+    assert_eq!(body_cap(Some(4 * 1024 * 1024), 0), 8 * 1024 * 1024 + 64 * 1024, "room for one hex-encoded");
+    // A chain that takes STARK proofs and names no max_tx_bytes has room for one; one that names
+    // a max_tx_bytes holds to it, as a larger proof could not run there anyway.
+    let stark = crate::proofs::ProofKind::Sp1Stark.max_bytes();
+    assert_eq!(body_cap(None, stark), 2 * stark + 64 * 1024);
+    assert_eq!(body_cap(None, crate::proofs::ProofKind::Sp1Groth16.max_bytes()), MAX_BODY);
+    assert_eq!(body_cap(Some(100_000), stark), MAX_BODY);
 
     // Past 2 MiB a node refuses a body as it reads it, before it is a transaction at all.
     let db = Arc::new(MemoryDb::default());
