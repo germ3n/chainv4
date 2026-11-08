@@ -1151,6 +1151,7 @@ dependencies = [
  "sha3 0.12.0",
  "sp1-verifier",
  "wasmi",
+ "wasmi_core",
  "wiki",
  "wincode",
  "xxhash-rust",
