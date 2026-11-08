@@ -1672,6 +1672,23 @@ impl Transfer {
 
         [selector(&signature), encode_values(&types(&signature), &values).expect("a delivery encodes")].concat()
     }
+
+    #[document(
+        parent = "Transfer",
+        summary = "Calldata delivering it to Gateway.sol by a validity proof: its path in the withdrawals tree of the proven range ending at end_block, as ChainV4Finality.sol holds the range's root, with the federation's signatures too when chainv4's governance says both, or none.",
+        see_also = "withdrawal_proof",
+    )]
+    pub fn deliver_proven_input(&self, end_block: [u8; 32], path: &[[u8; 32]], signatures: &[[u8; 65]]) -> Vec<u8> {
+        let signature = format!("deliverProven({TRANSFER_TUPLE},bytes32,bytes32[],bytes[])");
+        let values = [
+            self.evm_tuple(),
+            AbiValue::FixedBytes(end_block.to_vec()),
+            AbiValue::Array(path.iter().map(|node| AbiValue::FixedBytes(node.to_vec())).collect()),
+            AbiValue::Array(signatures.iter().map(|signature| AbiValue::Bytes(signature.to_vec())).collect()),
+        ];
+
+        [selector(&signature), encode_values(&types(&signature), &values).expect("a delivery encodes")].concat()
+    }
 }
 
 #[document(summary = "Calldata refunding what left Gateway.sol at a nonce, with the federation's signatures over Transfer::refund_digest: what and to whom are what it recorded, so that is all it takes.", category = "Bridges")]

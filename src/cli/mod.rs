@@ -43,6 +43,8 @@ mod claim;
 pub(crate) mod multisig;
 #[cfg(feature = "client")]
 mod send;
+#[cfg(feature = "secp256k1")]
+mod prove;
 #[cfg(feature = "client")]
 pub(crate) mod outside;
 #[cfg(feature = "client")]
@@ -72,6 +74,8 @@ pub use bench::{BenchArgs, bench};
 pub use calibrate::{CalibrateArgs, calibrate};
 #[cfg(all(feature = "lvm", feature = "node"))]
 pub use test::{TestArgs, test};
+#[cfg(feature = "secp256k1")]
+pub use prove::{ProveAction, ProveArgs, RangeArgs, prove};
 #[cfg(feature = "client")]
 pub use claim::{ClaimArgs, claim};
 #[cfg(all(feature = "client", feature = "swap"))]

@@ -3,11 +3,11 @@
 
 #[cfg(feature = "abi")]
 pub mod abi;
-#[cfg(all(feature = "anchoring", feature = "node"))]
+#[cfg(all(feature = "anchoring", feature = "chain"))]
 pub mod anchor;
 #[cfg(feature = "http")]
 pub mod api;
-#[cfg(feature = "node")]
+#[cfg(feature = "chain")]
 pub mod chain;
 #[cfg(feature = "node")]
 pub mod cli;
@@ -19,6 +19,7 @@ pub mod faucet;
 pub mod governance;
 pub mod light;
 pub mod params;
+pub mod proofs;
 #[cfg(feature = "node")]
 pub mod mempool;
 #[cfg(any(feature = "node", feature = "worker"))]

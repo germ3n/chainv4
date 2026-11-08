@@ -182,6 +182,21 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                     ui.add(egui::Label::new(RichText::new(self::fork(fork, height)).color(tone)).wrap());
                 });
             }
+            // How far validity proofs prove the chain, the latest proof checked here.
+            if let Some(status) = status
+                && let Some(validity) = &status.validity
+                && let Ok(hash) = status.hash.parse::<chainv4::structs::hash::HashType>()
+            {
+                let proven = chainv4_ui::validity::proven(validity, &status.genesis, hash, None);
+                let tone = match proven {
+                    chainv4_ui::validity::Proven::Unchecked { .. } => palette.warn,
+                    chainv4_ui::validity::Proven::Checked { .. } => palette.ink,
+                    _ => palette.muted,
+                };
+                facts.row("proofs", |ui| {
+                    ui.add(egui::Label::new(RichText::new(proven.describe()).color(tone)).wrap());
+                });
+            }
             facts.row("syncing", |ui| match &node.syncing {
                 _ if node.hides("syncing") => hidden(ui, &palette),
                 Some(syncing) => {

@@ -38,15 +38,22 @@ pub const TEST_FORK: Fork = Fork { name: "test-fork", summary: "Only in tests: a
 pub const RESTAKING: Fork = Fork { name: "restaking", summary: "Rewards restaked into bonds when a validator turns it on, bonds topped up by hand, and blocks' attestations checked." };
 
 #[document(
+    summary = "Validity proofs on chain: governance sets which proof system and program the chain takes proofs of (Change::Proofs), each block records its parent's id for a proof to name, and a proof of a range from the last proven block to a checkpoint (Tx::Prove) moves the proven tip there and mints a reward for each block it covers.",
+    category = "Governance",
+    see_also = "FORKS, Tx::Prove, ProofSettings",
+)]
+pub const PROOFS: Fork = Fork { name: "proofs", summary: "Validity proofs taken on chain: the proven tip, each block's parent recorded, Tx::Prove and Change::Proofs." };
+
+#[document(
     summary = "Every fork this release knows, oldest first. Each new one goes on the end, and is scheduled by name; a release never drops one, as blocks from its height on run by it.",
     category = "Governance",
     see_also = "Fork, Forks",
 )]
 #[cfg(not(test))]
-pub const FORKS: &[Fork] = &[RESTAKING];
+pub const FORKS: &[Fork] = &[RESTAKING, PROOFS];
 
 #[cfg(test)]
-pub const FORKS: &[Fork] = &[RESTAKING, TEST_FORK];
+pub const FORKS: &[Fork] = &[RESTAKING, PROOFS, TEST_FORK];
 
 #[document(
     summary = "The most forks a release may know: Forks holds them as the bits of a u64.",

@@ -34,6 +34,8 @@ pub mod secret;
 pub mod shelf;
 pub mod sse;
 pub mod theme;
+#[cfg(feature = "validity")]
+pub mod validity;
 pub mod votes;
 pub mod widgets;
 pub mod wipe;

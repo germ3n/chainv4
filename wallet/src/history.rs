@@ -604,6 +604,7 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Claim { to, .. }, _) => format!("Claimed pool earnings for {}", format::short(&to.to_string())),
         (Tx::Anchor { proof: chainv4::structs::tx::AnchorProof::Bitcoin(_) }, _) => "Showed a checkpoint anchored in Bitcoin".to_string(),
         (Tx::Anchor { proof: chainv4::structs::tx::AnchorProof::Ethereum(_) }, _) => "Showed a checkpoint anchored in Ethereum".to_string(),
+        (Tx::Prove { range, .. }, _) => format!("Proved blocks {} to {}", range.start.height + 1, range.end.height),
         (Tx::Batch { steps }, CommittedOutcome::BatchFailed { step }) => format!("A batch of {} step{}, which step {} stopped", steps.len(), if steps.len() == 1 { "" } else { "s" }, step + 1),
         (Tx::Batch { steps }, _) => format!("A batch of {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }),
     }

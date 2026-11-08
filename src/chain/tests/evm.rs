@@ -1567,6 +1567,59 @@ mod gateway {
     }
 
     #[test]
+    fn a_transfer_from_chainv4_arrives_by_a_proof_alone_or_with_signatures_as_the_mode_says() {
+        let db = Arc::new(MemoryDb::default());
+        let mut chain = open(&db);
+        let here = evm::chain_id(&chain.genesis());
+        let gateway = gateway(&mut chain);
+        let finality = create(&mut chain, from_hex(include_str!("../../../contracts/evm/MockFinality.bin").trim()).unwrap());
+        let transfer = |nonce: u64| Transfer {
+            from: PEER.to_vec(),
+            to: gateway.to_vec(),
+            source: OTHER,
+            target: here,
+            nonce,
+            kind: AssetKind::Token,
+            origin: OTHER,
+            asset: vec![0x07; 33],
+            id: u256::ZERO,
+            amount: u256::from(500u64),
+            recipient: evm::evm_alias(&authority().public().address()).to_vec(),
+            name: "Example Token".to_string(),
+            symbol: "EXT".to_string(),
+            decimals: 18,
+            uri: String::new(),
+        };
+        let signed = |transfer: &Transfer, signers: &[u8]| signers.iter().map(|index| transfer.sign(&[*index; 32])).collect::<Vec<_>>();
+        let address_word = |address: [u8; 20]| [[0u8; 12].as_slice(), &address].concat();
+        let prove = |chain: &mut Chain, transfer: &Transfer, mode: u8| {
+            let input = [keccak256(b"set(bytes32,uint8)")[..4].to_vec(), transfer.digest().to_vec(), u256::from(mode).to_be_bytes().to_vec()].concat();
+            assert!(run(chain, finality, 0, input).result.is_ok());
+        };
+
+        // Before it follows a finality, no proof is taken.
+        refused(&run(&mut chain, gateway, 0, transfer(1).deliver_proven_input([9; 32], &[], &[])), "no finality to prove by");
+
+        // Its owner points it at one, once.
+        let set = [keccak256(b"setFinality(address)")[..4].to_vec(), address_word(finality)].concat();
+        assert!(run(&mut chain, gateway, 0, set.clone()).result.is_ok());
+        refused(&run(&mut chain, gateway, 0, set), "replaced only by the federation");
+
+        // Proof or federation: a proven transfer alone, an unproven one not; signatures still do.
+        prove(&mut chain, &transfer(1), 0);
+        refused(&run(&mut chain, gateway, 0, transfer(2).deliver_proven_input([9; 32], &[], &[])), "not in that proven range");
+        assert!(run(&mut chain, gateway, 0, transfer(1).deliver_proven_input([9; 32], &[], &[])).result.is_ok());
+        refused(&run(&mut chain, gateway, 0, transfer(1).deliver_proven_input([9; 32], &[], &[])), "delivered already");
+        assert!(run(&mut chain, gateway, 0, transfer(2).deliver_input(&signed(&transfer(2), &[1, 2]))).result.is_ok());
+
+        // Both: signatures alone are refused, a proof alone too, and the two together arrive.
+        prove(&mut chain, &transfer(3), 1);
+        refused(&run(&mut chain, gateway, 0, transfer(3).deliver_input(&signed(&transfer(3), &[1, 2]))), "a proof is needed as well");
+        refused(&run(&mut chain, gateway, 0, transfer(3).deliver_proven_input([9; 32], &[], &[])), "not enough of the federation");
+        assert!(run(&mut chain, gateway, 0, transfer(3).deliver_proven_input([9; 32], &[], &signed(&transfer(3), &[1, 2]))).result.is_ok());
+    }
+
+    #[test]
     fn the_coin_and_erc20s_leave_held_and_the_signers_change_only_as_they_sign() {
         let db = Arc::new(MemoryDb::default());
         let mut chain = open(&db);

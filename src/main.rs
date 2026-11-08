@@ -66,6 +66,10 @@ enum Command {
     /// funded accounts and `t` to drive it. Deploys leave a contract's own tests out.
     #[cfg(all(feature = "lvm", feature = "node"))]
     Test(cli::TestArgs),
+    /// Validity proofs of ranges of blocks, by hand on this machine: a range's input from a node,
+    /// checked off the node with no zkVM, and with the sp1-prover feature, run and proven in SP1.
+    #[cfg(feature = "secp256k1")]
+    Prove(cli::ProveArgs),
     /// Writes a genesis file with the development defaults, to edit and run with --genesis.
     Genesis(cli::genesis::GenesisArgs),
     /// Shows the storage layout contract code declares, and with --from, checks it keeps an
@@ -635,6 +639,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Calibrate(args)) => cli::calibrate(args),
         #[cfg(all(feature = "lvm", feature = "node"))]
         Some(Command::Test(args)) => cli::test(args),
+        #[cfg(feature = "secp256k1")]
+        Some(Command::Prove(args)) => cli::prove(args),
         Some(Command::Genesis(args)) => cli::genesis::write(args),
         Some(Command::Layout(args)) => cli::layout(args),
         Some(Command::Db(args)) => cli::db(args),

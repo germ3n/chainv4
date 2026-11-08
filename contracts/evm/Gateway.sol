@@ -7,11 +7,20 @@
 // signs the next. A transfer refused for good is voided where it was going and only then refunded
 // where it left, each on the federation's signatures, so it can never pay twice. The wrapped contracts
 // are deployed once, as templates, and each wrapped asset is a minimal proxy of one (EIP-1167), so the
-// gateway stays under the EVM's size limit. Built with
+// gateway stays under the EVM's size limit. Once it follows ChainV4Finality.sol, a transfer from
+// chainv4 may instead arrive by a validity proof of the range it left in, with the federation's
+// signatures as well when chainv4's governance says both. Built with
 // solc 0.8 for Paris, through the IR pipeline:
 //
 //   solc --evm-version paris --optimize --via-ir --bin --abi Gateway.sol -o build
 pragma solidity ^0.8.24;
+
+/// ChainV4Finality.sol, as this gateway reads it: whether a digest left chainv4 in a proven range,
+/// and how chainv4's governance has it release.
+interface IChainV4Finality {
+    function withdrew(bytes32 endBlock, bytes32 transfer, bytes32[] calldata path) external view returns (bool);
+    function gatewayMode() external view returns (uint8);
+}
 
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
@@ -285,6 +294,10 @@ contract Gateway {
     uint64 public version;
     uint64 public nonce;
     mapping(uint64 => bytes) public peers;
+    /// The ChainV4Finality.sol it takes proven withdrawals by, none until set, and how many times
+    /// the federation replaced it.
+    IChainV4Finality public finality;
+    uint64 public finalityVersion;
     mapping(uint64 => Transfer) private sentTransfers;
     mapping(bytes32 => bool) public delivered;
     mapping(bytes32 => address) public wrappedOf;
@@ -326,6 +339,23 @@ contract Gateway {
     function setPeer(uint64 chain, bytes calldata gateway) external {
         require(msg.sender == owner, "only the owner");
         peers[chain] = gateway;
+    }
+
+    /// Follows a ChainV4Finality.sol, by the owner while it follows none: from then on a transfer
+    /// from chainv4 arrives by deliverProven too.
+    function setFinality(IChainV4Finality next) external {
+        require(msg.sender == owner, "only the owner");
+        require(address(finality) == address(0), "replaced only by the federation: replaceFinality");
+        finality = next;
+    }
+
+    /// Replaces the ChainV4Finality.sol it follows, with the federation's signatures over the
+    /// next one and the next version, so no single key picks what proves withdrawals.
+    function replaceFinality(IChainV4Finality next, uint64 nextVersion, bytes[] calldata signatures) external {
+        require(nextVersion > finalityVersion, "an older finality");
+        check(keccak256(abi.encode("chainv4-gateway-finality", address(this), block.chainid, nextVersion, next)), signatures);
+        finality = next;
+        finalityVersion = nextVersion;
     }
 
     /// The next federation, signed over by the one in force: what chainv4's governance decided.
@@ -403,16 +433,47 @@ contract Gateway {
 
     /// Delivers a transfer from another chain's gateway with the federation's signatures over its
     /// digest: what anyone relays from chainv4's signature board.
+    /// Once it follows a finality whose proofs say both, a transfer needs a proof as well:
+    /// deliverProven.
     function deliver(Transfer calldata t, bytes[] calldata signatures) external {
+        require(address(finality) == address(0) || finality.gatewayMode() == 0, "a proof is needed as well: deliverProven");
+        bytes32 key = admit(t);
+        bytes32 digest = digestOf(t);
+        check(digest, signatures);
+        take(t, key, digest);
+    }
+
+    /// Delivers a transfer from chainv4 by a proof that it left in the proven range ending at
+    /// endBlock: its path in that range's withdrawals tree, as ChainV4Finality.sol holds its root.
+    /// With the federation's signatures over its digest too while chainv4's governance says both;
+    /// otherwise signatures may be empty.
+    function deliverProven(Transfer calldata t, bytes32 endBlock, bytes32[] calldata path, bytes[] calldata signatures) external {
+        require(address(finality) != address(0), "no finality to prove by");
+        bytes32 key = admit(t);
+        bytes32 digest = digestOf(t);
+        require(finality.withdrew(endBlock, digest, path), "not in that proven range");
+
+        if (finality.gatewayMode() == 1) {
+            check(digest, signatures);
+        }
+
+        take(t, key, digest);
+    }
+
+    /// Whether a transfer may arrive here at all, before what vouches for it: for this gateway,
+    /// from its peer, once and unvoided. Its key, by which delivered marks it.
+    function admit(Transfer calldata t) private view returns (bytes32 key) {
         require(t.target == block.chainid && keccak256(t.to) == keccak256(abi.encodePacked(address(this))), "not for this gateway");
         require(peers[t.source].length > 0 && keccak256(t.from) == keccak256(peers[t.source]), "not from this gateway's peer");
         // By the gateway it came from too: a chain restarted from the identical genesis counts its
         // nonces from 1 again, under a gateway with the same address but set up anew.
-        bytes32 key = keccak256(abi.encode(t.source, keccak256(t.from), t.nonce));
+        key = keccak256(abi.encode(t.source, keccak256(t.from), t.nonce));
         require(!delivered[key], "delivered already");
         require(voidedAt[key] == 0, "voided: its source refunds it");
-        bytes32 digest = digestOf(t);
-        check(digest, signatures);
+    }
+
+    /// Delivers a transfer admitted and vouched for: released here or minted wrapped, once.
+    function take(Transfer calldata t, bytes32 key, bytes32 digest) private {
         delivered[key] = true;
         require(t.recipient.length == 20, "the recipient is an address here");
         address to = address(bytes20(t.recipient));

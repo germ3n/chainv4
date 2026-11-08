@@ -152,6 +152,8 @@ const FINALITIES: Options = &[("ffg", "FFG"), ("authority", "Authority"), ("dept
 const VOTE_REWARD_SOURCES: Options = &[("mint", "Minted"), ("fees", "Reward pool")];
 const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, by signers")];
 const GOVERNANCES: Options = &[("council", "A council"), ("electorate", "Finality's voters")];
+const PROOF_KINDS: Options = &[("sp1-groth16", "SP1, wrapped in Groth16")];
+const GATEWAY_MODES: Options = &[("proof-or-federation", "A proof, or the federation's signatures"), ("both", "A proof and the federation's signatures")];
 const EVM_SPECS: Options = &[("shanghai", "Shanghai"), ("cancun", "Cancun"), ("prague", "Prague"), ("osaka", "Osaka")];
 
 const VALIDATOR: &[Column] = &[Column { name: "account", label: "Account", cell: Cell::Account }, Column { name: "voter", label: "Voting key", cell: Cell::Key }, Column { name: "bond", label: "Bond", cell: Cell::Amount }, Column { name: "attester", label: "Attester, for Ethereum", cell: Cell::MaybeEvm }];
@@ -193,6 +195,12 @@ pub fn schema(kind: &str) -> Vec<Spec> {
         "upgrade" => vec![
             field("least", "Least version that runs on", "Nodes older than this stop and say to update.", Control::Version),
             field("from", "From block", "Must be ahead of the block that decides it.", Control::Whole),
+        ],
+        "proofs" => vec![
+            field("kind", "Proof system", "The zkVM and wrapping proofs are made with.", Control::Choice(PROOF_KINDS)),
+            field("program", "Program", "Its verifying key hash, 0x and 64 hex digits, as chainv4 prove program prints it. Each release that runs blocks otherwise is another.", Control::Text),
+            field("reward_per_block", "Reward a block proven", "Minted to whoever proves, for each block a proof covers. None pays nothing.", Control::Amount),
+            field("gateway", "Gateway.sol releases by", "How withdrawals to EVM chains arrive: each proof carries this to Ethereum.", Control::Choice(GATEWAY_MODES)),
         ],
         "fork" => vec![
             field("type", "What it does", "A fork changes what blocks compute from a height on. One within the lead of this vote, or passed, stays as it is.", Control::Choice(FORK_KINDS)),
@@ -425,6 +433,7 @@ pub fn defaults(kind: &str) -> Value {
         "name" => json!(""),
         "upgrade" => json!({ "least": "", "from": null }),
         "fork" => json!({ "type": "schedule", "name": "", "height": null, "epoch": null, "least": "", "blocks": null }),
+        "proofs" => json!({ "kind": "sp1-groth16", "program": "", "reward_per_block": "0", "gateway": "proof-or-federation" }),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),
         "fees" => json!({
             "block_gas_limit": 50_000_000,

@@ -408,6 +408,24 @@ recover to the set's attesters, by address; their `weight`, and whether it is `e
 thirds of the set. Words are 32-byte hex, as the contract takes them. 404 when no checkpoint is
 justified after it yet, on a chain whose finality does not vote, and in a build without secp256k1.
 
+### `GET /validity`
+
+[Validity proofs](proofs.md) as the chain has them: `settings`, governance's `Change::Proofs`
+(`kind`, `program`, `reward_per_block`, `gateway`), or null; `tip`, the proven tip's `height`,
+`block` and `state_root`, null before the `proofs` fork; and `proof`, the latest proof the chain
+took, its `kind`, `public_values` and `proof` in hex, null before the first. A light client checks
+the proof itself, so whoever serves it adds nothing. `GET /status` carries all three as
+`validity`.
+
+### `GET /validity/input?from=H&to=H2`
+
+A range's input, as a prover feeds its zkVM: a `RangeInput`, encoded, `application/octet-stream`,
+from block `from` to `to`, at most `MAX_VALIDITY_RANGE` (2,048) blocks. The node builds it by
+running the range over its history back to `from`, so it needs an archive, or a `--state-history`
+window that reaches it. It shares the turns block ranges take. 404, saying why, for a range it
+can't build: blocks it doesn't hold, history that doesn't reach the start, or a read no witness
+covers.
+
 ### `GET /proofs/{column}/{key}`
 
 A proof of one chain-state entry against the tip's state root (see

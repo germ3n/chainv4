@@ -197,6 +197,16 @@ pub fn tx(transaction: &Tx) -> Value {
             "update": crate::structs::hex::to_hex(&proof.update),
         }),
         Tx::Batch { steps } => json!({ "type": "batch", "steps": steps.iter().map(tx).collect::<Vec<_>>() }),
+        Tx::Prove { kind, range, proof } => json!({
+            "type": "prove",
+            "kind": kind.name(),
+            "start": range_end(&range.start),
+            "end": range_end(&range.end),
+            "withdrawals": crate::structs::hex::to_hex(&range.withdrawals),
+            "program": crate::structs::hex::to_hex(&range.program),
+            "gateway": range.gateway.name(),
+            "proof": crate::structs::hex::to_hex(proof),
+        }),
     }
 }
 
@@ -388,4 +398,9 @@ pub fn fee_offer(offer: &FeeOffer) -> Value {
 
 pub(crate) fn decimal(amount: &Amount) -> String {
     amount.to_u256().to_string()
+}
+
+/// One end of a proven range, as JSON.
+fn range_end(end: &crate::proofs::RangeEnd) -> Value {
+    json!({ "height": end.height, "block": end.block.to_string(), "state_root": end.state_root.to_string() })
 }

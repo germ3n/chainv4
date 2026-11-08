@@ -538,6 +538,142 @@ impl<'a> StateTree<'a> {
     }
 }
 
+#[document(
+    summary = "Checks a witness of the state tree against a root: nodes as a database holds them, by their keys in Column::StateTree, each a node or none, and entries, each a value or none. Every node must hang where its parent says, up to the root, and every entry be what the nodes on its way down hold. What a validity proof runs a range over in place of the whole state.",
+    params = {
+        hash = "The chain's hash.",
+        root = "The state root the witness is of.",
+        nodes = "The tree's nodes it gives, by key; None where a position holds no node.",
+        entries = "The entries it gives, by column and key; None for one the state does not hold.",
+    },
+    returns = "Why it does not hold, if it does not.",
+    category = "Storage",
+    see_also = "StateTree, STATE_COLUMNS",
+)]
+pub fn check_witness(
+    hash: HashType,
+    root: &Hash,
+    nodes: &std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    entries: &std::collections::BTreeMap<(Column, Vec<u8>), Option<Vec<u8>>>,
+) -> Result<(), String> {
+    let decoded = |bytes: &Option<Vec<u8>>| -> Result<Option<Node>, String> {
+        bytes.as_ref().map(|bytes| wincode::deserialize::<Node>(bytes).map_err(|err| format!("a node that does not decode: {err}"))).transpose()
+    };
+
+    for (key, bytes) in nodes {
+        let (depth, prefix) = parse_node_key(key).ok_or("a node key that is no depth and path")?;
+        let node = decoded(bytes)?;
+        let own = node.as_ref().map_or_else(|| Hash::zero(hash), node_hash);
+
+        if (depth..PATH_BITS).any(|below| bit(&prefix, below) == 1) {
+            return Err(format!("a node at depth {depth} with path bits below it"));
+        }
+
+        if let Some(Node::Leaf(leaf)) = &node
+            && (leaf.path != state_path(hash, leaf.column, &leaf.key) || (0..depth).any(|above| bit(&leaf.path, above) != bit(&prefix, above)))
+        {
+            return Err(format!("a leaf at depth {depth} off its own path"));
+        }
+
+        if depth == 0 {
+            if own != *root {
+                return Err("the tree's top is not the root".to_string());
+            }
+
+            continue;
+        }
+
+        let mut above = prefix;
+        let at = usize::from(depth - 1);
+        above[at / 8] &= !(1 << (7 - at % 8));
+        let parent = nodes.get(&node_key(depth - 1, &above)).ok_or_else(|| format!("a node at depth {depth} without its parent"))?;
+        let holds = match (decoded(parent)?, &node) {
+            (Some(Node::Branch { left, right }), _) => own == if bit(&prefix, depth - 1) == 0 { left } else { right },
+            // Nothing hangs under a leaf, nor under nothing.
+            (Some(Node::Leaf(_)) | None, None) => true,
+            (Some(Node::Leaf(_)) | None, Some(_)) => false,
+        };
+
+        if !holds {
+            return Err(format!("a node at depth {depth} that its parent does not hold"));
+        }
+    }
+
+    for ((column, key), value) in entries {
+        let path = state_path(hash, *column, key);
+        let (mut depth, mut prefix) = (0, [0; 32]);
+
+        loop {
+            let at = nodes.get(&node_key(depth, &prefix)).ok_or_else(|| format!("an entry of {column:?} whose way down is not in the witness"))?;
+
+            match decoded(at)? {
+                None => {
+                    if value.is_some() {
+                        return Err(format!("an entry of {column:?} the tree does not hold"));
+                    }
+
+                    break;
+                }
+                Some(Node::Leaf(leaf)) => {
+                    let held = (leaf.path == path).then_some(leaf.value);
+
+                    if held != value.as_ref().map(|value| Hasher::digest(hash, value)) {
+                        return Err(format!("an entry of {column:?} that is not what the tree holds"));
+                    }
+
+                    break;
+                }
+                Some(Node::Branch { .. }) => {
+                    if bit(&path, depth) == 1 {
+                        prefix = with_bit(prefix, depth);
+                    }
+
+                    depth += 1;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[document(
+    summary = "Where every node above a stored node's position is stored, from the root down: what a witness holds beside a node, so the node hangs from the root.",
+    params = { key = "The node's key in Column::StateTree." },
+    returns = "The keys above it; none for a key that is no node's.",
+    category = "Storage",
+    see_also = "check_witness",
+)]
+pub fn ancestor_keys(key: &[u8]) -> Vec<Vec<u8>> {
+    let Some((depth, prefix)) = parse_node_key(key) else {
+        return Vec::new();
+    };
+
+    (0..depth)
+        .map(|above| {
+            let mut bits = [0; 32];
+
+            for at in 0..above {
+                if bit(&prefix, at) == 1 {
+                    bits = with_bit(bits, at);
+                }
+            }
+
+            node_key(above, &bits)
+        })
+        .collect()
+}
+
+/// A node's depth and path bits from where it is stored.
+fn parse_node_key(key: &[u8]) -> Option<(u16, Path)> {
+    let (depth, prefix) = key.split_first_chunk::<2>()?;
+    let depth = u16::from_be_bytes(*depth);
+
+    (depth <= PATH_BITS).then_some(())?;
+
+    Some((depth, prefix.try_into().ok()?))
+}
+
 fn node_hash(node: &Node) -> Hash {
     match node {
         Node::Leaf(leaf) => leaf.hash(),

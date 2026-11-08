@@ -817,6 +817,8 @@ fn router(api: Api) -> Router {
         .route("/headers", get(headers))
         .route("/justifications", get(justifications))
         .route("/attestations", get(attestations))
+        .route("/validity", get(validity))
+        .route("/validity/input", get(validity_input))
         .route("/proofs/receipts/{id}", get(receipt_proof))
         .route("/proofs/{column}/{key}", get(state_proof))
         .route("/txs", post(submit))
@@ -1068,6 +1070,7 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
         "directory_admin": crate::registry::directory::directory_admin(&State::new(db.clone()))?.map(|admin| admin.to_string()),
         "upgrade": crate::registry::changes::Changes::new(&State::new(db.clone())).upgrade()?.map(|upgrade| json!({ "least": upgrade.least.to_string(), "from": upgrade.from })),
         "forks": forks_json(&crate::registry::changes::Changes::new(&State::new(db.clone())).forks()?, tip.header.height, api.rules.target_block_ms),
+        "validity": validity_json(&db)?,
         "version": crate::structs::version::Version::ours().to_string(),
         "name": crate::registry::changes::Changes::new(&State::new(db.clone())).name()?,
         "names_suffix": names_suffix(&api),
@@ -1087,6 +1090,82 @@ async fn status(Shared(api): Shared<Api>) -> Answer {
 
 /// The fork schedule as GET /status says it: the lead in blocks, and each fork scheduled with
 /// whether it has passed at the tip, whether this release knows it, and what it changes.
+/// Validity proofs as the chain has them: governance's settings, the proven tip, and the latest
+/// proof the chain took, for a light client to check for itself: its kind, public values and
+/// proof. Each null before there is one.
+fn validity_json(db: &Arc<dyn Committed>) -> Result<Value, ApiError> {
+    let state = State::new(db.clone());
+    let settings = crate::registry::changes::Changes::new(&state).proofs()?;
+    let tip = crate::proofs::ProvenChain::new(&state).tip()?;
+    let proof = crate::chain::stored_validity_proof(&**db)?;
+
+    Ok(json!({
+        "settings": settings.as_ref().map(crate::params::json::proof_settings_json),
+        "tip": tip.map(|tip| json!({ "height": tip.height, "block": tip.block.to_string(), "state_root": tip.state_root.to_string() })),
+        "proof": proof.map(|taken| json!({ "kind": taken.kind.name(), "public_values": to_hex(&taken.range.public_values()), "proof": to_hex(&taken.proof) })),
+    }))
+}
+
+/// GET /validity: validity proofs as GET /status gives them.
+async fn validity(Shared(api): Shared<Api>) -> Answer {
+    Ok(Json(validity_json(&api.db)?))
+}
+
+#[document(
+    summary = "The most blocks GET /validity/input builds a range's input of at once: 2,048, a few hours of blocks, as the node runs every one of them to build it.",
+    category = "API",
+    see_also = "RangeInput",
+)]
+pub const MAX_VALIDITY_RANGE: u64 = 2_048;
+
+/// GET /validity/input?from=&to=: the input of a proof of the range from block from to block to, a
+/// RangeInput, encoded, which a prover feeds its zkVM. Built in its turn, as block ranges are, on
+/// the blocking pool, from history back to from: an archive serves any range, a node with a
+/// --state-history window only one within it.
+async fn validity_input(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    #[cfg(all(feature = "secp256k1", any(feature = "governance", feature = "anchoring")))]
+    {
+        let from = number(&query, "from")?.ok_or_else(|| ApiError::BadRequest("from is the height the range starts at".to_string()))?;
+        let to = number(&query, "to")?.ok_or_else(|| ApiError::BadRequest("to is the height the range ends at".to_string()))?;
+
+        if to <= from || to - from > MAX_VALIDITY_RANGE {
+            return Err(ApiError::BadRequest(format!("a range ends after it starts, at most {MAX_VALIDITY_RANGE} blocks on")));
+        }
+
+        let turn = match api.ranges.enter(asker(peer, &headers, &api.trusted_proxies)).await {
+            Ok(turn) => turn,
+            Err(busy) => {
+                let mut response = busy.into_response();
+                response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+
+                return Ok(response);
+            }
+        };
+        let (db, genesis) = (api.db.clone(), api.genesis.clone());
+        let built = tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            let rules = crate::chain::Chain::open(Arc::new(crate::db::MemoryDb::default()), &genesis).map_err(|err| err.to_string())?;
+            let json = serde_json::to_vec(&crate::chain::json::to_json(&genesis)).map_err(|err| err.to_string())?;
+            let input = crate::proofs::RangeInput::build(&rules, db, json, from, to).map_err(|err| err.to_string())?;
+
+            wincode::serialize(&input).map_err(|err| format!("a range's input: {err}"))
+        })
+        .await
+        .map_err(|err| ApiError::Db(DbError::Corrupt(format!("a range's input stopped: {err}"))))?;
+
+        match built {
+            Ok(bytes) => Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()),
+            Err(why) => Err(ApiError::NotFound(format!("the range from {from} to {to}: {why}"))),
+        }
+    }
+    #[cfg(not(all(feature = "secp256k1", any(feature = "governance", feature = "anchoring"))))]
+    {
+        let _ = (api, peer, headers, query);
+
+        Err(ApiError::NotFound("this build builds no validity proofs' inputs".to_string()))
+    }
+}
+
 fn forks_json(schedule: &crate::params::forks::ForkSchedule, tip: u64, target_block_ms: Option<u64>) -> Value {
     let scheduled: Vec<Value> = schedule
         .forks

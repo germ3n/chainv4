@@ -165,10 +165,13 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
     let voters = voters();
     assert_eq!(Keypair::generate(KeyType::Secp256k1).unwrap().public().key_type(), KeyType::Secp256k1);
 
-    // Deployed from the genesis checkpoint, trusted, with the set that signs epoch 1.
+    // Deployed from the genesis checkpoint, trusted, with the set that signs epoch 1, proofs
+    // starting there too, checked by the test verifier under program 5s.
     let genesis_header = chain.block_at(0).unwrap().unwrap().header;
+    let verifier = deploy(&mut chain, crate::structs::hex::from_hex(include_str!("../../../../contracts/evm/MockSp1Verifier.bin").trim()).unwrap());
+    let Address::Evm(verifier) = verifier else { panic!("an EVM contract") };
     let constructor = encode_values(
-        &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
+        &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Address, AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
         &[
             AbiValue::Uint(u256::from(crate::crypto::ethereum::chain_id(&chain.genesis()))),
             AbiValue::Uint(u256::ZERO),
@@ -176,6 +179,12 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
             AbiValue::Uint(u256::ZERO),
             AbiValue::FixedBytes(word(&genesis_header.state_root).to_vec()),
             AbiValue::FixedBytes(chain.attesting_set(1).unwrap().unwrap().hash().to_vec()),
+            AbiValue::Address(verifier),
+            AbiValue::FixedBytes(word(&chain.genesis()).to_vec()),
+            AbiValue::FixedBytes([5; 32].to_vec()),
+            AbiValue::Uint(u256::ZERO),
+            AbiValue::FixedBytes(word(&chain.genesis()).to_vec()),
+            AbiValue::FixedBytes(word(&genesis_header.state_root).to_vec()),
         ],
     )
     .unwrap();
@@ -230,4 +239,64 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
     let (link, set, signed) = &links[4];
     call(&mut chain, contract, submit(link, set, signed)).unwrap();
     assert_eq!((read(&mut chain, contract, "justifiedEpoch()"), read(&mut chain, contract, "finalizedEpoch()")), (u256::new(5), u256::new(4)));
+
+    // A proof of the range from genesis to epoch 4's final checkpoint, two transfers leaving in it.
+    let ends: Vec<crate::proofs::RangeEnd> = (0..=5)
+        .map(|epoch| {
+            let header = chain.block_at(epoch * INTERVAL).unwrap().unwrap().header;
+            crate::proofs::RangeEnd { height: header.height, block: header.id(), state_root: header.state_root }
+        })
+        .collect();
+    let end = |epoch: u64| ends[epoch as usize];
+    let digests = [[0xd1; 32], [0xd2; 32]];
+    let range = crate::proofs::ProvenRange {
+        chain_id: crate::crypto::ethereum::chain_id(&chain.genesis()),
+        genesis: chain.genesis(),
+        start: crate::proofs::RangeEnd { height: 0, block: chain.genesis(), state_root: genesis_header.state_root },
+        end: end(4),
+        withdrawals: crate::proofs::withdrawals_root(&digests),
+        program: [6; 32],
+        gateway: crate::proofs::GatewayMode::Both,
+    };
+    let prove = |range: &crate::proofs::ProvenRange, program: [u8; 32], epoch: u64| {
+        let values = range.public_values();
+        let proof = crate::proofs::TestProofs::proof(&program, &values);
+        let types = [AbiType::Bytes, AbiType::Bytes, AbiType::Uint(256)];
+
+        [selector("prove(bytes,bytes,uint256)"), encode_values(&types, &[AbiValue::Bytes(values), AbiValue::Bytes(proof), AbiValue::Uint(u256::from(epoch))]).unwrap()].concat()
+    };
+
+    // Refused: by another program, to a checkpoint not final here, from elsewhere than the tip.
+    assert!(call(&mut chain, contract, prove(&range, [7; 32], 4)).is_err(), "another program");
+    assert!(call(&mut chain, contract, prove(&crate::proofs::ProvenRange { end: end(5), ..range }, [5; 32], 5)).is_err(), "5 is justified, not final");
+    assert!(call(&mut chain, contract, prove(&crate::proofs::ProvenRange { start: end(1), ..range }, [5; 32], 4)).is_err(), "not the proven tip");
+    let mut other_root = range;
+    other_root.end.state_root = genesis_header.state_root;
+    assert!(call(&mut chain, contract, prove(&other_root, [5; 32], 4)).is_err(), "a root the validators did not sign");
+
+    // Taken: the tip moves, the withdrawals root is kept, the program and mode follow chainv4's.
+    call(&mut chain, contract, prove(&range, [5; 32], 4)).unwrap();
+    assert_eq!(read(&mut chain, contract, "provenHeight()"), u256::from(4 * INTERVAL));
+    assert_eq!(read(&mut chain, contract, "program()"), u256::from_be_bytes([6; 32]));
+    assert_eq!(read(&mut chain, contract, "gatewayMode()"), u256::ONE);
+    assert_eq!(read(&mut chain, contract, "provenCount()"), u256::ONE);
+    let first_end = call(&mut chain, contract, [selector("provenEnds(uint256)"), u256::ZERO.to_be_bytes().to_vec()].concat()).unwrap();
+    assert_eq!(u256::from_be_bytes(first_end.try_into().unwrap()), u256::from(4 * INTERVAL));
+
+    let withdrew = |chain: &mut Chain, digest: [u8; 32], path: Vec<[u8; 32]>| {
+        let types = [AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::FixedBytes(32)))];
+        let values = [AbiValue::FixedBytes(word(&range.end.block).to_vec()), AbiValue::FixedBytes(digest.to_vec()), AbiValue::Array(path.into_iter().map(|node| AbiValue::FixedBytes(node.to_vec())).collect())];
+        let answer = call(chain, contract, [selector("withdrew(bytes32,bytes32,bytes32[])"), encode_values(&types, &values).unwrap()].concat()).unwrap();
+
+        answer.last() == Some(&1)
+    };
+
+    for (index, digest) in digests.iter().enumerate() {
+        assert!(withdrew(&mut chain, *digest, crate::proofs::withdrawal_proof(&digests, index).unwrap()), "{index}");
+    }
+
+    assert!(!withdrew(&mut chain, [0xd3; 32], crate::proofs::withdrawal_proof(&digests, 0).unwrap()), "one that never left");
+
+    // The same range again starts behind the tip now.
+    assert!(call(&mut chain, contract, prove(&range, [6; 32], 4)).is_err());
 }

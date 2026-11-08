@@ -17,6 +17,7 @@ How chainv4 works, part by part, and what to keep in mind while running it or ch
 | [Genesis](genesis.md) | Every field of a genesis file, and the rules a node checks them against. |
 | [Consensus](consensus.md) | Who may produce blocks: the development authority, proof of work, a rotating authority and production by stake. |
 | [Finality](finality.md) | FFG, authority and depth finality, votes, staking, slashing and signer changes. |
+| [Validity proofs](proofs.md) | Ranges of blocks proven in SP1 to come to their state roots: the replay over a witness, the program, proving by hand, Tx::Prove and the proofs fork, ChainV4Finality.sol's proofs, withdrawals by proof and light clients. |
 | [Anchoring](anchoring.md) | Finalized checkpoints written into Bitcoin, proven through the relay and paid for, nodes refusing to replace them, and new nodes picking the history Bitcoin saw first. |
 | [Governance](governance.md) | Changing the consensus on a running chain: the electorate and council kinds, approvals, and how a change takes effect. |
 | [Fees](fees.md) | Gas, scorers, base fees and bids, the block gas limit, and where fees go. |

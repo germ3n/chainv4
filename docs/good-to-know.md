@@ -2290,6 +2290,29 @@ contract computes, so they wait for the next regenesis (see the todo).
 - **Mining rewards are not restaked,** under proof of work: they are a miner's, paid to a payout
   address, which need not be a validator's account at all.
 
+## Validity proofs
+
+- **The program is the replay as built.** `proofs/sp1/build.sh` builds it the one way, so every
+  prover gets the same program id: SP1's toolchain, its RISC-V GCC for Luau, `climits` included
+  (Luau leans on Apple's clang including it), and unwind tables for Rust frames. Another build is
+  another program, which governance must name.
+- **SP1 starts no C++ runtime.** The program does it itself before anything runs
+  (`program/src/libc.rs`): it registers the unwind tables, which `eh_frame.ld` names and ends; runs
+  the static constructors, which Luau's parser builds its tables in; and answers the unwinder for
+  Rust frames, carrying on, as a Lua error raised in a Rust callback unwinds through them to Luau's
+  catch. Without these every compile fails, and a contract's error aborts the program.
+- **Errors are C++ exceptions in the program as on nodes.** Luau could be built with `longjmp`
+  instead, but the program runs blocks the way nodes do.
+- **No clock inside.** `time` and `clock` read zero there. Contracts read the block's time, and Luau
+  reads the clock only for GC metrics this build leaves out.
+- **What the replay may read is the state, the tree and headers.** Code a block runs that reads
+  any other column makes every range holding it unprovable: `RangeInput::build` says so, before
+  anyone tries to prove it.
+- **A scan carries the whole state.** A proof of single entries can't show a scan saw everything,
+  so a range in which any contract scans its storage takes the whole state as its witness.
+- **Proofs need history.** A range's input is built from history back to its start: an archive,
+  or a `--state-history` window that reaches it.
+
 ## Lua contract tests
 
 - **Tests run off chain, their calls on it.** A test's own code is not metered or limited; only

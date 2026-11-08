@@ -19,13 +19,13 @@ use {
 pub struct Recording {
     base: Arc<dyn Committed>,
     read: Mutex<BTreeSet<(Column, Vec<u8>)>>,
-    scanned: Mutex<bool>,
+    scanned: Mutex<BTreeSet<Column>>,
 }
 
 impl Recording {
     #[document(parent = "Recording", summary = "Notes the reads of a call run over base.")]
     pub fn new(base: Arc<dyn Committed>) -> Recording {
-        Recording { base, read: Mutex::default(), scanned: Mutex::new(false) }
+        Recording { base, read: Mutex::default(), scanned: Mutex::default() }
     }
 
     #[document(parent = "Recording", summary = "Every entry read, by column and key, in order, each once.")]
@@ -35,7 +35,12 @@ impl Recording {
 
     #[document(parent = "Recording", summary = "Whether the call scanned a range of keys, which no proof of single entries covers.")]
     pub fn scanned(&self) -> bool {
-        *self.scanned.lock().unwrap_or_else(PoisonError::into_inner)
+        !self.scanned.lock().unwrap_or_else(PoisonError::into_inner).is_empty()
+    }
+
+    #[document(parent = "Recording", summary = "Every column the call scanned a range of, each once.")]
+    pub fn scanned_columns(&self) -> Vec<Column> {
+        self.scanned.lock().unwrap_or_else(PoisonError::into_inner).iter().copied().collect()
     }
 }
 
@@ -49,7 +54,7 @@ impl Read for Recording {
 
 impl Committed for Recording {
     fn scan(&self, column: Column, prefix: &[u8], start: &[u8], visit: &mut dyn FnMut(&[u8], &[u8]) -> bool) -> Result<(), DbError> {
-        *self.scanned.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.scanned.lock().unwrap_or_else(PoisonError::into_inner).insert(column);
 
         self.base.scan(column, prefix, start, visit)
     }

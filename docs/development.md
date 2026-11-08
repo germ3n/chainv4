@@ -173,7 +173,11 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `mnemonic` | Seed phrases: BIP39 words, and keys derived from them for every scheme built in. |
 | `lvm`, `wasm`, `evm` | The contract engines; any pulls in `vm`. `evm` is revm, and pulls in `keccak256`. |
 | `rocksdb` | The RocksDB backend. |
-| `node` | The node, the chain and the CLI, which stops cleanly on SIGTERM and SIGINT through `signal-hook`. |
+| `node` | The node, the chain and the CLI, which stops cleanly on SIGTERM and SIGINT through `signal-hook`. Brings `chain`. |
+| `chain` | The chain's state transition alone, `Chain` and running blocks, without the node: no libp2p, RocksDB, tokio or rayon, the workers running in turn. What the [validity proofs](proofs.md)' program builds. |
+| `consensus` | Every feature that decides how a block runs, the hashes, keys, engines, finality, governance and `chain` among them, and nothing else: what the proofs' program builds chainv4 with, so it runs blocks as a node of the default build does. A new feature that changes how blocks run joins it. |
+| `sp1` | SP1's validity proofs checked: Groth16 by `sp1-verifier`, pure Rust and `no_std`, for a node's `Tx::Prove` and the apps' proven tip. On by default. |
+| `sp1-prover` | Off by default: proving ranges with SP1's SDK on this machine, `chainv4 prove execute` and `run`. Heavy; no node or app needs it. Its Groth16 wrapping builds gnark with Go (`native-gnark`), once Go's modules are fetched. |
 | `http` | The HTTP API. |
 | `stream` | `GET /stream`, and the node's `--stream`. Needs `http`. |
 | `faucet` | A [faucet](faucet.md) for dev and test chains: `--faucet-key` and `POST /faucet`. Brings `http` and `sha256`; `chainv4 faucet` comes with `client`. |

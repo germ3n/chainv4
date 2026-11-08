@@ -432,10 +432,15 @@ a node replaying history runs each block by its own height's (`params::forks`).
 
 - **A fork is a name its release knows** (`FORKS`), with the code it changes asking whether it is
   in force (`Forks::has`, through `VmRules::forks`, set for every block from its parent's state).
-  This release knows one, `restaking` (see [Finality](finality.md#restaking)): validators' rewards
-  restaked into their bonds when their accounts turn it on, bonds topped up by hand, and the
-  attestations of the justifications blocks carry checked as gossiped ones are. Tests also run
-  a fork that exists in them alone.
+  This release knows two:
+  - `restaking` (see [Finality](finality.md#restaking)): validators' rewards restaked into their
+    bonds when their accounts turn it on, bonds topped up by hand, and the attestations of the
+    justifications blocks carry checked as gossiped ones are.
+  - `proofs` (see [Validity proofs](proofs.md#on-the-chain-the-proofs-fork)): each block records
+    its parent for a proof to end at, the proven tip starts, and the chain takes `Tx::Prove` and
+    `Change::Proofs`.
+
+  Tests also run a fork that exists in them alone.
 - **Genesis may list forks** (`forks`, see [Genesis](genesis.md)), each its release knows, at a
   height or a finality epoch's first block.
 - **Governance schedules one** at least the chain's lead ahead, a day of its blocks unless it set
@@ -453,6 +458,19 @@ chainv4 send --key member.key vote-change --vote yes --fork faster-lua --fork-he
 chainv4 send --key member.key vote-change --vote yes --fork faster-lua --fork-epoch 22500 --fork-least 0.3.0   # moves it
 chainv4 send --key member.key vote-change --vote yes --cancel-fork faster-lua
 chainv4 send --key member.key vote-change --vote yes --change '{"fork":{"type":"schedule","name":"faster-lua","height":180000,"epoch":null,"least":"0.3.0"}}'
+```
+
+## Proofs
+
+`Change::Proofs`, from the `proofs` fork on, names which validity proofs the chain takes: the proof
+system (`sp1-groth16`), the program (its verifying key hash, from `chainv4 prove program`), what is
+minted for each block a proof covers, and how Gateway.sol releases (`proof-or-federation` or
+`both`). Each proof carries the program and the mode at its range's end, so the contracts on
+Ethereum follow them. Until it is decided, the chain takes no proofs. See
+[Validity proofs](proofs.md).
+
+```sh
+chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kind":"sp1-groth16","program":"0x…","reward_per_block":"0","gateway":"proof-or-federation"}}'
 ```
 
 The wallet's Governance page proposes the same under **Fork schedule**: schedule or move a fork by

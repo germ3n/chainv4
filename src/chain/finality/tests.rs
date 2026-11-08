@@ -3258,6 +3258,8 @@ fn staking_needs_staking() {
 mod attestations;
 #[cfg(all(feature = "finality-ffg", feature = "staking"))]
 mod restaking;
+#[cfg(all(feature = "finality-ffg", feature = "secp256k1", feature = "governance-council"))]
+mod proofs;
 
 #[cfg(feature = "finality-depth")]
 mod depth {

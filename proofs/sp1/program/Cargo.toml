@@ -1,0 +1,20 @@
+# The validity proofs' program for SP1: chainv4's own replay of a range of blocks (proofs::replay),
+# built for SP1's RISC-V with cargo prove build, run by chainv4 prove. Its verifying key is the
+# program governance names in Change::Proofs: any change to how blocks run is another program.
+[package]
+name = "chainv4-proof-program"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+sp1-zkvm = "=6.10.0"
+chainv4 = { path = "../../..", default-features = false, features = ["consensus"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,39 @@
+//! Validity proofs: a zero-knowledge proof that a run of blocks followed the chain's rules, so what
+//! the validators sign is checked by what the blocks did, not taken on their word (docs/proofs.md).
+//!
+//! A proof covers a range, from a block whose state root is known, proven before or trusted, to a
+//! later one: it runs every block of the range by the very code a node runs them by
+//! (`Chain::run_block`), over a witness of what the range reads, and says what it ran to, the end's
+//! block and state root, with a keccak256 root of what left through the bridge's gateway in the
+//! range. Which block is final still comes from the validators' attestations; the proof makes
+//! their state root a checked one.
+//!
+//! Nothing here is bound to one zkVM: a range's public values are laid out as Solidity's
+//! `abi.encode` lays them out, the replay is plain Rust, and a proof system is a ProofKind and the
+//! ProofSystem that checks its proofs, SP1's under the sp1 feature. Another zkVM is another kind
+//! beside it.
+
+mod range;
+#[cfg(all(feature = "chain", feature = "secp256k1"))]
+mod replay;
+#[cfg(feature = "sp1-prover")]
+mod sp1;
+mod state;
+mod system;
+
+pub use self::range::{GatewayMode, ProofSettings, ProvenRange, RangeEnd, TakenProof};
+#[cfg(feature = "secp256k1")]
+pub use self::range::{verify_withdrawal, withdrawal_proof, withdrawals_root};
+#[cfg(all(feature = "chain", feature = "secp256k1"))]
+pub use self::replay::{RangeInput, Ran, ReplayError, Witness, WitnessEntry, WitnessNode, replay, run_range};
+pub use self::state::{ProvenChain, RECORDED_BLOCKS};
+pub use self::system::{ProofKind, ProofSystem, Prover, verifier};
+#[cfg(feature = "sp1")]
+pub use self::system::Sp1Groth16;
+#[cfg(feature = "sp1-prover")]
+pub use self::sp1::Sp1Prover;
+#[cfg(test)]
+pub(crate) use self::system::TestProofs;
+
+#[cfg(test)]
+mod tests;

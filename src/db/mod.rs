@@ -27,7 +27,7 @@ pub use self::memory::MemoryDb;
 pub use self::rocksdb::{DEFAULT_CACHE_MB, RocksDb};
 pub use self::snapshot::{SnapshotWalk, WalkError};
 pub use self::witness::{ProvenEntries, Recording};
-pub use self::tree::{PartContents, Path, STATE_COLUMNS, StateEntry, StatePart, StateProof, StateTree, root_of, state_path, stored_root};
+pub use self::tree::{PartContents, Path, STATE_COLUMNS, StateEntry, StatePart, StateProof, StateTree, ancestor_keys, check_witness, root_of, state_path, stored_root};
 
 #[document(
     summary = "Where a record lives. A backend keeps each column apart: RocksDb as column families, MemoryDb as part of the key.",

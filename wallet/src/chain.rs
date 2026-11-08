@@ -76,6 +76,8 @@ enum Target {
     PoolClaimed { pool: String, miner: String },
     /// An Ethereum account's EIP-7702 delegation, by its address as text.
     Delegation(String),
+    /// Governance's settings for validity proofs.
+    ProofSettings,
 }
 
 /// An NFT a page shows, for its ownership to be proven: a token of an NFT collection, or a
@@ -340,6 +342,11 @@ pub struct Chain {
     pub wanted_claims: Vec<(String, String, u64)>,
     /// Governance's locks, proven: none at all on a chain that set none.
     pub locks: Option<Proven<Vec<String>>>,
+    /// Governance's settings for validity proofs, proven: none on a chain that takes none.
+    pub proof_settings: Option<Proven<Option<chainv4::proofs::ProofSettings>>>,
+    /// Validity proofs as GET /status gives them, the latest proof among them: the node's word
+    /// until the proof is checked here against the proven settings.
+    pub validity: Option<serde_json::Value>,
     /// The lowest height a receipt landed at below every header the client holds: what it takes
     /// ancestors down to, a stretch at a time.
     wanted_below: Option<u64>,
@@ -548,6 +555,7 @@ impl Chain {
 
         targets.push((Column::Validators, DIRECTORY_KEY.to_vec(), Target::Directory, vec![tip]));
         targets.push((Column::Validators, chainv4::registry::changes::Changes::locks_key().to_vec(), Target::Locks, vec![tip]));
+        targets.push((Column::Validators, chainv4::registry::changes::Changes::proofs_key().to_vec(), Target::ProofSettings, vec![tip]));
 
         // The multisigs a page shows, so their members and threshold rest on no node's word.
         for multisig in &self.wanted_policies {
@@ -1173,6 +1181,10 @@ impl Chain {
                             None => Vec::new(),
                         };
                         self.locks = Some(Proven { value: locks, assurance });
+                    }
+                    Target::ProofSettings => {
+                        let settings = held.map(|bytes| wincode::deserialize(&bytes).map_err(|_| "proof settings that do not decode")).transpose()?;
+                        self.proof_settings = Some(Proven { value: settings, assurance });
                     }
                 }
 

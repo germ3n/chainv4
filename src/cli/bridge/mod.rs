@@ -176,8 +176,18 @@ pub enum BridgeAction {
     /// Deploys ChainV4Finality.sol on the EVM chain of --eth-rpc, paid with --evm-key, from the
     /// finalized checkpoint the node names: a contract that follows chainv4's finality by its
     /// validators' attestations, printing where.
+    /// Validity proofs start from chainv4's proven tip, or from that checkpoint while there is
+    /// none, under the program governance names, or --program.
     #[cfg(feature = "secp256k1")]
-    FinalityDeploy,
+    FinalityDeploy {
+        /// The SP1 verifier gateway proofs are checked by, 0x and 40 hex digits: Succinct's on
+        /// the chain. Without it, the contract takes no proofs.
+        #[arg(long)]
+        sp1_verifier: Option<String>,
+        /// The program proofs prove, 0x and 64 hex digits, where governance names none yet.
+        #[arg(long)]
+        program: Option<String>,
+    },
     /// Brings ChainV4Finality.sol up to chainv4's finality, paid with --evm-key, in a few links
     /// rather than one an epoch: the newest checkpoint recorded and then finalized, two links in
     /// a row, and any link where the validator set changes. Anyone may, as it checks the
@@ -192,6 +202,25 @@ pub enum BridgeAction {
         /// Relay only once at least this many epochs are new, unless the set changes.
         #[arg(long, default_value_t = 1)]
         min_epochs: u64,
+    },
+    /// Takes a validity proof to ChainV4Finality.sol, paid with --evm-key: a proof file chainv4
+    /// prove run wrote, of the range from the contract's proven tip to a checkpoint it finalized.
+    #[cfg(feature = "secp256k1")]
+    FinalityProve {
+        /// The contract, 0x and 40 hex digits.
+        contract: String,
+        /// The proof file.
+        #[arg(long)]
+        proof: std::path::PathBuf,
+    },
+    /// Has Gateway.sol take proven withdrawals by a ChainV4Finality.sol, sent by its owner with
+    /// --evm-key: once only, as the federation's signatures replace it after.
+    #[cfg(feature = "secp256k1")]
+    GatewayFinality {
+        /// Gateway.sol, 0x and 40 hex digits.
+        gateway: String,
+        /// ChainV4Finality.sol, 0x and 40 hex digits.
+        finality: String,
     },
     /// Takes a transfer refused for good at its destination back to who sent it, on the word of the
     /// federation's threshold, each signer's operator running this with its --evm-key. It reads both
@@ -254,6 +283,10 @@ pub enum BridgeAction {
 /// Which turn a signer at this place among `signers` takes in delivering transfer `nonce` to an
 /// EVM chain, from 0: the first turn goes round the signers nonce by nonce, so they share the gas,
 /// and one that is no signer's (place `signers`) goes after them all.
+/// Where a transfer that left here is proven on an EVM chain: the end block of the proven range it
+/// left in, and its path in that range's withdrawals tree.
+type ProvenPath = ([u8; 32], Vec<[u8; 32]>);
+
 fn relay_turn(place: u64, signers: u64, nonce: u64) -> u64 {
     if signers == 0 || place >= signers {
         return signers;
@@ -395,9 +428,13 @@ pub fn bridge(args: BridgeArgs) -> CliResult<()> {
         BridgeAction::Sign { from_block } => bridge.sign(*from_block),
         BridgeAction::Relay => bridge.relay(),
         #[cfg(feature = "secp256k1")]
-        BridgeAction::FinalityDeploy => bridge.finality_deploy(),
+        BridgeAction::FinalityDeploy { sp1_verifier, program } => bridge.finality_deploy(sp1_verifier.as_deref(), program.as_deref()),
         #[cfg(feature = "secp256k1")]
         BridgeAction::FinalityRelay { contract, every, min_epochs } => bridge.finality_relay(&parse_address(contract)?, *every, *min_epochs),
+        #[cfg(feature = "secp256k1")]
+        BridgeAction::FinalityProve { contract, proof } => bridge.finality_prove(&parse_address(contract)?, proof),
+        #[cfg(feature = "secp256k1")]
+        BridgeAction::GatewayFinality { gateway, finality } => bridge.gateway_finality(&parse_address(gateway)?, &parse_address(finality)?),
         BridgeAction::Refund { nonce, from_evm, why, yes } => bridge.refund(*nonce, *from_evm, why.as_deref(), *yes, &mut std::io::stdin().lock()),
         BridgeAction::RefundTo { nonce, recipient, from_evm } => bridge.refund_to(*nonce, recipient, *from_evm),
         BridgeAction::Btc { action } => bridge.btc(action),
@@ -971,10 +1008,18 @@ impl Bridge {
         let posted = self.read(gateway, "signatures", json!([{ "type": "bytes", "value": to_hex(&transfer.digest()) }]))?;
         let threshold = posted.first().and_then(|value| value["value"].as_str()?.parse::<usize>().ok()).unwrap_or(usize::MAX);
         let signatures: Vec<[u8; 65]> = posted.iter().skip(1).filter_map(|value| value["value"].as_str().and_then(from_hex)?.try_into().ok()).collect();
+        let enough = signatures.len() >= threshold;
 
-        if signatures.len() < threshold {
-            return Ok(false);
-        }
+        // By a proof of the range it left in, once Gateway.sol follows a ChainV4Finality.sol that
+        // took one: alone, or with the federation's signatures when chainv4's governance says both.
+        let (proven, mode) = self.proven_delivery(rpc, evm_gateway, gateway, identity, here, nonce)?;
+        let input = match (proven, mode) {
+            (Some((end, path)), Some(1)) if enough => transfer.deliver_proven_input(end, &path, &signatures),
+            (Some((end, path)), Some(0)) => transfer.deliver_proven_input(end, &path, &[]),
+            (_, Some(1)) => return Ok(false),
+            _ if enough => transfer.deliver_input(&signatures),
+            _ => return Ok(false),
+        };
 
         // Voided, as one refused for good is, its signatures stop counting there.
         if rpc.call(evm_gateway, &calldata("voidedAt(bytes32)", &[AbiValue::FixedBytes(transfer.delivered_key())])?)?.iter().any(|byte| *byte != 0) {
@@ -992,9 +1037,85 @@ impl Bridge {
         }
 
         println!("delivering transfer {nonce} to chain {chain}, from {}", to_hex(&from_key(secret)?));
-        rpc.send(&Call { to: *evm_gateway, value: u256::ZERO, input: transfer.deliver_input(&signatures), what: "Deliver a transfer" }, false, secret)?;
+        rpc.send(&Call { to: *evm_gateway, value: u256::ZERO, input, what: "Deliver a transfer" }, false, secret)?;
 
         Ok(true)
+    }
+
+    /// How Gateway.sol takes a transfer that left here: the mode its ChainV4Finality.sol holds,
+    /// None while it follows none; and, once a proof of the range the transfer left in was taken
+    /// there, that range's end block and the transfer's path in its withdrawals tree, the gateway's
+    /// transfers of the range in the order they left, as the proof committed to them.
+    #[allow(clippy::too_many_arguments)]
+    fn proven_delivery(&self, rpc: &Rpc, evm_gateway: &[u8; 20], gateway: &Address, identity: &[u8], here: u64, nonce: u64) -> CliResult<(Option<ProvenPath>, Option<u8>)> {
+        let word = |to: &[u8; 20], signature: &str, args: &[AbiValue]| -> CliResult<[u8; 32]> {
+            let answer = rpc.call(to, &calldata(signature, args)?)?;
+
+            answer.get(..32).and_then(|word| word.try_into().ok()).ok_or_else(|| format!("{signature} answered nothing").into())
+        };
+        let number = |to: &[u8; 20], signature: &str, args: &[AbiValue]| -> CliResult<u64> { u64::try_from(u256::from_be_bytes(word(to, signature, args)?)).map_err(|_| format!("{signature} past any height").into()) };
+        // A Gateway.sol from before proofs has no finality to ask: it takes signatures alone.
+        let Ok(finality) = word(evm_gateway, "finality()", &[]) else {
+            return Ok((None, None));
+        };
+        let finality: [u8; 20] = finality[12..].try_into().expect("20 bytes");
+
+        if finality == [0; 20] {
+            return Ok((None, None));
+        }
+
+        let mode = u8::try_from(number(&finality, "gatewayMode()", &[])?).map_err(|_| "a gateway mode past 255")?;
+        let height_of = |nonce: u64| -> CliResult<u64> {
+            let values = self.read(gateway, "sent", json!([{ "type": "u64", "value": nonce.to_string() }]))?;
+
+            values.get(13).and_then(|value| value["value"].as_str()?.parse().ok()).ok_or_else(|| format!("sent({nonce}) gave no height").into())
+        };
+        let height = height_of(nonce)?;
+
+        if height > number(&finality, "provenHeight()", &[])? || height <= number(&finality, "provenFrom()", &[])? {
+            return Ok((None, Some(mode)));
+        }
+
+        // The first proven range that ends at or after it: the one it left in.
+        let ends = |at: u64| number(&finality, "provenEnds(uint256)", &[AbiValue::Uint(u256::from(at))]);
+        let (mut low, mut high) = (0, number(&finality, "provenCount()", &[])?);
+
+        while low < high {
+            let middle = (low + high) / 2;
+
+            match ends(middle)? < height {
+                true => low = middle + 1,
+                false => high = middle,
+            }
+        }
+
+        let end = ends(low)?;
+        let start = match low {
+            0 => number(&finality, "provenFrom()", &[])?,
+            _ => ends(low - 1)?,
+        };
+        let end_block = word(&finality, "provenBlockAt(uint256)", &[AbiValue::Uint(u256::from(end))])?;
+
+        // Every transfer of the range, in order: nonces count up as they leave.
+        let count = self.read(gateway, "sent_count", json!([]))?.first().and_then(|value| value["value"].as_str()?.parse::<u64>().ok()).unwrap_or(0);
+        let mut digests = Vec::new();
+        let mut at = None;
+
+        for other in 1..=count {
+            let left = height_of(other)?;
+
+            if left > start && left <= end {
+                if other == nonce {
+                    at = Some(digests.len());
+                }
+
+                digests.push(self.left_here(gateway, identity, here, other)?.digest());
+            }
+        }
+
+        let path = at.and_then(|at| crate::proofs::withdrawal_proof(&digests, at)).ok_or("the transfer is not among its range's")?;
+
+        Ok((Some((end_block, path)), Some(mode)))
     }
 }
 

@@ -16,8 +16,20 @@
 // It trusts what two thirds of chainv4's validators sign, as chainv4's own light clients do: what
 // it adds is that nothing else is trusted, no federation and no relayer. Anyone may submit a link.
 //
+// Validity proofs check what they sign. A proof, SP1's checked by SP1's verifier, shows that every
+// block from the proven tip to a final checkpoint ran by chainv4's rules, from the tip's state root
+// to the checkpoint's: once one is taken, a checkpoint's state root is no longer only the
+// validators' word. Each proof also gives the root of what left chainv4 through its gateway in its
+// range, which Gateway.sol releases withdrawals by, and the program and gateway mode chainv4's
+// governance names, which this contract follows.
+//
 // Built with: solc --evm-version prague --optimize --bin --abi ChainV4Finality.sol
 pragma solidity ^0.8.24;
+
+/// SP1's verifier, or its gateway, which routes a proof to the verifier of its version.
+interface ISP1Verifier {
+    function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata proofBytes) external view;
+}
 
 contract ChainV4Finality {
     /// What sets an attestation apart from anything else an attester's key signs.
@@ -40,20 +52,69 @@ contract ChainV4Finality {
     uint256 public finalizedEpoch;
     bytes32 public finalizedBlock;
 
-    /// Each justified checkpoint taken, by epoch: its block, height and state root.
+    /// Each justified checkpoint taken, by epoch: its block, height and state root, and whether it
+    /// was finalized here.
     mapping(uint256 => bytes32) public blockAt;
     mapping(uint256 => uint256) public heightAt;
     mapping(uint256 => bytes32) public stateRootAt;
+    mapping(uint256 => bool) public finalAt;
+
+    /// What checks validity proofs, the genesis id they are of, and the program they prove, as
+    /// chainv4's governance names it: zero for none yet, when no proof is taken.
+    ISP1Verifier public immutable verifier;
+    bytes32 public immutable genesis;
+    bytes32 public program;
+
+    /// The proven tip, where the next proof starts: the block, its height and its state root.
+    uint256 public provenHeight;
+    bytes32 public provenBlock;
+    bytes32 public provenRoot;
+
+    /// For each proven range, by the block it ends at, the root of what left chainv4 through its
+    /// gateway in it; and how Gateway.sol releases, 0 by a proof or the federation, 1 by both.
+    mapping(bytes32 => bytes32) public withdrawalsOf;
+    uint8 public gatewayMode;
+
+    /// Where proofs began, and every proven range's end in turn, by height with its block: a range
+    /// runs from the end before it, or provenFrom, so a relayer finds the one a transfer left in.
+    uint256 public immutable provenFrom;
+    uint256[] public provenEnds;
+    mapping(uint256 => bytes32) public provenBlockAt;
 
     event Justified(uint256 indexed epoch, bytes32 block_, uint256 height, bytes32 stateRoot);
     event Finalized(uint256 indexed epoch, bytes32 block_);
     event SetMoved(bytes32 setHash);
+    event Proven(uint256 height, bytes32 block_, bytes32 stateRoot, bytes32 withdrawals);
+    event ProgramMoved(bytes32 program);
 
     /// Starts from a checkpoint the deployer trusts as final, and the hash of the attesting set
-    /// that signs the next link: what a chainv4 node it trusts says.
-    constructor(uint256 chainId_, uint256 epoch, bytes32 block_, uint256 height, bytes32 stateRoot, bytes32 setHash_) {
+    /// that signs the next link: what a chainv4 node it trusts says. Proofs start from the proven
+    /// point given, which chainv4 keeps as its own proven tip, under the program given, both zero
+    /// while chainv4 takes no proofs; and are checked by the SP1 verifier given.
+    constructor(
+        uint256 chainId_,
+        uint256 epoch,
+        bytes32 block_,
+        uint256 height,
+        bytes32 stateRoot,
+        bytes32 setHash_,
+        ISP1Verifier verifier_,
+        bytes32 genesis_,
+        bytes32 program_,
+        uint256 provenHeight_,
+        bytes32 provenBlock_,
+        bytes32 provenRoot_
+    ) {
         chainId = chainId_;
         setHash = setHash_;
+        verifier = verifier_;
+        genesis = genesis_;
+        program = program_;
+        provenHeight = provenHeight_;
+        provenFrom = provenHeight_;
+        provenBlock = provenBlock_;
+        provenRoot = provenRoot_;
+        finalAt[epoch] = true;
         justifiedEpoch = epoch;
         justifiedBlock = block_;
         finalizedEpoch = epoch;
@@ -121,6 +182,7 @@ contract ChainV4Finality {
         if (targetEpoch == sourceEpoch + 1 && sourceEpoch > finalizedEpoch && blockAt[sourceEpoch] == link[1]) {
             finalizedEpoch = sourceEpoch;
             finalizedBlock = link[1];
+            finalAt[sourceEpoch] = true;
             emit Finalized(sourceEpoch, link[1]);
         }
 
@@ -128,6 +190,56 @@ contract ChainV4Finality {
             setHash = nextSet;
             emit SetMoved(nextSet);
         }
+    }
+
+    /// Takes a validity proof of the range from the proven tip to the final checkpoint of an epoch,
+    /// whose public values say so: eleven words, chainId, genesis, startHeight, startBlock,
+    /// startRoot, endHeight, endBlock, endRoot, withdrawals, program, gatewayMode. The end must be
+    /// the checkpoint this contract finalized, with its height and state root, so the proof shows
+    /// that the state root the validators signed is the one the blocks come to.
+    function prove(bytes calldata publicValues, bytes calldata proof, uint256 epoch) external {
+        require(program != bytes32(0) && address(verifier) != address(0), "no program to prove");
+        require(publicValues.length == 352, "eleven words of public values");
+        bytes32[11] memory v = abi.decode(publicValues, (bytes32[11]));
+        require(uint256(v[0]) == chainId && v[1] == genesis, "a proof of another chain");
+        require(uint256(v[2]) == provenHeight && v[3] == provenBlock && v[4] == provenRoot, "a range from elsewhere than the proven tip");
+        require(finalAt[epoch] && blockAt[epoch] == v[6] && heightAt[epoch] == uint256(v[5]) && stateRootAt[epoch] == v[7], "a range that ends at no final checkpoint here");
+        require(uint256(v[5]) > provenHeight, "a range that ends after it starts");
+        require(uint256(v[10]) <= 1, "no such gateway mode");
+        verifier.verifyProof(program, publicValues, proof);
+
+        provenHeight = uint256(v[5]);
+        provenBlock = v[6];
+        provenRoot = v[7];
+        withdrawalsOf[v[6]] = v[8];
+        provenEnds.push(provenHeight);
+        provenBlockAt[provenHeight] = v[6];
+        gatewayMode = uint8(uint256(v[10]));
+        emit Proven(provenHeight, provenBlock, provenRoot, v[8]);
+
+        if (v[9] != bytes32(0) && v[9] != program) {
+            program = v[9];
+            emit ProgramMoved(v[9]);
+        }
+    }
+
+    /// How many ranges were proven here.
+    function provenCount() external view returns (uint256) {
+        return provenEnds.length;
+    }
+
+    /// Whether a transfer's digest left chainv4 in the proven range that ends at a block, by its
+    /// proof in that range's withdrawals tree: each leaf keccak256 of a digest, each node keccak256
+    /// of its two children, the lower first.
+    function withdrew(bytes32 endBlock, bytes32 transfer, bytes32[] calldata path) external view returns (bool) {
+        bytes32 root = withdrawalsOf[endBlock];
+        bytes32 node = keccak256(abi.encode(transfer));
+
+        for (uint256 i = 0; i < path.length; i++) {
+            node = node <= path[i] ? keccak256(abi.encode(node, path[i])) : keccak256(abi.encode(path[i], node));
+        }
+
+        return root != bytes32(0) && node == root;
     }
 
     function recover(bytes32 linked, bytes calldata signature) private pure returns (address) {

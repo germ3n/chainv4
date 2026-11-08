@@ -1,6 +1,6 @@
 [package]
 name = "chainv4"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
@@ -10,12 +10,13 @@ luau0-src = "8c1973741bae634cd80e0adec620fd4e55f7d86a"
 
 [workspace]
 members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
-# Contracts build for wasm32, and the explorer for the desktop and the browser; each has a
-# workspace of its own, so neither shares the node's lockfile.
-exclude = ["contracts", "explorer"]
+# Contracts build for wasm32, the explorer for the desktop and the browser, and the validity
+# proofs' program for SP1's RISC-V; each has a workspace of its own, so none shares the node's
+# lockfile.
+exclude = ["contracts", "explorer", "proofs/sp1/program"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -128,6 +129,18 @@ pool = ["node"]
 # Genesis as JSON, and each change under governance (chain::json): what genesis files, the API and
 # the apps read and write.
 json = ["dep:serde_json"]
+# SP1's validity proofs checked: its Groth16 proofs, by sp1-verifier, pure Rust and no_std, for a
+# node's Tx::Prove and the apps' proven tip. Proving them is the CLI's sp1-prover, never a node's.
+sp1 = ["dep:sp1-verifier"]
+# Proving ranges with SP1 on this machine, by hand: chainv4 prove. SP1's SDK, its prover and its
+# Groth16 wrapping, heavy and off by default; no node or app needs it.
+sp1-prover = ["sp1", "chain", "secp256k1", "client", "dep:sp1-sdk"]
+# Everything that decides how a block runs, without the node: what the validity proofs' program
+# builds chainv4 with, so it runs blocks as a node of the default build does. A feature added that
+# changes how blocks run goes here too.
+consensus = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "lvm", "wasm", "evm", "abi", "chain", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "sp1"]
+# The chain itself, its state transition, without the node around it: what a validity proof runs.
+chain = ["json", "dep:log", "lvm"]
 # Releases for the apps and tools (docs/updates.md): the signed manifest of the newest chainv4,
 # wallet and explorer, checked against the release keys built in, and putting a downloaded binary
 # in place.
@@ -135,12 +148,14 @@ release = ["json", "sha256"]
 # A node fetching releases with --updates and serving them at GET /release, warning while it is
 # behind and stopping at an upgrade it is too old for; --auto-update, and chainv4 update.
 updates = ["release", "client", "ureq/socks-proxy"]
-node = ["dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "json", "dep:hmac", "dep:sha2", "lvm", "rocksdb", "worker"]
+node = ["chain", "dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep:clap", "dep:log", "dep:env_logger", "json", "dep:hmac", "dep:sha2", "lvm", "rocksdb", "worker"]
 
 [dependencies]
 # ENSIP-15, ENS's normalization of names against look-alikes, for Unicode names (src/registry/names.rs).
 ens-normalize = { version = "=0.1.1", optional = true }
 rocksdb = { version = "0.25.0", optional = true }
+sp1-verifier = { version = "=6.10.0", default-features = false, optional = true }
+sp1-sdk = { version = "=6.10.0", features = ["blocking"], optional = true }
 # A RocksDB snapshot owned with the database it reads, for the API's point-in-time reads.
 self_cell = { version = "1.2.0", optional = true }
 blake3 = { version = "1.8.7", optional = true }
@@ -190,7 +205,7 @@ wasmi = { version = "=2.0.0", default-features = false, features = ["std", "vali
 # Lua is consensus too, so the forks are pinned by commit: mlua by its rev here, and Luau, which
 # mlua-sys takes from its fork's main, by the commit below, which tests/toolchains.rs holds
 # Cargo.lock to, so a `cargo update` cannot move either.
-mlua = { git = "https://github.com/germ3n/mlua", rev = "ac9dda35ed946042bea35a62f4927f851442fd77", features = ["luau", "send"], optional = true }
+mlua = { git = "https://github.com/germ3n/mlua", rev = "fab23f8c42ab50b50f19acb1a8c429e91f3a44eb", features = ["luau", "send"], optional = true }
 # Stopping cleanly on SIGTERM and SIGINT: as a container's PID 1, nothing else would.
 signal-hook = { version = "0.3.18", optional = true }
 
@@ -228,3 +243,13 @@ opt-level = 2
 
 [profile.dev.package.luau0-src]
 opt-level = 2
+
+# SP1's executor is slow unoptimized, and the proofs' tests run it: optimized even in dev builds.
+[profile.dev.package.sp1-core-executor]
+opt-level = 3
+[profile.dev.package.sp1-core-executor-runner]
+opt-level = 3
+[profile.dev.package.sp1-primitives]
+opt-level = 3
+[profile.dev.package.sp1-hypercube]
+opt-level = 3

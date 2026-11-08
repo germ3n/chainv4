@@ -12,9 +12,9 @@ explorer's Bridge pages ([Wallet](wallet.md#bridge), [Explorer](explorer.md#page
 
 The bridges trust their federation's signers. Apart from them, ChainV4Finality.sol lets an EVM
 chain follow chainv4's finality itself, by the validators' attestations, with nobody's word
-between: see [Finality](finality.md#attestations-finality-followed-on-ethereum). The gateways do
-not read it yet; taking proven state roots in place of the federation's word is a later stage of
-the validity proofs in the [todo](todo.md).
+between: see [Finality](finality.md#attestations-finality-followed-on-ethereum). With
+[validity proofs](proofs.md), Gateway.sol also takes what left chainv4 by a proof of the range it
+left in: see [Withdrawals by proof](#withdrawals-by-proof).
 ## The federation
 
 Who vouches for a deposit made on another chain, and signs what leaves for one, is a federation:
@@ -186,6 +186,27 @@ will not take, or with more than a gateway here holds, is said with its nonce, c
 the pass goes on to the next. Under `watch` it sits out 1, 2, 4 and so on up to 64 passes between
 tries, since a dry run or a failed delivery costs something every time, and each pass still lists
 it, `still refused: …`, until it goes through. One EVM chain out of reach stops no other.
+
+## Withdrawals by proof
+
+Once Gateway.sol follows a ChainV4Finality.sol, a transfer from chainv4 can also arrive by a
+[validity proof](proofs.md) of the range it left in, rather than by the federation's word:
+
+- **What it checks:** each proof's withdrawals root covers every transfer the directory's gateway
+  sent in the range, in order. `deliverProven(t, endBlock, path, signatures)` takes the transfer by
+  its path in the tree of the proven range ending at `endBlock`, as ChainV4Finality.sol keeps the
+  root (`withdrew`).
+- **The mode,** as chainv4's governance sets it in `Change::Proofs` and each proof carries:
+  - `proof-or-federation`: a proof alone, or the federation's signatures through `deliver`
+    while the range is not proven yet;
+  - `both`: a proof and the signatures together, and `deliver` alone is refused.
+- **Following a finality:** `chainv4 bridge … gateway-finality 0x<Gateway.sol> 0x<ChainV4Finality.sol>`,
+  by Gateway.sol's owner, once. After that only the federation's signatures replace it
+  (`replaceFinality`), so no single key picks what proves withdrawals.
+- **Relaying:** `relay` and `watch` deliver by proof once a transfer's range is proven there. They
+  find the range by `provenEnds` and work out the transfer's path from the gateway's transfers in
+  it. Under `both`, they wait for the proof and the signatures alike.
+- **Bitcoin** can't check a proof: the Bitcoin gateway stays with the federation.
 
 ## Refunding a transfer refused for good
 

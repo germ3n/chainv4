@@ -117,6 +117,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::WithdrawMultisig { account, .. } => ("withdraw_multisig", *account),
         Tx::Claim { to, .. } => ("claim", *to),
         Tx::Anchor { .. } => ("anchor", sender),
+        Tx::Prove { .. } => ("prove", sender),
         Tx::Batch { .. } => ("batch", sender),
     }
 }

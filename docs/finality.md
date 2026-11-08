@@ -318,8 +318,10 @@ chainv4's finality cheaply (`structs::attestation`, `contracts/evm/ChainV4Finali
   nothing else, so anyone may relay. A validator without an attester weighs in the whole but signs
   nothing there, so two thirds must be reached by those with one.
 
-This is the first stage of the validity proofs in the [todo](todo.md): what the validators sign,
-checked cheaply elsewhere. Later stages prove the blocks themselves.
+This is the first stage of the [validity proofs](proofs.md): what the validators sign, checked
+cheaply elsewhere. The later stages prove the blocks themselves: ChainV4Finality.sol also takes a
+proof that a range ran to a final checkpoint's state root (`prove`), so the root it records is no
+longer only the validators' word.
 
 ## What to keep in mind
 

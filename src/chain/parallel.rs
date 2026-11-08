@@ -30,9 +30,8 @@ use {
     crate::structs::u256::u256,
     crate::vm::Vm,
     r#macro::document,
-    rayon::prelude::*,
     std::collections::{BTreeMap, BTreeSet, HashMap},
-    std::sync::{Arc, OnceLock},
+    std::sync::Arc,
     std::time::Instant,
 };
 
@@ -43,8 +42,10 @@ use {
 )]
 #[derive(Default)]
 pub struct Workers {
-    /// None when the threads could not start, so everything runs on the caller's thread.
-    pool: OnceLock<Option<rayon::ThreadPool>>,
+    /// None when the threads could not start, so everything runs on the caller's thread. A
+    /// build without the node, as a validity proof runs the chain, has no threads at all.
+    #[cfg(feature = "node")]
+    pool: std::sync::OnceLock<Option<rayon::ThreadPool>>,
 }
 
 impl Workers {
@@ -63,15 +64,19 @@ impl Workers {
         R: Send,
         F: Fn(&T) -> R + Sync + Send,
     {
-        match items.len() > 1 {
-            true => match self.pool() {
-                Some(pool) => pool.install(|| items.par_iter().map(f).collect()),
-                None => items.iter().map(f).collect(),
-            },
-            false => items.iter().map(f).collect(),
+        #[cfg(feature = "node")]
+        if items.len() > 1
+            && let Some(pool) = self.pool()
+        {
+            use rayon::prelude::*;
+
+            return pool.install(|| items.par_iter().map(f).collect());
         }
+
+        items.iter().map(f).collect()
     }
 
+    #[cfg(feature = "node")]
     fn pool(&self) -> Option<&rayon::ThreadPool> {
         self.pool
             .get_or_init(|| {
@@ -180,6 +185,8 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         // Anchors append to one list, read the relay, and may pay from the reward pool: they take
         // turns, with governance, whose state the list is kept beside.
         Tx::Anchor { .. } => touched.extend([Touch::Governance, Touch::Address(crate::chain::REWARD_POOL)]),
+        // Proofs move one proven tip, kept beside governance's settings they are checked by.
+        Tx::Prove { .. } => touched.push(Touch::Governance),
         Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => touched.push(Touch::Address(*to)),
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),

@@ -118,6 +118,8 @@ pub const DEV_MAX_BLOCK_BYTES: u64 = 4 * 1024 * 1024;
 pub const STORAGE_FORMAT: u32 = 9;
 
 const TIP_KEY: &[u8] = b"tip";
+/// The latest validity proof the main chain took, for light clients to check for themselves.
+const VALIDITY_PROOF_KEY: &[u8] = b"validity-proof";
 const TIPS_KEY: &[u8] = b"tips";
 const FORMAT_KEY: &[u8] = b"format";
 /// Where a node that synced from a snapshot keeps which block it took state at.
@@ -2003,6 +2005,7 @@ impl Chain {
             Err(err) => unreachable!("settling a block only fails it or the database: {err}"),
         }
 
+        follow_forks(layer, parent, &params)?;
         block.header.state_root = StateTree::new(layer, self.hash).follow()?;
 
         Ok(block)
@@ -2069,7 +2072,7 @@ impl Chain {
         Ok(None)
     }
 
-    #[cfg(feature = "anchoring")]
+    #[cfg(all(feature = "anchoring", feature = "node"))]
     #[document(
         parent = "Chain",
         summary = "What a peer checking anchors asks for: every anchor the main chain recorded, the newest's proof and those asked for, where anchoring's Bitcoin headers start and the relay's tip, and where its Ethereum relay started. None while the chain holds no anchors, or anchoring has no relay or start this build reads.",
@@ -2320,6 +2323,7 @@ impl Chain {
     }
 
     /// The chain's fees, shared, for what checks transactions off the node loop.
+    #[cfg(feature = "node")]
     pub(crate) fn shared_fees(&self) -> Option<Arc<Fees>> {
         self.next.rules.fees.clone()
     }
@@ -3001,6 +3005,32 @@ impl Chain {
     fn apply(&self, below: &Arc<State>, block: &Block) -> Result<Vec<Receipt>, ImportError> {
         let id = block.id();
         let height = block.header.height;
+        let parent = stored_header(&*self.db, &block.header.parent)?.ok_or_else(|| missing(&block.header.parent))?.header;
+        let (layer, receipts) = self.run_block(below, &parent, block)?;
+
+        if let Some(finality) = &self.light
+            && let Some(update) = LightUpdate::of(&layer, self.hash, finality, self.governed, id, height)?
+        {
+            layer.put_value(Column::Light, id_key(&id), &update);
+        }
+
+        self.keep(below, layer, block, &receipts)?;
+
+        Ok(receipts)
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "Runs a block on top of its parent's state by the chain's rules and checks what it commits to: its size and price, its gas, its receipts root and its state root. What Chain::import does to a block it extends the tip with, without anything a node keeps beside the state, so a validity proof runs the very same code over a witness of what it reads.",
+        params = {
+            below = "The parent's state.",
+            parent = "The parent's header.",
+            block = "The block, whose transaction, proof and pool roots its caller checked.",
+        },
+        returns = "A layer over below with the block's changes, the state tree's among them, and its receipts.",
+    )]
+    pub fn run_block(&self, below: &Arc<State>, parent: &BlockHeader, block: &Block) -> Result<(Arc<State>, Vec<Receipt>), ImportError> {
+        let height = block.header.height;
         let layer = Arc::new(State::new(below.clone()));
         let context = BlockContext {
             height,
@@ -3016,8 +3046,7 @@ impl Chain {
             return Err(ImportError::UnknownFork(fork.name.clone()));
         }
 
-        let parent = stored_header(&*self.db, &block.header.parent)?.ok_or_else(|| missing(&block.header.parent))?.header;
-        check_size_and_price(block, &parent, &params)?;
+        check_size_and_price(block, parent, &params)?;
         let ran = self.runner(&params.rules).run(&layer, &block.txs, &context, Unfit::Refuse, None)?;
         let receipts = ran.receipts;
 
@@ -3029,6 +3058,7 @@ impl Chain {
         }
 
         self.settle(&layer, block, params.reward, ran.to_producer, ran.burned, params.rules.pooled_fees)?;
+        follow_forks(&layer, parent, &params)?;
 
         let committed: Vec<CommittedReceipt> = receipts.iter().map(CommittedReceipt::of).collect();
 
@@ -3045,14 +3075,25 @@ impl Chain {
             }));
         }
 
-        if let Some(finality) = &self.light
-            && let Some(update) = LightUpdate::of(&layer, self.hash, finality, self.governed, id, height)?
-        {
-            layer.put_value(Column::Light, id_key(&id), &update);
-        }
+        Ok((layer, receipts))
+    }
 
-        for (index, (tx, receipt)) in block.txs.iter().zip(&receipts).enumerate() {
+    /// Keeps what a node keeps of a block it ran: receipts, indexes, its height and the tip, and
+    /// the undo record and history of every value it replaced, merged into below.
+    fn keep(&self, below: &Arc<State>, layer: Arc<State>, block: &Block, receipts: &[Receipt]) -> Result<(), ImportError> {
+        let id = block.id();
+        let height = block.header.height;
+
+        for (index, (tx, receipt)) in block.txs.iter().zip(receipts).enumerate() {
             let record = TxReceipt::new(id, index as u32, receipt);
+
+            // A proof taken, kept beside the chain: it proves itself, so a light client asks any
+            // node for it and checks it alone. Taken back with its block.
+            if let crate::structs::tx::Tx::Prove { kind, range, proof } = &tx.tx
+                && receipt.result.is_ok()
+            {
+                layer.put_value(Column::Meta, VALIDITY_PROOF_KEY.to_vec(), &crate::proofs::TakenProof { kind: *kind, range: *range, proof: proof.clone() });
+            }
             let tx_id = tx.id(self.hash);
             layer.put_value(Column::Receipts, id_key(&tx_id), &record);
 
@@ -3145,7 +3186,7 @@ impl Chain {
             }
         }
 
-        Ok(receipts)
+        Ok(())
     }
 
     /// Lets go of history past the window, as the tip reaches a height: the entries of the block
@@ -3181,6 +3222,17 @@ impl Chain {
     pub(super) fn on_main_chain(&self, id: &Hash) -> Result<bool, DbError> {
         self.view().on_main_chain(id)
     }
+}
+
+/// What the forks in force have every block do once it has run and settled, as building it and
+/// running it both do: from the proofs fork, record its parent for a proof to end at, the first one
+/// starting the proven tip there.
+fn follow_forks(layer: &State, parent: &BlockHeader, params: &BlockParams) -> Result<(), DbError> {
+    if params.rules.vm.forks.has(&crate::params::forks::PROOFS) {
+        crate::proofs::ProvenChain::new(layer).follow(parent)?;
+    }
+
+    Ok(())
 }
 
 /// Takes a main-chain block back off, restoring every value it replaced.
@@ -3446,6 +3498,15 @@ pub fn stored_state_at(db: Arc<dyn crate::db::Committed>, id: &Hash) -> Result<O
     }
 
     Ok(Some(Arc::new(State::new(Arc::new(crate::db::Historic::new(db, height))))))
+}
+
+#[document(
+    summary = "The latest validity proof the main chain took, read straight from a database: None before one was.",
+    category = "Proofs",
+    see_also = "TakenProof",
+)]
+pub fn stored_validity_proof(db: &dyn Read) -> Result<Option<crate::proofs::TakenProof>, DbError> {
+    read_value(db, Column::Meta, VALIDITY_PROOF_KEY)
 }
 
 #[document(

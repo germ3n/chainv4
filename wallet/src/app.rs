@@ -840,6 +840,7 @@ impl Wallet {
                     self.dex = (value["dex"]["contract"].as_str().map(str::to_string), value["dex"]["router"].as_str().map(str::to_string));
                     self.dex_settings = chainv4::params::json::dex_from_status(value);
                     self.fork_schedule = chainv4::params::json::forks_from_status(value);
+                    self.chain.validity = value.get("validity").filter(|validity| !validity.is_null()).cloned();
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.evm_spec = value["evm_spec"].as_str().and_then(|spec| spec.parse().ok());

@@ -41,6 +41,7 @@ const GOVERNANCE: &[u8] = b"change:governance";
 const REJECTED: &[u8] = b"change:rejected";
 const LOCKS: &[u8] = b"change:locks";
 const FORKS: &[u8] = b"change:forks";
+const PROOFS: &[u8] = b"change:proofs";
 
 /// How many changes of one kind were decided, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -496,6 +497,11 @@ impl<'a> Changes<'a> {
         self.state.get_value(Column::Validators, ANCHORING)
     }
 
+    #[document(parent = "Changes", summary = "The validity proofs' settings governance decided last, or None while it decided none, when the chain takes no proofs.")]
+    pub fn proofs(&self) -> Result<Option<crate::proofs::ProofSettings>, DbError> {
+        self.state.get_value(Column::Validators, PROOFS)
+    }
+
     #[document(parent = "Changes", summary = "The engines decided last, or None while governance never decided any, when genesis's stand.")]
     pub fn engines(&self) -> Result<Option<Vec<crate::structs::code::Engine>>, DbError> {
         Ok(self.state.get_value::<Engines>(Column::Validators, ENGINES)?.map(|decided| decided.engines))
@@ -727,6 +733,11 @@ impl<'a> Changes<'a> {
         LOCKS
     }
 
+    #[document(parent = "Changes", summary = "Where the validity proofs' settings are kept in Column::Validators, for a light client to prove them.")]
+    pub fn proofs_key() -> &'static [u8] {
+        PROOFS
+    }
+
     #[document(parent = "Changes", summary = "The locks a change:locks entry holds, as a light client proved its bytes: None for bytes that are no locks.")]
     pub fn decode_locks(bytes: &[u8]) -> Option<Vec<String>> {
         wincode::deserialize::<Locks>(bytes).ok().map(|locks| locks.paths)
@@ -782,6 +793,7 @@ impl<'a> Changes<'a> {
             Some(Change::Governance(governance.clone())),
             Some(Change::Locks(self.locks()?)),
             Some(Change::Engines(self.engines()?.unwrap_or_else(|| genesis.engines.clone()))),
+            self.proofs()?.map(Change::Proofs),
         ];
 
         Ok(settings.into_iter().flatten().collect())
@@ -857,6 +869,7 @@ impl<'a> Changes<'a> {
             Change::EvmSpec { spec, .. } => self.evm_specs()?.eras.last().map(|(_, last)| last) == Some(spec),
             Change::Dex(dex) => self.dex()?.as_ref() == Some(dex),
             Change::Engines(engines) => self.engines()?.as_ref() == Some(engines),
+            Change::Proofs(settings) => self.proofs()?.as_ref() == Some(settings),
             Change::Anchoring(settings) => self.anchoring()?.as_ref() == Some(settings),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
@@ -950,6 +963,12 @@ impl<'a> Changes<'a> {
             // frozen from the next block.
             Change::Engines(engines) => {
                 self.state.put_value(Column::Validators, ENGINES.to_vec(), &Engines { engines });
+
+                decided.consensus
+            }
+            // Read by each Tx::Prove, and by a range's proof at its end, for the contracts.
+            Change::Proofs(settings) => {
+                self.state.put_value(Column::Validators, PROOFS.to_vec(), &settings);
 
                 decided.consensus
             }

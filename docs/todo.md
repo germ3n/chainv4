@@ -353,7 +353,7 @@ offline; these would make that hold up as a treasury.
   hold, by their work. `bridge anchor` (or its alias `bridge btc anchor`) is the anchorer. Each part switches on its own under
   `Change::Anchoring`, all off when unset. No Bitcoin height went into headers: the relay's tip is
   chain state already. See [Anchoring](anchoring.md).
-- [ ] **Validity proofs: other chains check our blocks, not just our timestamps (owner, 2026-11-05).**
+- [x] **Validity proofs: other chains check our blocks, not just our timestamps (owner, 2026-11-05).**
   Anchoring proves that a checkpoint existed by a certain time. It doesn't prove the checkpoint was
   right: two thirds of the current validators could still finalize an invalid state. Validity proofs
   close that. A zero-knowledge proof that each block (or a run of them) followed the rules is checked
@@ -383,9 +383,46 @@ offline; these would make that hold up as a treasury.
   - **Proofs are made locally, by hand,** on this Mac by a command; tests run SP1's execute or mock
     mode only, never a GPU. A prover network can come later. SP1's toolchain and Groth16 wrapping
     need disk room and RAM.
-  Still to ask when it starts: proving every block or batches, who pays for proving, and whether the
-  engines can be proven at a sane cost, Luau's C++ VM above all. Queued after the todo, with the
-  second pentest.
+  **Stages 2 and 3 done 2026-11-08,** see [Validity proofs](proofs.md):
+  - **The replay:** `Chain::run_block`, split out of import, runs a range off the node over a witness
+    checked against the start's state root (`db::check_witness`): the entries read and the tree's
+    nodes, or the whole state for a range that scans. The headers it reads are checked by their
+    parents' ids, and anything else it reads fails it (`proofs::replay`, `RangeInput::build`,
+    `GET /validity/input`). The chain builds without the node (`chain`, `consensus` features).
+  - **The program:** `proofs/sp1/program`, built by `proofs/sp1/build.sh`, Luau's C++ in SP1's
+    RISC-V on newlib and libstdc++. The program starts the C++ runtime itself, as SP1 doesn't:
+    unwind tables registered, static constructors run, and Rust frames unwound through.
+  - **Proving by hand:** `chainv4 prove` (status, input, check, execute, run), with the `sp1-prover`
+    feature, behind the `Prover` and `ProofSystem` traits, so another zkVM is another kind.
+  - **On chain:** the `proofs` fork brings the proven tip and each block's parent recorded,
+    `Change::Proofs` (system, program, reward per block, gateway mode), and `Tx::Prove`, checked by
+    `sp1-verifier` and paid for each block covered.
+  - **On Ethereum:** ChainV4Finality.sol's `prove` takes a range to a checkpoint it finalized.
+    Gateway.sol's `deliverProven` takes a withdrawal by its path in the range's withdrawals root,
+    with the federation's signatures too under `both`. The relayer delivers that way, and
+    `bridge finality-prove` and `gateway-finality` are new.
+  - **Light clients:** the latest proof is in `GET /status`, and the apps check it themselves, the
+    wallet against settings it proves from state.
+  **Answers (owner, 2026-11-08):**
+  - **SP1, but changeable:** behind a feature and an abstraction (`sp1`, `sp1-prover`,
+    `ProofKind`, `ProofSystem`, `Prover`).
+  - **Everything is proven,** Luau too.
+  - **Each proof covers a range,** from the proven tip to a final checkpoint.
+  - **The proof checks state only:** which block is final comes from the attesters.
+  - **A chain reward,** minted for each block proven at a rate governance sets, from a `proofs`
+    fork of its own.
+  - **Gateway.sol takes a proof or the federation, or both,** as governance says.
+  - **The light clients go by votes for the newest blocks,** with proofs marking how far is proven.
+  - **Bitcoin stays with the federation.**
+  Left:
+  - [ ] The wallet's strict setting, trusting only state at or under the proven tip; the wallet and
+    explorer show the proven tip and check its proof now.
+  - [x] The mlua fork's `zkvm` commit (`fab23f8`), which lets mlua build for SP1, pushed and pinned
+    (owner's OK, 2026-11-08).
+  - [ ] SP1's precompile patches for sha2, k256, curve25519 and bn, which make proving faster but
+    change nothing it proves; and a BLAKE3 one, as SP1 has none.
+  - [ ] BitVM-style fraud proofs, for Bitcoin's side.
+  - [ ] Schedule the `proofs` fork on the devnet, with restaking, and name the program.
 - [ ] **Anchoring: next.**
   - [x] **Ethereum anchors that count** (2026-11-05). `ethlight` and `eth_relay` follow the beacon
     chain. `Tx::Anchor` proves an Ethereum anchor against the relay with the finality update that

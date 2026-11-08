@@ -24,10 +24,10 @@ use {
     wincode::{SchemaRead, SchemaWrite},
 };
 
-#[cfg(all(feature = "governance-council", feature = "node"))]
+#[cfg(all(feature = "governance-council", feature = "chain"))]
 mod council;
 pub mod locks;
-#[cfg(all(feature = "governance-electorate", feature = "node"))]
+#[cfg(all(feature = "governance-electorate", feature = "chain"))]
 mod electorate;
 
 #[document(
@@ -93,7 +93,7 @@ pub enum GovernanceConfig {
             quorum_permille = "The share of the electorate's weight, in thousandths, that must have voted on a change at all, Yes, No or Abstain, before Yes can decide it. 0, as genesis files without it mean, asks for none.",
         },
     )]
-    #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+    #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
     #[wincode(tag = 0)]
     Electorate { approval_epochs: u64, quorum_permille: u32 },
     #[document(
@@ -105,7 +105,7 @@ pub enum GovernanceConfig {
             quorum_permille = "The share of the members, in thousandths, that must have voted on a change at all, Yes, No or Abstain, before Yes can decide it. 0, as genesis files without it mean, asks for none.",
         },
     )]
-    #[cfg(any(feature = "governance-council", not(feature = "node")))]
+    #[cfg(any(feature = "governance-council", not(feature = "chain")))]
     #[wincode(tag = 1)]
     Council {
         members: Vec<Address>,
@@ -148,18 +148,18 @@ impl GovernanceKind {
 impl GovernanceConfig {
     #[document(parent = "GovernanceConfig", summary = "The names of the kinds this build has, as genesis files spell them.")]
     pub const KINDS: &'static [&'static str] = &[
-        #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+        #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
         "electorate",
-        #[cfg(any(feature = "governance-council", not(feature = "node")))]
+        #[cfg(any(feature = "governance-council", not(feature = "chain")))]
         "council",
     ];
 
     #[document(parent = "GovernanceConfig", summary = "The kind, by name alone.")]
     pub fn kind(&self) -> GovernanceKind {
         match *self {
-            #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+            #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
             GovernanceConfig::Electorate { .. } => GovernanceKind::Electorate,
-            #[cfg(any(feature = "governance-council", not(feature = "node")))]
+            #[cfg(any(feature = "governance-council", not(feature = "chain")))]
             GovernanceConfig::Council { .. } => GovernanceKind::Council,
         }
     }
@@ -172,9 +172,9 @@ impl GovernanceConfig {
     #[document(parent = "GovernanceConfig", summary = "How many epochs an approval counts for.")]
     pub fn approval_epochs(&self) -> u64 {
         match *self {
-            #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+            #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
             GovernanceConfig::Electorate { approval_epochs, .. } => approval_epochs,
-            #[cfg(any(feature = "governance-council", not(feature = "node")))]
+            #[cfg(any(feature = "governance-council", not(feature = "chain")))]
             GovernanceConfig::Council { approval_epochs, .. } => approval_epochs,
         }
     }
@@ -182,9 +182,9 @@ impl GovernanceConfig {
     #[document(parent = "GovernanceConfig", summary = "The share of the voters' weight, in thousandths, that must vote on a change before Yes decides it.")]
     pub fn quorum_permille(&self) -> u32 {
         match *self {
-            #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+            #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
             GovernanceConfig::Electorate { quorum_permille, .. } => quorum_permille,
-            #[cfg(any(feature = "governance-council", not(feature = "node")))]
+            #[cfg(any(feature = "governance-council", not(feature = "chain")))]
             GovernanceConfig::Council { quorum_permille, .. } => quorum_permille,
         }
     }
@@ -200,9 +200,9 @@ impl GovernanceConfig {
         }
 
         match *self {
-            #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+            #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
             GovernanceConfig::Electorate { .. } => None,
-            #[cfg(any(feature = "governance-council", not(feature = "node")))]
+            #[cfg(any(feature = "governance-council", not(feature = "chain")))]
             GovernanceConfig::Council { ref members, threshold, .. } => {
                 let mut sorted = members.clone();
                 sorted.sort();
@@ -226,13 +226,13 @@ impl GovernanceConfig {
         summary = "The governance these settings describe, counting approvals under the chain's finality.",
         params = { finality = "The chain's finality, whose electorate approves under the electorate kind." },
     )]
-    #[cfg(feature = "node")]
+    #[cfg(feature = "chain")]
     #[cfg_attr(not(feature = "governance-electorate"), allow(unused_variables))]
     pub fn build(&self, finality: &crate::chain::FinalityConfig) -> std::sync::Arc<dyn Governance> {
         match *self {
-            #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+            #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
             GovernanceConfig::Electorate { .. } => std::sync::Arc::new(electorate::Electorate::new(finality.clone())),
-            #[cfg(any(feature = "governance-council", not(feature = "node")))]
+            #[cfg(any(feature = "governance-council", not(feature = "chain")))]
             GovernanceConfig::Council { ref members, threshold, .. } => std::sync::Arc::new(council::Council::new(members.clone(), threshold)),
         }
     }
@@ -338,6 +338,9 @@ pub enum Change {
     #[document(summary = "A change of the fork schedule: a fork scheduled or moved, at a height or an epoch's first block at least the chain's lead ahead, which also stops nodes older than the release that knows it there; one not yet passed cancelled; or the lead set. A fork once passed, or within the lead, is fixed. Blocks from a fork's height run by it, those below by the rules before. See params::forks.")]
     #[wincode(tag = 20)]
     Fork(crate::params::forks::ForkChange),
+    #[document(summary = "New settings for validity proofs, replacing the last decided: the proof system and program the chain takes proofs of (Tx::Prove), what it mints for each block one covers, and how Gateway.sol releases what left here, which proofs carry to it. From the proofs fork on; until governance decides some, the chain takes no proofs.")]
+    #[wincode(tag = 21)]
+    Proofs(crate::proofs::ProofSettings),
 }
 
 #[document(
@@ -496,6 +499,9 @@ pub enum ChangeKind {
     #[document(summary = "The fork schedule.")]
     #[wincode(tag = 18)]
     Fork,
+    #[document(summary = "The validity proofs' settings.")]
+    #[wincode(tag = 19)]
+    Proofs,
 }
 
 impl Hashable for ChangeKind {
@@ -504,7 +510,7 @@ impl Hashable for ChangeKind {
 
 impl ChangeKind {
     #[document(parent = "ChangeKind", summary = "Every kind, in tag order.")]
-    pub const ALL: [ChangeKind; 19] = [
+    pub const ALL: [ChangeKind; 20] = [
         ChangeKind::Consensus,
         ChangeKind::Bootnodes,
         ChangeKind::Names,
@@ -524,9 +530,10 @@ impl ChangeKind {
         ChangeKind::Locks,
         ChangeKind::Engines,
         ChangeKind::Fork,
+        ChangeKind::Proofs,
     ];
 
-    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines or fork.")]
+    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork or proofs.")]
     pub fn name(self) -> &'static str {
         match self {
             ChangeKind::Consensus => "consensus",
@@ -548,6 +555,7 @@ impl ChangeKind {
             ChangeKind::Locks => "locks",
             ChangeKind::Engines => "engines",
             ChangeKind::Fork => "fork",
+            ChangeKind::Proofs => "proofs",
         }
     }
 }
@@ -590,10 +598,11 @@ impl Change {
             Change::Locks(_) => ChangeKind::Locks,
             Change::Engines(_) => ChangeKind::Engines,
             Change::Fork(_) => ChangeKind::Fork,
+            Change::Proofs(_) => ChangeKind::Proofs,
         }
     }
 
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines or fork.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork or proofs.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -617,6 +626,7 @@ impl Change {
             Change::Locks(_) => "locks",
             Change::Engines(_) => "engines",
             Change::Fork(_) => "fork",
+            Change::Proofs(_) => "proofs",
         }
     }
 }

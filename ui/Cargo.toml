@@ -41,6 +41,9 @@ tls = ["ureq/rustls"]
 # an index on a shelf, in files or in IndexedDB (src/blocks.rs, src/shelf.rs): what the wallet and the
 # explorer read a chain by when told to rest on nothing else. Off by default, as chainv4 is C by way of
 # blake3 on Android, which the ui workflow has no sysroot for.
+# Validity proofs checked here (src/validity.rs): the latest proof a node gives, by SP1's verifier,
+# pure Rust, so the chain's proven tip is the app's own finding.
+validity = ["dep:chainv4", "chainv4/sp1"]
 blocks = ["dep:chainv4", "dep:serde", "dep:wincode", "web-sys/IdbFactory", "web-sys/IdbDatabase", "web-sys/IdbOpenDbRequest", "web-sys/IdbRequest", "web-sys/IdbObjectStore", "web-sys/IdbTransaction", "web-sys/IdbTransactionMode", "web-sys/DomException", "web-sys/DomStringList", "web-sys/Event", "web-sys/EventTarget"]
 # Reading a transfer that left a bridge's gateway back as the signers signed it (src/bridge.rs),
 # as both apps' Bridge pages do. Off by default, for blocks' reason.

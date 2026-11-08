@@ -191,6 +191,14 @@ pub enum TxArgs {
     /// Turns restaking of a validator's rewards on or off, sent from the account that bonded it:
     /// while on, its vote rewards, and its block rewards under staked consensus, go into its
     /// bond, up to --cap if given. Taken from the chain's restaking fork on.
+    /// Submits a validity proof of the range from the chain's proven tip to a checkpoint, as
+    /// chainv4 prove run wrote it: from the proofs fork on, once governance named the program, it
+    /// moves the proven tip and pays the sender for each block it covers.
+    Prove {
+        /// The proof file.
+        #[arg(long)]
+        proof: PathBuf,
+    },
     SetRestake {
         #[arg(long)]
         voter: PublicKey,
@@ -1166,6 +1174,16 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
         #[cfg(feature = "staking")]
         TxArgs::Withdraw { voter } => Tx::Withdraw { voter },
         #[cfg(feature = "staking")]
+        TxArgs::Prove { proof } => {
+            let file: Value = serde_json::from_slice(&std::fs::read(&proof).map_err(|err| format!("{}: {err}", proof.display()))?).map_err(|err| format!("{}: {err}", proof.display()))?;
+            let status = ok(agent.get(format!("{node}/status")).call())?;
+            let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
+            let field = |name: &str| file[name].as_str().and_then(crate::structs::hex::from_hex).ok_or_else(|| format!("{}: no {name}", proof.display()));
+            let kind = file["kind"].as_str().and_then(crate::proofs::ProofKind::parse).ok_or_else(|| format!("{}: no kind of proof this build knows", proof.display()))?;
+            let range = crate::proofs::ProvenRange::from_public_values(hash, &field("public_values")?).ok_or_else(|| format!("{}: public values that are no range", proof.display()))?;
+
+            Tx::Prove { kind, range, proof: field("proof")? }
+        }
         TxArgs::SetRestake { voter, restake, cap } => Tx::SetRestake { voter, on: restake == "on", cap: cap.unwrap_or(u256::ZERO) },
         #[cfg(feature = "staking")]
         TxArgs::SetAttester { voter, attester, attester_key } => {
@@ -1454,6 +1472,13 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 crate::governance::Change::Governance(config) => format!("governance's settings: {}", crate::chain::json::governance_json(config)),
                 crate::governance::Change::Locks(paths) => format!("locking {} for good", paths.join(", ")),
                 crate::governance::Change::Fork(change) => change.describe(),
+                crate::governance::Change::Proofs(settings) => format!(
+                    "validity proofs by {} of the program {}, {} minted a block proven, Gateway.sol releasing by {}",
+                    settings.kind.name(),
+                    crate::structs::hex::to_hex(&settings.program),
+                    settings.reward_per_block,
+                    settings.gateway.name()
+                ),
             };
             println!("voting {} on {what}, from version {version}", vote.name());
 
@@ -1597,6 +1622,11 @@ pub(super) fn agent(tls: &TlsArgs) -> CliResult<Agent> {
 /// requests go at once, so none is closed and opened again: what a client sending many at once,
 /// such as bench load, needs, or its machine runs out of ports.
 pub(super) fn pooled(tls: &TlsArgs, connections: usize) -> CliResult<Agent> {
+    waiting(tls, connections, 30)
+}
+
+/// An agent whose requests may take this many seconds, for answers a node works long on.
+pub(super) fn waiting(tls: &TlsArgs, connections: usize, seconds: u64) -> CliResult<Agent> {
     let mut config = ureq::tls::TlsConfig::builder();
 
     if let Some(path) = &tls.ca_cert {
@@ -1624,7 +1654,7 @@ pub(super) fn pooled(tls: &TlsArgs, connections: usize) -> CliResult<Agent> {
 
     Ok(Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(seconds)))
         .max_idle_connections(connections.max(3))
         .max_idle_connections_per_host(connections.max(3))
         .tls_config(config.build())

@@ -46,6 +46,26 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, send: &mut super::send::SendState) {
         }
     }
 
+    // How far validity proofs prove the chain: the latest proof checked here, by the program
+    // governance names, proven from state.
+    if let (Some(validity), Some(client), Some(settings)) = (&ctx.chain.validity, &ctx.chain.client, &ctx.chain.proof_settings) {
+        let line = match &settings.value {
+            None => None,
+            Some(settings) => {
+                let genesis = client.genesis();
+                let proven = chainv4_ui::validity::proven(validity, &genesis.to_string(), genesis.algorithm(), Some(settings.program));
+
+                Some(proven.describe())
+            }
+        };
+
+        if let Some(line) = line {
+            ui.add(egui::Label::new(RichText::new(format!("The chain is {line}")).small().color(palette.soft)).wrap())
+                .on_hover_text("Its latest validity proof, checked on this device against the program the chain's governance names, which is proven too. Votes carry it past that, to the newest blocks.");
+            theme::section_gap(ui);
+        }
+    }
+
     // A validator this wallet's accounts bonded: its bond, and where its rewards go.
     for validator in ctx.chain.validators.iter().filter(|validator| addresses.iter().any(|address| validator["account"].as_str() == Some(address.to_string().as_str()))) {
         let bond = ctx.amount(None, validator["bond"].as_str().unwrap_or("0"));

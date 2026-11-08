@@ -558,6 +558,15 @@ bonded, Overview gives its bond and where its rewards go, restaked into the bond
 the account, as `GET /validators` lists them: the node's word, which says so. Activity names a
 restake setting turned on or off.
 
+## Proven by validity proofs
+
+On a chain that takes [validity proofs](proofs.md), the overview says how far the chain is proven:
+`The chain is proven through block H, the proof checked here`. The wallet proves governance's
+proof settings from state like the directory and the federation, takes the latest proof from the
+node, and checks it on the device by SP1's verifier against the program those settings name. The
+node's word adds nothing, as a proof that holds proves itself. Votes still carry the wallet past
+that block, to the newest ones.
+
 ## Read from checked blocks
 
 Settings → **Read from checked blocks** has the wallet take what it shows from final blocks it

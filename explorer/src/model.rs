@@ -84,6 +84,10 @@ pub struct Status {
     /// The fork schedule: none from older nodes.
     #[serde(default)]
     pub forks: Option<ForksView>,
+    /// Validity proofs: governance's settings, the proven tip and the latest proof taken, which
+    /// the explorer checks itself; none from older nodes.
+    #[serde(default)]
+    pub validity: Option<Value>,
 }
 
 /// The chain's fork schedule, as /status says it: how far ahead one must be scheduled, and each

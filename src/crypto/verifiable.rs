@@ -63,6 +63,8 @@ pub enum VerifyError {
     BadAttestation,
     #[document(summary = "Function names that are not the ones a typed signature's calls hold: too few, too many, one that hashes to another function, or any beside a signature of another kind.")]
     FunctionNames,
+    #[document(summary = "A validity proof of more than MAX_PROOF_BYTES.")]
+    BadProof,
 }
 
 impl fmt::Display for VerifyError {
@@ -87,6 +89,7 @@ impl fmt::Display for VerifyError {
             VerifyError::BatchStep => write!(f, "a batch holds only transfers, contract calls, EVM calls, deploys, upgrades, names, primary names, burns and claims"),
             VerifyError::BadAttestation => write!(f, "a vote's attestation does not recover to its validator's attester"),
             VerifyError::FunctionNames => write!(f, "the function names are not the ones its typed signature's calls hold, or stand beside a signature of another kind"),
+            VerifyError::BadProof => write!(f, "a validity proof of more than {} bytes", crate::structs::tx::MAX_PROOF_BYTES),
         }
     }
 }

@@ -5,11 +5,11 @@
 //! present, and unknown fields are refused, so a misspelled parameter is an error rather than a
 //! silent default.
 
-#[cfg(any(feature = "finality-authority", not(feature = "node")))]
+#[cfg(any(feature = "finality-authority", not(feature = "chain")))]
 use crate::params::finality::AuthorityConfig;
-#[cfg(any(feature = "finality-depth", not(feature = "node")))]
+#[cfg(any(feature = "finality-depth", not(feature = "chain")))]
 use crate::params::finality::DepthConfig;
-#[cfg(any(feature = "finality-ffg", not(feature = "node")))]
+#[cfg(any(feature = "finality-ffg", not(feature = "chain")))]
 use {crate::crypto::keypair::PublicKey, crate::params::finality::{FfgConfig, GenesisValidator}};
 use {
     crate::consensus::{ConsensusConfig, PowConfig},
@@ -834,7 +834,7 @@ pub(crate) fn fees_from_fields(mut fees: Fields) -> Result<FeeConfig, String> {
 /// Finality as JSON, its kind in "type" as consensus has it.
 pub fn finality_json(config: &FinalityConfig) -> Value {
     match *config {
-        #[cfg(any(feature = "finality-ffg", not(feature = "node")))]
+        #[cfg(any(feature = "finality-ffg", not(feature = "chain")))]
         FinalityConfig::Ffg(ref ffg) => {
             let mut value = json!({
             "type": "ffg",
@@ -866,7 +866,7 @@ pub fn finality_json(config: &FinalityConfig) -> Value {
 
             value
         }
-        #[cfg(any(feature = "finality-authority", not(feature = "node")))]
+        #[cfg(any(feature = "finality-authority", not(feature = "chain")))]
         FinalityConfig::Authority(ref authority) => json!({
             "type": "authority",
             "checkpoint_interval": authority.checkpoint_interval,
@@ -880,7 +880,7 @@ pub fn finality_json(config: &FinalityConfig) -> Value {
             "vote_reward": authority.vote_reward.to_string(),
             "max_proofs_per_block": authority.max_proofs_per_block,
         }),
-        #[cfg(any(feature = "finality-depth", not(feature = "node")))]
+        #[cfg(any(feature = "finality-depth", not(feature = "chain")))]
         FinalityConfig::Depth(ref depth) => json!({
             "type": "depth",
             "depth": depth.depth,
@@ -895,7 +895,7 @@ pub fn finality_json(config: &FinalityConfig) -> Value {
 )]
 pub(crate) fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig, String> {
     let config = match finality.text("type")?.as_str() {
-        #[cfg(any(feature = "finality-ffg", not(feature = "node")))]
+        #[cfg(any(feature = "finality-ffg", not(feature = "chain")))]
         "ffg" => FinalityConfig::Ffg(FfgConfig {
             checkpoint_interval: finality.whole("checkpoint_interval")?,
             vote_depth: finality.whole("vote_depth")?,
@@ -942,7 +942,7 @@ pub(crate) fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig,
                 false => None,
             },
         }),
-        #[cfg(any(feature = "finality-authority", not(feature = "node")))]
+        #[cfg(any(feature = "finality-authority", not(feature = "chain")))]
         "authority" => FinalityConfig::Authority(AuthorityConfig {
             checkpoint_interval: finality.whole("checkpoint_interval")?,
             vote_depth: finality.whole("vote_depth")?,
@@ -955,7 +955,7 @@ pub(crate) fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig,
             vote_reward: finality.amount("vote_reward")?,
             max_proofs_per_block: finality.small("max_proofs_per_block")?,
         }),
-        #[cfg(any(feature = "finality-depth", not(feature = "node")))]
+        #[cfg(any(feature = "finality-depth", not(feature = "chain")))]
         "depth" => FinalityConfig::Depth(DepthConfig {
             depth: finality.whole("depth")?,
         }),
@@ -974,7 +974,7 @@ pub(crate) struct Fields<'a> {
 }
 
 // Some are for genesis files alone, which only a node reads.
-#[cfg_attr(not(feature = "node"), allow(dead_code))]
+#[cfg_attr(not(feature = "chain"), allow(dead_code))]
 impl<'a> Fields<'a> {
     pub(crate) fn of(value: &'a Value, path: &str) -> Result<Fields<'a>, String> {
         let map = value.as_object().ok_or_else(|| format!("{path} must be an object"))?;
@@ -1208,7 +1208,7 @@ pub fn forks_from_status(status: &Value) -> crate::params::forks::ForkSchedule {
 
 /// A fork schedule as a genesis file writes it: each fork at a height, or at an epoch, whose first
 /// block it is placed at by the chain's checkpoint interval.
-#[cfg_attr(not(feature = "node"), allow(dead_code))]
+#[cfg_attr(not(feature = "chain"), allow(dead_code))]
 pub(crate) fn forks_from_json(mut fields: Fields, interval: Option<u64>) -> Result<crate::params::forks::ForkSchedule, String> {
     use crate::params::forks::{ForkAt, ForkSchedule, ScheduledFork};
 
@@ -1278,6 +1278,33 @@ fn fork_change_from_json(value: &Value) -> Result<crate::params::forks::ForkChan
     Ok(change)
 }
 
+/// Validity proofs' settings as JSON: { "kind": "sp1-groth16", "program": "0x…32 bytes",
+/// "reward_per_block": "…", "gateway": "proof-or-federation" or "both" }, the reward a whole
+/// amount in the coin's smallest units.
+pub fn proof_settings_json(settings: &crate::proofs::ProofSettings) -> Value {
+    json!({
+        "kind": settings.kind.name(),
+        "program": crate::structs::hex::to_hex(&settings.program),
+        "reward_per_block": settings.reward_per_block.to_string(),
+        "gateway": settings.gateway.name(),
+    })
+}
+
+/// Validity proofs' settings from JSON, as proof_settings_json writes them.
+pub fn proof_settings_from_json(value: &Value) -> Result<crate::proofs::ProofSettings, String> {
+    let mut fields = Fields::of(value, "proofs")?;
+    let kind = fields.text("kind")?;
+    let kind = crate::proofs::ProofKind::parse(&kind).ok_or_else(|| format!("proofs.kind: {kind} is not {}", crate::proofs::ProofKind::ALL.map(crate::proofs::ProofKind::name).join(" or ")))?;
+    let program = fields.text("program")?;
+    let program: [u8; 32] = crate::structs::hex::from_hex(&program).and_then(|bytes| bytes.try_into().ok()).ok_or("proofs.program: 32 bytes of hex")?;
+    let reward_per_block = fields.amount("reward_per_block")?;
+    let gateway = fields.text("gateway")?;
+    let gateway = crate::proofs::GatewayMode::parse(&gateway).ok_or_else(|| format!("proofs.gateway: {gateway} is not proof-or-federation or both"))?;
+    fields.done()?;
+
+    Ok(crate::proofs::ProofSettings { kind, program, reward_per_block, gateway })
+}
+
 /// The finality kinds this build has, for error messages.
 pub fn finality_kinds() -> String {
     match FinalityConfig::KINDS {
@@ -1289,9 +1316,9 @@ pub fn finality_kinds() -> String {
 /// Governance as JSON: the shape genesis files and GET /governance use.
 pub fn governance_json(config: &crate::governance::GovernanceConfig) -> Value {
     match *config {
-        #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+        #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
         crate::governance::GovernanceConfig::Electorate { approval_epochs, quorum_permille } => json!({ "type": "electorate", "approval_epochs": approval_epochs, "quorum_permille": quorum_permille }),
-        #[cfg(any(feature = "governance-council", not(feature = "node")))]
+        #[cfg(any(feature = "governance-council", not(feature = "chain")))]
         crate::governance::GovernanceConfig::Council { ref members, threshold, approval_epochs, quorum_permille } => json!({
             "type": "council",
             "members": members.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -1312,12 +1339,12 @@ pub fn governance_from_value(value: &Value) -> Result<crate::governance::Governa
 #[cfg_attr(not(any(feature = "governance-electorate", feature = "governance-council")), allow(unreachable_code, unused_variables))]
 pub(crate) fn governance_from_json(mut governance: Fields) -> Result<crate::governance::GovernanceConfig, String> {
     let config = match governance.text("type")?.as_str() {
-        #[cfg(any(feature = "governance-electorate", not(feature = "node")))]
+        #[cfg(any(feature = "governance-electorate", not(feature = "chain")))]
         "electorate" => crate::governance::GovernanceConfig::Electorate {
             approval_epochs: governance.whole("approval_epochs")?,
             quorum_permille: quorum(&mut governance)?,
         },
-        #[cfg(any(feature = "governance-council", not(feature = "node")))]
+        #[cfg(any(feature = "governance-council", not(feature = "chain")))]
         "council" => crate::governance::GovernanceConfig::Council {
             members: governance
                 .strings("members")?
@@ -1362,6 +1389,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::SwitchFinality { epoch, config } => json!({ "switch_finality": { "epoch": epoch, "finality": finality_json(config) } }),
         Change::Upgrade(upgrade) => json!({ "upgrade": { "least": upgrade.least.to_string(), "from": upgrade.from } }),
         Change::Fork(change) => json!({ "fork": fork_change_json(change) }),
+        Change::Proofs(settings) => json!({ "proofs": proof_settings_json(settings) }),
         Change::Name(name) => json!({ "name": name }),
         Change::Governance(config) => json!({ "governance": governance_json(config) }),
         Change::TokenFunctions(functions) => json!({ "token_functions": functions }),
@@ -1457,6 +1485,7 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
             Change::SwitchFinality { epoch, config }
         }
         "fork" => Change::Fork(fork_change_from_json(value)?),
+        "proofs" => Change::Proofs(proof_settings_from_json(value)?),
         "upgrade" => {
             let mut fields = Fields::of(value, "upgrade")?;
             let least = fields.text("least")?.parse().map_err(|why| format!("upgrade.least: {why}"))?;

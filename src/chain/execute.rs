@@ -283,6 +283,8 @@ pub enum Failure {
     Claim(String),
     #[document(summary = "An anchor whose proof does not show what it must: see prove.")]
     Anchor(String),
+    #[document(summary = "A validity proof the chain does not take: of another range or system, or one that does not hold.")]
+    Proof(String),
     #[document(summary = "A batch's step failed, which undid every step: which one, counted from 0, and why.")]
     Step { step: u32, failure: Box<Failure> },
 }
@@ -310,7 +312,7 @@ impl fmt::Display for Failure {
             Failure::BadEvidence => write!(f, "the evidence's signatures do not check out"),
             Failure::NoNames => write!(f, "this chain has no names"),
             Failure::BondingClosed => write!(f, "validators bond only under FFG finality, or before a switch into it"),
-            Failure::Claim(why) | Failure::Anchor(why) => write!(f, "{why}"),
+            Failure::Claim(why) | Failure::Anchor(why) | Failure::Proof(why) => write!(f, "{why}"),
             Failure::Step { step, failure } => write!(f, "step {} failed, undoing every step: {failure}", step + 1),
         }
     }
@@ -517,6 +519,16 @@ fn authorize(block: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> Resul
     Ok(())
 }
 
+/// The fork that brought a kind of transaction in, for one a fork did.
+fn brought_by(tx: &Tx) -> Option<&'static crate::params::forks::Fork> {
+    match tx {
+        Tx::SetRestake { .. } => Some(&crate::params::forks::RESTAKING),
+        Tx::Prove { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_), .. } => Some(&crate::params::forks::PROOFS),
+        Tx::Multisig { tx, .. } => brought_by(tx),
+        _ => None,
+    }
+}
+
 /// Runs a transaction as execute_verified does, whoever backs it: what a dry run of a multisig's
 /// transaction, before its members sign, runs.
 pub(crate) fn execute_authorized(
@@ -533,8 +545,10 @@ pub(crate) fn execute_authorized(
 
     // A kind of transaction a fork brought in is no transaction before the fork, as it is to a
     // release from before it.
-    if matches!(tx.tx, Tx::SetRestake { .. }) && !rules.vm.forks.has(&crate::params::forks::RESTAKING) {
-        return Err(ExecuteError::Invalid(TxError::BeforeFork(crate::params::forks::RESTAKING.name)));
+    if let Some(fork) = brought_by(&tx.tx)
+        && !rules.vm.forks.has(fork)
+    {
+        return Err(ExecuteError::Invalid(TxError::BeforeFork(fork.name)));
     }
 
     // A transaction over max_tx_bytes never runs: an Ethereum-signed one by its raw bytes, which
@@ -856,6 +870,56 @@ fn batch(
     (Ok(Effect::Batch(outcomes)), all)
 }
 
+/// Runs a Tx::Prove: a proof of the range from the proven tip to a checkpoint this chain recorded,
+/// by the system and program governance named, moves the tip to its end and mints its reward.
+fn prove(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Address, kind: crate::proofs::ProofKind, range: &crate::proofs::ProvenRange, proof: &[u8]) -> Result<Effect, Failure> {
+    let refused = |why: String| Failure::Proof(why);
+    let db = |err: DbError| Failure::Registry(RegistryError::Db(err));
+    let settings = crate::registry::changes::Changes::new(layer).proofs().map_err(db)?.ok_or_else(|| refused("governance named no proof system".to_string()))?;
+
+    if kind != settings.kind {
+        return Err(refused(format!("a {} proof, where the chain takes {} ones", kind.name(), settings.kind.name())));
+    }
+
+    #[cfg(feature = "secp256k1")]
+    let chain_id = crate::crypto::ethereum::chain_id(&context.genesis);
+    #[cfg(not(feature = "secp256k1"))]
+    let chain_id = range.chain_id;
+
+    if range.genesis != context.genesis || range.chain_id != chain_id {
+        return Err(refused("a range of another chain".to_string()));
+    }
+
+    let proven = crate::proofs::ProvenChain::new(layer);
+    let tip = proven.tip().map_err(db)?.ok_or_else(|| refused("nothing proven to start from".to_string()))?;
+
+    if range.start != tip {
+        return Err(refused(format!("a range from {}, where the proven tip is at {}", range.start.height, tip.height)));
+    }
+
+    let interval = rules.staking.as_ref().map(|staking| staking.checkpoint_interval).or(rules.signers.map(|signers| signers.checkpoint_interval)).unwrap_or(0);
+
+    if interval == 0 || range.end.height <= range.start.height || !range.end.height.is_multiple_of(interval) {
+        return Err(refused("a range ends at a later checkpoint".to_string()));
+    }
+
+    if proven.block_at(range.end.height).map_err(db)? != Some(range.end.block) {
+        return Err(refused(format!("a range that ends off this chain at {}, or longer ago than it keeps", range.end.height)));
+    }
+
+    let verifier = crate::proofs::verifier(kind).ok_or_else(|| refused(format!("this build checks no {} proofs", kind.name())))?;
+    verifier.verify(&settings.program, &range.public_values(), proof).map_err(refused)?;
+    proven.set_tip(&range.end);
+    let reward = settings.reward_per_block.saturating_mul(u256::from(range.end.height - range.start.height));
+
+    if reward > u256::ZERO {
+        Accounts::new(layer).credit(sender, reward).map_err(Failure::Registry)?;
+        crate::registry::supply::Supply::mint(layer, reward).map_err(db)?;
+    }
+
+    Ok(Effect::Done)
+}
+
 /// Runs a Tx::Anchor: anchoring's own check, on a build that takes anchors.
 fn anchor(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Address, proof: &crate::structs::tx::AnchorProof) -> Result<Effect, Failure> {
     #[cfg(feature = "anchoring")]
@@ -961,6 +1025,7 @@ fn run(
             Err(err) => (Err(Failure::Claim(err.to_string())), Contracted::default()),
         },
         Tx::Anchor { proof } => (anchor(layer, rules, context, &sender, proof), Contracted::default()),
+        Tx::Prove { kind, range, proof } => (prove(layer, rules, context, &sender, *kind, range, proof), Contracted::default()),
         Tx::Transfer { from, to, amount } => (moved(accounts.transfer(from, to, amount.to_u256())), Contracted::default()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {
@@ -1209,6 +1274,7 @@ fn run(
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
                 Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
                 Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),
+                Change::Proofs(settings) => Ok(settings.problem()),
                 Change::Fork(change) => Changes::new(layer).forks().map(|schedule| change.problem(&schedule, height, Some(governance.checkpoint_interval), rules.target_block_ms)),
                 Change::Name(name) => Ok(crate::governance::chain_name_problem(name)),
                 Change::Governance(config) => Ok(governance.config.change_problem(config)),

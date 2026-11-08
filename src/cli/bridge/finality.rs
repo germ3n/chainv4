@@ -100,9 +100,20 @@ impl Bridge {
 
     /// Deploys ChainV4Finality.sol on the EVM chain of --eth-rpc, from the finalized checkpoint
     /// the node names, with the attesting set that signs the link from it.
-    pub(super) fn finality_deploy(&self) -> CliResult<()> {
+    pub(super) fn finality_deploy(&self, sp1_verifier: Option<&str>, program: Option<&str>) -> CliResult<()> {
         let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
-        let finalized = self.status()?["finality"]["finalized"]["epoch"].as_u64().ok_or("the node's finality does not vote")?;
+        let status = self.status()?;
+        let finalized = status["finality"]["finalized"]["epoch"].as_u64().ok_or("the node's finality does not vote")?;
+        let bytes20 = |text: &str, what: &str| -> CliResult<[u8; 20]> { from_hex(text).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("{what}: 0x and 40 hex digits").into()) };
+        let verifier = sp1_verifier.map(|text| bytes20(text, "--sp1-verifier")).transpose()?.unwrap_or([0; 20]);
+        let validity = &status["validity"];
+        let program = match program {
+            Some(text) => from_hex(text).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()).ok_or("--program: 0x and 64 hex digits")?,
+            None => match validity["settings"]["program"].as_str() {
+                Some(text) => word(&Value::String(text.to_string()), "the program")?,
+                None => [0; 32],
+            },
+        };
         let link = self.attested_after(finalized)?.ok_or("no link from the finalized checkpoint is justified yet: try again in an epoch")?;
         let source = &link["source"];
 
@@ -110,8 +121,15 @@ impl Bridge {
             return Err(format!("the next justified link starts at epoch {}, not the finalized {finalized}: try again in an epoch", source["epoch"]).into());
         }
 
+        // Proofs start where chainv4's do, or from this trusted checkpoint while it takes none.
+        let tip = &validity["tip"];
+        let proven = match tip.is_object() {
+            true => (number(&tip["height"], "the proven tip's height")?, word(&tip["block"], "the proven tip")?, word(&tip["state_root"], "the proven tip's state root")?),
+            false => (number(&source["height"], "source height")?, word(&source["block"], "source block")?, word(&source["state_root"], "source state root")?),
+        };
+        let genesis = word(&status["genesis"], "the genesis")?;
         let constructor = encode_values(
-            &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
+            &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Address, AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
             &[
                 AbiValue::Uint(number(&link["chain_id"], "chain id")?),
                 AbiValue::Uint(u256::from(finalized)),
@@ -119,11 +137,21 @@ impl Bridge {
                 AbiValue::Uint(number(&source["height"], "source height")?),
                 AbiValue::FixedBytes(word(&source["state_root"], "source state root")?.to_vec()),
                 AbiValue::FixedBytes(word(&link["set"]["hash"], "set")?.to_vec()),
+                AbiValue::Address(verifier),
+                AbiValue::FixedBytes(genesis.to_vec()),
+                AbiValue::FixedBytes(program.to_vec()),
+                AbiValue::Uint(proven.0),
+                AbiValue::FixedBytes(proven.1.to_vec()),
+                AbiValue::FixedBytes(proven.2.to_vec()),
             ],
         )?;
         let init = [from_hex(FINALITY_CODE.trim()).ok_or("built-in code is hex")?, constructor].concat();
         let receipt = rpc.send(&Call { to: [0; 20], value: u256::ZERO, input: init, what: "Deploy ChainV4Finality.sol" }, true, &secret)?;
         println!("finality {} from epoch {finalized}", receipt["contractAddress"].as_str().ok_or("the deploy's receipt names no contract")?);
+
+        if verifier == [0; 20] || program == [0; 32] {
+            println!("it takes no validity proofs: give --sp1-verifier, and --program while governance names none");
+        }
 
         Ok(())
     }
@@ -210,5 +238,43 @@ impl Bridge {
                 None => return Ok(()),
             }
         }
+    }
+
+    /// Takes a proof file to ChainV4Finality.sol: its public values and proof, at the epoch whose
+    /// checkpoint the range ends at, which the contract must have finalized.
+    pub(super) fn finality_prove(&self, contract: &[u8; 20], proof: &std::path::Path) -> CliResult<()> {
+        let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
+        let file: Value = serde_json::from_slice(&std::fs::read(proof).map_err(|err| format!("{}: {err}", proof.display()))?).map_err(|err| format!("{}: {err}", proof.display()))?;
+        let field = |name: &str| file[name].as_str().and_then(from_hex).ok_or_else(|| format!("{}: no {name}", proof.display()));
+        let height = file["range"]["end"]["height"].as_u64().ok_or_else(|| format!("{}: no range end", proof.display()))?;
+        let interval = self.status()?["finality"]["checkpoint_interval"].as_u64().filter(|interval| *interval > 0).ok_or("the node's finality has no checkpoints")?;
+
+        if !height.is_multiple_of(interval) {
+            return Err(format!("the range ends at {height}, no checkpoint").into());
+        }
+
+        let epoch = height / interval;
+        let finalized = u256::from_be_bytes(rpc.call(contract, &[selector("finalAt(uint256)"), u256::from(epoch).to_be_bytes().to_vec()].concat())?.get(..32).and_then(|word| word.try_into().ok()).unwrap_or([0; 32]));
+
+        if finalized == u256::ZERO {
+            return Err(format!("epoch {epoch} is not final on the contract yet: finality-relay brings it there").into());
+        }
+
+        let input = [selector("prove(bytes,bytes,uint256)"), encode_values(&[AbiType::Bytes, AbiType::Bytes, AbiType::Uint(256)], &[AbiValue::Bytes(field("public_values")?), AbiValue::Bytes(field("proof")?), AbiValue::Uint(u256::from(epoch))])?].concat();
+        rpc.send(&Call { to: *contract, value: u256::ZERO, input, what: "Prove a range" }, false, &secret)?;
+        println!("proven there through block {height}, epoch {epoch}");
+
+        Ok(())
+    }
+
+    /// Points Gateway.sol at a ChainV4Finality.sol, as its owner, while it follows none.
+    pub(super) fn gateway_finality(&self, gateway: &[u8; 20], finality: &[u8; 20]) -> CliResult<()> {
+        let (rpc, secret) = (self.rpc()?, self.evm_secret()?);
+        let mut word = [0; 32];
+        word[12..].copy_from_slice(finality);
+        rpc.send(&Call { to: *gateway, value: u256::ZERO, input: [selector("setFinality(address)"), word.to_vec()].concat(), what: "Follow a ChainV4Finality.sol" }, false, &secret)?;
+        println!("Gateway.sol {} takes proven withdrawals by {}", crate::structs::hex::to_hex(gateway), crate::structs::hex::to_hex(finality));
+
+        Ok(())
     }
 }
