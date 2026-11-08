@@ -36,6 +36,7 @@ use {
 
 mod addresses;
 mod events;
+mod versions;
 mod execute;
 pub mod fees;
 mod finality;
@@ -50,6 +51,7 @@ mod range;
 mod receipt;
 
 pub use addresses::{AddressScan, IndexedTx, address_txs_from, scan_address_txs, stored_address_txs, touched};
+pub use versions::{ContractVersion, WasmOutline, stored_versions, versions_in, wasm_outline};
 pub use events::{EventFilter, IndexedEvent, stored_events};
 pub use index::{IndexKind, IndexWindow, Indexing, KeepFrom, stored_index};
 pub use members::{stored_member_index, stored_multisigs_of};
@@ -1288,9 +1290,11 @@ pub struct Chain {
     light_params: LightParams,
     /// The threads blocks run on, shared with finality to check votes.
     workers: Arc<Workers>,
-    /// The event index and the address index, when this node keeps them.
+    /// The event index and the address index, when this node keeps them, and the versions index,
+    /// which every node keeps.
     events: Option<IndexWindow>,
     addresses: Option<IndexWindow>,
+    versions: IndexWindow,
     /// Whether this node keeps the member index, which follows the multisig registry whole.
     members: bool,
     /// The height this node took state at, when it synced from a snapshot: it has headers only
@@ -1482,6 +1486,20 @@ impl Chain {
         };
         let events = index::events_up_to_date(&db, index::stored_index(&*db, IndexKind::Events)?, tip.header.height)?;
         let addresses = index::stored_index(&*db, IndexKind::Addresses)?;
+        // Every node keeps the versions index, of every block: one that had none starts it above
+        // its tip, and catches up from there back to genesis in the background.
+        let versions = match index::stored_index(&*db, IndexKind::Versions)? {
+            Some(window) => window,
+            None => {
+                let window = IndexWindow { from: tip.header.height + 1, keep: KeepFrom::Height(0) };
+                let state = State::new(db.clone());
+                state.put_value(Column::Meta, IndexKind::Versions.low_end_key().to_vec(), &index::IndexedFrom { height: window.from });
+                state.put_value(Column::Meta, IndexKind::Versions.keep_key().to_vec(), &window.keep);
+                db.commit(state.take_changes())?;
+
+                window
+            }
+        };
         let members = members::stored_member_index(&*db)?;
         let snapshot = read_value::<SnapshotRecord>(&*db, Column::Meta, SNAPSHOT_KEY)?.map(|record| record.height);
         let bodies_from = read_value::<BodiesFrom>(&*db, Column::Meta, BODIES_FROM_KEY)?.map_or(0, |from| from.height);
@@ -1523,6 +1541,7 @@ impl Chain {
             workers,
             events,
             addresses,
+            versions,
             members,
             snapshot,
             state_history: Some(DEFAULT_STATE_HISTORY),
@@ -1654,7 +1673,7 @@ impl Chain {
 
     #[document(
         parent = "Chain",
-        summary = "Keeps one of the indexes, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_index fills it in; whatever an index dropped half-way left behind is cleared first. Once on, it stays on until drop_index.",
+        summary = "Keeps one of the indexes, and sets which blocks it keeps. A new index starts empty at the next block, and catch_up_index fills it in; whatever an index dropped half-way left behind is cleared first. Once on, it stays on until drop_index. The versions index is always kept, of every block, and stays as it is.",
         params = {
             kind = "Which index.",
             keep = "Which blocks to keep; None keeps what the database keeps, or every block for a new index.",
@@ -1663,6 +1682,11 @@ impl Chain {
         see_also = "Chain::catch_up_index, stored_events, stored_address_txs",
     )]
     pub fn keep_index(&mut self, kind: IndexKind, keep: Option<KeepFrom>) -> Result<IndexWindow, DbError> {
+        // Every node keeps the versions index of every block, as it is.
+        if kind == IndexKind::Versions {
+            return Ok(self.versions);
+        }
+
         let tip = self.tip.height;
         let window = match (self.index_window(kind), keep) {
             (Some(window), None) => return Ok(window),
@@ -1690,19 +1714,23 @@ impl Chain {
             None => self.db.clear(kind.column(), state.take_changes())?,
         }
 
-        *self.window(kind) = Some(window);
+        self.set_window(kind, Some(window));
 
         Ok(window)
     }
 
     #[document(
         parent = "Chain",
-        summary = "Stops keeping one of the indexes, and deletes it and its records in Meta in one atomic write, quick however big it is.",
+        summary = "Stops keeping one of the indexes, and deletes it and its records in Meta in one atomic write, quick however big it is. The versions index, which every node keeps, is never dropped.",
         params = { kind = "Which index." },
         returns = "Whether there was an index to drop.",
         see_also = "Chain::keep_index",
     )]
     pub fn drop_index(&mut self, kind: IndexKind) -> Result<bool, DbError> {
+        if kind == IndexKind::Versions {
+            return Ok(false);
+        }
+
         let state = State::new(self.db.clone());
         state.delete(Column::Meta, kind.low_end_key().to_vec());
         state.delete(Column::Meta, kind.keep_key().to_vec());
@@ -1713,7 +1741,10 @@ impl Chain {
 
         self.db.clear(kind.column(), state.take_changes())?;
 
-        Ok(self.window(kind).take().is_some())
+        let had = self.index_window(kind).is_some();
+        self.set_window(kind, None);
+
+        Ok(had)
     }
 
     #[document(
@@ -1739,7 +1770,7 @@ impl Chain {
             from: index::catch_up(&self.db, self.hash, kind, window, self.tip.height, floor)?,
             ..window
         };
-        *self.window(kind) = Some(window);
+        self.set_window(kind, Some(window));
 
         Ok(window.from != lowest)
     }
@@ -1783,13 +1814,20 @@ impl Chain {
         match kind {
             IndexKind::Events => self.events,
             IndexKind::Addresses => self.addresses,
+            IndexKind::Versions => Some(self.versions),
         }
     }
 
-    fn window(&mut self, kind: IndexKind) -> &mut Option<IndexWindow> {
+    /// Sets one of the indexes' windows; the versions index, kept always, keeps one.
+    fn set_window(&mut self, kind: IndexKind, window: Option<IndexWindow>) {
         match kind {
-            IndexKind::Events => &mut self.events,
-            IndexKind::Addresses => &mut self.addresses,
+            IndexKind::Events => self.events = window,
+            IndexKind::Addresses => self.addresses = window,
+            IndexKind::Versions => {
+                if let Some(window) = window {
+                    self.versions = window;
+                }
+            }
         }
     }
 

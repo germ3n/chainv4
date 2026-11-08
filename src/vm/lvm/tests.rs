@@ -792,3 +792,70 @@ fn the_memory_limit_counts_from_the_call_s_start() {
 }
 
 
+
+/// A host on this state whose block has the memory fork in force, or not.
+fn host_on(state: &Arc<State>, forked: bool) -> Host {
+    let mut context = context();
+
+    if forked {
+        let fork = crate::params::forks::ScheduledFork { name: "memory".into(), height: 0, epoch: None, least: None };
+        context.block.vm.forks = crate::params::forks::Forks::at(&[fork], 0);
+    }
+
+    let vm = Arc::new(Vm::new(&[Engine::Lua], HashType::default_chain()).unwrap());
+
+    Host::root(state.clone(), context, LIMITS.memory, vm)
+}
+
+#[test]
+fn storage_iterators_count_against_the_memory_limit_from_the_memory_fork_on() {
+    let code = r#"
+local M = {}
+
+function M.fill()
+    -- Each value its own, as Luau keeps one copy of equal strings, however long.
+    local filler = string.rep("v", 60 * 1024 - 3)
+
+    for index = 1, 64 do
+        storage.set(string.format("k%03d", index), filler .. string.format("%03d", index))
+    end
+end
+
+-- Iterators each a page in: 64 values of 60 KB, nearly 4 MB a page. From the memory fork on a page
+-- is Lua strings, which Luau keeps one copy of, so pages of the same keys share it.
+function M.hoard(count)
+    local held = {}
+
+    for index = 1, count:tonumber() do
+        local step = storage.iter("k")
+        local key, value = step()
+        assert(value ~= nil and #value == 60 * 1024, "a page of the values filled")
+        held[index] = step
+    end
+
+    return #held
+end
+
+function M.long()
+    storage.iter(string.rep("x", 300))
+    return "made"
+end
+
+return M
+"#;
+    let limits = Limits { fuel: 10_000_000, memory: 2 * 1024 * 1024 };
+    let contract = Contract::load(code, limits).unwrap();
+    let state = Arc::new(State::new(Arc::new(MemoryDb::default())));
+    let call = |name: &str, args: &[TxCallArgumentType], forked: bool| contract.call(&func(name), args, host_on(&state, forked), limits);
+
+    call("fill", &[], false).result.unwrap();
+
+    // Before the fork three pages, near 12 MB, sit outside a 2 MB limit; from it on one page counts.
+    assert_eq!(call("hoard", &[TxCallArgumentType::I64(3)], false).result.unwrap(), [TxCallArgumentType::I64(3)]);
+    assert_eq!(call("hoard", &[TxCallArgumentType::I64(3)], true).result.unwrap_err(), VmError::OutOfMemory);
+    assert_eq!(call("hoard", &[TxCallArgumentType::I64(0)], true).result.unwrap(), [TxCallArgumentType::I64(0)]);
+
+    // A prefix no key could match was copied as given before the fork, and is refused from it on.
+    assert_eq!(call("long", &[], false).result.unwrap(), [TxCallArgumentType::String("made".into())]);
+    assert!(call("long", &[], true).result.unwrap_err().to_string().contains("a scan's prefix is at most 256 bytes"));
+}

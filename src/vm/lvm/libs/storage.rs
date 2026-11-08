@@ -27,7 +27,7 @@ impl UserData for LuaNamespace {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("get", |lua, this, key: mlua::LuaString| storage_get(lua, &this.0, &key.as_bytes()));
         methods.add_method("iter", |lua, this, (prefix, start): (Option<mlua::LuaString>, Option<mlua::LuaString>)| {
-            storage_iter(lua, this.0.clone(), prefix.map(|prefix| prefix.as_bytes().to_vec()), start.map(|start| start.as_bytes().to_vec()))
+            storage_iter(lua, this.0.clone(), prefix, start)
         });
         methods.add_method("set", |lua, this, (key, value): (mlua::LuaString, Option<mlua::LuaString>)| {
             let value = value.as_ref().map(|value| value.as_bytes());
@@ -225,10 +225,31 @@ fn storage_scan(lua: &Lua, space: &Space, prefix: &[u8], start: &[u8]) -> mlua::
 
 /// An iterator over a space's keys that start with prefix, from start on, in byte order, for a
 /// generic for: each step gives a key and its value, a page asked for at a time.
-fn storage_iter(lua: &Lua, space: Space, prefix: Option<Vec<u8>>, start: Option<Vec<u8>>) -> mlua::Result<mlua::Function> {
-    host(lua)?;
-    let prefix = prefix.unwrap_or_default();
-    let mut next = start.unwrap_or_else(|| prefix.clone());
+///
+/// From the memory fork on, what it holds is the call's to pay for: a prefix or start no key could
+/// match is refused here, before anything is copied, and each page is kept as Lua strings, so it
+/// counts against the memory limit. Before it, the prefix and start were copied as given and the
+/// page kept on the node's own heap, out of the limit's sight, which blocks before it replay.
+fn storage_iter(lua: &Lua, space: Space, prefix: Option<mlua::LuaString>, start: Option<mlua::LuaString>) -> mlua::Result<mlua::Function> {
+    let host = host(lua)?;
+
+    if host.rules().forks.has(&crate::params::forks::MEMORY) {
+        let longest = host.limits().key_len as usize;
+
+        if prefix.as_ref().is_some_and(|prefix| prefix.as_bytes().len() > longest) {
+            return Err(Error::runtime(format!("a scan's prefix is at most {longest} bytes")));
+        }
+
+        // One past the longest key, as the key right after a longest one, to go on from it.
+        if start.as_ref().is_some_and(|start| start.as_bytes().len() > longest + 1) {
+            return Err(Error::runtime(format!("a scan starts at a key of at most {longest} bytes, or one past it")));
+        }
+
+        return metered_iter(lua, space, prefix, start);
+    }
+
+    let prefix = prefix.map(|prefix| prefix.as_bytes().to_vec()).unwrap_or_default();
+    let mut next = start.map(|start| start.as_bytes().to_vec()).unwrap_or_else(|| prefix.clone());
     let mut page: VecDeque<(Vec<u8>, Vec<u8>)> = VecDeque::new();
     let mut ended = false;
 
@@ -247,6 +268,39 @@ fn storage_iter(lua: &Lua, space: Space, prefix: Option<Vec<u8>>, start: Option<
 
         match page.pop_front() {
             Some((key, value)) => Ok((Some(lua.create_string(&key)?), Some(lua.create_string(&value)?))),
+            None => Ok((None, None)),
+        }
+    })
+}
+
+/// The memory fork's iterator: its prefix, where it goes on from and its page are Lua strings,
+/// all of them on the Lua heap the memory limit counts.
+fn metered_iter(lua: &Lua, space: Space, prefix: Option<mlua::LuaString>, start: Option<mlua::LuaString>) -> mlua::Result<mlua::Function> {
+    let prefix = match prefix {
+        Some(prefix) => prefix,
+        None => lua.create_string("")?,
+    };
+    let mut next = start.unwrap_or_else(|| prefix.clone());
+    let mut page: VecDeque<(mlua::LuaString, mlua::LuaString)> = VecDeque::new();
+    let mut ended = false;
+
+    lua.create_function_mut(move |lua, _: mlua::MultiValue| {
+        if page.is_empty() && !ended {
+            let found = storage_scan(lua, &space, &prefix.as_bytes(), &next.as_bytes())?;
+            ended = found.len() < ITER_PAGE;
+
+            // The page after starts right after its last key.
+            if let Some((last, _)) = found.last() {
+                next = lua.create_string([&last[..], &[0]].concat())?;
+            }
+
+            for (key, value) in found {
+                page.push_back((lua.create_string(&key)?, lua.create_string(&value)?));
+            }
+        }
+
+        match page.pop_front() {
+            Some((key, value)) => Ok((Some(key), Some(value))),
             None => Ok((None, None)),
         }
     })
@@ -625,7 +679,7 @@ pub fn register_storage_lib(lua: &Lua) {
         .set(
             "iter",
             lua.create_function(|lua, (prefix, start): (Option<mlua::LuaString>, Option<mlua::LuaString>)| {
-                storage_iter(lua, Space::Plain, prefix.map(|prefix| prefix.as_bytes().to_vec()), start.map(|start| start.as_bytes().to_vec()))
+                storage_iter(lua, Space::Plain, prefix, start)
             })
             .expect("[storage] Failed to create iter"),
         )

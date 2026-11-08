@@ -2261,6 +2261,31 @@ contract computes, so they wait for the next regenesis (see the todo).
 - **Fork by epoch on a chain with finality alone.** Its height is the epoch times the checkpoint
   interval, worked out when it is scheduled.
 
+## Memory a contract holds outside its engine
+
+- **A limit counts only what it sees.** Luau counts its own heap and wasmi its linear memory; what
+  a host library keeps for a script on the node's heap, or what an engine keeps beside the memory
+  (a wasm table), escapes both. Two did until the `memory` fork: a Lua storage iterator's copies
+  and page, and wasm tables. Anything new a library keeps for a script between its calls should
+  be made Lua values (or charged and capped), so the limit sees it.
+- **Equal strings are one.** Luau interns every string however long, so iterators over the same
+  keys share a page, and a test of the limit wants values that differ.
+- **Before a fork, the old way.** Blocks before the fork still run with both uncounted, so a node
+  replaying them agrees with the receipts; the fork is what closes the hole on a live chain.
+
+## Contract versions
+
+- **An index, not state.** Each version is the code its deploy or upgrade transaction carried, so
+  the index only points the way: the transaction and its receipt are what a light client proves.
+  Nothing was added to the state root, so it needed no fork.
+- **Every node keeps it.** One entry a deploy or upgrade is too little to make a flag of; a node
+  from before it fills it from its receipts in the background at the first start.
+- **No deploy, no first version.** Contracts genesis placed and clones made by contracts have no
+  transaction that carried their first code, so their list starts at their first upgrade.
+- **WebAssembly is outlined, not shown.** A module's bytes are not worth reading, so the index keeps
+  its exported functions and chainv4 sections, read without an engine (`wasm_outline`), and the
+  explorer diffs those; Lua's source comes from the block, and is diffed line by line.
+
 ## Attestations for Ethereum
 
 - **They changed the encoding of votes and blocks.** `SignedVote::attestation` rides in every vote

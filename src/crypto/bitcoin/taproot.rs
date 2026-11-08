@@ -200,7 +200,7 @@ pub fn x_only_of(secret: &[u8; 32]) -> Option<[u8; 32]> {
 pub fn schnorr_sign(secret: &[u8; 32], message: &[u8; 32]) -> Option<[u8; 64]> {
     let key = SigningKey::from_bytes(&(*secret).into()).ok()?;
 
-    Some(key.sign_raw(message, &[0; 32]).ok()?.to_bytes().into())
+    Some(key.sign_raw(message, &[0; 32]).ok()?.to_bytes())
 }
 
 #[document(summary = "Whether a BIP340 signature holds for an x-only key and a 32-byte message.", category = "Bitcoin")]

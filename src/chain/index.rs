@@ -1,7 +1,8 @@
 //! What the chain's indexes share. A node may keep two, each its own choice: the event index,
 //! every event findable by its contract, its name, the addresses in its data and an EVM log's
-//! topics; and the address index, every transaction findable by the addresses it touches. Neither
-//! is part of the chain's state: each is what a node reads out of the blocks and receipts it keeps,
+//! topics; and the address index, every transaction findable by the addresses it touches. And
+//! every node keeps a third, the versions index, each contract's code as deployed and upgraded.
+//! None is part of the chain's state: each is what a node reads out of the blocks and receipts it keeps,
 //! for its API to list.
 //!
 //! An index holds every main-chain block from its low end to the tip, and once on stays on until
@@ -14,7 +15,7 @@
 //! its entries, so an index never has gaps.
 
 use {
-    super::{Undo, UndoEntry, addresses, events, id_key, read_value, stored_block_at, stored_receipt},
+    super::{Undo, UndoEntry, addresses, events, versions, id_key, read_value, stored_block_at, stored_receipt},
     crate::chain::receipt::TxReceipt,
     crate::crypto::hashable::Hashable,
     crate::db::{Column, Database, DbError, Read, State},
@@ -89,17 +90,20 @@ pub enum IndexKind {
     Events,
     #[document(summary = "The address index, which GET /accounts/{address}/txs lists from: --index-addresses.")]
     Addresses,
+    #[document(summary = "The versions index, which GET /contracts/{address}/versions lists from: every node keeps it, of every block.")]
+    Versions,
 }
 
 impl IndexKind {
-    #[document(parent = "IndexKind", summary = "Both, in the order a block indexes them.")]
-    pub const ALL: [IndexKind; 2] = [IndexKind::Events, IndexKind::Addresses];
+    #[document(parent = "IndexKind", summary = "Every one, in the order a block indexes them.")]
+    pub const ALL: [IndexKind; 3] = [IndexKind::Events, IndexKind::Addresses, IndexKind::Versions];
 
     #[document(parent = "IndexKind", summary = "The column it is kept in, alone.")]
     pub fn column(self) -> Column {
         match self {
             IndexKind::Events => Column::Events,
             IndexKind::Addresses => Column::Addresses,
+            IndexKind::Versions => Column::Versions,
         }
     }
 
@@ -108,6 +112,7 @@ impl IndexKind {
         match self {
             IndexKind::Events => b"events_from",
             IndexKind::Addresses => b"addresses_from",
+            IndexKind::Versions => b"versions_from",
         }
     }
 
@@ -115,6 +120,7 @@ impl IndexKind {
         match self {
             IndexKind::Events => b"events_keep",
             IndexKind::Addresses => b"addresses_keep",
+            IndexKind::Versions => b"versions_keep",
         }
     }
 
@@ -123,6 +129,7 @@ impl IndexKind {
         match self {
             IndexKind::Events => events::index(layer, landed.block, landed.height, landed.tx, landed.at, &receipt.events),
             IndexKind::Addresses => addresses::index(layer, landed, signed, receipt),
+            IndexKind::Versions => versions::index(layer, landed, signed, receipt),
         }
     }
 
@@ -131,6 +138,7 @@ impl IndexKind {
         match self {
             IndexKind::Events => events::unindex(layer, height, at, &receipt.events),
             IndexKind::Addresses => addresses::unindex(layer, height, at, signed, receipt),
+            IndexKind::Versions => versions::unindex(layer, height, at, signed, receipt),
         }
     }
 }
@@ -140,6 +148,7 @@ impl fmt::Display for IndexKind {
         match self {
             IndexKind::Events => write!(f, "event index"),
             IndexKind::Addresses => write!(f, "address index"),
+            IndexKind::Versions => write!(f, "versions index"),
         }
     }
 }

@@ -856,7 +856,8 @@ cores runs blocks slower, and links slower than a laptop's loopback carry fewer 
   theirs, from genesis or the height or `latest-N` window given, and once on, the database keeps
   it on. `=off` deletes one at startup, in one atomic write however big it is, and leaves the
   other. `GET /events` and `GET /accounts/{address}/txs` answer 404 on nodes without the index
-  they need.
+  they need. The versions index, for `GET /contracts/{address}/versions`, is kept by every
+  node, with no flag, and a node from before it fills it in the background.
 - **`--index-multisigs` keeps the member index,** each multisig under its members, for
   `GET /accounts/{address}/multisigs`. It follows the multisig registry, so it takes no window: a
   node turning it on, on a chain already running, builds it from the registry at startup, in one

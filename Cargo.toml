@@ -71,7 +71,7 @@ mnemonic = ["dep:bip39", "dep:hmac", "dep:sha2", "dep:ripemd"]
 sealed-keys = ["dep:argon2", "dep:chacha20poly1305", "dep:libc"]
 vm = ["xxh3"]
 lvm = ["vm", "dep:mlua"]
-wasm = ["vm", "dep:wasmi"]
+wasm = ["vm", "dep:wasmi", "dep:wasmi_core"]
 # The Ethereum Virtual Machine, on revm in pure Rust: its precompiles take k256 and arkworks, not C.
 # EVM accounts are 20 bytes, keccak256's, so it needs keccak256.
 evm = ["vm", "keccak256", "abi", "dep:revm"]
@@ -228,6 +228,9 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"], opt
 # The interpreter is consensus: an upgrade can change what a module costs, so it is pinned.
 revm = { version = "43.0.3", default-features = false, features = ["std", "optional_fee_charge", "optional_no_base_fee", "optional_block_gas_limit", "memory_limit"], optional = true }
 wasmi = { version = "=2.0.0", default-features = false, features = ["std", "validate", "stable", "auto-dispatch"], optional = true }
+# wasmi's own core, the same release, for the LimiterError a resource limiter of ours returns, which
+# wasmi does not re-export.
+wasmi_core = { version = "=2.0.0", default-features = false, optional = true }
 # Lua is consensus too, so the forks are pinned by commit: mlua by its rev here, and Luau, which
 # mlua-sys takes from its fork's main, by the commit below, which tests/toolchains.rs holds
 # Cargo.lock to, so a `cargo update` cannot move either.

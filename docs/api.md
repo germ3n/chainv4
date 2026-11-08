@@ -331,6 +331,26 @@ What a contract is:
 A contract that was [removed](contracts.md#lifecycle-hooks) answers 404, saying in which block,
 by whom, and its balance to whom.
 
+### `GET /contracts/{address}/versions?limit=N&cursor=C`
+
+A contract's versions, oldest first: its deploy and each upgrade that went through after, from the
+[versions index](storage.md#the-indexes) every node keeps. Each has:
+- `tx`, `block`, `height` and `index`: the transaction that set it and where it landed, and `step`,
+  the batch step that did it, `null` for a transaction of its own;
+- `kind`, `deploy` or `upgrade`;
+- `engine`, `code_hash` (the code as the transaction carried it, hashed by the chain's hash) and
+  `size`, in bytes;
+- `outline`, for a WebAssembly module: its `functions` (exports that take and give nothing),
+  `reentrant` ones and `layout` entries, read from its sections; `null` for Lua, whose source is in
+  its transaction, and EVM code.
+
+At most `limit` (50 by default, 200 at most) a page; `next` is the cursor for the page after, `null`
+after the last. `indexed_from` and `catching_up_to` say what the index holds while a node fills it.
+A removed contract's versions are still listed; an account, or a contract genesis placed or a
+contract cloned, has none. The code itself is the transaction's: a Lua version's `source` is in its
+block, at `GET /blocks/{id}`, and a light client proves the transaction and its receipt, which says
+`deployed` or `upgraded`, as any other.
+
 ### `GET /light`
 
 What a [light client](light-client.md) starts from: the chain's `genesis` id, its light

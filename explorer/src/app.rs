@@ -501,6 +501,22 @@ impl Explorer {
                     }
                 }
             }
+            Ask::ContractVersions { address, cursor } => {
+                if let Some(page) = parse::<crate::model::Versions>(value) {
+                    let listed = store.versions.entry(address.clone()).or_default();
+
+                    if cursor.is_none() {
+                        listed.versions.clear();
+                    }
+
+                    listed.versions.extend(page.versions);
+                    (listed.indexed_from, listed.catching_up_to) = (page.indexed_from, page.catching_up_to);
+
+                    if let Some(next) = page.next {
+                        self.api.ask(Ask::ContractVersions { address, cursor: Some(next) });
+                    }
+                }
+            }
             Ask::Contract(address) => {
                 let contract = parse::<Contract>(value);
 

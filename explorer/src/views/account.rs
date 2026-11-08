@@ -2,7 +2,8 @@
 //! call them read-only. A token shows its name, symbol and decimals as the chain's registry holds
 //! them, and its decimals can be set by hand; every account shows what it holds of the registered
 //! tokens: the registry's first page, by symbol, and any other the explorer has met. With the
-//! node's address index, it lists every transaction that touched the address.
+//! node's address index, it lists every transaction that touched the address. A native contract
+//! lists its versions: its deploy and each upgrade after, each with its code.
 
 use {
     super::{Ctx, TxLine, View, events, tokens},
@@ -39,6 +40,8 @@ pub struct AccountState {
     evm_asked: std::collections::HashMap<String, Ask>,
     /// What its transactions are narrowed to.
     filter: TxFilter,
+    /// Which of a contract's versions is open.
+    versions: super::versions::VersionsState,
 }
 
 pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState) {
@@ -305,6 +308,11 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, address: &str, state: &mut AccountState)
                 events::list(ui, ctx, &query);
             },
         );
+    }
+
+    // A native contract's code as deployed and as each upgrade replaced it, a removed one's too.
+    if address.starts_with("contract:") {
+        super::section(ui, look, "Versions", |ui| super::versions::show(ui, ctx, address, &mut state.versions));
     }
 
     holdings(ui, ctx, address);

@@ -434,13 +434,15 @@ a node replaying history runs each block by its own height's (`params::forks`).
   in force (`Forks::has`, through `VmRules::forks`, set for every block from its parent's state).
   There's no most: `Forks` keeps a bit for each, in as many words as the list needs, and it's
   worked out per block rather than stored, so a release with more forks changes nothing a chain
-  holds. This release knows two:
+  holds. This release knows three:
   - `restaking` (see [Finality](finality.md#restaking)): validators' rewards restaked into their
     bonds when their accounts turn it on, bonds topped up by hand, and the attestations of the
     justifications blocks carry checked as gossiped ones are.
   - `proofs` (see [Validity proofs](proofs.md#on-the-chain-the-proofs-fork)): each block records
     its parent for a proof to end at, the proven tip starts, and the chain takes `Tx::Prove` and
     `Change::Proofs`.
+  - `memory` (see [Contracts](contracts.md#memory)): what a contract holds counted against its
+    call's memory limit: a Lua storage iterator's pages and a wasm module's table entries.
 
   Tests also run a fork that exists in them alone.
 - **Genesis may list forks** (`forks`, see [Genesis](genesis.md)), each its release knows, at a

@@ -126,6 +126,10 @@ address, storage and balance. They:
 
 If anything fails, nothing changes.
 
+Earlier code stays findable: `GET /contracts/{address}/versions` lists the deploy and each upgrade
+that went through, from an index every node keeps (see [Storage](storage.md#the-indexes)), and the
+explorer shows each version's code and what the next one changed.
+
 **Removal** (`Tx::Remove`, `chainv4 send remove --contract … --to …`) takes a Lua or WebAssembly
 contract away for good. It:
 1. asks its `check_perms("remove", sender, beneficiary)`;
@@ -524,6 +528,12 @@ their receipts differ.
 - **Caught or not.** A script can `pcall` running out and go on, with what it still holds counted.
 - **Strings are interned.** Luau keeps one copy of each string, so making the same text twice
   counts once.
+- **What the libraries hold counts too, from the `memory` fork on.** A storage iterator keeps its
+  page of keys and values, and where it goes on from, as Lua strings, so they count like any
+  other. Before the fork it kept them, and a copy of the prefix and start it was given, on the
+  node's own heap, where the limit did not see them: a loop of iterators over one long string could
+  hold far more than the limit (found 2026-11-08). From the fork on a prefix longer than any key
+  (`key_len`), or a start more than one byte past that, is refused when the iterator is made.
 
 **The collector runs on bytes alone.** It starts a cycle once the heap is twice what the last one
 left (Luau's goal of 200%) and does a fixed amount of work per kilobyte allocated, so it frees
@@ -543,6 +553,12 @@ build would count smaller objects and run out later.
 
 **In WebAssembly**, the limit is on the module's linear memory, in 64 KiB pages: a `memory.grow`
 past it fails the call with `OutOfMemory`, and a module that starts with more cannot load.
+- **Tables count, from the `memory` fork on**, at 16 bytes an entry (`TABLE_ENTRY_BYTES`), beside
+  the linear memory, within the same limit: a module whose table and memory start past it cannot
+  load, and a `table.grow` or `memory.grow` that would take the two past it fails the call with
+  `OutOfMemory`. Before the fork a table's entries were not counted, so a module declaring
+  millions of them loaded for a few thousand fuel and held them on the node's heap (found
+  2026-11-08).
 
 ## Lua contracts
 

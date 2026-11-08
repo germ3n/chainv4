@@ -1340,6 +1340,57 @@ return M
 
     assert_eq!(receipts[0].result, Ok(Effect::Upgraded(contract)));
     assert_eq!(version(&mut chain, 4), Ok(Effect::Returned(vec![TxCallArgumentType::I64(2)])));
+
+    // The versions index has the deploy and the upgrade that went through, oldest first, each the
+    // code its transaction carried; the failed upgrades left none.
+    let digest = |code: &str| crate::crypto::hasher::Hasher::digest(HashType::default_chain(), code.as_bytes());
+    let listed = |db: &Arc<MemoryDb>| {
+        let (versions, next) = crate::chain::stored_versions(&**db, &contract, None, 10).unwrap();
+        assert_eq!(next, None);
+
+        versions.iter().map(|version| (version.upgrade, version.code_hash, version.step, version.size)).collect::<Vec<_>>()
+    };
+    let expected = [(false, digest(V1), None, V1.len() as u64), (true, digest(V2), None, V2.len() as u64)];
+    assert_eq!(listed(&db), expected);
+    let (first, _) = crate::chain::stored_versions(&*db, &contract, None, 1).unwrap();
+    assert_eq!((first.len(), first[0].height, first[0].engine), (1, 1, crate::structs::code::Engine::Lua));
+
+    // A node from before the index fills it from its blocks' receipts, back to genesis.
+    let state = State::new(db.clone());
+    state.delete(Column::Meta, IndexKind::Versions.low_end_key().to_vec());
+    state.delete(Column::Meta, IndexKind::Versions.keep_key().to_vec());
+    db.clear(Column::Versions, state.take_changes()).unwrap();
+    drop(chain);
+    let mut chain = open(&db);
+    assert_eq!(listed(&db), [], "empty until it catches up");
+    assert_eq!(chain.index_window(IndexKind::Versions).map(|window| window.from), Some(chain.tip().height + 1));
+
+    while chain.catch_up_index(IndexKind::Versions).unwrap() {}
+    assert_eq!(listed(&db), expected);
+    assert_eq!(chain.index_window(IndexKind::Versions).map(|window| window.from), Some(0));
+    assert!(!chain.drop_index(IndexKind::Versions).unwrap(), "every node keeps it");
+    assert_eq!(listed(&db), expected);
+}
+
+#[test]
+fn a_batch_s_deploys_and_upgrades_are_versions_by_their_step() {
+    use crate::structs::receipt::{StepEffect, StepOutcome};
+    let owner = authority();
+    let contract = contract_address(&owner.public().address(), 0, HashType::default_chain());
+    let step = |effect| StepOutcome { effect, events: 0, payments: 0 };
+    let batch = Tx::Batch {
+        steps: vec![
+            Tx::Deploy { code: Code::Lua("return {}".to_string()) },
+            Tx::Transfer { from: owner.public().address(), to: contract, amount: Amount::U128(1) },
+            Tx::Upgrade { contract, code: Code::Lua("return { }".to_string()) },
+        ],
+    };
+    let signed = SignedTx::sign(batch, 0, FeeOffer::NONE, &owner, &Hash::Xxh3_64(0));
+    let status = TxStatus::Batch(vec![step(StepEffect::Deployed(contract)), step(StepEffect::Done), step(StepEffect::Upgraded(contract))]);
+    let made: Vec<_> = crate::chain::versions_in(&signed, &status).into_iter().map(|(address, step, upgrade, _)| (address, step, upgrade)).collect();
+
+    assert_eq!(made, [(contract, Some(0), false), (contract, Some(2), true)]);
+    assert!(crate::chain::versions_in(&signed, &TxStatus::BatchFailed { step: 2, why: "no".into() }).is_empty(), "a failed batch made none");
 }
 
 #[test]

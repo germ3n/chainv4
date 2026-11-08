@@ -124,6 +124,9 @@ pub enum Column {
     #[document(summary = "A mining pool's claim trees, on a node that runs a pool: each tree's leaves, its leaves by miner, its inner nodes, and the blocks that committed to it, by its root, and which trees are kept. A miner's path is a few reads, however many miners the pool has. Not chain state: the pool's own books.")]
     #[wincode(tag = 28)]
     PoolTrees,
+    #[document(summary = "The versions index, which every node keeps: each contract's code as deployed and as each upgrade replaced it, by the contract and the height, oldest first, for GET /contracts/{address}/versions. Not chain state: read out of blocks and receipts, and taken back with its block.")]
+    #[wincode(tag = 29)]
+    Versions,
 }
 
 impl Hashable for Column {
@@ -131,7 +134,7 @@ impl Hashable for Column {
 }
 
 impl Column {
-    pub const ALL: [Column; 29] = [
+    pub const ALL: [Column; 30] = [
         Column::Accounts,
         Column::Contracts,
         Column::Storage,
@@ -161,6 +164,7 @@ impl Column {
         Column::Bans,
         Column::Faucet,
         Column::PoolTrees,
+        Column::Versions,
     ];
 
     #[document(
@@ -198,6 +202,7 @@ impl Column {
             Column::Bans => "bans",
             Column::Faucet => "faucet",
             Column::PoolTrees => "pool_trees",
+            Column::Versions => "versions",
         }
     }
 }

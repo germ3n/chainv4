@@ -449,3 +449,48 @@ fn a_cache_sized_on_the_node_holds_no_more_modules_than_it_was_given() {
     assert!(!engine.cache().entries.contains_key(&a[..]));
     assert_eq!(engine.run(&a, "a", &[], host(state()), LIMITS).result, WasmEngine::new().run(&a, "a", &[], host(state()), LIMITS).result, "and a call runs the same whatever it holds");
 }
+
+/// Rules with the memory fork in force.
+fn memory_fork() -> crate::params::vm::VmRules {
+    let fork = crate::params::forks::ScheduledFork { name: "memory".into(), height: 0, epoch: None, least: None };
+
+    crate::params::vm::VmRules { forks: crate::params::forks::Forks::at(&[fork], 0), ..crate::params::vm::VmRules::default() }
+}
+
+fn forked_host(state: Arc<State>) -> Host {
+    let mut context = context();
+    context.block.vm = memory_fork();
+
+    Host::root(state, context, LIMITS.memory, Arc::new(Vm::new(&[Kind::Wasm], HashType::default_chain()).unwrap()))
+}
+
+#[test]
+fn tables_count_against_the_memory_limit_from_the_memory_fork_on() {
+    let engine = WasmEngine::new();
+    // 100,000 entries are 1.6 MB at TABLE_ENTRY_BYTES, past the 1 MiB limit with the memory's page.
+    let big = module("(table 100000 funcref)");
+
+    assert!(engine.load(&big, LIMITS).result.is_ok(), "before the fork a table is not counted");
+    // Refused as a memory past the limit is at load: instantiating it fails.
+    let refused = engine.load_under(&big, LIMITS, &memory_fork()).result.unwrap_err().to_string();
+    assert!(refused.contains("failed to instantiate table"), "{refused}");
+
+    // 60,000 entries and one page fit in 1 MiB; one page more, or 10,000 entries more, do not.
+    let body = r#"(table $t 60000 funcref)
+      (func (export "page") (drop (memory.grow (i32.const 1))))
+      (func (export "entries") (drop (table.grow $t (ref.null func) (i32.const 10000))))
+      (func (export "few") (drop (table.grow $t (ref.null func) (i32.const 100))))"#;
+    let fits = engine.load_under(&module(body), LIMITS, &memory_fork()).result.unwrap();
+    let call = |function: &str| engine.run(&fits.code, function, &[], forked_host(state()), LIMITS).result;
+
+    assert_eq!(call("page").unwrap_err(), VmError::OutOfMemory);
+    assert_eq!(call("entries").unwrap_err(), VmError::OutOfMemory);
+    call("few").unwrap();
+
+    // Before the fork the same calls grow as far as the memory alone allows.
+    let plain = engine.load(&module(body), LIMITS).result.unwrap();
+
+    for function in ["page", "entries", "few"] {
+        engine.run(&plain.code, function, &[], host(state()), LIMITS).result.unwrap();
+    }
+}

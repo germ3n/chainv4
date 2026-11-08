@@ -30,15 +30,72 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
 
 ### Once every queued batch is done
 
-- [ ] **A review pass, feature by feature.** Once every queued batch is in, before the fresh test
-  chain, go through each feature and category in turn (consensus, finality, governance, storage,
-  the node and network, the API, each engine, the registries, swaps, the DEX, NFTs, bridges, the
-  wallet, the explorer, the CLI) and in each find:
-  - bugs, and code or comments that make no sense or say what the code no longer does;
-  - stale docs: guides, good-to-know, the todo and `#[document]` text that drifted from the code;
-  - tests that test nothing, or the wrong thing, and places that want more;
-  - then measure coverage, run the analysis tools (clippy pedantic, cargo-audit, fuzzing where the
-    todo asks for it), and fix what turns up, a commit per feature.
+- [ ] **Whole-project passes: security, optimization, code quality, tests (owner, 2026-11-08).**
+  Once every queued batch is in (after the stale-docs pass), before the fresh test chain. This
+  folds in the feature-by-feature review pass and the optimization pass (both 2026-11-06) and going
+  through every test. Each area below is gone through on all four dimensions:
+  - **Security:** what strangers can send (the API, RPC, gossip, the mining port, contracts'
+    inputs, bridge messages, proofs, BitVM's posts); consensus splits (non-determinism, behaviour
+    that differs by feature, overflow and wrapping, encoding compatibility); how keys and secrets
+    are handled; bounds against DoS (sizes, counts, fuel); crypto misuse (sighash types, domain
+    separation, signature malleability).
+  - **Optimization:** hottest paths first, measured rather than guessed (criterion benches and
+    flamegraphs of block import, sync, the mempool, state proofs and the apps' frames):
+    - **containers:** the best fit at each place: `Vec` or `SmallVec` over maps for small sets,
+      `HashMap` with a fast hasher (`ahash`/`foldhash`) where keys are not attacker-chosen and the
+      default SipHash where they are, `BTreeMap` only where order is needed, `IndexMap` where
+      insertion order matters, arenas and slabs over many small allocations;
+    - **locks:** `parking_lot` over std where it measures faster, `RwLock` where reads dominate,
+      narrower critical sections, no lock held across I/O or `.await`, fewer `Arc<Mutex<…>>`
+      passed around;
+    - **lock-free where it pays:** atomics for counters and flags, `ArcSwap` for read-mostly shared
+      state (the tip, settings, rules in force), `crossbeam` channels and queues over mutex-guarded
+      `Vec`s, sharded maps (`DashMap`, or per-shard locks) for the mempool and peer tables, epoch
+      reclamation only where a benchmark shows contention;
+    - **the fastest way to do things:** fewer clones and allocations on hot paths (`Bytes`, `Cow`,
+      borrowing), batch database writes and reads, parallel verification with `rayon` where work
+      splits, caches with bounds where the same thing is computed again, SIMD-friendly hashing, and
+      `release` profile settings (LTO, codegen units, `panic`) measured.
+
+    Each change kept only with a benchmark that shows it, consensus results unchanged (the
+    determinism tests and a full resync agree).
+  - **Code quality:** bugs, dead code, duplication, code or comments that make no sense or say what
+    the code no longer does, misleading names and `#[document]` text, functions too long to follow,
+    error messages; clippy pedantic, cargo-audit, fuzzing where the todo asks for it.
+  - **Tests:** every test in the node, the CLI, the contracts, the wallet, the explorer and the ui
+    crate, read for what it still checks: tests made stale by what changed (to adjust or delete),
+    ones that pass without checking what their names say, duplicates, and gaps (features and
+    failure paths with no test at all); coverage measured. A list of what changed and why, with the
+    gaps filled.
+
+  **The areas**, one each: consensus (PoW, staked, authority); finality (FFG, authority, depth,
+  votes, attestations, the threshold); governance (changes, locks, forks); storage (RocksDB, the
+  state tree, witnesses, history); the node and network (libp2p, sync, gossip, bans); the API
+  (HTTP, RPC, the stream, limits); the Lua engine (the LVM, its libs, fuel); the wasm engine; the
+  EVM; the registries (accounts, tokens, names, collections, multisig, pools); swaps (HTLC); the
+  DEX; NFTs; the EVM bridge (gateways, the federation, signers, the relay); the Bitcoin gateway (its
+  contract, the relay, releases, bumping); BitVM; validity proofs (replay, the programs, finality,
+  header-chain and withdrawal proofs, the SP1 abstraction); anchoring; mining (the worker, pools,
+  GPU); the CLI; the wallet; the explorer; the ui crate; the contracts (Lua and Solidity); deploy
+  and Docker.
+
+  **How it runs: as a multi-agent workflow, findings verified before any fix.**
+  - A finder agent per area, given the area's files and the four dimensions, reads (never edits)
+    and returns findings: file and line, dimension, severity, a concrete failure scenario, a
+    suggested fix.
+  - Every finding of medium severity or above goes to a verifier agent of its own, given the code
+    and the claim but not the finder's reasoning, told to try to refute it. Only confirmed findings
+    go on.
+  - A manager agent takes the confirmed findings: merges duplicates across areas, flags issues that
+    cross areas, ranks by severity, and groups them into fix batches, one per area, marking the
+    ones that touch consensus (a fork or a regenesis).
+  - Fixes are applied one batch at a time, not by parallel agents (they touch shared code), with
+    that area's tests run after each, a commit per area; one full test and clippy pass at the end,
+    then the CI matrix.
+  - About 25 finders plus verifiers is over a session's default workflow size, so it runs in three
+    waves of 8 or 9 finders (the chain's core; the engines, registries and apps; the bridges,
+    proofs and tooling), verifiers pipelined per wave, the manager once at the end. The owner opts
+    in when it comes up ("use a workflow", or a larger size in `/config`).
 - [x] **Pin the Rust and clang toolchains.** Done 2026-11-05: Rust 1.98.1 in `rust-toolchain.toml`,
   clang 19.1.7, LLVM's own release by its SHA-256 (`docker/llvm.sh`), in the image and the CI's
   node jobs as `CC`/`CXX`, checked alike by `tests/toolchains.rs`
@@ -50,37 +107,17 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   and `contracts/`, with the components and targets the builds use (wasm32, Android, iOS). Pin clang
   for the C/C++ deps in the Docker image and the CI, and say which in `docs/development.md`. A
   release then names the toolchains it was built with.
-- [ ] **An optimization pass (owner, 2026-11-06), after the consensus batches, before SurrealKV.**
-  Go through the node, the engines, the database layer, the light client and the apps, hottest
-  paths first, measured rather than guessed (criterion benches and flamegraphs of block import,
-  sync, the mempool, state proofs and the apps' frames):
-  - **containers:** the best fit at each place: `Vec` or `SmallVec` over maps for small sets,
-    `HashMap` with a fast hasher (`ahash`/`foldhash`) where keys are not attacker-chosen and the
-    default SipHash where they are, `BTreeMap` only where order is needed, `IndexMap` where
-    insertion order matters, arenas and slabs over many small allocations;
-  - **locks:** `parking_lot` over std where it measures faster, `RwLock` where reads dominate,
-    narrower critical sections, no lock held across I/O or `.await`, fewer `Arc<Mutex<…>>`
-    passed around;
-  - **lock-free where it pays:** atomics for counters and flags, `ArcSwap` for read-mostly shared
-    state (the tip, settings, rules in force), `crossbeam` channels and queues over mutex-guarded
-    `Vec`s, sharded maps (`DashMap`, or per-shard locks) for the mempool and peer tables, epoch
-    reclamation only where a benchmark shows contention;
-  - **the fastest way to do things:** fewer clones and allocations on hot paths (`Bytes`, `Cow`,
-    borrowing), batch database writes and reads, parallel verification with `rayon` where work
-    splits, caches with bounds where the same thing is computed again, SIMD-friendly hashing, and
-    `release` profile settings (LTO, codegen units, `panic`) measured.
-  Each change kept only with a benchmark that shows it, consensus results unchanged (the
-  determinism tests and a full resync agree), a commit per area.
-- [ ] **Go through every test there is (owner, 2026-11-06), last of all.** Each test in the node, the
-  CLI, the contracts, the wallet, the explorer and the ui crate, read for what it still checks:
-  tests made stale by what changed since (to adjust or delete), ones that pass without checking what
-  their names say, duplicates, and gaps, features and failure paths with no test at all. A list of
-  what changed and why, with the gaps filled.
 - [ ] **Run `cargo fmt` over everything.** The tree is not rustfmt-clean today (`cargo fmt --check`
   shows diffs in `build.rs`, `gpu/` and more), so batches have kept to the style around them by
   hand. Run it once across the node, `wallet/`, `explorer/`, `ui/`, `gpu/`, `macro/`, `wiki/` and
   `contracts/`, in a commit of its own with nothing else in it, so blame stays readable. Then
   add `cargo fmt --check` to CI.
+- [ ] **A SurrealKV backend: shelved (owner, 2026-11-08).** Was queued as the very last thing
+  (2026-11-06); not to be started until the owner takes it off the shelf. The design kept for then:
+  SurrealKV (pure Rust) as the default backend, RocksDB behind its feature for existing databases,
+  `--db-backend`, a database recording which backend wrote it, and `chainv4 db convert --from X --to
+  Y --db … --out …` with the node stopped, copying every column and checking counts and the state
+  root, never touching the source.
 - [x] **Review fixes: consensus and what strangers can send.** Done 2026-11-01, from the review in
   the queue. In the node and its API:
   - the ABI type parser caps a fixed array's length (`u32::MAX`), so measuring a static type's size
@@ -1953,8 +1990,8 @@ with.
     and member signatures of a multisig.
   - **Sync and light clients:** from genesis and from a snapshot, by chain length; a light
     client's walk to the tip, and proving a read.
-  - **Storage:** reads, writes, commits and state proofs by state size, RocksDB against SurrealKV
-    for the SurrealKV pass.
+  - **Storage:** reads, writes, commits and state proofs by state size (and RocksDB against
+    SurrealKV, should that backend come off the shelf).
   - **The API and the apps:** latency of the busiest routes under load, the wallet's and explorer's
     start and proof checks.
   - **Attestations on Ethereum:** what ChainV4Finality.sol's submit costs by the number of

@@ -1516,6 +1516,7 @@ dependencies = [
  "ur",
  "ureq",
  "wasmi",
+ "wasmi_core",
  "wat",
  "webpki-roots",
  "wiki",
@@ -4134,6 +4135,7 @@ dependencies = [
  "elliptic-curve 0.14.2",
  "primeorder 0.14.0",
  "sha2 0.11.1",
+ "signature 3.0.0",
  "wnaf",
 ]
 

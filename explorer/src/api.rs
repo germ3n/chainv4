@@ -105,6 +105,8 @@ pub enum Ask {
     /// A page of the multisigs an address's key is a member of, from the node's member index, the
     /// first or the one after a cursor, every page followed to the end.
     AccountMultisigs { address: String, cursor: Option<String> },
+    /// A contract's versions, oldest first, a page at a time: its deploy and each upgrade after.
+    ContractVersions { address: String, cursor: Option<String> },
     /// A JSON-RPC request to POST /rpc, as its body: what EVM reads go through.
     Rpc(String),
     /// A read at a block of its own, as POST /call's body: what a time-weighted price reads at two.
@@ -165,6 +167,7 @@ impl Ask {
             Ask::Name(name) => format!("/names/{}", encode(name)),
             Ask::AccountNames { address, cursor } => format!("/accounts/{address}/names?limit=200{}", after(cursor)),
             Ask::AccountMultisigs { address, cursor } => format!("/accounts/{address}/multisigs?limit=200{}", after(cursor)),
+            Ask::ContractVersions { address, cursor } => format!("/contracts/{address}/versions?limit=200{}", after(cursor)),
             Ask::Rpc(_) => "/rpc".to_string(),
             Ask::CallAt(_) => "/call".to_string(),
             Ask::Faucet(_) => "/faucet".to_string(),
@@ -293,6 +296,7 @@ impl Ask {
             | Ask::Name(_)
             | Ask::AccountNames { .. }
             | Ask::AccountMultisigs { .. }
+            | Ask::ContractVersions { .. }
             | Ask::Rpc(_)
             | Ask::CallAt(_)
             | Ask::Faucet(_)
@@ -733,6 +737,7 @@ mod tests {
             Ask::Name("alice.dev".to_string()),
             Ask::AccountNames { address: text(), cursor: None },
             Ask::AccountMultisigs { address: text(), cursor: None },
+            Ask::ContractVersions { address: text(), cursor: None },
             Ask::Rpc("{}".to_string()),
             Ask::CallAt("{}".to_string()),
             Ask::Faucet("{}".to_string()),

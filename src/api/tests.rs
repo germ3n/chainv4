@@ -326,6 +326,16 @@ fn accounts_and_contracts_are_read_from_state() {
         json!([{"name": "counter", "shape": "map", "kind": "number", "unit": "clicks", "key_kind": "text", "key_unit": null}])
     );
     assert!(contract["code_size"].as_u64().unwrap() > 0);
+
+    // Its deploy is its one version, pointing at the transaction that carried the code.
+    let versions = ok(fixture.address, &format!("/contracts/{counter}/versions"));
+    let deploy = &versions["versions"][0];
+
+    assert_eq!(versions["versions"].as_array().unwrap().len(), 1);
+    assert_eq!((deploy["kind"].as_str(), deploy["engine"].as_str(), &deploy["step"]), (Some("deploy"), Some("lua"), &Value::Null));
+    assert_eq!(versions["next"], Value::Null);
+    assert_eq!(ok(fixture.address, &format!("/txs/{}", deploy["tx"].as_str().unwrap()))["block"], deploy["block"]);
+    assert_eq!(ok(fixture.address, &format!("/contracts/{}/versions", fixture.bob))["versions"], json!([]), "an account has none");
 }
 
 #[test]

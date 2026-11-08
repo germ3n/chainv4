@@ -45,15 +45,22 @@ pub const RESTAKING: Fork = Fork { name: "restaking", summary: "Rewards restaked
 pub const PROOFS: Fork = Fork { name: "proofs", summary: "Validity proofs taken on chain: the proven tip, each block's parent recorded, Tx::Prove and Change::Proofs." };
 
 #[document(
+    summary = "What a contract holds counted against its call's memory limit: a Lua storage iterator refuses a prefix or start longer than any key at once, and keeps its pages as Lua strings, on the heap the limit counts; a wasm module's table entries count against the same limit as its linear memory, at TABLE_ENTRY_BYTES each, for the size it declares when it loads and each table.grow after. Before it, both sat on the node's own heap, out of the limit's sight.",
+    category = "Governance",
+    see_also = "FORKS, TABLE_ENTRY_BYTES",
+)]
+pub const MEMORY: Fork = Fork { name: "memory", summary: "Lua storage iterators and wasm tables counted against a call's memory limit." };
+
+#[document(
     summary = "Every fork this release knows, oldest first. Each new one goes on the end, and is scheduled by name; a release never drops one, as blocks from its height on run by it.",
     category = "Governance",
     see_also = "Fork, Forks",
 )]
 #[cfg(not(test))]
-pub const FORKS: &[Fork] = &[RESTAKING, PROOFS];
+pub const FORKS: &[Fork] = &[RESTAKING, PROOFS, MEMORY];
 
 #[cfg(test)]
-pub const FORKS: &[Fork] = &[RESTAKING, PROOFS, TEST_FORK];
+pub const FORKS: &[Fork] = &[RESTAKING, PROOFS, MEMORY, TEST_FORK];
 
 #[document(
     summary = "How many 64-bit words Forks holds its bits in: as many as FORKS needs, so a release may know any number of forks, the set growing with the list.",

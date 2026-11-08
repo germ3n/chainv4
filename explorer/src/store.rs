@@ -219,6 +219,8 @@ pub struct Store {
     pub accounts: HashMap<String, Account>,
     /// Contracts by address; None for an address that holds none.
     pub contracts: HashMap<String, Option<Contract>>,
+    /// Contracts' versions by address, oldest first, as far as their pages have come.
+    pub versions: HashMap<String, crate::model::Versions>,
     /// Registered tokens met so far, by address, from the registry or their contract's page.
     pub tokens: HashMap<String, RegisteredToken>,
     /// Pages of the token registry, by the symbol searched for.

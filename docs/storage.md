@@ -78,8 +78,19 @@ nodes can differ in it, and a reorg never touches it.
 
 ## The indexes
 
-A node may keep two indexes, each its own choice: neither is chain state, and two nodes can keep
-different ones. What they share is in `src/chain/index.rs`.
+A node may keep two indexes, each its own choice, and keeps a third always: none is chain state,
+and two nodes can keep different ones. What they share is in `src/chain/index.rs`.
+
+**The versions index** (`src/chain/versions.rs`, column `versions`) lists each contract's code as
+deployed and as each upgrade replaced it, oldest first, for `GET /contracts/{address}/versions`
+and the explorer's Versions section. Every node keeps it, of every block, with no flag: one entry
+a deploy or upgrade, each the transaction and where it landed, the code's engine, hash and size,
+and for a WebAssembly module its exported functions and declared sections (`wasm_outline`, read
+from the module's sections with no engine). A node that had none when it starts fills it from its
+blocks' receipts in the background, newest first, as the others catch up; a snapshot node's
+reaches back to its pivot. Failed deploys and upgrades leave nothing, and a batch's are listed by
+step. Contracts genesis placed and clones made by a contract ran no deploy, so they have none for
+their first code.
 
 **The event index** (`--index-events`, `src/chain/events.rs`) finds every event on the main chain:
 - **Once:** each event is stored once, under its contract, with its transaction, block, height and

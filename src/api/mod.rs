@@ -5,7 +5,7 @@
 use {
     crate::chain::fees::OfferChoice,
     crate::chain::{
-        DryRun, RangeLimits, RangeProblem, Rules, dry_run, stored_block_range, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_member_index, stored_multisigs_of, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
+        DryRun, RangeLimits, RangeProblem, Rules, dry_run, stored_block_range, Coin, EventFilter, FinalityConfig, Fees, Genesis, IndexKind, REWARD_POOL, VoteRewardSource, scan_address_txs, address_txs_from, stored_index, stored_versions, stored_member_index, stored_multisigs_of, stored_events, stored_block, stored_block_at, stored_evidence, stored_finality, stored_on_main_chain,
         stored_receipt, stored_tip, stored_tips, stored_work, CommittedReceipt, stored_header, stored_header_at, stored_justification,
         stored_light_finality, stored_light_update, stored_state_at, stored_checkpoint_start, stored_split, StartProblem,
     },
@@ -79,6 +79,10 @@ const MAX_EVENTS: u64 = 500;
 const DEFAULT_ACCOUNT_TXS: u64 = 50;
 /// The most transactions /accounts/{address}/txs returns.
 const MAX_ACCOUNT_TXS: u64 = 200;
+/// How many versions /contracts/{address}/versions returns when the client does not say.
+const DEFAULT_VERSIONS: u64 = 50;
+/// The most versions /contracts/{address}/versions returns.
+const MAX_VERSIONS: u64 = 200;
 /// How many tokens /tokens returns when the client does not say.
 const DEFAULT_TOKENS: u64 = 50;
 /// The most tokens /tokens returns.
@@ -823,6 +827,7 @@ fn router(api: Api) -> Router {
         .route("/accounts/{address}/txs", get(account_txs))
         .route("/accounts/{address}/multisigs", get(account_multisigs))
         .route("/contracts/{address}", get(contract))
+        .route("/contracts/{address}/versions", get(contract_versions))
         .route("/light", get(light))
         .route("/light/updates/{block}", get(light_update))
         .route("/light/finality", get(light_finality))
@@ -2844,6 +2849,53 @@ async fn contract(Shared(api): Shared<Api>, Path(address): Path<String>) -> Answ
     let collection = Collections::new(&state).get(&address)?;
 
     Ok(Json(json::contract(&address, &record, token.as_ref(), collection.as_ref())))
+}
+
+/// A contract's versions, oldest first, a page at a time, from the versions index every node
+/// keeps: the transaction that deployed or upgraded it each time, where it landed, and the code's
+/// engine, hash and size, as the transaction carried it. A removed contract's are still listed.
+/// The code itself is the transaction's, at GET /txs/{id}, which a light client proves with its
+/// receipt.
+async fn contract_versions(Shared(api): Shared<Api>, Path(address): Path<String>, Query(query): Query<HashMap<String, String>>) -> Answer {
+    let db = api.db;
+    let address = parse_address(&address)?;
+    let limit = page(&api.tuned, &query, DEFAULT_VERSIONS, MAX_VERSIONS)?.max(1) as usize;
+    let cursor = query
+        .get("cursor")
+        .map(|cursor| from_hex(cursor).ok_or_else(|| ApiError::BadRequest("cursor is not hex".to_string())))
+        .transpose()?;
+    let (versions, next) = stored_versions(&*db, &address, cursor.as_deref(), limit)?;
+    let index = stored_index(&*db, IndexKind::Versions)?;
+    let tip = tip(&*db)?.header.height;
+    let listed: Vec<Value> = versions
+        .iter()
+        .map(|version| {
+            json!({
+                "tx": version.tx.to_string(),
+                "block": version.block.to_string(),
+                "height": version.height,
+                "index": version.index,
+                "step": version.step,
+                "kind": if version.upgrade { "upgrade" } else { "deploy" },
+                "engine": version.engine.name(),
+                "code_hash": version.code_hash.to_string(),
+                "size": version.size,
+                "outline": version.outline.as_ref().map(|outline| json!({
+                    "functions": outline.functions,
+                    "reentrant": outline.reentrant,
+                    "layout": outline.layout,
+                })),
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "contract": address.to_string(),
+        "versions": listed,
+        "next": next.map(|next| to_hex(&next)),
+        "indexed_from": index.map(|index| index.from),
+        "catching_up_to": index.filter(|index| !index.caught_up(tip)).map(|index| index.keep.lowest(tip)),
+    })))
 }
 
 /// What a light client starts from: the chain's light parameters and its genesis header, encoded,

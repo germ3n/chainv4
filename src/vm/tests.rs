@@ -2445,3 +2445,21 @@ pub(crate) fn btc_relay_mined(prev: &[u8; 32], merkle: &[u8; 32], time: u32, bit
 pub(crate) fn btc_relay_coinbase(stamp: u32) -> Vec<u8> {
     btc_relay::coinbase(stamp)
 }
+
+#[test]
+fn a_wasm_outline_reads_what_the_engine_does() {
+    let engine = crate::vm::wasm::WasmEngine::new();
+
+    for name in ["counter", "token", "members", "proxy", "upgradable", "vault", "names", "nft"] {
+        let module = example(name);
+        let loaded = engine.load(&module, Limits { fuel: 50_000_000, memory: 16 * 1024 * 1024 }).result.unwrap();
+        let outline = crate::chain::wasm_outline(&module).unwrap();
+
+        assert_eq!(outline.functions, loaded.functions, "{name}'s functions");
+        assert_eq!(outline.reentrant, loaded.reentrant, "{name}'s reentrant");
+        assert_eq!(outline.layout.is_empty(), !loaded.layout.is_declared(), "{name}'s layout");
+    }
+
+    assert_eq!(crate::chain::wasm_outline(b"not wasm"), None);
+    assert_eq!(crate::chain::wasm_outline(b"\0asm\x01\0\0\0\x07\x05"), None, "a section cut short");
+}

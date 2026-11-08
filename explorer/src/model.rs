@@ -693,6 +693,47 @@ pub struct Contract {
     pub collection: Option<RegisteredCollection>,
 }
 
+/// A contract's versions as GET /contracts/{address}/versions lists them, the pages so far joined.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Versions {
+    pub versions: Vec<Version>,
+    #[serde(default)]
+    pub next: Option<String>,
+    /// The lowest block the node's versions index holds, and where it is filling down to while it
+    /// catches up.
+    #[serde(default)]
+    pub indexed_from: Option<u64>,
+    #[serde(default)]
+    pub catching_up_to: Option<u64>,
+}
+
+/// One version of a contract: the deploy or upgrade that set it, and what its code was.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Version {
+    pub tx: String,
+    pub block: String,
+    pub height: u64,
+    /// Its transaction's place in the block, and the batch step that did it, for a batch.
+    pub index: u32,
+    #[serde(default)]
+    pub step: Option<u32>,
+    /// deploy or upgrade.
+    pub kind: String,
+    pub engine: String,
+    pub code_hash: String,
+    pub size: u64,
+    /// A WebAssembly module's exported functions, reentrant ones and layout entries.
+    #[serde(default)]
+    pub outline: Option<Outline>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Outline {
+    pub functions: Vec<String>,
+    pub reentrant: Vec<String>,
+    pub layout: Vec<String>,
+}
+
 /// One namespace a contract's storage layout declares: a map of one kind, keyed by any key or by
 /// keys of a kind, a record of keys, or retired.
 #[derive(Clone, Debug, PartialEq, Deserialize)]

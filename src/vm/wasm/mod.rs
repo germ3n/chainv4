@@ -16,8 +16,7 @@ use {
     std::sync::{Arc, Mutex},
     xxhash_rust::xxh3::Xxh3Builder,
     wasmi::{
-        CompilationMode, Config, EnforcedLimits, Engine, ExternType, Linker, Module, Store, StoreLimits,
-        StoreLimitsBuilder, TrapCode,
+        CompilationMode, Config, EnforcedLimits, Engine, ExternType, Linker, Module, Store, TrapCode,
     },
 };
 
@@ -194,7 +193,7 @@ impl WasmEngine {
 
     /// Checks a module and instantiates it once, adding what instantiating burned to started.
     /// Start functions are refused, so it runs none of the module's code.
-    fn check(&self, code: &[u8], limits: Limits, largest: usize, started: &mut u64) -> Result<Loaded, VmError> {
+    fn check(&self, code: &[u8], limits: Limits, largest: usize, counting_tables: bool, started: &mut u64) -> Result<Loaded, VmError> {
         if code.len() > largest {
             return Err(VmError::Compile(format!(
                 "module is {} bytes, more than the {largest} allowed",
@@ -238,7 +237,7 @@ impl WasmEngine {
 
         // Instantiating links every import and sizes the memory, so a module that cannot run
         // fails here rather than in its first call.
-        let mut store = self.store(None, Vec::new(), limits);
+        let mut store = self.store(None, Vec::new(), limits, counting_tables);
         let instance = self.linker.instantiate_and_start(&mut store, &module);
         *started = limits.fuel - store.get_fuel().unwrap_or(0);
         instance.map_err(|err| store.data_mut().error.take().unwrap_or_else(|| trapped(&err)))?;
@@ -257,19 +256,18 @@ impl WasmEngine {
         })
     }
 
-    fn store(&self, host: Option<Host>, input: Vec<u8>, limits: Limits) -> Store<Run> {
+    fn store(&self, host: Option<Host>, input: Vec<u8>, limits: Limits, counting_tables: bool) -> Store<Run> {
         let run = Run {
             host,
             input,
             output: None,
             result: Vec::new(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(limits.memory)
-                .memories(1)
-                .tables(1)
-                .instances(1)
-                .trap_on_grow_failure(true)
-                .build(),
+            limits: Metered {
+                limit: limits.memory,
+                counting_tables,
+                memory: 0,
+                table: 0,
+            },
             error: None,
         };
         let mut store = Store::new(&self.engine, run);
@@ -295,7 +293,7 @@ impl ScriptEngine for WasmEngine {
         let result = self.check(code, Limits {
             fuel: limits.fuel - fee,
             ..limits
-        }, rules.limits.module_len as usize, &mut started);
+        }, rules.limits.module_len as usize, rules.forks.has(&crate::params::forks::MEMORY), &mut started);
 
         Loading {
             fuel_used: fee + started,
@@ -319,7 +317,8 @@ impl ScriptEngine for WasmEngine {
         };
         let input = wincode::serialize(&args.to_vec()).expect("arguments always encode");
         let limits = Limits { fuel: limits.fuel - load, ..limits };
-        let mut store = self.store(Some(host), input, limits);
+        let counting_tables = host.rules().forks.has(&crate::params::forks::MEMORY);
+        let mut store = self.store(Some(host), input, limits, counting_tables);
         let result = self
             .linker
             .instantiate_and_start(&mut store, &module)
@@ -355,9 +354,78 @@ struct Run {
     output: Option<Vec<u8>>,
     /// What the last storage_get or call produced, for result_read.
     result: Vec<u8>,
-    limits: StoreLimits,
+    limits: Metered,
     /// Why a host function stopped the module, which says more than the trap does.
     error: Option<VmError>,
+}
+
+#[document(
+    summary = "What one wasm table entry counts as against a call's memory limit from the memory fork on: a function reference's size on a 64-bit node, the same on every node whatever it runs on.",
+    category = "Contracts",
+    see_also = "MEMORY",
+)]
+pub const TABLE_ENTRY_BYTES: usize = 16;
+
+/// A module's room: one instance, one memory and one table, the memory within the call's memory
+/// limit; from the memory fork on, the table's entries, at TABLE_ENTRY_BYTES each, within the same
+/// limit beside it, for the size a module declares as for each table.grow. Past it, the grow or
+/// the instantiation traps, which reads as running out of memory.
+struct Metered {
+    limit: usize,
+    counting_tables: bool,
+    /// The memory's bytes and the table's entries as last allowed.
+    memory: usize,
+    table: usize,
+}
+
+impl Metered {
+    fn tables_bytes(&self) -> usize {
+        if self.counting_tables { self.table.saturating_mul(TABLE_ENTRY_BYTES) } else { 0 }
+    }
+}
+
+impl wasmi::ResourceLimiter for Metered {
+    fn memory_growing(&mut self, _current: usize, desired: usize, maximum: Option<usize>) -> Result<bool, wasmi_core::LimiterError> {
+        if desired.saturating_add(self.tables_bytes()) > self.limit || maximum.is_some_and(|most| desired > most) {
+            return Err(wasmi_core::LimiterError::ResourceLimiterDeniedAllocation);
+        }
+
+        self.memory = desired;
+
+        Ok(true)
+    }
+
+    fn table_growing(&mut self, _current: usize, desired: usize, maximum: Option<usize>) -> Result<bool, wasmi_core::LimiterError> {
+        let after = Metered { table: desired, ..*self };
+
+        if (self.counting_tables && self.memory.saturating_add(after.tables_bytes()) > self.limit) || maximum.is_some_and(|most| desired > most) {
+            return Err(wasmi_core::LimiterError::ResourceLimiterDeniedAllocation);
+        }
+
+        self.table = desired;
+
+        Ok(true)
+    }
+
+    fn memory_grow_failed(&mut self, _error: &wasmi::errors::MemoryError) -> Result<(), wasmi_core::LimiterError> {
+        Err(wasmi_core::LimiterError::ResourceLimiterDeniedAllocation)
+    }
+
+    fn table_grow_failed(&mut self, _error: &wasmi::errors::TableError) -> Result<(), wasmi_core::LimiterError> {
+        Err(wasmi_core::LimiterError::ResourceLimiterDeniedAllocation)
+    }
+
+    fn instances(&self) -> usize {
+        1
+    }
+
+    fn tables(&self) -> usize {
+        1
+    }
+
+    fn memories(&self) -> usize {
+        1
+    }
 }
 
 /// The functions the module's chainv4.reentrant sections name, sorted. Each must be exported.
