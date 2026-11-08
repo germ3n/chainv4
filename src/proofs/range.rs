@@ -74,7 +74,7 @@ impl GatewayMode {
 }
 
 #[document(
-    summary = "What governance sets for validity proofs (Change::Proofs): the proof systems and program the chain takes proofs of, what it mints for each block a proof covers, and how Gateway.sol releases. Unset, the chain takes no proofs.",
+    summary = "What governance sets for validity proofs (Change::Proofs): the proof systems the chain takes, the programs of each kind of proof (ranges of blocks, links of finality, the header chain), what it mints for each block a range covers and each epoch a header chain adds, and how Gateway.sol releases. Unset, the chain takes no proofs.",
     category = "Proofs",
     see_also = "ProofKind, GatewayMode, Tx::Prove",
 )]
@@ -89,12 +89,19 @@ pub struct ProofSettings {
     pub reward_per_block: u256,
     #[document(summary = "How Gateway.sol releases what left here.")]
     pub gateway: GatewayMode,
+    #[document(summary = "The finality program: what proves a link of finality, two thirds of an epoch's voters signing it, for ChainV4Finality.sol beside the attesters' signatures. Zeros for none.")]
+    pub finality_program: [u8; 32],
+    #[document(summary = "The header-chain program: what proves the chain's finalized checkpoints from genesis, each proof checking the one before, for the apps to sync by (Tx::ProveHeaders). Zeros for none.")]
+    pub headers_program: [u8; 32],
+    #[document(summary = "What is minted to whoever proves the header chain, for each epoch its proof moves the proven finalized checkpoint on: 0 pays nothing.")]
+    #[wincode(with = "crate::structs::u256::U256Le")]
+    pub reward_per_epoch: u256,
 }
 
 impl crate::crypto::hashable::Hashable for ProofSettings {}
 
 impl ProofSettings {
-    #[document(parent = "ProofSettings", summary = "Why no chain takes these settings, if none does: no kind, kinds out of order or twice, or a program of zeros, which names none.")]
+    #[document(parent = "ProofSettings", summary = "Why no chain takes these settings, if none does: no kind, kinds out of order or twice, or every program zeros, naming none.")]
     pub fn problem(&self) -> Option<&'static str> {
         let rank = |kind: &crate::proofs::ProofKind| crate::proofs::ProofKind::ALL.iter().position(|known| known == kind).unwrap_or(usize::MAX);
 
@@ -106,7 +113,7 @@ impl ProofSettings {
             return Some("proof systems named twice or out of order");
         }
 
-        (self.program == [0; 32]).then_some("a program of zeros names none")
+        (self.program == [0; 32] && self.finality_program == [0; 32] && self.headers_program == [0; 32]).then_some("a program of zeros names none")
     }
 
     #[document(parent = "ProofSettings", summary = "Whether the chain takes proofs of this kind.")]

@@ -3233,7 +3233,10 @@ mod send {
             })),
             other => other,
         };
-        let running = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), ..genesis }, |node| node.attest(attester.clone()), Default::default());
+        // The proofs fork from the first block: attesting sets name the weight a link needs, as
+        // ChainV4Finality.sol takes them.
+        let forks = crate::params::forks::ForkSchedule { forks: vec![crate::params::forks::ScheduledFork { name: crate::params::forks::PROOFS.name.to_string(), height: 1, epoch: None, least: None }], lead: None };
+        let running = Running::launch_genesis(true, true, |genesis| Genesis { finality: finality.clone(), forks: forks.clone(), ..genesis }, |node| node.attest(attester.clone()), Default::default());
         let node = format!("http://{}", running.api);
         let rpc_url = format!("{node}/rpc");
         let dir = TempDir::new("finality-relay");

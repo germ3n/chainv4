@@ -413,7 +413,8 @@ justified after it yet, on a chain whose finality does not vote, and in a build 
 [Validity proofs](proofs.md) as the chain has them: `settings`, governance's `Change::Proofs`
 (`kind`, `program`, `reward_per_block`, `gateway`), or null; `tip`, the proven tip's `height`,
 `block` and `state_root`, null before the `proofs` fork; and `proof`, the latest proof the chain
-took, its `kind`, `public_values` and `proof` in hex, null before the first. A light client checks
+took, its `kind`, `public_values` and `proof` in hex, null before the first; and `headers`, the
+latest header-chain proof the chain took, likewise. A light client checks
 the proof itself, so whoever serves it adds nothing. `GET /status` carries all three as
 `validity`.
 

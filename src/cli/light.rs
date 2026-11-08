@@ -261,6 +261,7 @@ fn summary(tx: &Tx) -> String {
         Tx::Anchor { proof: crate::structs::tx::AnchorProof::Bitcoin(proof) } => format!("show an anchor in Bitcoin block {}", crate::structs::hex::to_hex(&proof.block.iter().rev().copied().collect::<Vec<_>>())),
         Tx::Anchor { proof: crate::structs::tx::AnchorProof::Ethereum(proof) } => format!("show an anchor in Ethereum, resting on beacon block {}", crate::structs::hex::to_hex(&proof.root)),
         Tx::Prove { kind, range, .. } => format!("prove blocks {} to {} by {}", range.start.height + 1, range.end.height, kind.name()),
+        Tx::ProveHeaders { kind, .. } => format!("prove the header chain by {}", kind.name()),
         Tx::Batch { steps } => {
             let listed: Vec<String> = steps.iter().enumerate().map(|(index, step)| format!("{}. {}", index + 1, summary(step))).collect();
 

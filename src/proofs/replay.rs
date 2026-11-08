@@ -117,7 +117,7 @@ impl From<DbError> for ReplayError {
     }
 }
 
-fn fail(why: impl fmt::Display) -> ReplayError {
+pub(super) fn fail(why: impl fmt::Display) -> ReplayError {
     ReplayError(why.to_string())
 }
 
@@ -260,62 +260,8 @@ impl RangeInput {
         let recording = Arc::new(Recording::new(historic.clone()));
         run_range(chain, recording.clone(), &start, &blocks)?;
 
-        let whole = recording.scanned_columns().iter().any(|column| STATE_COLUMNS.contains(column) || *column == Column::StateTree);
         let reads = recording.reads();
-
-        // Anything read but the state, the tree and the headers is nothing a proof checks.
-        if let Some((column, _)) = reads.iter().find(|(column, _)| !STATE_COLUMNS.contains(column) && !matches!(column, Column::StateTree | Column::Heights | Column::Headers)) {
-            return Err(fail(format!("the range reads {column:?}, which no witness covers")));
-        }
-
-        if let Some(column) = recording.scanned_columns().into_iter().find(|column| !STATE_COLUMNS.contains(column)) {
-            return Err(fail(format!("the range scans {column:?}, which no witness covers")));
-        }
-
-        let witness = match whole {
-            true => {
-                let mut entries = Vec::new();
-
-                for column in STATE_COLUMNS {
-                    historic.scan(column, &[], &[], &mut |key, value| {
-                        entries.push(WitnessEntry { column, key: key.to_vec(), value: Some(value.to_vec()) });
-
-                        true
-                    })?;
-                }
-
-                Witness::Whole { entries }
-            }
-            false => {
-                // The way down to every entry read, through the recording, so its nodes are read.
-                let walk = State::new(recording.clone());
-
-                for (column, key) in reads.iter().filter(|(column, _)| STATE_COLUMNS.contains(column)) {
-                    StateTree::new(&walk, hash).prove(*column, key)?;
-                }
-
-                // And the nodes above every node read, which a node the range changed first may
-                // have kept the range from reading here.
-                for (_, key) in reads.iter().filter(|(column, _)| *column == Column::StateTree) {
-                    for above in crate::db::ancestor_keys(key) {
-                        recording.read(Column::StateTree, &above)?;
-                    }
-                }
-
-                let mut nodes = Vec::new();
-                let mut entries = Vec::new();
-
-                for (column, key) in recording.reads() {
-                    match column {
-                        Column::StateTree => nodes.push(WitnessNode { node: historic.read(column, &key)?, key }),
-                        column if STATE_COLUMNS.contains(&column) => entries.push(WitnessEntry { value: historic.read(column, &key)?, column, key }),
-                        _ => {}
-                    }
-                }
-
-                Witness::Partial { nodes, entries }
-            }
-        };
+        let witness = witness_of(hash, &historic, &recording, "the range")?;
 
         // The headers it read: the ancestors from the start down to the lowest of them.
         let mut lowest = from;
@@ -344,9 +290,73 @@ impl RangeInput {
     }
 }
 
+/// The witness of what a run over history read, through the recording it read by: the entries it
+/// read and the tree's nodes that prove them, or the whole state when it scanned. Anything it read
+/// but the state, the tree and the headers is an error, as no witness covers it.
+pub(super) fn witness_of(hash: HashType, historic: &Arc<dyn Committed>, recording: &Arc<Recording>, what: &str) -> Result<Witness, ReplayError> {
+    let whole = recording.scanned_columns().iter().any(|column| STATE_COLUMNS.contains(column) || *column == Column::StateTree);
+    let reads = recording.reads();
+
+    // Anything read but the state, the tree and the headers is nothing a proof checks.
+    if let Some((column, _)) = reads.iter().find(|(column, _)| !STATE_COLUMNS.contains(column) && !matches!(column, Column::StateTree | Column::Heights | Column::Headers)) {
+        return Err(fail(format!("{what} reads {column:?}, which no witness covers")));
+    }
+
+    if let Some(column) = recording.scanned_columns().into_iter().find(|column| !STATE_COLUMNS.contains(column)) {
+        return Err(fail(format!("{what} scans {column:?}, which no witness covers")));
+    }
+
+    let witness = match whole {
+        true => {
+            let mut entries = Vec::new();
+
+            for column in STATE_COLUMNS {
+                historic.scan(column, &[], &[], &mut |key, value| {
+                    entries.push(WitnessEntry { column, key: key.to_vec(), value: Some(value.to_vec()) });
+
+                    true
+                })?;
+            }
+
+            Witness::Whole { entries }
+        }
+        false => {
+            // The way down to every entry read, through the recording, so its nodes are read.
+            let walk = State::new(recording.clone());
+
+            for (column, key) in reads.iter().filter(|(column, _)| STATE_COLUMNS.contains(column)) {
+                StateTree::new(&walk, hash).prove(*column, key)?;
+            }
+
+            // And the nodes above every node read, which a node the range changed first may
+            // have kept the range from reading here.
+            for (_, key) in reads.iter().filter(|(column, _)| *column == Column::StateTree) {
+                for above in crate::db::ancestor_keys(key) {
+                    recording.read(Column::StateTree, &above)?;
+                }
+            }
+
+            let mut nodes = Vec::new();
+            let mut entries = Vec::new();
+
+            for (column, key) in recording.reads() {
+                match column {
+                    Column::StateTree => nodes.push(WitnessNode { node: historic.read(column, &key)?, key }),
+                    column if STATE_COLUMNS.contains(&column) => entries.push(WitnessEntry { value: historic.read(column, &key)?, column, key }),
+                    _ => {}
+                }
+            }
+
+            Witness::Partial { nodes, entries }
+        }
+    };
+
+    Ok(witness)
+}
+
 /// The start's state as a witness gives it, checked, and its headers: what replay runs a range
 /// over. Anything else it is asked for is an error, as nothing else was checked.
-struct WitnessDb {
+pub(super) struct WitnessDb {
     whole: bool,
     db: MemoryDb,
     known: BTreeSet<(Column, Vec<u8>)>,
@@ -355,7 +365,7 @@ struct WitnessDb {
 }
 
 impl WitnessDb {
-    fn new(hash: HashType, root: &Hash, witness: &Witness, headers: &[SealedHeader]) -> Result<WitnessDb, ReplayError> {
+    pub(super) fn new(hash: HashType, root: &Hash, witness: &Witness, headers: &[SealedHeader]) -> Result<WitnessDb, ReplayError> {
         let db = MemoryDb::default();
         let state = State::new(Arc::new(MemoryDb::default()));
         let mut known = BTreeSet::new();

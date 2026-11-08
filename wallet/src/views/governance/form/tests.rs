@@ -50,7 +50,7 @@ fn ffg(leak: Option<Leak>) -> FinalityConfig {
         vote_reward: u256::new(DEV),
         max_proofs_per_block: 4,
         validators: vec![GenesisValidator { account: address(1), voter: key(1), bond: u256::new(10_000 * DEV), attester: None }],
-        leak,
+        later: chainv4::params::finality::FfgLater { leak, justify_permille: None },
         slash_permille: None,
     })
 }
@@ -581,7 +581,7 @@ fn a_retune_of_finality_keeps_what_the_chain_keeps() {
     match &built.change {
         Some(Change::Finality(FinalityConfig::Ffg(config))) => {
             assert_eq!(config.min_bond, u256::new(500 * DEV));
-            assert_eq!(config.leak, Some(Leak { after_epochs: 16, permille: 10 }));
+            assert_eq!(config.leak(), Some(Leak { after_epochs: 16, permille: 10 }));
             assert_eq!(config.validators.len(), 1, "the validators from genesis stay");
             assert_eq!(config.checkpoint_interval, 8);
         }
@@ -598,7 +598,7 @@ fn a_retune_of_finality_keeps_what_the_chain_keeps() {
     let mut draft = Draft::of("finality", Some(&stands), &env);
     draft.switches.insert("leak".to_string(), false);
     let built = build("finality", &draft, Some(&stands), &env);
-    assert!(matches!(&built.change, Some(Change::Finality(FinalityConfig::Ffg(config))) if config.leak.is_none()), "{:?}", built.errors);
+    assert!(matches!(&built.change, Some(Change::Finality(FinalityConfig::Ffg(config))) if config.leak().is_none()), "{:?}", built.errors);
     assert_eq!(built.changes, [Diff { label: "Inactivity leak".to_string(), old: "A leak".to_string(), new: "None".to_string() }]);
 
     // Fewer validators than genesis named, as the node's check says.

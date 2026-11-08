@@ -156,6 +156,7 @@ fn named(tx: &Tx, touched: &mut BTreeSet<Address>) {
         | Tx::PrimaryName { .. }
         | Tx::Anchor { .. }
         | Tx::Prove { .. }
+        | Tx::ProveHeaders { .. }
         // Read past above: what_it_runs gives what these do, never one of these.
         | Tx::Multisig { .. }
         | Tx::Batch { .. } => {}

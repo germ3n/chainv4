@@ -207,6 +207,12 @@ pub fn tx(transaction: &Tx) -> Value {
             "gateway": range.gateway.name(),
             "proof": crate::structs::hex::to_hex(proof),
         }),
+        Tx::ProveHeaders { kind, values, proof } => json!({
+            "type": "prove_headers",
+            "kind": kind.name(),
+            "values": crate::structs::hex::to_hex(values),
+            "proof": crate::structs::hex::to_hex(proof),
+        }),
     }
 }
 

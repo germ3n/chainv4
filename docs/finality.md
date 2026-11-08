@@ -142,7 +142,17 @@ it, never past the finalized checkpoint.
 ## FFG
 
 Validators bond on chain and vote with a key of their own; two thirds of the bonded weight
-justify.
+justify, unless the chain sets a threshold of its own.
+
+- **The threshold** (`justify_permille`, from the `proofs` fork on): how much of the bonded weight,
+  in thousandths, a link's votes must reach, from 667, two thirds, up to 1000, all of it; unset, two
+  thirds exactly. Never below two thirds, which is what keeps FFG safe: two conflicting final
+  checkpoints would take a third of the stake signing both, and that is slashed. A higher one is
+  safer still but stalls sooner when validators go quiet, and the inactivity leak works toward it.
+  Governance retunes it by `Change::Finality`, and it holds from the epoch the change is fixed
+  for, as validator sets do. Ethereum follows it: from the fork the attesting set's hash names the
+  weight a link needs, and ChainV4Finality.sol's `submit` checks that rather than two thirds;
+  finality proofs check it inside, as the chain does.
 
 - **Bond** (`chainv4 send bond --voter KEY --amount N`): locks at least `min_bond` from the sender,
   for a voting key. Only the bonding account may unbond or withdraw it; the voting key only signs
@@ -318,6 +328,14 @@ chainv4's finality cheaply (`structs::attestation`, `contracts/evm/ChainV4Finali
   nothing else, so anyone may relay. A validator without an attester weighs in the whole but signs
   nothing there, so two thirds must be reached by those with one.
 
+### Finality by proof instead
+
+ChainV4Finality.sol also takes a link by a finality proof (`proveLink`): an SP1 proof that two thirds
+of the epoch's voters signed it with their own voting keys, checked over a witness of the target's
+state, the voters as the source checkpoint's state fixed them. It needs no attester at all, and it
+takes a link from any checkpoint the contract recorded, by either path, with its state root, so the
+two take turns as they like. See [Proofs of finality](proofs.md#proofs-of-finality).
+
 ### Turning attestations off
 
 Ethereum following the chain can be turned off for the whole chain at once, by governance or by
@@ -330,7 +348,8 @@ building without it:
     it), so justifications and the blocks a node builds carry none;
   - a block carrying one is invalid.
 
-  So ChainV4Finality.sol follows the chain no further: it has nothing to take. Turning them on again
+  So ChainV4Finality.sol follows the chain no further by attestations: it has nothing to take, unless
+  someone proves links by finality proofs instead. Turning them on again
   works the same way, from the next block. `GET /status` says which in `finality.attestations`.
 
   ```sh

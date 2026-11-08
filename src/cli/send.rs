@@ -191,9 +191,10 @@ pub enum TxArgs {
     /// Turns restaking of a validator's rewards on or off, sent from the account that bonded it:
     /// while on, its vote rewards, and its block rewards under staked consensus, go into its
     /// bond, up to --cap if given. Taken from the chain's restaking fork on.
-    /// Submits a validity proof of the range from the chain's proven tip to a checkpoint, as
-    /// chainv4 prove run wrote it: from the proofs fork on, once governance named the program, it
-    /// moves the proven tip and pays the sender for each block it covers.
+    /// Submits a proof chainv4 prove run wrote: of a range from the chain's proven tip to a
+    /// checkpoint, which moves the proven tip and pays for each block it covers (Tx::Prove); or of
+    /// the header chain, which the chain keeps for the apps and pays for each epoch it adds
+    /// (Tx::ProveHeaders). From the proofs fork on, once governance named the program.
     Prove {
         /// The proof file.
         #[arg(long)]
@@ -1180,9 +1181,16 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
             let hash: HashType = status["hash"].as_str().ok_or("the node did not say its chain's hash")?.parse()?;
             let field = |name: &str| file[name].as_str().and_then(crate::structs::hex::from_hex).ok_or_else(|| format!("{}: no {name}", proof.display()));
             let kind = file["kind"].as_str().and_then(crate::proofs::ProofKind::parse).ok_or_else(|| format!("{}: no kind of proof this build knows", proof.display()))?;
-            let range = crate::proofs::ProvenRange::from_public_values(hash, &field("public_values")?).ok_or_else(|| format!("{}: public values that are no range", proof.display()))?;
 
-            Tx::Prove { kind, range, proof: field("proof")? }
+            match file["of"].as_str().unwrap_or("range") {
+                "headers" => Tx::ProveHeaders { kind, values: field("public_values")?, proof: field("proof")? },
+                "finality" => return Err(format!("{}: a finality proof goes to Ethereum, not here: chainv4 bridge … finality-prove", proof.display()).into()),
+                _ => {
+                    let range = crate::proofs::ProvenRange::from_public_values(hash, &field("public_values")?).ok_or_else(|| format!("{}: public values that are no range", proof.display()))?;
+
+                    Tx::Prove { kind, range, proof: field("proof")? }
+                }
+            }
         }
         TxArgs::SetRestake { voter, restake, cap } => Tx::SetRestake { voter, on: restake == "on", cap: cap.unwrap_or(u256::ZERO) },
         #[cfg(feature = "staking")]

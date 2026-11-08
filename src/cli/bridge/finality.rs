@@ -68,6 +68,7 @@ pub(super) fn submit_input(link: &Value) -> CliResult<Vec<u8>> {
     let types = [
         AbiType::FixedArray(Box::new(AbiType::FixedBytes(32)), 6),
         AbiType::Uint(256),
+        AbiType::Uint(256),
         AbiType::Array(Box::new(AbiType::Address)),
         AbiType::Array(Box::new(AbiType::Uint(256))),
         AbiType::FixedBytes(32),
@@ -77,6 +78,8 @@ pub(super) fn submit_input(link: &Value) -> CliResult<Vec<u8>> {
     let values = [
         AbiValue::Array(words.iter().map(|word| AbiValue::FixedBytes(word.to_vec())).collect()),
         AbiValue::Uint(number(&set["total"], "total")?),
+        // The weight a link needs, which the set's hash names from the proofs fork on.
+        AbiValue::Uint(number(&set["needed"], "the weight a link needs: a link from before the proofs fork, which this contract takes none of")?),
         AbiValue::Array(attesters.into_iter().map(AbiValue::Address).collect()),
         AbiValue::Array(weights.into_iter().map(AbiValue::Uint).collect()),
         AbiValue::FixedBytes(word(&link["next_set"]["hash"], "next set")?.to_vec()),
@@ -84,7 +87,7 @@ pub(super) fn submit_input(link: &Value) -> CliResult<Vec<u8>> {
         AbiValue::Bytes(signatures),
     ];
 
-    Ok([selector("submit(bytes32[6],uint256,address[],uint256[],bytes32,uint256[],bytes)"), encode_values(&types, &values)?].concat())
+    Ok([selector("submit(bytes32[6],uint256,uint256,address[],uint256[],bytes32,uint256[],bytes)"), encode_values(&types, &values)?].concat())
 }
 
 impl Bridge {
@@ -121,6 +124,12 @@ impl Bridge {
             return Err(format!("the next justified link starts at epoch {}, not the finalized {finalized}: try again in an epoch", source["epoch"]).into());
         }
 
+        // Finality proofs by the finality program governance names, from any checkpoint recorded.
+        let finality_program = match validity["settings"]["finality_program"].as_str() {
+            Some(text) => word(&Value::String(text.to_string()), "the finality program")?,
+            None => [0; 32],
+        };
+
         // Proofs start where chainv4's do, or from this trusted checkpoint while it takes none.
         let tip = &validity["tip"];
         let proven = match tip.is_object() {
@@ -129,7 +138,7 @@ impl Bridge {
         };
         let genesis = word(&status["genesis"], "the genesis")?;
         let constructor = encode_values(
-            &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
+            &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
             &[
                 AbiValue::Uint(number(&link["chain_id"], "chain id")?),
                 AbiValue::Uint(u256::from(finalized)),
@@ -143,6 +152,7 @@ impl Bridge {
                 AbiValue::Uint(proven.0),
                 AbiValue::FixedBytes(proven.1.to_vec()),
                 AbiValue::FixedBytes(proven.2.to_vec()),
+                AbiValue::FixedBytes(finality_program.to_vec()),
             ],
         )?;
         let init = [from_hex(FINALITY_CODE.trim()).ok_or("built-in code is hex")?, constructor].concat();
@@ -253,7 +263,20 @@ impl Bridge {
             return Err(format!("{}: a {} proof, which no EVM chain can check: prove the range with --kind sp1-groth16 or sp1-plonk for Ethereum", proof.display(), kind.name()).into());
         }
 
-        let height = file["range"]["end"]["height"].as_u64().ok_or_else(|| format!("{}: no range end", proof.display()))?;
+        // A link of finality: proveLink, which needs no checkpoint final there first.
+        if file["of"].as_str() == Some("finality") {
+            let input = [selector("proveLink(bytes,bytes)"), encode_values(&[AbiType::Bytes, AbiType::Bytes], &[AbiValue::Bytes(field("public_values")?), AbiValue::Bytes(field("proof")?)])?].concat();
+            rpc.send(&Call { to: *contract, value: u256::ZERO, input, what: "Prove a link of finality" }, false, &secret)?;
+            println!("the link to epoch {} proven there", file["proves"]["target"]["epoch"]);
+
+            return Ok(());
+        }
+
+        if file["of"].as_str() == Some("headers") {
+            return Err(format!("{}: a header-chain proof goes to the chain: chainv4 send prove", proof.display()).into());
+        }
+
+        let height = file["proves"]["end"]["height"].as_u64().or(file["range"]["end"]["height"].as_u64()).ok_or_else(|| format!("{}: no range end", proof.display()))?;
         let interval = self.status()?["finality"]["checkpoint_interval"].as_u64().filter(|interval| *interval > 0).ok_or("the node's finality has no checkpoints")?;
 
         if !height.is_multiple_of(interval) {

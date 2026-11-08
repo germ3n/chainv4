@@ -118,6 +118,7 @@ fn describe(tx: &Tx, sender: Address) -> (&'static str, Address) {
         Tx::Claim { to, .. } => ("claim", *to),
         Tx::Anchor { .. } => ("anchor", sender),
         Tx::Prove { .. } => ("prove", sender),
+        Tx::ProveHeaders { .. } => ("prove_headers", sender),
         Tx::Batch { .. } => ("batch", sender),
     }
 }

@@ -797,9 +797,11 @@ guide). It is `org.chainv4.explorer`, for iOS 16 and up, its icon from
 
 ## What to keep in mind
 
-- **The API is plain HTTP.** Keep a node's API, and so the explorer's traffic, on a trusted
-  network. A phone talking to a node over Wi-Fi is on that network too. A proxy, or a Tor exit
-  relay, can read plain HTTP as well; a `.onion` node never leaves Tor.
+- **Reach a node over HTTPS or Tor.** The node's own listener is plain HTTP. The Docker setup puts
+  nginx in front of it with HTTPS, from Let's Encrypt or a certificate you give it
+  ([Docker](docker.md)), so point the explorer at `https://`. Plain `http://` is only for a node
+  on a network you trust: anyone on the path, a café's Wi-Fi, a proxy or a Tor exit relay, can
+  read and change it. A `.onion` node never leaves Tor.
 - **Read-only calls run on the node.** Each one runs under the chain's fuel cap on the API's
   thread, holding up the API's other requests while it runs.
 - **Side branches show only what the node kept.** `/forks` lists the side blocks the node

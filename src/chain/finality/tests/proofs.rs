@@ -205,8 +205,18 @@ fn a_range_that_scans_carries_the_whole_state_and_what_left_is_in_its_root() {
     assert!(why.contains("not the start's state"), "{why}");
 }
 
-fn settings(reward: u64) -> ProofSettings {
-    ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::new(reward.into()), gateway: GatewayMode::Both }
+/// The test kind's settings: the range program 5s, the finality program 8s, the header-chain
+/// program 9s, paying these for each block a range covers and each epoch a header chain adds.
+fn settings(per_block: u64, per_epoch: u64) -> ProofSettings {
+    ProofSettings {
+        kinds: vec![ProofKind::Test],
+        program: [5; 32],
+        reward_per_block: u256::new(per_block.into()),
+        gateway: GatewayMode::Both,
+        finality_program: [8; 32],
+        headers_program: [9; 32],
+        reward_per_epoch: u256::new(per_epoch.into()),
+    }
 }
 
 /// A test proof of the range from the proven tip to a height, as the replay would prove it.
@@ -236,7 +246,7 @@ fn from_the_fork_a_proof_of_the_range_from_the_proven_tip_moves_it_and_pays_for_
     finalize_through(&mut chain, 1);
     assert_eq!(ProvenChain::new(&chain.state()).tip().unwrap(), None);
     let version = Changes::new(&chain.state()).version_of(crate::governance::ChangeKind::Proofs).unwrap();
-    assert!(send_all(&mut chain, vec![Tx::VoteChange { version, change: Change::Proofs(settings(3)), vote: ChangeVote::Yes }]).is_empty(), "left out of the block");
+    assert!(send_all(&mut chain, vec![Tx::VoteChange { version, change: Change::Proofs(settings(3, 0)), vote: ChangeVote::Yes }]).is_empty(), "left out of the block");
 
     // From it, the tip starts at the block before it, and each block records its parent.
     grow_to(&mut chain, fork);
@@ -248,7 +258,7 @@ fn from_the_fork_a_proof_of_the_range_from_the_proven_tip_moves_it_and_pays_for_
     let refused = { let tx = prove_to(&chain, 3 * INTERVAL, [5; 32]); send_all(&mut chain, vec![tx]) };
     assert!(refused[0].result.as_ref().is_err_and(|why| why.to_string().contains("no proof system")), "{:?}", refused[0].result);
 
-    decide(&mut chain, Change::Proofs(settings(3)));
+    decide(&mut chain, Change::Proofs(settings(3, 0)));
     let balance = |chain: &Chain| super::voting::balance(chain, &dev().public().address());
 
     // Not to a checkpoint, by another program, or from somewhere else: refused, and nothing paid.
@@ -281,7 +291,7 @@ fn a_range_holding_a_proof_and_the_settings_proves_the_program_governance_names(
     let mut chain = Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap();
     finalize_through(&mut chain, 3);
     let from = chain.tip().height;
-    decide(&mut chain, Change::Proofs(settings(0)));
+    decide(&mut chain, Change::Proofs(settings(0, 0)));
     { let tx = prove_to(&chain, 3 * INTERVAL, [5; 32]); send_all(&mut chain, vec![tx]) };
     finalize_through(&mut chain, 5);
     let to = 5 * INTERVAL;
@@ -364,4 +374,144 @@ fn a_range_proven_by_sp1_is_checked_by_the_kinds_verifier() {
     let mut other = values.clone();
     other[40] ^= 1;
     assert!(verifier.verify(&prover.program(), &other, &proof).is_err(), "other public values");
+}
+
+#[cfg(feature = "finality-proofs")]
+#[test]
+fn a_finality_proof_checks_the_voters_own_votes_as_the_sources_state_fixed_them_and_nothing_else() {
+    use crate::proofs::{FinalityInput, LinkInput, check_link, prove_finality};
+
+    let (genesis, chain) = grown();
+    let input = FinalityInput::build(&chain, chain.db().snapshot(), json(&genesis), 2).unwrap();
+    let input = FinalityInput::from_bytes(&input.to_bytes()).unwrap();
+    let proven = prove_finality(&input).unwrap();
+
+    assert_eq!((proven.source.epoch, proven.target.epoch, proven.height), (1, 2, 2 * INTERVAL));
+    assert_eq!(proven.source_root, end_at(&chain, INTERVAL).state_root, "the source's state fixed the voters");
+    assert_eq!(proven.target.block, end_at(&chain, 2 * INTERVAL).block);
+    assert_eq!(proven.state_root, end_at(&chain, 2 * INTERVAL).state_root);
+    assert_eq!(proven.genesis, chain.genesis());
+    assert_eq!(check_link(&chain, &input.link), Ok(proven), "the same off the program");
+    let fails = |link: LinkInput| check_link(&chain, &link).expect_err("refused").to_string();
+
+    // One vote short of two thirds.
+    let mut short = input.link.clone();
+    short.votes.pop();
+    assert!(fails(short).contains("short of"));
+
+    // A vote for another link, by no voter of the epoch, or signed by another key.
+    let mut other = input.link.clone();
+    other.votes[0].vote.target.epoch += 1;
+    assert!(fails(other).contains("another link"));
+    let mut stranger = input.link.clone();
+    stranger.votes[0] = crate::structs::vote::SignedVote::sign(crate::structs::vote::Vote { voter: key(99).public(), ..stranger.votes[0].vote }, &key(99), &chain.genesis());
+    stranger.votes.sort_by_key(|vote| vote.vote.voter);
+    assert!(fails(stranger).contains("no voter"));
+    let mut forged = input.link.clone();
+    forged.votes[0].signature = forged.votes[1].signature;
+    assert!(fails(forged).contains("not its voter's"));
+
+    // A witness that is not the source's or the target's state, a source root that is not the
+    // source's, or a target that is not the one voted for.
+    for source in [true, false] {
+        let mut moved = input.link.clone();
+        let witness = if source { &mut moved.source_witness } else { &mut moved.witness };
+        let Witness::Partial { entries, .. } = witness else { panic!("a partial witness") };
+        entries.iter_mut().find(|entry| entry.value.is_some()).unwrap().value.as_mut().unwrap().push(1);
+        assert!(fails(moved).contains("witness does not hold"));
+    }
+    let mut rooted = input.link.clone();
+    rooted.source_root = end_at(&chain, 2 * INTERVAL).state_root;
+    assert!(check_link(&chain, &rooted).is_err(), "another source root");
+    let mut elsewhere = input.link.clone();
+    elsewhere.target = chain.block_at(3 * INTERVAL).unwrap().unwrap().sealed_header();
+    assert!(check_link(&chain, &elsewhere).is_err());
+}
+
+#[cfg(feature = "header-proofs")]
+#[test]
+fn a_header_chain_is_proven_from_genesis_then_on_from_the_last_proof_and_taken_on_chain() {
+    use crate::proofs::{HeadersInput, ProvenHeaders, TakenHeaders, TestProofs, prove_headers};
+
+    let (genesis, mut chain) = grown();
+    let program = [9; 32];
+    let taken = |values: Vec<u8>, program: [u8; 32]| TakenHeaders { kind: ProofKind::Test, proof: TestProofs::proof(&program, &values), values };
+
+    // From genesis to epoch 2 final: every link from epoch 0's checkpoint, each by the voters its
+    // source's state fixed.
+    let first = HeadersInput::build(&chain, chain.db().snapshot(), json(&genesis), program, None, 2).unwrap();
+    let first = HeadersInput::from_bytes(&first.to_bytes()).unwrap();
+    assert_eq!(first.links.first().map(|link| link.source.epoch), Some(0));
+    let proven = prove_headers(&first).unwrap();
+    assert_eq!((proven.finalized.checkpoint.epoch, proven.justified.checkpoint.epoch), (2, 3));
+    assert_eq!(proven.finalized.checkpoint.block, end_at(&chain, 2 * INTERVAL).block);
+    assert_eq!(proven.finalized.state_root, end_at(&chain, 2 * INTERVAL).state_root);
+    assert_eq!(ProvenHeaders::from_public_values(chain.hash(), &proven.public_values()), Some(proven));
+
+    // A link left out does not start where the one before ended.
+    let mut gap = first.clone();
+    gap.links.remove(1);
+    assert!(prove_headers(&gap).expect_err("refused").to_string().contains("where the justified checkpoint is"));
+
+    // On from it, its proof checked first: by its own program only, and holding.
+    let previous = taken(proven.public_values(), program);
+    let second = HeadersInput::build(&chain, chain.db().snapshot(), json(&genesis), program, Some(previous.clone()), 3).unwrap();
+    assert_eq!(second.links.first().map(|link| link.source.epoch), Some(3), "from the justified checkpoint");
+    // The same, built from the justified checkpoint alone and the proof put in after, as a prover
+    // going on from a proof of its own does.
+    let built = HeadersInput::build_from(&chain, chain.db().snapshot(), json(&genesis), program, proven.justified.checkpoint, 3).unwrap();
+    assert_eq!(HeadersInput { previous: Some(previous.clone()), ..built }, second);
+    let next = prove_headers(&second).unwrap();
+    assert_eq!(next.finalized.checkpoint.epoch, 3);
+    assert!(prove_headers(&HeadersInput { previous: Some(taken(proven.public_values(), [8; 32])), ..second.clone() }).is_err(), "a previous proof by another program");
+    let mut forged = previous.clone();
+    forged.proof[0] ^= 1;
+    assert!(prove_headers(&HeadersInput { previous: Some(forged), ..second.clone() }).expect_err("refused").to_string().contains("previous proof"));
+
+    // On chain: none before governance names the program, then the proof is kept and paid for
+    // each epoch it adds, and one no later is refused.
+    let prove = |chain: &mut Chain, taken: &TakenHeaders| send_all(chain, vec![Tx::ProveHeaders { kind: taken.kind, values: taken.values.clone(), proof: taken.proof.clone() }]);
+    let refused = prove(&mut chain, &previous);
+    assert!(refused[0].result.as_ref().is_err_and(|why| why.to_string().contains("no proof system")), "{:?}", refused[0].result);
+    decide(&mut chain, Change::Proofs(settings(0, 7)));
+    let balance = |chain: &Chain| super::voting::balance(chain, &dev().public().address());
+    let before = balance(&chain);
+    let wrong = prove(&mut chain, &taken(proven.public_values(), [8; 32]));
+    assert!(wrong[0].result.is_err(), "by another program");
+    let kept = prove(&mut chain, &previous);
+    assert!(kept[0].result.is_ok(), "{:?}", kept[0].result);
+    assert_eq!(ProvenChain::new(&chain.state()).headers().unwrap(), Some(previous.clone()));
+    assert_eq!(balance(&chain), before + u256::new(2 * 7), "7 for each of the two epochs");
+    let again = prove(&mut chain, &previous);
+    assert!(again[0].result.as_ref().is_err_and(|why| why.to_string().contains("proven to epoch 2")), "{:?}", again[0].result);
+    let later = prove(&mut chain, &taken(next.public_values(), program));
+    assert!(later[0].result.is_ok(), "{:?}", later[0].result);
+    assert_eq!(balance(&chain), before + u256::new(3 * 7));
+}
+
+/// The finality and header-chain programs run in SP1's RISC-V to what the native checks prove:
+/// the link to epoch 2, and the header chain from genesis to epoch 2 final. Executed, never proven.
+/// Only with the sp1-prover feature, once proofs/sp1/build.sh wrote the programs.
+#[cfg(feature = "sp1-prover")]
+#[test]
+fn the_finality_and_header_programs_run_in_sp1_to_what_the_checks_prove() {
+    use crate::proofs::{FinalityInput, HeadersInput, Prover as _, ProvenHeaders, ProvenLink, prove_finality, prove_headers};
+
+    let elf = |name: &str| std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proofs/sp1/elf").join(name)).ok();
+    let (Some(finality), Some(headers)) = (elf("chainv4-finality-program"), elf("chainv4-headers-program")) else {
+        eprintln!("no programs in proofs/sp1/elf: build them with proofs/sp1/build.sh");
+
+        return;
+    };
+    let (genesis, chain) = grown();
+
+    let input = FinalityInput::build(&chain, chain.db().snapshot(), json(&genesis), 2).unwrap();
+    let (values, cycles) = crate::proofs::Sp1Prover::new(finality, ProofKind::Sp1Groth16).unwrap().execute(&input.to_bytes()).unwrap();
+    assert_eq!(ProvenLink::from_public_values(chain.hash(), &values), Some(prove_finality(&input).unwrap()), "in {cycles} cycles");
+    eprintln!("a link in {cycles} SP1 cycles");
+
+    let input = HeadersInput::build(&chain, chain.db().snapshot(), json(&genesis), [9; 32], None, 2).unwrap();
+    let (values, cycles) = crate::proofs::Sp1Prover::new(headers, ProofKind::Sp1Groth16).unwrap().execute(&input.to_bytes()).unwrap();
+    assert_eq!(ProvenHeaders::from_public_values(chain.hash(), &values), Some(prove_headers(&input).unwrap()), "in {cycles} cycles");
+    eprintln!("{} links from genesis in {cycles} SP1 cycles", input.links.len());
 }

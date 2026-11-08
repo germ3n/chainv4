@@ -62,7 +62,7 @@ impl Electorate for Elected {
     fn voters(&self, state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
         match Changes::new(state).finality_in(epoch, &self.genesis)? {
             #[cfg(feature = "finality-ffg")]
-            FinalityConfig::Ffg(_) => super::ffg::voters(state, epoch),
+            FinalityConfig::Ffg(config) => super::ffg::voters(state, epoch, &config),
             #[cfg(feature = "finality-authority")]
             FinalityConfig::Authority(_) => super::authority::voters(state, epoch),
             #[allow(unreachable_patterns)]

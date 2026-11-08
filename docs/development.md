@@ -176,6 +176,8 @@ Every piece sits behind a cargo feature, and everything is on by default.
 | `node` | The node, the chain and the CLI, which stops cleanly on SIGTERM and SIGINT through `signal-hook`. Brings `chain`. |
 | `chain` | The chain's state transition alone, `Chain` and running blocks, without the node: no libp2p, RocksDB, tokio or rayon, the workers running in turn. What the [validity proofs](proofs.md)' program builds. |
 | `consensus` | Every feature that decides how a block runs, the hashes, keys, engines, finality, governance and `chain` among them, and nothing else: what the proofs' program builds chainv4 with, so it runs blocks as a node of the default build does. A new feature that changes how blocks run joins it. |
+| `finality-proofs` | Finality proofs: a link's check over a witness of the target's state (`proofs::finality`), `GET /validity/finality-input`, `chainv4 prove --of finality`. On by default and part of `consensus`. |
+| `header-proofs` | Header-chain proofs: `Tx::ProveHeaders`, `GET /validity/headers-input`, `chainv4 prove --of headers`, the apps' check. On by default and part of `consensus`; a build without it follows only a chain whose blocks hold none. |
 | `attestations` | Validators attesting links for Ethereum, and checking the attestations votes and blocks carry: what ChainV4Finality.sol follows the chain by, and `GET /attestations`. On by default and part of `consensus`. A build without it follows only a chain that has them off (`Change::Attestations`). |
 | `sp1` | All three of SP1's proof kinds below, on by default. |
 | `sp1-groth16` | SP1's proofs wrapped in Groth16, checked by `sp1-verifier`, pure Rust and `no_std`, for a node's `Tx::Prove` and the apps' proven tip. |

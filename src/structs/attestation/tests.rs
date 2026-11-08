@@ -34,7 +34,7 @@ fn an_attesting_set_lists_attesters_by_address_each_once_and_counts_every_valida
     let mut expected = vec![(first, u256::new(3)), (second, u256::new(6))];
     expected.sort();
 
-    assert_eq!(set, AttestingSet { total: u256::new(16), attesters: expected });
+    assert_eq!(set, AttestingSet { total: u256::new(16), needed: None, attesters: expected });
     assert_eq!(set.weight(&second), Some(u256::new(6)));
     assert!(set.enough(u256::new(11)) && !set.enough(u256::new(10)), "two thirds of 16, as 3w >= 2t");
 

@@ -116,7 +116,7 @@ impl FinalityConfig {
     pub(super) fn leak(&self) -> Option<crate::registry::validators::Leak> {
         match *self {
             #[cfg(feature = "finality-ffg")]
-            FinalityConfig::Ffg(ref config) => config.leak,
+            FinalityConfig::Ffg(ref config) => config.leak(),
             #[allow(unreachable_patterns)]
             _ => None,
         }

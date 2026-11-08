@@ -21,6 +21,13 @@ fee change how blocks replay, and the fixed DEX is deployed on it. Push the fork
   network keys, and new validator words; Gateway.sol on Sepolia deployed again under the new EVM
   key, with the Sepolia ETH moved over.
 
+### Stale and wrong docs pass (owner, 2026-11-08)
+
+- [ ] Read every page in `docs/` and the README against the code as it stands, and fix what's
+  stale or wrong: flags, defaults, endpoints, limits, features and behaviour that changed since a
+  page was written. One found already: "The API is plain HTTP" in the explorer's and wallet's
+  pages predated nginx's HTTPS in front (fixed 2026-11-08). Queued after BitVM.
+
 ### Once every queued batch is done
 
 - [ ] **A review pass, feature by feature.** Once every queued batch is in, before the fresh test
@@ -421,7 +428,36 @@ offline; these would make that hold up as a treasury.
     (owner's OK, 2026-11-08).
   - [ ] SP1's precompile patches for sha2, k256, curve25519 and bn, which make proving faster but
     change nothing it proves; and a BLAKE3 one, as SP1 has none.
-  - [ ] BitVM-style fraud proofs, for Bitcoin's side.
+  - [ ] BitVM-style fraud proofs, for Bitcoin's side. **Queued next (owner, 2026-11-08),** after the
+    finality and header-chain proofs; ask its design questions first.
+  - [ ] **The whole chain, or only some layers? (owner, 2026-11-08):** decide whether proofs should
+    keep covering the whole state transition, as now (every block, every engine, Luau included), or
+    only the layers where a proof pays for itself, if splitting makes sense. Measure before
+    choosing; ask before building. To weigh:
+    - **Cost per layer:** SP1 cycles by part of a block (Lua, wasm, EVM, signatures, the state
+      tree, justifications), from `prove execute` on real devnet ranges, to see what dominates.
+    - **Who needs what:** Gateway.sol needs only the withdrawals root, light clients a state root,
+      Ethereum's finality the attesters' signatures. A proof of just the bridge's part, or just the
+      finality signatures (no attesters' `ecrecover` on Ethereum, or a full FFG proof), may be far
+      cheaper than the whole chain.
+    - **What a partial proof gives up:** anything unproven falls back to the validators' word, so
+      say plainly what each layer's proof does and doesn't vouch for.
+    - **Other shapes:** a proof per block folded by recursion, rather than per range; an engine
+      proven on its own (revm is already proven with SP1); proving the header chain alone for the
+      apps' sync.
+  - [x] **A finality proof (owner, 2026-11-08):** which block is final is a different statement from
+    whether the blocks were right. Today Ethereum checks it through the attesters' secp256k1
+    signatures. A zk proof of the validators' own votes (ed25519, the weights, two thirds) could
+    retire the attester keys entirely, and it and the state proof could be folded into one by
+    recursion. **Done 2026-11-08:** `proofs::finality`, `chainv4-finality-program`, ChainV4Finality.sol's
+    `proveLink` beside attestations (owner's pick), `--of finality`. Its own program (owner's pick:
+    separate programs). Left: the wallet's sync from a header-chain proof alone (see the strict
+    setting above), and folding a range and a link into one proof by recursion.
+  - [x] **A header-chain proof for the apps' sync (owner, 2026-11-08):** a proof that a header
+    descends from genesis with these finalized checkpoints, so a new wallet skips downloading and
+    checking votes. Later, if syncing gets slow. **Done 2026-11-08:** `chainv4-headers-program`, each
+    proof checking the previous by its kind's verifier, taken on chain as `Tx::ProveHeaders` (owner's
+    pick) and paid `reward_per_epoch`, checked by the wallet and explorer.
   - [ ] **Swaps and DEXes by zk, where it holds up (owner, 2026-11-08):** use the proofs for the
     swap contracts, Swap.sol and the DEXes wherever it makes them need less trust or less waiting.
     To look into, each to be asked about before it starts:
@@ -445,6 +481,10 @@ offline; these would make that hold up as a treasury.
     list of SP1 gateways, a proof standing if any takes it. Into the `proofs` fork, before it was
     scheduled. SP1's PLONK route on Sepolia is frozen for now, so Sepolia lists Groth16's gateway
     alone.
+  - [x] **FFG's threshold adjustable (owner, 2026-11-08):** `justify_permille`, 667 to 1000, two
+    thirds unset (owner's picks: never below two thirds, a permille in FFG's settings retuned by
+    `Change::Finality`, carried to Ethereum in the attesting set). From the `proofs` fork; FFG's
+    later fields encode together (`FfgLater`), as nothing while unset.
   - [x] **Ethereum's side switchable (owner, 2026-11-08):** `Change::Attestations` turns validators'
     attestations off or on for the whole chain from the next block (refused under the `both`
     gateway mode); the `attestations` feature, default and in `consensus`; and the

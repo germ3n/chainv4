@@ -13,6 +13,7 @@ It comes in three stages:
 | 1. Finality on Ethereum | Validators' attesters sign each link with secp256k1. ChainV4Finality.sol follows justified and final checkpoints and their state roots. | [Finality](finality.md#attestations-finality-followed-on-ethereum) |
 | 2. State roots by proof | An SP1 proof that a range of blocks ran to its end's state root, in Groth16, PLONK or as SP1's STARK. The chain takes it as `Tx::Prove` and pays for it, and ChainV4Finality.sol takes the first two. | This page |
 | 3. Bridges and light clients by proof | Gateway.sol releases withdrawals by a proof of the range they left in. The apps check the latest proof themselves. | This page, [Bridges](bridges.md#withdrawals-by-proof) |
+| Finality by proof | A proof that two thirds of an epoch's voters signed a link, their own votes rather than their attesters', for ChainV4Finality.sol; and a proof of the header chain from genesis, for the apps. | [Proofs of finality](#proofs-of-finality) |
 
 Bitcoin can't check a zk proof, so the Bitcoin gateway stays with the federation. BitVM-style fraud
 proofs are in the [todo](todo.md).
@@ -115,8 +116,11 @@ From the `proofs` fork ([Forks](governance.md#forks)):
   `both` or `federation-only`, [Bridges](bridges.md#withdrawals-by-proof)):
 
   ```sh
-  chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kinds":["sp1-groth16"],"program":"0x…","reward_per_block":"1000000000000000","gateway":"proof-or-federation"}}'
+  chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kinds":["sp1-groth16"],"program":"0x…","reward_per_block":"1000000000000000","gateway":"proof-or-federation","finality_program":"0x…","headers_program":"0x…","reward_per_epoch":"0"}}'
   ```
+
+  `finality_program`, `headers_program` and `reward_per_epoch` may be left out, as zeros: no
+  finality or header-chain proofs, paying nothing.
 
   `kinds` is a set: the chain takes a proof of any kind listed (see [Proof kinds](#proof-kinds)).
   Until governance decides one, the chain takes no proofs. The settings are lockable like any other.
@@ -140,10 +144,68 @@ ChainV4Finality.sol takes proofs beside the attestations:
   gateway under its program. It moves the tip, keeps the range's withdrawals root by its end block,
   lists the range's end (`provenEnds`, `provenBlockAt`), and takes the program and gateway mode
   from the proof.
+- **`proveLink(publicValues, proof)`:** a link by a finality proof, by the voters it holds, under
+  the finality program; see [Proofs of finality](#proofs-of-finality).
 - **Deploying:** `chainv4 bridge finality-deploy --sp1-verifier 0x… [--sp1-verifier 0x…] [--program 0x…]`
   starts proofs at the chain's proven tip, or at its trusted checkpoint while there is none. It
   takes a list of SP1's gateways, one for each wrapping (SP1 keeps Groth16's and PLONK's apart), and
   a proof stands if any of them takes it. Without one it takes no proofs. It never takes a STARK.
+
+## Proofs of finality
+
+A range proof says the blocks were right; which block is final still comes from the votes. Two
+more proofs, each its own program, prove that from the votes themselves (`proofs::finality`):
+
+| Proof | What it proves | Taken by | Program |
+| --- | --- | --- | --- |
+| Finality | Two thirds of an epoch's voters, by weight, signed the link from a source checkpoint to the target, the voters as the source's state fixed them; with the source's state root, the target's height and state root, and the next epoch's attesting set (`ProvenLink`, eleven words). | ChainV4Finality.sol's `proveLink`, beside the attesters' `submit` | `chainv4-finality-program`, governance's `finality_program` |
+| Header chain | The chain finalized a checkpoint, every link from genesis to it signed by its epoch's voters as the checkpoint before fixed them (`ProvenHeaders`, eleven words). | The chain, as `Tx::ProveHeaders`; then the apps | `chainv4-headers-program`, governance's `headers_program` |
+
+- **What a link checks:** the votes are for exactly that link, each signed by a voter of the target
+  epoch, together at least the weight a link needs. The voters are read from a witness of the
+  *source's* state, which fixed them two epochs ahead, checked against the source's state root,
+  which the proof says. A witness of the target's state, checked against its header's root, which
+  the votes vouch for as they name the target block, gives the next epoch's attesting set and
+  governance's finality program (`check_link`).
+- **The taker checks the source:** ChainV4Finality.sol takes a link only from a checkpoint it
+  recorded with that very state root, by attestations or by proofs alike. Nothing is tracked from
+  link to link, so the two paths take turns as they like, and with restaking moving the weights
+  every epoch neither falls behind the other. With attestations off
+  ([Turning Ethereum's side off](#turning-ethereums-side-off)) Ethereum still follows the chain, by
+  proofs. A link may skip at most the epochs voters are fixed ahead.
+- **The header chain from genesis:** each proof checks the previous one, the one the chain took
+  last, with its kind's verifier inside the program, then goes on from its justified checkpoint
+  and that checkpoint's state root link by link, at most `MAX_HEADER_LINKS` of them. The first
+  starts from genesis and its state root. A proof takes only a previous one by its own program, so a new program starts again
+  from genesis.
+- **On chain:** `Tx::ProveHeaders`, from the `proofs` fork, takes a header-chain proof by
+  governance's `headers_program` that finalizes a checkpoint on this chain later than the last one
+  taken. The chain keeps it in state, where an app proves it, and mints `reward_per_epoch` for each
+  epoch it adds. `GET /validity` gives it as `headers`.
+- **Apps:** the wallet and explorer check the latest header-chain proof themselves, against the
+  program governance names, and say how far the chain is finalized from genesis
+  (`chainv4_ui::validity::headers_proven`).
+- **Cost, measured:** a link runs in SP1 in about 7.8 million cycles, three links from genesis in
+  12 million; signatures are most of it.
+
+Proving them, by hand as ranges are:
+
+```sh
+chainv4 prove check --of finality --epoch 120 --node https://…     # the link to epoch 120, run off the node
+chainv4 prove run --of finality --epoch 120 --out link.json --node https://…
+chainv4 bridge … finality-prove 0x<ChainV4Finality.sol> --proof link.json   # proveLink
+chainv4 prove run --of headers --out headers.json --node https://…  # on from the chain's last one
+chainv4 send --key k.key prove --proof headers.json                 # Tx::ProveHeaders
+chainv4 prove program --of finality                                 # its id, for governance
+```
+
+The node builds the inputs at `GET /validity/finality-input?epoch=` and
+`GET /validity/headers-input?to=`, from history back to the links' sources.
+
+The chain takes a header-chain proof only up to a checkpoint among the blocks it still records
+(`RECORDED_BLOCKS`, from the `proofs` fork on). A chain older than one proof covers is caught up
+off chain: each proof goes on from the last with `--previous headers.json`
+(`GET /validity/headers-input?from=`), and only the one that reaches a recent checkpoint is sent.
 
 ## Turning Ethereum's side off
 

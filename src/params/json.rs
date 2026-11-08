@@ -860,8 +860,12 @@ pub fn finality_json(config: &FinalityConfig) -> Value {
                 value["slash_permille"] = permille.into();
             }
 
-            if let Some(leak) = ffg.leak {
+            if let Some(leak) = ffg.leak() {
                 value["leak"] = json!({ "after_epochs": leak.after_epochs, "permille": leak.permille });
+            }
+
+            if let Some(permille) = ffg.later.justify_permille {
+                value["justify_permille"] = permille.into();
             }
 
             value
@@ -926,20 +930,23 @@ pub(crate) fn finality_from_json(mut finality: Fields) -> Result<FinalityConfig,
                 })
                 .collect::<Result<Vec<_>, String>>()?,
             slash_permille: finality.later_whole("slash_permille")?.map(|permille| u32::try_from(permille).map_err(|_| "finality.slash_permille is too large".to_string())).transpose()?,
-            leak: match finality.map.contains_key("leak") {
-                true => match finality.optional_object("leak")? {
-                    Some(mut leak) => {
-                        let value = crate::registry::validators::Leak {
-                            after_epochs: leak.whole("after_epochs")?,
-                            permille: leak.whole("permille")?,
-                        };
-                        leak.done()?;
+            later: crate::params::finality::FfgLater {
+                leak: match finality.map.contains_key("leak") {
+                    true => match finality.optional_object("leak")? {
+                        Some(mut leak) => {
+                            let value = crate::registry::validators::Leak {
+                                after_epochs: leak.whole("after_epochs")?,
+                                permille: leak.whole("permille")?,
+                            };
+                            leak.done()?;
 
-                        Some(value)
-                    }
-                    None => None,
+                            Some(value)
+                        }
+                        None => None,
+                    },
+                    false => None,
                 },
-                false => None,
+                justify_permille: finality.later_whole("justify_permille")?.map(|permille| u32::try_from(permille).map_err(|_| "finality.justify_permille is too large".to_string())).transpose()?,
             },
         }),
         #[cfg(any(feature = "finality-authority", not(feature = "chain")))]
@@ -1287,6 +1294,9 @@ pub fn proof_settings_json(settings: &crate::proofs::ProofSettings) -> Value {
         "program": crate::structs::hex::to_hex(&settings.program),
         "reward_per_block": settings.reward_per_block.to_string(),
         "gateway": settings.gateway.name(),
+        "finality_program": crate::structs::hex::to_hex(&settings.finality_program),
+        "headers_program": crate::structs::hex::to_hex(&settings.headers_program),
+        "reward_per_epoch": settings.reward_per_epoch.to_string(),
     })
 }
 
@@ -1313,9 +1323,22 @@ pub fn proof_settings_from_json(value: &Value) -> Result<crate::proofs::ProofSet
     let reward_per_block = fields.amount("reward_per_block")?;
     let gateway = fields.text("gateway")?;
     let gateway = crate::proofs::GatewayMode::parse(&gateway).ok_or_else(|| format!("proofs.gateway: {gateway} is not proof-or-federation, both or federation-only"))?;
+    // The finality and header-chain programs and the header chain's reward, zeros left out.
+    let mut later_program = |key: &'static str| -> Result<[u8; 32], String> {
+        match fields.later_text(key)? {
+            Some(text) => crate::structs::hex::from_hex(&text).and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| format!("proofs.{key}: 32 bytes of hex")),
+            None => Ok([0; 32]),
+        }
+    };
+    let finality_program = later_program("finality_program")?;
+    let headers_program = later_program("headers_program")?;
+    let reward_per_epoch = match fields.later_text("reward_per_epoch")? {
+        Some(_) => fields.amount("reward_per_epoch")?,
+        None => u256::ZERO,
+    };
     fields.done()?;
 
-    Ok(crate::proofs::ProofSettings { kinds, program, reward_per_block, gateway })
+    Ok(crate::proofs::ProofSettings { kinds, program, reward_per_block, gateway, finality_program, headers_program, reward_per_epoch })
 }
 
 /// The finality kinds this build has, for error messages.

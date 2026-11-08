@@ -375,6 +375,21 @@ pub enum Tx {
         range: crate::proofs::ProvenRange,
         proof: Vec<u8>,
     },
+    #[document(
+        summary = "A header-chain proof: the chain's finalized checkpoints proven from genesis, by the header-chain program governance named (Change::Proofs). Taken when it finalizes a checkpoint on this chain later than the last one taken; kept in state for the apps to check and the next proof to go on from, and paid the reward for each epoch it moves on. From the proofs fork on.",
+        params = {
+            kind = "The proof system it was made with: one governance named.",
+            values = "Its public values, a ProvenHeaders's eleven words.",
+            proof = "The proof, at most its kind's ProofKind::max_bytes.",
+        },
+        see_also = "ProvenHeaders, TakenHeaders, ProofSettings",
+    )]
+    #[wincode(tag = 32)]
+    ProveHeaders {
+        kind: crate::proofs::ProofKind,
+        values: Vec<u8>,
+        proof: Vec<u8>,
+    },
 }
 
 #[document(
@@ -850,7 +865,7 @@ impl Verifiable for Tx {
                 nonzero(amount)
             }
             Tx::Unbond { voter } | Tx::Withdraw { voter } | Tx::SetAttester { voter, .. } | Tx::SetRestake { voter, .. } => voter.verify(),
-            Tx::Prove { kind, proof, .. } => match proof.len() <= kind.max_bytes() {
+            Tx::Prove { kind, proof, .. } | Tx::ProveHeaders { kind, proof, .. } => match proof.len() <= kind.max_bytes() {
                 true => Ok(()),
                 false => Err(VerifyError::BadProof),
             },
@@ -1014,6 +1029,7 @@ impl Tx {
             | Tx::SetAttester { .. }
             | Tx::SetRestake { .. }
             | Tx::Prove { .. }
+            | Tx::ProveHeaders { .. }
             | Tx::Slash { .. }
             | Tx::ApproveSigners { .. }
             | Tx::WithdrawApproval { .. }

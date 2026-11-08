@@ -466,7 +466,8 @@ chainv4 send --key member.key vote-change --vote yes --change '{"fork":{"type":"
 systems, one or more of `sp1-groth16`, `sp1-plonk` and `sp1-stark`, any of which it takes; the
 program (its verifying key hash, from `chainv4 prove program`, the same for all three); what is
 minted for each block a proof covers, and how Gateway.sol releases (`proof-or-federation`, `both`
-or `federation-only`). Each proof carries the program and the mode at its range's end, so the contracts on
+or `federation-only`); and the finality and header-chain programs, with what is minted for each
+epoch a header-chain proof adds ([Proofs of finality](proofs.md#proofs-of-finality)). Each proof carries the program and the mode at its range's end, so the contracts on
 Ethereum follow them. Until it is decided, the chain takes no proofs. See
 [Validity proofs](proofs.md).
 
@@ -657,6 +658,7 @@ chainv4 send --key member.key vote-change --vote yes --change '{"locks":["reward
 | `limits` | `contract` | `call_depth`, `key_len`, `value_len`, `scan`, `event_data`, `events`, `module_len`, `source_len`. |
 | `limits` | `max_tx_bytes`, `multisig_members` | The most bytes a transaction takes (Ethereum-signed ones by their raw bytes, 128 KiB while unset), and the most members of a new multisig, at most 20. |
 | `finality` | `slash_permille` | How much of a cheater's FFG bond a slash takes, 1000 by default. |
+| `finality` | `justify_permille` | How much of the bonded weight justifies a link under FFG, 667 to 1000, two thirds unset. From the `proofs` fork on. |
 | `consensus` | `window`, `adjustment`, `max_steps_down`, `max_swing` | Proof of work's retarget window and steps; unset, genesis's window and 64, 32 and 4. |
 | `federation` | `btc` | The Bitcoin policy: `fee_cap`, `fee_floor`, `grace_ms`, `cancel_after_ms`, `fee_part`, `bump_after_ms` and `bump_below_pct`, when a stuck release is bumped, an hour and 80 percent of what the network asks when left out, and `repay_pct` and `repay_most`, how much of its fee a release repays at most of what children cost the backing and the most one withdrawal repays, 20 percent and 500 satoshis when left out, as a policy written before them is read (see [Bridges](bridges.md#bumping-a-stuck-release)). |
 

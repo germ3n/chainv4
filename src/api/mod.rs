@@ -834,6 +834,8 @@ fn router(api: Api) -> Router {
         .route("/attestations", get(attestations))
         .route("/validity", get(validity))
         .route("/validity/input", get(validity_input))
+        .route("/validity/finality-input", get(finality_input))
+        .route("/validity/headers-input", get(headers_input))
         .route("/proofs/receipts/{id}", get(receipt_proof))
         .route("/proofs/{column}/{key}", get(state_proof))
         .route("/txs", post(submit))
@@ -1120,7 +1122,107 @@ fn validity_json(db: &Arc<dyn Committed>) -> Result<Value, ApiError> {
         "settings": settings.as_ref().map(crate::params::json::proof_settings_json),
         "tip": tip.map(|tip| json!({ "height": tip.height, "block": tip.block.to_string(), "state_root": tip.state_root.to_string() })),
         "proof": proof.map(|taken| json!({ "kind": taken.kind.name(), "public_values": to_hex(&taken.range.public_values()), "proof": to_hex(&taken.proof) })),
+        // The latest header-chain proof taken, from state, which the apps check for themselves.
+        "headers": headers_json(&state)?,
     }))
+}
+
+#[cfg(feature = "secp256k1")]
+fn headers_json(state: &State) -> Result<Value, ApiError> {
+    Ok(match crate::proofs::ProvenChain::new(state).headers()? {
+        Some(taken) => json!({ "kind": taken.kind.name(), "public_values": to_hex(&taken.values), "proof": to_hex(&taken.proof) }),
+        None => Value::Null,
+    })
+}
+
+#[cfg(not(feature = "secp256k1"))]
+fn headers_json(_state: &State) -> Result<Value, ApiError> {
+    Ok(Value::Null)
+}
+
+/// Builds a proof's input in its turn, as a range's is, on the blocking pool: what the finality
+/// and header-chain inputs share with GET /validity/input.
+#[cfg(feature = "finality-proofs")]
+async fn built_input(api: &Api, peer: SocketAddr, headers: &HeaderMap, what: String, build: impl FnOnce(&crate::chain::Chain, Arc<dyn Committed>, Vec<u8>) -> Result<Vec<u8>, String> + Send + 'static) -> Result<Response, ApiError> {
+    let turn = match api.ranges.enter(asker(peer, headers, &api.trusted_proxies)).await {
+        Ok(turn) => turn,
+        Err(busy) => {
+            let mut response = busy.into_response();
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+
+            return Ok(response);
+        }
+    };
+    let (db, genesis) = (api.db.clone(), api.genesis.clone());
+    let built = tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        let rules = crate::chain::Chain::open(Arc::new(crate::db::MemoryDb::default()), &genesis).map_err(|err| err.to_string())?;
+        let json = serde_json::to_vec(&crate::chain::json::to_json(&genesis)).map_err(|err| err.to_string())?;
+
+        build(&rules, db, json)
+    })
+    .await
+    .map_err(|err| ApiError::Db(DbError::Corrupt(format!("{what}: stopped: {err}"))))?;
+
+    match built {
+        Ok(bytes) => Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response()),
+        Err(why) => Err(ApiError::NotFound(format!("{what}: {why}"))),
+    }
+}
+
+/// GET /validity/finality-input?epoch=: the input of a finality proof of the link to an epoch's
+/// checkpoint, a FinalityInput, encoded: its justification's votes, the target's header and a
+/// witness of its state, from history back to it.
+async fn finality_input(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    #[cfg(feature = "finality-proofs")]
+    {
+        let epoch = number(&query, "epoch")?.ok_or_else(|| ApiError::BadRequest("epoch is the link's target epoch".to_string()))?;
+
+        built_input(&api, peer, &headers, format!("the link to epoch {epoch}"), move |chain, db, json| Ok(crate::proofs::FinalityInput::build(chain, db, json, epoch).map_err(|err| err.to_string())?.to_bytes())).await
+    }
+    #[cfg(not(feature = "finality-proofs"))]
+    {
+        let _ = (api, peer, headers, query);
+
+        Err(ApiError::NotFound("this build builds no finality proofs' inputs".to_string()))
+    }
+}
+
+/// GET /validity/headers-input?to=[&from=]: the input of a header-chain proof going on from the
+/// latest one the chain took, or from genesis, to the link that finalizes epoch to, or as far as one
+/// proof goes (MAX_HEADER_LINKS), by the header-chain program governance names. With from, the links
+/// from the justified checkpoint of that epoch instead, with no previous proof in it: a prover's
+/// own, which it puts in.
+async fn headers_input(Shared(api): Shared<Api>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Result<Response, ApiError> {
+    #[cfg(feature = "header-proofs")]
+    {
+        let to = number(&query, "to")?.ok_or_else(|| ApiError::BadRequest("to is the epoch to finalize".to_string()))?;
+        let from = number(&query, "from")?;
+        let state = State::new(api.db.clone());
+        let program = crate::registry::changes::Changes::new(&state).proofs()?.map(|settings| settings.headers_program).filter(|program| *program != [0; 32]).ok_or_else(|| ApiError::NotFound("governance names no header-chain program".to_string()))?;
+        // From scratch when the latest was made by another program: none but its own goes on.
+        let previous = crate::proofs::ProvenChain::new(&state).headers()?.filter(|taken| crate::proofs::ProvenHeaders::from_public_values(api.hash, &taken.values).is_some_and(|before| before.program == program));
+
+        built_input(&api, peer, &headers, format!("the header chain to epoch {to}"), move |chain, db, json| {
+            let input = match from {
+                Some(epoch) => {
+                    let interval = chain.finality_config().map(|config| config.checkpoint_interval()).unwrap_or(0);
+                    let block = stored_header_at(&*db, epoch.saturating_mul(interval)).map_err(|err| err.to_string())?.ok_or(format!("no checkpoint at epoch {epoch}"))?.id();
+                    crate::proofs::HeadersInput::build_from(chain, db, json, program, crate::structs::vote::Checkpoint { epoch, block }, to)
+                }
+                None => crate::proofs::HeadersInput::build(chain, db, json, program, previous, to),
+            };
+
+            Ok(input.map_err(|err| err.to_string())?.to_bytes())
+        })
+        .await
+    }
+    #[cfg(not(feature = "header-proofs"))]
+    {
+        let _ = (api, peer, headers, query);
+
+        Err(ApiError::NotFound("this build builds no header-chain proofs' inputs".to_string()))
+    }
 }
 
 /// GET /validity: validity proofs as GET /status gives them.
@@ -2876,6 +2978,7 @@ async fn attestations(Shared(api): Shared<Api>, Query(query): Query<HashMap<Stri
         let set_json = |set: &AttestingSet| {
             json!({
                 "total": set.total.to_string(),
+                "needed": set.needed.map(|needed| needed.to_string()),
                 "attesters": set.attesters.iter().map(|(address, _)| to_hex(address)).collect::<Vec<_>>(),
                 "weights": set.attesters.iter().map(|(_, weight)| weight.to_string()).collect::<Vec<_>>(),
                 "hash": to_hex(&set.hash()),
@@ -2893,7 +2996,25 @@ async fn attestations(Shared(api): Shared<Api>, Query(query): Query<HashMap<Stri
                 continue;
             };
             let attesting = |epoch: u64| -> Result<Option<AttestingSet>, ApiError> {
-                Ok(validators.set(epoch)?.map(|set| AttestingSet::of(set.members.iter().map(|member| (member.attester, member.weight)))))
+                // Naming the weight a link needs from the proofs fork on, as attesters sign it.
+                let needing = crate::registry::changes::Changes::new(&state).forks()?.at(epoch.saturating_mul(interval)).has(&crate::params::forks::PROOFS);
+
+                Ok(validators.set(epoch)?.map(|set| {
+                    let attesting = AttestingSet::of(set.members.iter().map(|member| (member.attester, member.weight)));
+                    let needed = match (needing, &api.genesis.finality) {
+                        (false, _) | (_, None) => None,
+                        (true, Some(genesis)) => Some(match crate::registry::changes::Changes::new(&state).finality_in(epoch, genesis) {
+                            #[cfg(feature = "finality-ffg")]
+                            Ok(crate::params::finality::FinalityConfig::Ffg(config)) => config.needed(&set),
+                            _ => set.two_thirds(),
+                        }),
+                    };
+
+                    match needed {
+                        Some(needed) => attesting.needing(needed),
+                        None => attesting,
+                    }
+                }))
             };
             let (Some(set), Some(next)) = (attesting(epoch)?, attesting(epoch + 1)?) else {
                 return Err(ApiError::NotFound(format!("epoch {epoch}'s attesting sets are no longer kept here")));

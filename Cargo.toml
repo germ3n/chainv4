@@ -16,7 +16,7 @@ members = ["macro", "wiki", "gpu", "ethlight", "btclight"]
 exclude = ["contracts", "explorer", "proofs/sp1/program"]
 
 [features]
-default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1", "attestations"]
+default = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "swap", "mnemonic", "sealed-keys", "lvm", "wasm", "evm", "rocksdb", "node", "http", "stream", "client", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "ethereum", "abi", "faucet", "dex", "nft", "bridge", "pool", "updates", "sp1", "attestations", "finality-proofs", "header-proofs"]
 sha256 = ["dep:sha2"]
 blake3 = ["dep:blake3"]
 blake2s = ["dep:blake2"]
@@ -138,6 +138,14 @@ sp1 = ["sp1-groth16", "sp1-plonk", "sp1-stark"]
 sp1-groth16 = ["dep:sp1-verifier"]
 sp1-plonk = ["dep:sp1-verifier"]
 sp1-stark = ["dep:sp1-verifier", "sp1-verifier/full"]
+# Finality proofs: a zk proof that two thirds of an epoch's voters signed a link, checked over a
+# witness of the target's state (proofs::finality), what ChainV4Finality.sol takes beside the
+# attesters' signatures; GET /validity/finality-input and chainv4 prove finality.
+finality-proofs = ["chain", "secp256k1"]
+# Header-chain proofs: the chain's finalized checkpoints proven from genesis, each proof checking
+# the one before, taken on chain by Tx::ProveHeaders and checked by the apps to sync by. A build
+# without it follows only a chain whose blocks hold none.
+header-proofs = ["finality-proofs"]
 # Validators attesting each link with a secp256k1 key for Ethereum, and checking the attestations
 # votes and blocks carry: what ChainV4Finality.sol follows the chain by. Governance turns them off
 # with Change::Attestations; a build without it follows only a chain that has them off, as it
@@ -149,7 +157,7 @@ sp1-prover = ["sp1", "chain", "secp256k1", "client", "dep:sp1-sdk", "dep:bincode
 # Everything that decides how a block runs, without the node: what the validity proofs' program
 # builds chainv4 with, so it runs blocks as a node of the default build does. A feature added that
 # changes how blocks run goes here too.
-consensus = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "lvm", "wasm", "evm", "abi", "chain", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "sp1", "attestations"]
+consensus = ["sha256", "blake3", "blake2s", "blake2b", "xxh3", "keccak256", "ed25519", "edblake", "secp256k1", "bls12-381", "bitcoin", "anchoring", "anchoring-btc", "anchoring-eth", "lvm", "wasm", "evm", "abi", "chain", "finality-ffg", "finality-authority", "finality-depth", "governance-electorate", "governance-council", "names", "sp1", "attestations", "finality-proofs", "header-proofs"]
 # The chain itself, its state transition, without the node around it: what a validity proof runs.
 chain = ["json", "dep:log", "lvm"]
 # Releases for the apps and tools (docs/updates.md): the signed manifest of the newest chainv4,

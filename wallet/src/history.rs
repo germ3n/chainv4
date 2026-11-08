@@ -605,6 +605,7 @@ pub fn action(tx: &Tx, outcome: &CommittedOutcome) -> String {
         (Tx::Anchor { proof: chainv4::structs::tx::AnchorProof::Bitcoin(_) }, _) => "Showed a checkpoint anchored in Bitcoin".to_string(),
         (Tx::Anchor { proof: chainv4::structs::tx::AnchorProof::Ethereum(_) }, _) => "Showed a checkpoint anchored in Ethereum".to_string(),
         (Tx::Prove { range, .. }, _) => format!("Proved blocks {} to {}", range.start.height + 1, range.end.height),
+        (Tx::ProveHeaders { .. }, _) => "Proved the header chain".to_string(),
         (Tx::Batch { steps }, CommittedOutcome::BatchFailed { step }) => format!("A batch of {} step{}, which step {} stopped", steps.len(), if steps.len() == 1 { "" } else { "s" }, step + 1),
         (Tx::Batch { steps }, _) => format!("A batch of {} step{}", steps.len(), if steps.len() == 1 { "" } else { "s" }),
     }
@@ -709,7 +710,7 @@ mod tests {
             vote_reward: u256::new(1),
             max_proofs_per_block: 4,
             validators: Vec::new(),
-            leak: Some(Leak { after_epochs: 4, permille: 10 }),
+            later: chainv4::params::finality::FfgLater { leak: Some(Leak { after_epochs: 4, permille: 10 }), justify_permille: None },
             slash_permille: None,
         };
         let changes = [

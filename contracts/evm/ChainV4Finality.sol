@@ -16,6 +16,12 @@
 // It trusts what two thirds of chainv4's validators sign, as chainv4's own light clients do: what
 // it adds is that nothing else is trusted, no federation and no relayer. Anyone may submit a link.
 //
+// Finality proofs check the validators' own votes instead of their attesters': an SP1 proof that two
+// thirds of an epoch's voters signed a link, the voters as the source checkpoint's state fixed them,
+// taken beside the attesters' signatures (proveLink) from any checkpoint recorded here with that
+// state root. So the two take turns as they like, and with attestations off Ethereum still follows
+// chainv4 by proofs.
+//
 // Validity proofs check what they sign. A proof, SP1's checked by SP1's verifiers, shows that every
 // block from the proven tip to a final checkpoint ran by chainv4's rules, from the tip's state root
 // to the checkpoint's: once one is taken, a checkpoint's state root is no longer only the
@@ -43,9 +49,14 @@ contract ChainV4Finality {
     /// The chain followed, by its EVM chain id, as attestations name it.
     uint256 public immutable chainId;
 
-    /// The hash of the attesting set that signs the next link: keccak256(abi.encode(total,
-    /// attesters, weights)), attesters by address ascending.
+    /// The hash of the attesting set that signs the next link: keccak256(abi.encode(total, needed,
+    /// attesters, weights)), attesters by address ascending, needed the weight a link's votes must
+    /// reach as chainv4's governance sets the threshold, never under two thirds.
     bytes32 public setHash;
+
+    /// The finality program finality proofs are by, as chainv4's governance names it, zero for
+    /// none, when no finality proof is taken.
+    bytes32 public finalityProgram;
 
     /// The newest justified checkpoint taken, and the newest final one.
     uint256 public justifiedEpoch;
@@ -88,6 +99,7 @@ contract ChainV4Finality {
     event SetMoved(bytes32 setHash);
     event Proven(uint256 height, bytes32 block_, bytes32 stateRoot, bytes32 withdrawals);
     event ProgramMoved(bytes32 program);
+    event FinalityProgramMoved(bytes32 program);
 
     /// Starts from a checkpoint the deployer trusts as final, and the hash of the attesting set
     /// that signs the next link: what a chainv4 node it trusts says. Proofs start from the proven
@@ -106,8 +118,10 @@ contract ChainV4Finality {
         bytes32 program_,
         uint256 provenHeight_,
         bytes32 provenBlock_,
-        bytes32 provenRoot_
+        bytes32 provenRoot_,
+        bytes32 finalityProgram_
     ) {
+        finalityProgram = finalityProgram_;
         chainId = chainId_;
         setHash = setHash_;
         verifiers = verifiers_;
@@ -136,13 +150,15 @@ contract ChainV4Finality {
     /// Takes a link once enough of the attesting set signed it.
     ///   link: sourceEpoch, sourceBlock, targetEpoch, targetBlock, the target's height and state
     ///         root, each a word.
-    ///   total, attesters, weights: the attesting set that signs it, whose hash is setHash.
+    ///   total, needed, attesters, weights: the attesting set that signs it, whose hash is setHash,
+    ///         and the weight its attesters must reach.
     ///   nextSet: the hash of the next epoch's attesting set, which it moves to.
     ///   signers: the places in attesters of those that signed, ascending.
     ///   signatures: their attestations, 65 bytes each, r, s and v, in the same order.
     function submit(
         bytes32[6] calldata link,
         uint256 total,
+        uint256 needed,
         address[] calldata attesters,
         uint256[] calldata weights,
         bytes32 nextSet,
@@ -150,13 +166,37 @@ contract ChainV4Finality {
         bytes calldata signatures
     ) external {
         require(attesters.length == weights.length, "one weight for each attester");
-        require(keccak256(abi.encode(total, attesters, weights)) == setHash, "not the set that signs the next link");
+        require(keccak256(abi.encode(total, needed, attesters, weights)) == setHash, "not the set that signs the next link");
+        require(needed * 3 >= total * 2, "a threshold under two thirds");
         require(link[1] != bytes32(0), "a link from no checkpoint");
         require(uint256(link[2]) > uint256(link[0]) && uint256(link[2]) > justifiedEpoch, "its target is no later checkpoint");
         require(signatures.length == signers.length * 65, "65 bytes for each signer");
-        require(signed(digest(link, setHash, nextSet), attesters, weights, signers, signatures) * 3 >= total * 2, "short of two thirds of the set");
+        require(signed(digest(link, setHash, nextSet), attesters, weights, signers, signatures) >= needed, "short of the weight a link needs");
 
         record(link, nextSet);
+    }
+
+    /// Takes a link by a finality proof: eleven words of public values, chainId, genesis,
+    /// sourceEpoch, sourceBlock, sourceRoot, targetEpoch, targetBlock, the target's height and state
+    /// root, the next epoch's attesting set, and the finality program chainv4's governance names at
+    /// the target. Its source must be a checkpoint recorded here with that state root, which fixed
+    /// the voters that signed it; the attesters' set moves to the next, and the program follows.
+    function proveLink(bytes calldata publicValues, bytes calldata proof) external {
+        require(finalityProgram != bytes32(0) && verifiers.length > 0, "no finality program to prove by");
+        require(publicValues.length == 352, "eleven words of public values");
+        bytes32[11] memory v = abi.decode(publicValues, (bytes32[11]));
+        require(uint256(v[0]) == chainId && v[1] == genesis, "a link of another chain");
+        uint256 sourceEpoch = uint256(v[2]);
+        require(v[3] != bytes32(0) && blockAt[sourceEpoch] == v[3] && stateRootAt[sourceEpoch] == v[4], "a link from no checkpoint recorded here");
+        require(uint256(v[5]) > sourceEpoch && uint256(v[5]) > justifiedEpoch, "its target is no later checkpoint");
+        require(verified(finalityProgram, publicValues, proof), "no verifier here takes the proof");
+
+        record([v[2], v[3], v[5], v[6], v[7], v[8]], v[9]);
+
+        if (v[10] != bytes32(0) && v[10] != finalityProgram) {
+            finalityProgram = v[10];
+            emit FinalityProgramMoved(v[10]);
+        }
     }
 
     /// The weight of the attesters whose attestations of a digest these are.
@@ -171,7 +211,7 @@ contract ChainV4Finality {
 
     /// Takes a link that holds: its target justified, its source final when the target is the
     /// very next epoch, and the next epoch's set as the one that signs from now on.
-    function record(bytes32[6] calldata link, bytes32 nextSet) private {
+    function record(bytes32[6] memory link, bytes32 nextSet) private {
         uint256 sourceEpoch = uint256(link[0]);
         uint256 targetEpoch = uint256(link[2]);
         justifiedEpoch = targetEpoch;
@@ -202,9 +242,9 @@ contract ChainV4Finality {
 
     /// Whether any verifier takes the proof under the program: each is asked in turn, as each of
     /// SP1's gateways refuses a proof of another kind.
-    function verified(bytes calldata publicValues, bytes calldata proof) internal view returns (bool) {
+    function verified(bytes32 by, bytes calldata publicValues, bytes calldata proof) internal view returns (bool) {
         for (uint256 i = 0; i < verifiers.length; i++) {
-            try verifiers[i].verifyProof(program, publicValues, proof) {
+            try verifiers[i].verifyProof(by, publicValues, proof) {
                 return true;
             } catch {}
         }
@@ -225,7 +265,7 @@ contract ChainV4Finality {
         require(finalAt[epoch] && blockAt[epoch] == v[6] && heightAt[epoch] == uint256(v[5]) && stateRootAt[epoch] == v[7], "a range that ends at no final checkpoint here");
         require(uint256(v[5]) > provenHeight, "a range that ends after it starts");
         require(uint256(v[10]) <= 2, "no such gateway mode");
-        require(verified(publicValues, proof), "no verifier here takes the proof");
+        require(verified(program, publicValues, proof), "no verifier here takes the proof");
 
         provenHeight = uint256(v[5]);
         provenBlock = v[6];

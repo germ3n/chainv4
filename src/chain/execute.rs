@@ -523,7 +523,7 @@ fn authorize(block: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> Resul
 fn brought_by(tx: &Tx) -> Option<&'static crate::params::forks::Fork> {
     match tx {
         Tx::SetRestake { .. } => Some(&crate::params::forks::RESTAKING),
-        Tx::Prove { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_) | crate::governance::Change::Attestations(_), .. } => Some(&crate::params::forks::PROOFS),
+        Tx::Prove { .. } | Tx::ProveHeaders { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_) | crate::governance::Change::Attestations(_), .. } => Some(&crate::params::forks::PROOFS),
         Tx::Multisig { tx, .. } => brought_by(tx),
         _ => None,
     }
@@ -920,6 +920,66 @@ fn prove(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Add
     Ok(Effect::Done)
 }
 
+/// Runs a Tx::ProveHeaders: a header-chain proof by the program governance named, of this chain,
+/// finalizing a checkpoint on it later than the last one taken, is kept and paid for each epoch it
+/// moves on.
+fn prove_headers(layer: &Arc<State>, context: &BlockContext, sender: &Address, kind: crate::proofs::ProofKind, values: &[u8], proof: &[u8]) -> Result<Effect, Failure> {
+    #[cfg(feature = "header-proofs")]
+    {
+        let refused = |why: String| Failure::Proof(why);
+        let db = |err: DbError| Failure::Registry(RegistryError::Db(err));
+        let settings = Changes::new(layer).proofs().map_err(db)?.ok_or_else(|| refused("governance named no proof system".to_string()))?;
+
+        if settings.headers_program == [0; 32] {
+            return Err(refused("governance named no header-chain program".to_string()));
+        }
+
+        if !settings.takes(kind) {
+            return Err(refused(format!("a {} proof, where the chain takes {}", kind.name(), settings.kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>().join(" or "))));
+        }
+
+        let proven = crate::proofs::ProvenChain::new(layer);
+        let taken = crate::proofs::TakenHeaders { kind, values: values.to_vec(), proof: proof.to_vec() };
+        let headers = crate::proofs::ProvenHeaders::from_public_values(context.genesis.algorithm(), values).ok_or_else(|| refused("public values that are no header chain".to_string()))?;
+
+        if headers.genesis != context.genesis || headers.chain_id != crate::crypto::ethereum::chain_id(&context.genesis) {
+            return Err(refused("a header chain of another chain".to_string()));
+        }
+
+        let finalized = headers.finalized;
+
+        if proven.block_at(finalized.height).map_err(db)? != Some(finalized.checkpoint.block) {
+            return Err(refused(format!("a finalized checkpoint off this chain at {}, or longer ago than it keeps", finalized.height)));
+        }
+
+        let before = match proven.headers().map_err(db)? {
+            Some(before) => crate::proofs::ProvenHeaders::from_public_values(context.genesis.algorithm(), &before.values).map_or(0, |before| before.finalized.checkpoint.epoch),
+            None => 0,
+        };
+
+        if finalized.checkpoint.epoch <= before {
+            return Err(refused(format!("a header chain to epoch {}, where the chain is proven to epoch {before}", finalized.checkpoint.epoch)));
+        }
+
+        taken.check(context.genesis.algorithm(), &context.genesis, &settings.headers_program).map_err(refused)?;
+        proven.set_headers(&taken);
+        let reward = settings.reward_per_epoch.saturating_mul(u256::from(finalized.checkpoint.epoch - before));
+
+        if reward > u256::ZERO {
+            Accounts::new(layer).credit(sender, reward).map_err(Failure::Registry)?;
+            crate::registry::supply::Supply::mint(layer, reward).map_err(db)?;
+        }
+
+        Ok(Effect::Done)
+    }
+    #[cfg(not(feature = "header-proofs"))]
+    {
+        let _ = (layer, context, sender, kind, values, proof);
+
+        Err(Failure::Proof("this build checks no header-chain proofs".to_string()))
+    }
+}
+
 /// Runs a Tx::Anchor: anchoring's own check, on a build that takes anchors.
 fn anchor(layer: &Arc<State>, rules: &Rules, context: &BlockContext, sender: &Address, proof: &crate::structs::tx::AnchorProof) -> Result<Effect, Failure> {
     #[cfg(feature = "anchoring")]
@@ -1026,6 +1086,7 @@ fn run(
         },
         Tx::Anchor { proof } => (anchor(layer, rules, context, &sender, proof), Contracted::default()),
         Tx::Prove { kind, range, proof } => (prove(layer, rules, context, &sender, *kind, range, proof), Contracted::default()),
+        Tx::ProveHeaders { kind, values, proof } => (prove_headers(layer, context, &sender, *kind, values, proof), Contracted::default()),
         Tx::Transfer { from, to, amount } => (moved(accounts.transfer(from, to, amount.to_u256())), Contracted::default()),
         Tx::Mint { to, amount } => {
             if rules.minter != Some(sender) {
@@ -1271,6 +1332,9 @@ fn run(
                 Change::Fees(fees) => Ok(fees.problem()),
                 Change::Reward(reward) => Ok(crate::chain::reward_problem(reward)),
                 Change::Limits(limits) => Ok(limits.problem().or_else(|| limits.contract.and_then(|contract| rules.vm.limits.lowering_problem(&contract)))),
+                // A threshold of FFG's own comes with the proofs fork: a release before it reads none.
+                #[cfg(feature = "finality-ffg")]
+                Change::Finality(FinalityConfig::Ffg(tuned)) if tuned.later.justify_permille.is_some() && !rules.vm.forks.has(&crate::params::forks::PROOFS) => Ok(Some("a justification threshold comes with the proofs fork")),
                 Change::Finality(tuned) => settled(&|decided| tuned.retune_problem(decided)),
                 Change::SwitchFinality { epoch: named, config } => crate::chain::switch::switch_problem(layer, finality, epoch, *named, config),
                 Change::Upgrade(upgrade) => Ok(upgrade.problem(height)),

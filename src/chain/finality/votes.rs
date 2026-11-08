@@ -135,6 +135,17 @@ fn taken(chain: &View, vote: SignedVote) -> Result<SignedVote, DbError> {
     })
 }
 
+/// An epoch's attesting set from its voters: needing their threshold from the proofs fork on.
+#[cfg(feature = "secp256k1")]
+fn attesting_set(voters: Voters, needing: bool) -> crate::structs::attestation::AttestingSet {
+    let set = crate::structs::attestation::AttestingSet::of(voters.set.members.iter().map(|member| (member.attester, member.weight)));
+
+    match needing {
+        true => set.needing(voters.needed),
+        false => set,
+    }
+}
+
 fn counted_key(vote: &SignedVote) -> Vec<u8> {
     let mut key = epoch_key(COUNTED, vote.vote.target.epoch);
     key.extend_from_slice(&vote.vote.voter.hashable_bytes_with_tag());
@@ -392,9 +403,10 @@ impl<E: Electorate> Votes<E> {
     fn link_in(&self, state: &State, header: &crate::structs::block::BlockHeader, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
         use crate::structs::attestation::{AttestedLink, AttestingSet};
 
-        let attesting = |epoch: u64| -> Result<Option<AttestingSet>, DbError> {
-            Ok(self.electorate.voters(state, epoch)?.map(|voters| AttestingSet::of(voters.set.members.iter().map(|member| (member.attester, member.weight)))))
-        };
+        // From the proofs fork on, a set's hash names the weight a link needs, as the threshold may
+        // be other than two thirds.
+        let needing = crate::registry::changes::Changes::new(state).forks()?.at(header.height).has(&crate::params::forks::PROOFS);
+        let attesting = |epoch: u64| -> Result<Option<AttestingSet>, DbError> { Ok(self.electorate.voters(state, epoch)?.map(|voters| attesting_set(voters, needing))) };
         let (Some(set), Some(next)) = (attesting(target.epoch)?, attesting(target.epoch + 1)?) else {
             return Ok(None);
         };
@@ -413,7 +425,10 @@ impl<E: Electorate> Votes<E> {
     /// An epoch's attesting set, from its fixed validator set.
     #[cfg(feature = "secp256k1")]
     fn attesting(&self, chain: &View, epoch: u64) -> Result<Option<crate::structs::attestation::AttestingSet>, DbError> {
-        Ok(self.electorate.voters(&chain.state(), epoch)?.map(|voters| crate::structs::attestation::AttestingSet::of(voters.set.members.iter().map(|member| (member.attester, member.weight)))))
+        let state = chain.state();
+        let needing = crate::registry::changes::Changes::new(&state).forks()?.at(self.checkpoint_height(epoch)).has(&crate::params::forks::PROOFS);
+
+        Ok(self.electorate.voters(&state, epoch)?.map(|voters| attesting_set(voters, needing)))
     }
 
     /// Whether a vote's attestation, if it carries one, is its validator's: it recovers to the
@@ -624,6 +639,10 @@ impl<E: Electorate> Finality for Votes<E> {
     #[cfg(feature = "secp256k1")]
     fn attesting_set(&self, chain: &View, epoch: u64) -> Result<Option<crate::structs::attestation::AttestingSet>, DbError> {
         self.attesting(chain, epoch)
+    }
+
+    fn voters_in(&self, state: &State, epoch: u64) -> Result<Option<(ValidatorSet, u256)>, DbError> {
+        Ok(self.electorate.voters(state, epoch)?.map(|voters| (voters.set, voters.needed)))
     }
 
     fn checkpoint_interval(&self) -> u64 {

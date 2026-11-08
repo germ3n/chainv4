@@ -2312,6 +2312,18 @@ contract computes, so they wait for the next regenesis (see the todo).
   so a range in which any contract scans its storage takes the whole state as its witness.
 - **Proofs need history.** A range's input is built from history back to its start: an archive,
   or a `--state-history` window that reaches it.
+- **Three programs.** Ranges, finality links and the header chain are separate ELFs from one crate
+  (`proofs/sp1/program`, its `src/bin`), each with its own id that governance names. Any change to
+  code they share moves all three ids.
+- **A header-chain proof only follows its own program.** One by a new program can't go on from one
+  by the old: it starts again from genesis. That costs a link for each justified epoch, a few
+  million cycles each.
+- **FFG's threshold rides in the attesting set.** From the `proofs` fork on, the set's hash commits
+  to the weight a link needs, so attesters sign what Ethereum checks; a contract deployed before
+  the fork, which checks two thirds itself, takes none of these links, and is deployed again.
+- **A link's voters come from its source.** A finality or header-chain proof reads them from the
+  source checkpoint's state, so whoever takes it only checks the source's state root against one it
+  holds. A link that skips more epochs than voters are fixed ahead can't be proven.
 - **One program, three kinds.** Groth16, PLONK and the STARK prove the same program, by the same id:
   the kind is only how the proof is wrapped. The STARK's verifier takes that id as the eight field
   words it packs (`sp1_stark_key`).

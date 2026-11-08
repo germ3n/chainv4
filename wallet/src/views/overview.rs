@@ -54,8 +54,12 @@ pub fn show(ui: &mut Ui, ctx: &mut Ctx, send: &mut super::send::SendState) {
             Some(settings) => {
                 let genesis = client.genesis();
                 let proven = chainv4_ui::validity::proven(validity, &genesis.to_string(), genesis.algorithm(), Some(settings.program));
+                let headers = chainv4_ui::validity::headers_proven(validity, &genesis.to_string(), genesis.algorithm(), Some(settings.headers_program));
 
-                Some(proven.describe())
+                Some(match headers {
+                    chainv4_ui::validity::HeadersProven::Off => proven.describe(),
+                    headers => format!("{}, and {}", proven.describe(), headers.describe()),
+                })
             }
         };
 

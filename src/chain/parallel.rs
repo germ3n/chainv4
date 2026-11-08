@@ -186,7 +186,7 @@ fn touches_of(tx: &Tx, sender: Address, nonce: u64, hash: HashType) -> Vec<Touch
         // turns, with governance, whose state the list is kept beside.
         Tx::Anchor { .. } => touched.extend([Touch::Governance, Touch::Address(crate::chain::REWARD_POOL)]),
         // Proofs move one proven tip, kept beside governance's settings they are checked by.
-        Tx::Prove { .. } => touched.push(Touch::Governance),
+        Tx::Prove { .. } | Tx::ProveHeaders { .. } => touched.push(Touch::Governance),
         Tx::Transfer { to, .. } | Tx::Mint { to, .. } | Tx::ContractCall { to, .. } | Tx::EvmCall { to, .. } => touched.push(Touch::Address(*to)),
         #[cfg(feature = "evm")]
         Tx::Deploy { code: crate::structs::code::Code::Evm(_) } => touched.push(Touch::Address(crate::vm::evm::create_address(&sender, nonce))),

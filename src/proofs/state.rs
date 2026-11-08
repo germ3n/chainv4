@@ -11,6 +11,7 @@ use {
 };
 
 const TIP: &[u8] = b"proofs:tip";
+const HEADERS: &[u8] = b"proofs:headers";
 const BLOCK: &[u8] = b"proofs:block:";
 
 #[document(
@@ -43,6 +44,23 @@ impl<'a> ProvenChain<'a> {
     #[document(parent = "ProvenChain", summary = "The id of the block at a height, while the chain keeps it: from the block before the fork, the latest RECORDED_BLOCKS of them.")]
     pub fn block_at(&self, height: u64) -> Result<Option<Hash>, DbError> {
         self.state.get_value(Column::Validators, &block_key(height))
+    }
+
+    #[document(parent = "ProvenChain", summary = "The latest header-chain proof taken (Tx::ProveHeaders), or None before any.")]
+    #[cfg(feature = "secp256k1")]
+    pub fn headers(&self) -> Result<Option<super::TakenHeaders>, DbError> {
+        self.state.get_value(Column::Validators, HEADERS)
+    }
+
+    #[document(parent = "ProvenChain", summary = "Keeps a header-chain proof as the latest taken.")]
+    #[cfg(feature = "secp256k1")]
+    pub fn set_headers(&self, headers: &super::TakenHeaders) {
+        self.state.put_value(Column::Validators, HEADERS.to_vec(), headers);
+    }
+
+    #[document(parent = "ProvenChain", summary = "Where the latest header-chain proof is kept in the Validators column, for an app to prove.")]
+    pub fn headers_key() -> &'static [u8] {
+        HEADERS
     }
 
     #[document(parent = "ProvenChain", summary = "Moves the proven tip to a proof's end.")]

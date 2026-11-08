@@ -664,7 +664,7 @@ mod tests {
                 vote_reward: u256::ZERO,
                 max_proofs_per_block: 4,
                 validators: Vec::new(),
-                leak,
+                later: crate::params::finality::FfgLater { leak, justify_permille: None },
                 slash_permille: None,
             })
         };

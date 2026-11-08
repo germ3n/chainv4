@@ -196,6 +196,17 @@ fn about(ui: &mut Ui, ctx: &mut Ctx, node: &NodeView, streaming: &Streaming) {
                 facts.row("proofs", |ui| {
                     ui.add(egui::Label::new(RichText::new(proven.describe()).color(tone)).wrap());
                 });
+                let headers = chainv4_ui::validity::headers_proven(validity, &status.genesis, hash, None);
+                if headers != chainv4_ui::validity::HeadersProven::Off {
+                    let tone = match headers {
+                        chainv4_ui::validity::HeadersProven::Unchecked { .. } => palette.warn,
+                        chainv4_ui::validity::HeadersProven::Checked { .. } => palette.ink,
+                        _ => palette.muted,
+                    };
+                    facts.row("header chain", |ui| {
+                        ui.add(egui::Label::new(RichText::new(headers.describe()).color(tone)).wrap());
+                    });
+                }
             }
             facts.row("syncing", |ui| match &node.syncing {
                 _ if node.hides("syncing") => hidden(ui, &palette),

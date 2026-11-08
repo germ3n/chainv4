@@ -45,6 +45,8 @@ pub fn word(hash: &Hash) -> [u8; 32] {
 pub struct AttestingSet {
     #[document(summary = "The weight of every validator in the set.")]
     pub total: u256,
+    #[document(summary = "The weight a link's votes must reach, as the set's finality settings name it, from the proofs fork on: what the contract checks the attesters' weight against, committed to by the set's hash. None before the fork, when two thirds is all there is and the hash leaves it out.")]
+    pub needed: Option<u256>,
     #[document(summary = "Each attester and its weight, by address ascending.")]
     pub attesters: Vec<([u8; 20], u256)>,
 }
@@ -72,18 +74,31 @@ impl AttestingSet {
 
         attesters.sort_by_key(|(address, _)| *address);
 
-        AttestingSet { total, attesters }
+        AttestingSet { total, needed: None, attesters }
     }
 
-    #[document(parent = "AttestingSet", summary = "Its hash, as the contract makes it: keccak256(abi.encode(total, attesters, weights)).")]
+    #[document(
+        parent = "AttestingSet",
+        summary = "The set needing a weight a link's votes must reach: what it is from the proofs fork on, its hash committing to it.",
+        params = { needed = "The weight, as the epoch's finality settings name it." },
+    )]
+    pub fn needing(self, needed: u256) -> AttestingSet {
+        AttestingSet { needed: Some(needed), ..self }
+    }
+
+    #[document(parent = "AttestingSet", summary = "Its hash, as the contract makes it: keccak256(abi.encode(total, needed, attesters, weights)) from the proofs fork on, keccak256(abi.encode(total, attesters, weights)) before it.")]
     pub fn hash(&self) -> [u8; 32] {
         let count = self.attesters.len();
-        let mut encoded = Vec::with_capacity(32 * (5 + 2 * count));
+        let mut encoded = Vec::with_capacity(32 * (6 + 2 * count));
         let number = |value: u256| value.to_be_bytes();
-        // The head: total, then where each array starts.
+        // The head: total, needed when there is one, then where each array starts.
+        let head: u64 = if self.needed.is_some() { 4 } else { 3 };
         encoded.extend_from_slice(&number(self.total));
-        encoded.extend_from_slice(&number(u256::from(96u64)));
-        encoded.extend_from_slice(&number(u256::from(128 + 32 * count as u64)));
+        if let Some(needed) = self.needed {
+            encoded.extend_from_slice(&number(needed));
+        }
+        encoded.extend_from_slice(&number(u256::from(32 * head)));
+        encoded.extend_from_slice(&number(u256::from(32 * (head + 1) + 32 * count as u64)));
         encoded.extend_from_slice(&number(u256::from(count as u64)));
 
         for (address, _) in &self.attesters {
@@ -106,9 +121,12 @@ impl AttestingSet {
         self.attesters.iter().find(|(address, _)| address == attester).map(|(_, weight)| *weight)
     }
 
-    #[document(parent = "AttestingSet", summary = "Whether some weight is two thirds of the whole set's or more, as a justification needs and the contract checks: weight × 3 ≥ total × 2.")]
+    #[document(parent = "AttestingSet", summary = "Whether some weight is what a justification needs, as the contract checks: the weight the set needs from the proofs fork on, two thirds of the whole set's before it, weight × 3 ≥ total × 2.")]
     pub fn enough(&self, weight: u256) -> bool {
-        weight.saturating_mul(u256::from(3u64)) >= self.total.saturating_mul(u256::from(2u64))
+        match self.needed {
+            Some(needed) => weight >= needed,
+            None => weight.saturating_mul(u256::from(3u64)) >= self.total.saturating_mul(u256::from(2u64)),
+        }
     }
 }
 

@@ -33,8 +33,15 @@ fn secret(keypair: &Keypair) -> [u8; 32] {
     }
 }
 
-/// FFG of the three voters, the first two attesting, the third weighing more than either.
+/// FFG of the three voters, the first two attesting, the third weighing more than either; the
+/// proofs fork from the first block, so attesting sets name the weight a link needs, as
+/// ChainV4Finality.sol takes them.
 fn attested() -> Chain {
+    attested_with(None)
+}
+
+/// The same, with a justification threshold of its own in thousandths, or two thirds.
+fn attested_with(justify_permille: Option<u32>) -> Chain {
     let attesters = attesters();
     let bonds = [10u64, 10, 15];
     let validators = voters()
@@ -43,8 +50,13 @@ fn attested() -> Chain {
         .map(|(at, keypair)| GenesisValidator { account: keypair.public().address(), voter: keypair.public(), bond: u256::new(bonds[at].into()), attester: attesters.get(at).map(address_of) })
         .collect();
     let FinalityConfig::Ffg(config) = super::voting::ffg() else { unreachable!() };
+    let later = crate::params::finality::FfgLater { justify_permille, ..config.later };
+    let genesis = Genesis {
+        forks: crate::params::forks::ForkSchedule { forks: vec![crate::params::forks::ScheduledFork { name: crate::params::forks::PROOFS.name.to_string(), height: 1, epoch: None, least: None }], lead: None },
+        ..genesis_with(Some(FinalityConfig::Ffg(FfgConfig { validators, later, ..config })))
+    };
 
-    open(&FinalityConfig::Ffg(FfgConfig { validators, ..config }))
+    Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap()
 }
 
 /// The honest vote of a voter, with its attestation signed by this key.
@@ -65,8 +77,8 @@ fn a_votes_attestation_must_be_its_validators_attesters_and_the_set_says_who_att
     // The whole set's weight, and the two attesters by address, each with its validator's weight.
     let mut expected = vec![(address_of(&first), u256::new(10)), (address_of(&second), u256::new(10))];
     expected.sort();
-    assert_eq!(set, AttestingSet { total: u256::new(35), attesters: expected });
-    assert!(!set.enough(u256::new(20)) && set.enough(u256::new(24)), "two thirds of 35");
+    assert_eq!(set, AttestingSet { total: u256::new(35), needed: Some(u256::new(24)), attesters: expected });
+    assert!(!set.enough(u256::new(23)) && set.enough(u256::new(24)), "two thirds of 35, rounded up");
 
     grow_to(&mut chain, INTERVAL + 1);
     let voters = voters();
@@ -132,6 +144,7 @@ fn submit(link: &AttestedLink, set: &AttestingSet, signed: &[([u8; 20], [u8; 65]
     let types = [
         AbiType::FixedArray(Box::new(AbiType::FixedBytes(32)), 6),
         AbiType::Uint(256),
+        AbiType::Uint(256),
         AbiType::Array(Box::new(AbiType::Address)),
         AbiType::Array(Box::new(AbiType::Uint(256))),
         AbiType::FixedBytes(32),
@@ -141,6 +154,7 @@ fn submit(link: &AttestedLink, set: &AttestingSet, signed: &[([u8; 20], [u8; 65]
     let values = [
         AbiValue::Array(words.iter().map(|word| AbiValue::FixedBytes(word.to_vec())).collect()),
         AbiValue::Uint(set.total),
+        AbiValue::Uint(set.needed.expect("a set from the proofs fork on")),
         AbiValue::Array(set.attesters.iter().map(|(address, _)| AbiValue::Address(*address)).collect()),
         AbiValue::Array(set.attesters.iter().map(|(_, weight)| AbiValue::Uint(*weight)).collect()),
         AbiValue::FixedBytes(link.next_set.to_vec()),
@@ -148,7 +162,7 @@ fn submit(link: &AttestedLink, set: &AttestingSet, signed: &[([u8; 20], [u8; 65]
         AbiValue::Bytes(signed.iter().flat_map(|(_, attestation)| attestation.to_vec()).collect()),
     ];
 
-    [selector("submit(bytes32[6],uint256,address[],uint256[],bytes32,uint256[],bytes)"), encode_values(&types, &values).unwrap()].concat()
+    [selector("submit(bytes32[6],uint256,uint256,address[],uint256[],bytes32,uint256[],bytes)"), encode_values(&types, &values).unwrap()].concat()
 }
 
 #[test]
@@ -158,8 +172,14 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
         let FinalityConfig::Ffg(config) = super::voting::ffg() else { unreachable!() };
         let attesters = [attesters()[0].clone(), attesters()[1].clone(), Keypair::from_private(PrivateKey::Secp256k1([43; 32]))];
         let validators = voters().iter().zip(&attesters).map(|(keypair, attester)| GenesisValidator { account: keypair.public().address(), voter: keypair.public(), bond: u256::new(10), attester: Some(address_of(attester)) }).collect();
+        // The proofs fork from the first block: sets name the weight a link needs, as the
+        // contract takes them.
+        let genesis = Genesis {
+            forks: crate::params::forks::ForkSchedule { forks: vec![crate::params::forks::ScheduledFork { name: crate::params::forks::PROOFS.name.to_string(), height: 1, epoch: None, least: None }], lead: None },
+            ..genesis_with(Some(FinalityConfig::Ffg(FfgConfig { validators, ..config })))
+        };
 
-        open(&FinalityConfig::Ffg(FfgConfig { validators, ..config }))
+        Chain::open(Arc::new(MemoryDb::default()), &genesis).unwrap()
     };
     let attesters = [attesters()[0].clone(), attesters()[1].clone(), Keypair::from_private(PrivateKey::Secp256k1([43; 32]))];
     let voters = voters();
@@ -174,7 +194,7 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
     let verifier = deploy(&mut chain, crate::structs::hex::from_hex(include_str!("../../../../contracts/evm/MockSp1Verifier.bin").trim()).unwrap());
     let Address::Evm(verifier) = verifier else { panic!("an EVM contract") };
     let constructor = encode_values(
-        &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
+        &[AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32)],
         &[
             AbiValue::Uint(u256::from(crate::crypto::ethereum::chain_id(&chain.genesis()))),
             AbiValue::Uint(u256::ZERO),
@@ -188,6 +208,7 @@ fn chainv4_finality_sol_takes_the_links_two_thirds_of_the_attesting_set_signed_a
             AbiValue::Uint(u256::ZERO),
             AbiValue::FixedBytes(word(&chain.genesis()).to_vec()),
             AbiValue::FixedBytes(word(&genesis_header.state_root).to_vec()),
+            AbiValue::FixedBytes([0; 32].to_vec()),
         ],
     )
     .unwrap();
@@ -343,7 +364,7 @@ fn governance_turns_attestations_off_and_votes_and_blocks_then_carry_none() {
 
     let mut chain = governed(INTERVAL);
     let at = |chain: &Chain| crate::registry::changes::Changes::new(&chain.state()).attestations_at(chain.tip().height + 1).unwrap();
-    let proofs = |gateway: GatewayMode| Change::Proofs(ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::ZERO, gateway });
+    let proofs = |gateway: GatewayMode| Change::Proofs(ProofSettings { kinds: vec![ProofKind::Test], program: [5; 32], reward_per_block: u256::ZERO, gateway, finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO });
 
     // Before the fork the change is no transaction; on until governance says otherwise.
     assert_eq!(vote_on(&mut chain, Change::Attestations(false)), None, "left out of the block");
@@ -397,4 +418,139 @@ fn governance_turns_attestations_off_and_votes_and_blocks_then_carry_none() {
     let justification = unpaid.iter().find(|proof| proof.target.epoch == 3).expect("epoch 3 justified");
     assert!(justification.votes.iter().all(|vote| vote.attestation.is_some()), "kept");
     advance(&mut chain, Vec::new(), unpaid).unwrap();
+}
+
+/// ChainV4Finality.sol takes links by finality proofs, the voters' own votes checked as the
+/// source's state fixed them, with no attestation at all, from any checkpoint it recorded: after
+/// links by attestations as well, and the attesters' path goes on after them. It refuses a link by
+/// another program, from a checkpoint it did not record or with another state root, or not later.
+#[cfg(feature = "finality-proofs")]
+#[test]
+fn chainv4_finality_sol_takes_links_by_finality_proofs_of_the_voters_own_votes() {
+    let mut chain = attested();
+    let genesis_header = chain.block_at(0).unwrap().unwrap().header;
+    let finality_program = [7; 32];
+    let Address::Evm(verifier) = deploy(&mut chain, crate::structs::hex::from_hex(include_str!("../../../../contracts/evm/MockSp1Verifier.bin").trim()).unwrap()) else { panic!("an EVM contract") };
+    let values = vec![
+        AbiValue::Uint(u256::from(crate::crypto::ethereum::chain_id(&chain.genesis()))),
+        AbiValue::Uint(u256::ZERO),
+        AbiValue::FixedBytes(word(&start(&chain).block).to_vec()),
+        AbiValue::Uint(u256::ZERO),
+        AbiValue::FixedBytes(word(&genesis_header.state_root).to_vec()),
+        AbiValue::FixedBytes(chain.attesting_set(1).unwrap().unwrap().hash().to_vec()),
+        AbiValue::Array(vec![AbiValue::Address(verifier)]),
+        AbiValue::FixedBytes(word(&chain.genesis()).to_vec()),
+        AbiValue::FixedBytes([0; 32].to_vec()),
+        AbiValue::Uint(u256::ZERO),
+        AbiValue::FixedBytes(word(&chain.genesis()).to_vec()),
+        AbiValue::FixedBytes(word(&genesis_header.state_root).to_vec()),
+        AbiValue::FixedBytes(finality_program.to_vec()),
+    ];
+    let types = [
+        AbiType::Uint(256), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Array(Box::new(AbiType::Address)),
+        AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::Uint(256), AbiType::FixedBytes(32), AbiType::FixedBytes(32), AbiType::FixedBytes(32),
+    ];
+    let init = [crate::structs::hex::from_hex(include_str!("../../../../contracts/evm/ChainV4Finality.bin").trim()).unwrap(), encode_values(&types, &values).unwrap()].concat();
+    let contract = deploy(&mut chain, init);
+
+    // Epochs justified by plain votes, no attestation: the first voter's and the third's, who
+    // names no attester at all, together two thirds of the weight.
+    let voters = voters();
+    for epoch in 1..=5 {
+        grow_to(&mut chain, epoch * INTERVAL + 1);
+        for voter in [&voters[0], &voters[2]] {
+            let vote = honest_vote(&chain, voter);
+            chain.add_vote(vote).unwrap();
+        }
+    }
+    let prove = |values: Vec<u8>, program: [u8; 32]| {
+        let proof = crate::proofs::TestProofs::proof(&program, &values);
+
+        [selector("proveLink(bytes,bytes)"), encode_values(&[AbiType::Bytes, AbiType::Bytes], &[AbiValue::Bytes(values), AbiValue::Bytes(proof)]).unwrap()].concat()
+    };
+    let link = |chain: &Chain, epoch: u64| {
+        let input = crate::proofs::LinkInput::build(chain, chain.db().snapshot(), epoch).unwrap();
+
+        crate::proofs::check_link(chain, &input).unwrap()
+    };
+
+    let one = link(&chain, 1);
+    assert_eq!(one.source_root, genesis_header.state_root, "genesis's state fixed epoch 1's voters");
+
+    // Refused: by another program, from a source root it did not record, from a source it never
+    // recorded.
+    assert!(call(&mut chain, contract, prove(one.public_values(), [8; 32])).is_err(), "another program");
+    let other = crate::proofs::ProvenLink { source_root: one.state_root, ..one };
+    assert!(call(&mut chain, contract, prove(other.public_values(), finality_program)).is_err(), "another state root");
+    let three = link(&chain, 3);
+    assert!(call(&mut chain, contract, prove(three.public_values(), finality_program)).is_err(), "epoch 2 not recorded yet");
+
+    // Taken, one link after another: justified, then its source final, the attesters' set too.
+    for epoch in 1..=3 {
+        let proven = link(&chain, epoch);
+        call(&mut chain, contract, prove(proven.public_values(), finality_program)).unwrap();
+        assert_eq!(read(&mut chain, contract, "justifiedEpoch()"), u256::from(epoch));
+        assert_eq!(read(&mut chain, contract, "setHash()"), u256::from_be_bytes(proven.next_attesting_set));
+    }
+    assert_eq!(read(&mut chain, contract, "finalizedEpoch()"), u256::from(2u8));
+
+    // The same link again is no later checkpoint; the next one goes on.
+    let (again, four) = (link(&chain, 3), link(&chain, 4));
+    assert!(call(&mut chain, contract, prove(again.public_values(), finality_program)).is_err(), "not later");
+    call(&mut chain, contract, prove(four.public_values(), finality_program)).unwrap();
+    assert_eq!(read(&mut chain, contract, "finalizedEpoch()"), u256::from(3u8));
+}
+
+/// A threshold above two thirds, from FFG's settings: the third voter and the first, 25 of 35, no
+/// longer justify at 800 thousandths, which need 28; the attesting set names it, so
+/// ChainV4Finality.sol takes no link short of it either; and settings under two thirds are refused.
+#[test]
+fn a_threshold_of_ffgs_own_holds_for_votes_and_for_attestations_alike() {
+    let mut chain = attested_with(Some(800));
+    let voters = voters();
+    let set = chain.attesting_set(1).unwrap().unwrap();
+    assert_eq!(set.needed, Some(u256::new(28)), "800 thousandths of 35, rounded up");
+    assert!(!set.enough(u256::new(25)) && set.enough(u256::new(28)));
+
+    grow_to(&mut chain, INTERVAL + 1);
+    for voter in [&voters[0], &voters[2]] {
+        let vote = honest_vote(&chain, voter);
+        chain.add_vote(vote).unwrap();
+    }
+    assert_eq!(chain.justified().unwrap(), start(&chain), "25 of 35 is short of 800 thousandths");
+    let vote = honest_vote(&chain, &voters[1]);
+    chain.add_vote(vote).unwrap();
+    assert_eq!(chain.justified().unwrap(), checkpoint(&chain, 1), "all three, 35");
+
+    // A threshold under two thirds, or over all of the weight, is no FFG setting.
+    let FinalityConfig::Ffg(config) = super::voting::ffg() else { unreachable!() };
+    for permille in [666, 1_001] {
+        let low = FfgConfig { later: crate::params::finality::FfgLater { justify_permille: Some(permille), ..config.later }, ..config.clone() };
+        assert!(low.problem().is_some(), "{permille}");
+    }
+    let json = crate::params::json::finality_json(&FinalityConfig::Ffg(FfgConfig { later: crate::params::finality::FfgLater { justify_permille: Some(800), ..config.later }, ..config.clone() }));
+    assert_eq!(json["justify_permille"], 800);
+}
+
+/// FFG's later fields encode as they did while the threshold is unset, nothing for neither and the
+/// leak's own seventeen bytes for a leak alone, so chains from before keep their genesis ids; and
+/// every pairing of the two reads back.
+#[test]
+fn ffgs_later_fields_encode_as_before_until_a_threshold_is_set_and_every_pairing_reads_back() {
+    use crate::params::finality::FfgLater;
+
+    let FinalityConfig::Ffg(config) = super::voting::ffg() else { unreachable!() };
+    let bare = wincode::serialize(&FfgConfig { later: FfgLater::default(), ..config.clone() }).unwrap();
+    let leak = Leak { after_epochs: 3, permille: 40 };
+    let leaked = wincode::serialize(&FfgConfig { later: FfgLater { leak: Some(leak), justify_permille: None }, ..config.clone() }).unwrap();
+    let mut expected = bare.clone();
+    expected.push(1);
+    expected.extend(3u64.to_le_bytes());
+    expected.extend(40u64.to_le_bytes());
+    assert_eq!(leaked, expected, "a leak alone, as before the threshold");
+
+    for later in [FfgLater::default(), FfgLater { leak: Some(leak), justify_permille: None }, FfgLater { leak: None, justify_permille: Some(800) }, FfgLater { leak: Some(leak), justify_permille: Some(1_000) }] {
+        let tuned = FfgConfig { later, ..config.clone() };
+        assert_eq!(wincode::deserialize::<FfgConfig>(&wincode::serialize(&tuned).unwrap()).unwrap(), tuned, "{later:?}");
+    }
 }

@@ -564,7 +564,9 @@ On a chain that takes [validity proofs](proofs.md), the overview says how far th
 `The chain is proven through block H, the proof checked here`. The wallet proves governance's
 proof settings from state like the directory and the federation, takes the latest proof from the
 node, and checks it on the device with the verifier for its kind, Groth16, PLONK or the STARK,
-against the program those settings name. The
+against the program those settings name. When governance names a header-chain program it also
+checks the latest header-chain proof the same way, and says how far the chain is finalized from
+genesis ([Proofs of finality](proofs.md#proofs-of-finality)). The
 node's word adds nothing, as a proof that holds proves itself. Votes still carry the wallet past
 that block, to the newest ones.
 
@@ -1971,8 +1973,11 @@ local network. App storage is `wallet.ron` under its Application Support folder.
 - **A new dev chain looks like the old one.** Every dev chain has the same genesis id, so after
   starting a new one the wallet resumes what it followed on the old, and keeps proving: Settings
   → Light client → **Start over** follows the new one. Its keys and wallets stay.
-- **The API is plain HTTP.** What the wallet sends is signed and public anyway, but keep the node
-  on a trusted network all the same.
+- **Reach a node over HTTPS or Tor.** The node's own listener is plain HTTP; the Docker setup serves
+  it over HTTPS through nginx ([Docker](docker.md)). What the wallet sends is signed and public
+  anyway, but over plain `http://` anyone on the path sees which addresses you ask about and can
+  answer falsely where the wallet doesn't prove what it shows, so keep plain HTTP to a network
+  you trust.
 - **A signer trusts the sender for names alone.** What the signer shows of the coin's and token's
   symbol and decimals is the sender's word, from its node: check the raw units and addresses,
   which are what is signed. The sender trusts the signer for nothing: what comes back is checked

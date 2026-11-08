@@ -44,7 +44,7 @@ impl FfgConfig {
                 bond: coins(10_000),
                 attester: None,
             }],
-            leak: None,
+            later: crate::params::finality::FfgLater::default(),
             slash_permille: None,
         }
     }
@@ -83,12 +83,16 @@ impl FfgConfig {
             return Some("more genesis validators than max_validators");
         }
 
-        if self.leak.is_some_and(|leak| leak.after_epochs == 0) {
+        if self.leak().is_some_and(|leak| leak.after_epochs == 0) {
             return Some("leak.after_epochs must be at least 1");
         }
 
-        if self.leak.is_some_and(|leak| leak.permille > 1000) {
+        if self.leak().is_some_and(|leak| leak.permille > 1000) {
             return Some("leak.permille must be at most 1000");
+        }
+
+        if self.later.justify_permille.is_some_and(|permille| !crate::params::finality::JUSTIFY_PERMILLE.contains(&permille)) {
+            return Some("justify_permille must be from 667, two thirds, to 1000");
         }
 
         None
@@ -121,11 +125,12 @@ pub(super) fn write_genesis(state: &State, config: &FfgConfig) -> Result<(), DbE
     Ok(())
 }
 
-/// Bonded validators, weighted by bond, two thirds of the weight justifying: the smallest weight
-/// w with 3w >= 2 total, and never nothing, so an empty set justifies nothing.
-pub(super) fn voters(state: &State, epoch: u64) -> Result<Option<Voters>, DbError> {
+/// Bonded validators, weighted by bond, the threshold the epoch's settings name justifying: two
+/// thirds of the weight while unset, the smallest weight w with 3w >= 2 total, and never nothing,
+/// so an empty set justifies nothing.
+pub(super) fn voters(state: &State, epoch: u64, config: &FfgConfig) -> Result<Option<Voters>, DbError> {
     Ok(Validators::new(state).set(epoch)?.map(|set| Voters {
-        needed: set.two_thirds(),
+        needed: config.needed(&set),
         set,
     }))
 }
@@ -135,7 +140,7 @@ pub(super) fn voters(state: &State, epoch: u64) -> Result<Option<Voters>, DbErro
 pub(super) fn leak_at(state: &State, config: &FfgConfig, epoch: u64) -> Result<(), DbError> {
     let validators = Validators::new(state);
 
-    if let Some(leak) = config.leak
+    if let Some(leak) = config.leak()
         && epoch.saturating_sub(validators.proven()?) > leak.after_epochs
     {
         validators.leak(epoch, &leak, &config.staking())?;

@@ -2153,7 +2153,7 @@ mod tests {
             vote_reward: u256::new(1),
             max_proofs_per_block: 4,
             validators: Vec::new(),
-            leak: None,
+            later: chainv4::params::finality::FfgLater::default(),
             slash_permille: None,
         };
         let changes = [

@@ -150,7 +150,7 @@ mod voting {
                     attester: None,
                 })
                 .collect(),
-            leak: None,
+            later: crate::params::finality::FfgLater::default(),
             slash_permille: None,
         })
     }
@@ -927,7 +927,7 @@ mod voting {
             _ => unreachable!(),
         };
         let mut config = FfgConfig {
-            leak: Some(Leak { after_epochs: 2, permille: 500 }),
+            later: crate::params::finality::FfgLater { leak: Some(Leak { after_epochs: 2, permille: 500 }), justify_permille: None },
             ..config
         };
         config.validators.iter_mut().for_each(|validator| validator.bond = u256::new(1_000));
@@ -1949,6 +1949,9 @@ mod voting {
         // What the epochs, the fixed-ahead sets and the history rest on stays.
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { checkpoint_interval: INTERVAL + 1, ..genesis.clone() })), "keeps checkpoint_interval");
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { validators: Vec::new(), ..genesis.clone() })), "keeps checkpoint_interval");
+        // A threshold of its own, before the proofs fork this chain never scheduled.
+        let threshold = crate::params::finality::FfgLater { justify_permille: Some(800), ..genesis.later };
+        refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { later: threshold, ..genesis.clone() })), "comes with the proofs fork");
 
         for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Consensus, version: 1 })] {
             assert_eq!(send_as(&mut chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(effect));

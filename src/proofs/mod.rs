@@ -13,7 +13,15 @@
 //! ProofSystem that checks its proofs: SP1's in Groth16, PLONK and as its STARK, each under a
 //! feature of its own (sp1-groth16, sp1-plonk, sp1-stark), governance naming which the chain takes.
 //! Another zkVM is another kind beside them.
+//!
+//! Beside ranges, two proofs of finality (proofs::finality): of one link, two thirds of an epoch's
+//! voters signing it, for Ethereum; and of the header chain from genesis, each proof checking the
+//! one before, for the apps. Each is its own program.
 
+#[cfg(feature = "finality-proofs")]
+mod finality;
+#[cfg(feature = "secp256k1")]
+mod links;
 mod range;
 #[cfg(all(feature = "chain", feature = "secp256k1"))]
 mod replay;
@@ -23,6 +31,12 @@ mod state;
 mod system;
 
 pub use self::range::{GatewayMode, ProofSettings, ProvenRange, RangeEnd, TakenProof};
+#[cfg(feature = "finality-proofs")]
+pub use self::finality::{FinalityInput, LinkInput, check_link, prove_finality};
+#[cfg(feature = "header-proofs")]
+pub use self::finality::{HeadersInput, MAX_HEADER_LINKS, prove_headers};
+#[cfg(feature = "secp256k1")]
+pub use self::links::{ChainPoint, ProvenHeaders, ProvenLink, TakenHeaders};
 #[cfg(feature = "secp256k1")]
 pub use self::range::{verify_withdrawal, withdrawal_proof, withdrawals_root};
 #[cfg(all(feature = "chain", feature = "secp256k1"))]

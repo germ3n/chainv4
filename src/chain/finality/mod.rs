@@ -141,6 +141,14 @@ pub trait Finality: Send {
 
     #[document(
         parent = "Finality",
+        summary = "An epoch's voters as a state knows them, with the weight their votes for one link must reach: what a finality proof checks votes against, over a witness of that state. None under finality that does not vote, or while the state cannot know them yet.",
+    )]
+    fn voters_in(&self, _state: &crate::db::State, _epoch: u64) -> Result<Option<(crate::registry::validators::ValidatorSet, crate::structs::u256::u256)>, DbError> {
+        Ok(None)
+    }
+
+    #[document(
+        parent = "Finality",
         summary = "Checks a justification from a peer: its link, its votes, and that they are enough.",
         returns = "false for one this node holds already.",
     )]
@@ -630,6 +638,19 @@ impl Chain {
     pub fn attested_link(&self, source: Checkpoint, target: Checkpoint) -> Result<Option<crate::structs::attestation::AttestedLink>, DbError> {
         match &self.finality {
             Some(finality) => finality.attested_link(&self.view(), source, target),
+            None => Ok(None),
+        }
+    }
+
+    #[document(
+        parent = "Chain",
+        summary = "An epoch's voters as a state knows them, and the weight a link's votes must reach.",
+        params = { state = "The state, the chain's own or a witness of one.", epoch = "The epoch." },
+        returns = "None under finality that does not vote, or while the state cannot know them yet.",
+    )]
+    pub fn voters_in(&self, state: &crate::db::State, epoch: u64) -> Result<Option<(crate::registry::validators::ValidatorSet, crate::structs::u256::u256)>, DbError> {
+        match &self.finality {
+            Some(finality) => finality.voters_in(state, epoch),
             None => Ok(None),
         }
     }

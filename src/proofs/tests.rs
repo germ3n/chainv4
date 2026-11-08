@@ -74,7 +74,7 @@ fn every_withdrawal_proves_against_its_ranges_root_and_nothing_else_does() {
 #[cfg(feature = "chain")]
 #[test]
 fn proof_settings_cross_json_and_a_program_of_zeros_names_none() {
-    let settings = ProofSettings { kinds: vec![ProofKind::Sp1Groth16, ProofKind::Sp1Stark], program: [3; 32], reward_per_block: u256::new(1_000), gateway: GatewayMode::ProofOrFederation };
+    let settings = ProofSettings { kinds: vec![ProofKind::Sp1Groth16, ProofKind::Sp1Stark], program: [3; 32], reward_per_block: u256::new(1_000), gateway: GatewayMode::ProofOrFederation, finality_program: [4; 32], headers_program: [5; 32], reward_per_epoch: u256::new(7) };
     let json = crate::params::json::proof_settings_json(&settings);
 
     assert_eq!(json["kinds"], serde_json::json!(["sp1-groth16", "sp1-stark"]));
@@ -82,7 +82,15 @@ fn proof_settings_cross_json_and_a_program_of_zeros_names_none() {
     assert_eq!(crate::params::json::proof_settings_from_json(&json).as_ref(), Ok(&settings));
     assert_eq!(settings.problem(), None);
     assert!(settings.takes(ProofKind::Sp1Stark) && !settings.takes(ProofKind::Sp1Plonk));
-    assert!(ProofSettings { program: [0; 32], ..settings.clone() }.problem().is_some());
+    assert!(ProofSettings { program: [0; 32], ..settings.clone() }.problem().is_none(), "the other programs still name some");
+    assert!(ProofSettings { program: [0; 32], finality_program: [0; 32], headers_program: [0; 32], ..settings.clone() }.problem().is_some(), "every program zeros");
+
+    // Settings written before the finality and header programs read as naming neither.
+    let mut older = json.clone();
+    for key in ["finality_program", "headers_program", "reward_per_epoch"] {
+        older.as_object_mut().unwrap().remove(key);
+    }
+    assert_eq!(crate::params::json::proof_settings_from_json(&older), Ok(ProofSettings { finality_program: [0; 32], headers_program: [0; 32], reward_per_epoch: u256::ZERO, ..settings.clone() }));
     assert!(ProofSettings { kinds: vec![], ..settings.clone() }.problem().is_some(), "no kind");
     assert!(ProofSettings { kinds: vec![ProofKind::Sp1Stark, ProofKind::Sp1Groth16], ..settings.clone() }.problem().is_some(), "out of order");
     assert!(ProofSettings { kinds: vec![ProofKind::Sp1Plonk, ProofKind::Sp1Plonk], ..settings.clone() }.problem().is_some(), "twice");

@@ -121,53 +121,111 @@ pub struct FfgConfig {
     pub validators: Vec<GenesisValidator>,
     #[document(summary = "How much of a cheater's bond a slash takes, in thousandths: None, as genesis files without it mean, takes it all, 1000. The reporter gets what is taken divided by reporter_divisor and the rest is burned; what is left stays the validator's, to withdraw once its delay is over. Governance retunes it by Change::Finality.")]
     pub slash_permille: Option<u32>,
-    #[document(summary = "The inactivity leak, or None for none: once no checkpoint has been proven in a block for after_epochs epochs, each checkpoint takes permille thousandths of the bond of every validator that has not voted since, until those that do vote hold two thirds again. Added after chains launched: None adds nothing to genesis's encoding, so chains from before keep their ids.")]
-    #[wincode(with = "UnsetLeak")]
-    pub leak: Option<Leak>,
+    #[document(summary = "What FFG took on after chains launched, the inactivity leak and the justification threshold, each None while unset. Encoded as nothing while both are None, so chains from before keep their ids.")]
+    #[wincode(with = "UnsetLater")]
+    pub later: FfgLater,
 }
 
 impl Hashable for FfgConfig {}
 
-/// Encodes FfgConfig::leak as nothing while None, and as a 1 and the leak once set, so a genesis
-/// from before the field hashes as it did. Only as a last field; see Unset.
-pub struct UnsetLeak;
-
-// SAFETY: size_of is exactly what write writes: nothing for None, seventeen bytes for Some.
-unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for UnsetLeak {
-    type Src = Option<Leak>;
-
-    fn size_of(src: &Option<Leak>) -> wincode::WriteResult<usize> {
-        Ok(if src.is_some() { 17 } else { 0 })
+impl FfgConfig {
+    #[document(parent = "FfgConfig", summary = "The inactivity leak, if it has one.")]
+    pub fn leak(&self) -> Option<Leak> {
+        self.later.leak
     }
 
-    fn write(writer: impl wincode::io::Writer, src: &Option<Leak>) -> wincode::WriteResult<()> {
-        let Some(leak) = src else {
-            return Ok(());
-        };
-        let mut bytes = [1; 17];
-        bytes[1..9].copy_from_slice(&leak.after_epochs.to_le_bytes());
-        bytes[9..].copy_from_slice(&leak.permille.to_le_bytes());
+    #[document(
+        parent = "FfgConfig",
+        summary = "The weight a link's votes must reach, out of a set: justify_permille thousandths of it, rounded up, or two thirds while unset; never less than two thirds, never nothing.",
+        params = { set = "The epoch's validator set." },
+    )]
+    pub fn needed(&self, set: &crate::registry::validators::ValidatorSet) -> u256 {
+        let two_thirds = set.two_thirds();
 
-        <[u8; 17] as SchemaWrite<C>>::write(writer, &bytes)
+        match self.later.justify_permille {
+            None => two_thirds,
+            Some(permille) => {
+                let thousand = u256::from(1_000u64);
+                let share = (set.total().saturating_mul(u256::from(permille)).saturating_add(thousand - u256::ONE)) / thousand;
+
+                share.max(two_thirds)
+            }
+        }
     }
 }
 
-// SAFETY: read initializes dst before it returns Ok. An exhausted reader is None, which is how an
-// encoding from before the field reads; so this only ever ends a message.
-unsafe impl<'de, C: wincode::config::ConfigCore> SchemaRead<'de, C> for UnsetLeak {
-    type Dst = Option<Leak>;
+#[document(
+    summary = "The least and most FfgConfig's justify_permille may be: two thirds, which keeps FFG's safety, up to all of the weight.",
+    category = "Finality",
+    see_also = "FfgLater",
+)]
+pub const JUSTIFY_PERMILLE: std::ops::RangeInclusive<u32> = 667..=1_000;
 
-    fn read(mut reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<Option<Leak>>) -> wincode::ReadResult<()> {
+#[document(
+    summary = "What FFG took on after chains launched, kept together at the end of its settings so they encode as nothing while unset.",
+    category = "Finality",
+    see_also = "FfgConfig",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FfgLater {
+    #[document(summary = "The inactivity leak, or None for none: once no checkpoint has been proven in a block for after_epochs epochs, each checkpoint takes permille thousandths of the bond of every validator that has not voted since, until those that do vote hold the threshold again.")]
+    pub leak: Option<Leak>,
+    #[document(summary = "How much of the bonded weight, in thousandths, votes for a link must reach to justify it: JUSTIFY_PERMILLE, 667 to 1000; None for two thirds exactly, as chains from before it. Governance retunes it by Change::Finality, from the proofs fork on, and it holds from the epoch the change is fixed for, as validator sets do.")]
+    pub justify_permille: Option<u32>,
+}
+
+/// Encodes FfgConfig::later as nothing while both are None, so a genesis from before them hashes
+/// as it did; a leak alone as a 1 and the leak, as it was before the threshold; the threshold alone
+/// as a 2 and its four bytes; both as a 3, the leak, then the threshold. Only as a last field: an
+/// exhausted reader is both None.
+pub struct UnsetLater;
+
+fn leak_bytes(leak: &Leak) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&leak.after_epochs.to_le_bytes());
+    bytes[8..].copy_from_slice(&leak.permille.to_le_bytes());
+
+    bytes
+}
+
+fn later_bytes(later: &FfgLater) -> Vec<u8> {
+    match (later.leak, later.justify_permille) {
+        (None, None) => Vec::new(),
+        (Some(leak), None) => [[1].as_slice(), &leak_bytes(&leak)].concat(),
+        (None, Some(permille)) => [[2].as_slice(), &permille.to_le_bytes()].concat(),
+        (Some(leak), Some(permille)) => [[3].as_slice(), &leak_bytes(&leak), &permille.to_le_bytes()].concat(),
+    }
+}
+
+// SAFETY: size_of is exactly what write writes, later_bytes's length.
+unsafe impl<C: wincode::config::ConfigCore> SchemaWrite<C> for UnsetLater {
+    type Src = FfgLater;
+
+    fn size_of(src: &FfgLater) -> wincode::WriteResult<usize> {
+        Ok(later_bytes(src).len())
+    }
+
+    fn write(mut writer: impl wincode::io::Writer, src: &FfgLater) -> wincode::WriteResult<()> {
+        for byte in later_bytes(src) {
+            <u8 as SchemaWrite<C>>::write(&mut writer, &byte)?;
+        }
+
+        Ok(())
+    }
+}
+
+// SAFETY: read initializes dst before it returns Ok. An exhausted reader is both None, which is how
+// an encoding from before them reads; so this only ever ends a message.
+unsafe impl<'de, C: wincode::config::ConfigCore> SchemaRead<'de, C> for UnsetLater {
+    type Dst = FfgLater;
+
+    fn read(mut reader: impl wincode::io::Reader<'de>, dst: &mut std::mem::MaybeUninit<FfgLater>) -> wincode::ReadResult<()> {
+        let leak = |bytes: [u8; 16]| Leak { after_epochs: u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes")), permille: u64::from_le_bytes(bytes[8..].try_into().expect("eight bytes")) };
         let value = match reader.take_byte() {
-            Ok(1) => {
-                let rest = reader.take_array::<16>()?;
-
-                Some(Leak {
-                    after_epochs: u64::from_le_bytes(rest[..8].try_into().expect("eight bytes")),
-                    permille: u64::from_le_bytes(rest[8..].try_into().expect("eight bytes")),
-                })
-            }
-            _ => None,
+            Ok(1) => FfgLater { leak: Some(leak(reader.take_array::<16>()?)), justify_permille: None },
+            Ok(2) => FfgLater { leak: None, justify_permille: Some(u32::from_le_bytes(reader.take_array::<4>()?)) },
+            Ok(3) => FfgLater { leak: Some(leak(reader.take_array::<16>()?)), justify_permille: Some(u32::from_le_bytes(reader.take_array::<4>()?)) },
+            _ => FfgLater::default(),
         };
         dst.write(value);
 
