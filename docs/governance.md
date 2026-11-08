@@ -432,7 +432,9 @@ a node replaying history runs each block by its own height's (`params::forks`).
 
 - **A fork is a name its release knows** (`FORKS`), with the code it changes asking whether it is
   in force (`Forks::has`, through `VmRules::forks`, set for every block from its parent's state).
-  This release knows two:
+  There's no most: `Forks` keeps a bit for each, in as many words as the list needs, and it's
+  worked out per block rather than stored, so a release with more forks changes nothing a chain
+  holds. This release knows two:
   - `restaking` (see [Finality](finality.md#restaking)): validators' rewards restaked into their
     bonds when their accounts turn it on, bonds topped up by hand, and the attestations of the
     justifications blocks carry checked as gossiped ones are.

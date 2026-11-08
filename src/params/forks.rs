@@ -56,10 +56,11 @@ pub const FORKS: &[Fork] = &[RESTAKING, PROOFS];
 pub const FORKS: &[Fork] = &[RESTAKING, PROOFS, TEST_FORK];
 
 #[document(
-    summary = "The most forks a release may know: Forks holds them as the bits of a u64.",
+    summary = "How many 64-bit words Forks holds its bits in: as many as FORKS needs, so a release may know any number of forks, the set growing with the list.",
     category = "Governance",
+    see_also = "Forks, FORKS",
 )]
-pub const MAX_FORKS: usize = 64;
+pub const FORK_WORDS: usize = FORKS.len().div_ceil(64);
 
 #[document(
     summary = "The longest name a fork may have.",
@@ -303,37 +304,53 @@ impl ForkChange {
 }
 
 #[document(
-    summary = "The forks in force at a block: one bit for each in FORKS, by its place. What every rule a fork changes asks, through VmRules::forks; none at all on a chain that scheduled none, which runs as it always did.",
+    summary = "The forks in force at a block: one bit for each in FORKS, by its place, in as many words as FORKS needs (FORK_WORDS), so there is no most. What every rule a fork changes asks, through VmRules::forks; none at all on a chain that scheduled none, which runs as it always did. Worked out for each block from the schedule in state, never kept or sent, so its size changes nothing a chain holds.",
     category = "Governance",
-    see_also = "Fork, ForkSchedule::at",
+    see_also = "Fork, ForkSchedule::at, FORK_WORDS",
 )]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Forks(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Forks([u64; FORK_WORDS]);
+
+impl Default for Forks {
+    fn default() -> Forks {
+        Forks::NONE
+    }
+}
 
 impl Forks {
     #[document(parent = "Forks", summary = "No forks: a chain's rules as they were before any.")]
-    pub const NONE: Forks = Forks(0);
+    pub const NONE: Forks = Forks([0; FORK_WORDS]);
+
+    /// A fork's place in FORKS, which is its bit.
+    fn place(fork: &Fork) -> Option<usize> {
+        FORKS.iter().position(|known| known.name == fork.name)
+    }
+
+    fn bit(&self, place: usize) -> bool {
+        self.0[place / 64] & (1 << (place % 64)) != 0
+    }
 
     #[document(parent = "Forks", summary = "The forks this release knows among those scheduled at or below a height.")]
     pub fn at(scheduled: &[ScheduledFork], height: u64) -> Forks {
-        let bits = FORKS
-            .iter()
-            .take(MAX_FORKS)
-            .enumerate()
-            .filter(|(_, fork)| scheduled.iter().any(|at| at.name == fork.name && at.height <= height))
-            .fold(0, |bits, (place, _)| bits | 1 << place);
+        let mut forks = Forks::NONE;
 
-        Forks(bits)
+        for (place, fork) in FORKS.iter().enumerate() {
+            if scheduled.iter().any(|at| at.name == fork.name && at.height <= height) {
+                forks.0[place / 64] |= 1 << (place % 64);
+            }
+        }
+
+        forks
     }
 
     #[document(parent = "Forks", summary = "Whether a fork is in force.")]
     pub fn has(self, fork: &Fork) -> bool {
-        FORKS.iter().take(MAX_FORKS).position(|known| known.name == fork.name).is_some_and(|place| self.0 & (1 << place) != 0)
+        Forks::place(fork).is_some_and(|place| self.bit(place))
     }
 
     #[document(parent = "Forks", summary = "The names of those in force, oldest first.")]
     pub fn names(self) -> Vec<&'static str> {
-        FORKS.iter().take(MAX_FORKS).enumerate().filter(|(place, _)| self.0 & (1 << place) != 0).map(|(_, fork)| fork.name).collect()
+        FORKS.iter().enumerate().filter(|(place, _)| self.bit(*place)).map(|(_, fork)| fork.name).collect()
     }
 }
 

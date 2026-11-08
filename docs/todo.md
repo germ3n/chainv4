@@ -485,6 +485,9 @@ offline; these would make that hold up as a treasury.
     thirds unset (owner's picks: never below two thirds, a permille in FFG's settings retuned by
     `Change::Finality`, carried to Ethereum in the attesting set). From the `proofs` fork; FFG's
     later fields encode together (`FfgLater`), as nothing while unset.
+  - [x] **As many forks as wanted (owner, 2026-11-08):** `Forks` sized from `FORKS` itself
+    (`FORK_WORDS` words of 64 bits) rather than one `u64`, which capped a release at 64 and dropped
+    a 65th without a word.
   - [x] **Ethereum's side switchable (owner, 2026-11-08):** `Change::Attestations` turns validators'
     attestations off or on for the whole chain from the next block (refused under the `both`
     gateway mode); the `attestations` feature, default and in `consensus`; and the
