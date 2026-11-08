@@ -86,3 +86,21 @@ fn the_apps_read_the_schedule_from_status_as_the_node_writes_it() {
     assert_eq!(crate::params::json::forks_from_status(&serde_json::json!({})), ForkSchedule::default(), "an older node's says none");
     assert!(crate::params::json::forks_from_status(&status).at(12).has(&TEST_FORK));
 }
+
+#[test]
+fn every_fork_this_release_knows_has_a_bit_however_many_there_are() {
+    assert!(FORK_WORDS * 64 >= FORKS.len(), "room for each");
+    assert_eq!(Forks::default(), Forks::NONE);
+
+    // Each fork alone in force is that fork and no other.
+    for fork in FORKS {
+        let alone = ForkSchedule { forks: vec![scheduled(fork.name, 1)], lead: None }.at(1);
+
+        assert!(alone.has(fork), "{}", fork.name);
+        assert_eq!(alone.names(), [fork.name]);
+    }
+
+    // All of them at once, oldest first.
+    let all = ForkSchedule { forks: FORKS.iter().map(|fork| scheduled(fork.name, 1)).collect(), lead: None }.at(1);
+    assert_eq!(all.names(), FORKS.iter().map(|fork| fork.name).collect::<Vec<_>>());
+}
