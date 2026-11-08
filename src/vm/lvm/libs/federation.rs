@@ -20,8 +20,14 @@ fn get(lua: &Lua, (): ()) -> mlua::Result<Option<Table>> {
     let Some(decided) = host.federation().map_err(refused)? else {
         return Ok(None);
     };
+    let table = federation_table(lua, decided.version, &decided.federation)?;
 
-    federation_table(lua, decided.version, &decided.federation).map(Some)
+    // Which way new Bitcoin peg-ins go, once governance decided it: none before, as before BitVM.
+    if let Some(path) = host.btc_path().map_err(refused)? {
+        table.set("btc_path", path.name())?;
+    }
+
+    Ok(Some(table))
 }
 
 // A federation of any version, with when it was decided and when the next replaced it, each as a
@@ -98,7 +104,7 @@ fn federation_lib() {}
     parent = "federation",
     name = "get",
     summary = "The federation in force.",
-    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be; and btc, the Bitcoin policy, with fee_cap, fee_floor, grace_ms, cancel_after_ms, fee_part, bump_after_ms, bump_below_pct, repay_pct and repay_most, or nil while the federation names none. nil on a chain with none." },
+    returns = { ty = "table | nil", desc = "version, 0 for genesis's and one more for each decided since; threshold, how many must sign; signers, their 33-byte compressed secp256k1 keys, in order; chain_depth, evm_depth and bitcoin_depth, how deep each chain's locks must be; and btc, the Bitcoin policy, with fee_cap, fee_floor, grace_ms, cancel_after_ms, fee_part, bump_after_ms, bump_below_pct, repay_pct and repay_most, or nil while the federation names none; and btc_path, which way new Bitcoin peg-ins go, federation, bitvm or both, once governance decided it (Change::BtcPath), nil before, when it is the federation. nil on a chain with none." },
 )]
 fn federation_get() {}
 

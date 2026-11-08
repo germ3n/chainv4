@@ -43,6 +43,7 @@ const LOCKS: &[u8] = b"change:locks";
 const FORKS: &[u8] = b"change:forks";
 const PROOFS: &[u8] = b"change:proofs";
 const ATTESTATIONS: &[u8] = b"change:attestations";
+const BTC_PATH: &[u8] = b"change:btc_path";
 
 /// How many changes of one kind were decided, as a state value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
@@ -534,6 +535,16 @@ impl<'a> Changes<'a> {
         Ok(self.attestations()?.is_none_or(|decided| if height >= decided.from { decided.on } else { decided.before }))
     }
 
+    #[document(parent = "Changes", summary = "Which way new Bitcoin peg-ins go, as governance decided last, or None while it decided nothing, when the federation's addresses alone take them.")]
+    pub fn btc_path(&self) -> Result<Option<crate::registry::federation::BtcPath>, DbError> {
+        self.state.get_value(Column::Validators, BTC_PATH)
+    }
+
+    #[document(parent = "Changes", summary = "Where which way new Bitcoin peg-ins go is kept in the Validators column, for a light client to prove.")]
+    pub fn btc_path_key() -> &'static [u8] {
+        BTC_PATH
+    }
+
     #[document(parent = "Changes", summary = "Where whether validators attest is kept in the Validators column, for a light client to prove.")]
     pub fn attestations_key() -> &'static [u8] {
         ATTESTATIONS
@@ -832,6 +843,7 @@ impl<'a> Changes<'a> {
             Some(Change::Engines(self.engines()?.unwrap_or_else(|| genesis.engines.clone()))),
             self.proofs()?.map(Change::Proofs),
             Some(Change::Attestations(self.attestations()?.is_none_or(|decided| decided.on))),
+            Some(Change::BtcPath(self.btc_path()?.unwrap_or_default())),
         ];
 
         Ok(settings.into_iter().flatten().collect())
@@ -909,6 +921,7 @@ impl<'a> Changes<'a> {
             Change::Engines(engines) => self.engines()?.as_ref() == Some(engines),
             Change::Proofs(settings) => self.proofs()?.as_ref() == Some(settings),
             Change::Attestations(on) => self.attestations()?.is_none_or(|decided| decided.on) == *on,
+            Change::BtcPath(path) => self.btc_path()?.unwrap_or_default() == *path,
             Change::Anchoring(settings) => self.anchoring()?.as_ref() == Some(settings),
             Change::Collections(functions) => self.collections()?.as_ref() == Some(functions),
             Change::Federation(federation) => self.federation()?.map(|decided| decided.federation).as_ref() == Some(federation),
@@ -1008,6 +1021,12 @@ impl<'a> Changes<'a> {
             // Read by each Tx::Prove, and by a range's proof at its end, for the contracts.
             Change::Proofs(settings) => {
                 self.state.put_value(Column::Validators, PROOFS.to_vec(), &settings);
+
+                decided.consensus
+            }
+            // Read by the Bitcoin gateway as each call runs, through federation.get().
+            Change::BtcPath(path) => {
+                self.state.put_value(Column::Validators, BTC_PATH.to_vec(), &path);
 
                 decided.consensus
             }

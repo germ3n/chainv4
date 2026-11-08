@@ -50,7 +50,7 @@ const REFRESH: u64 = 15_000;
 const NOT_FOUND: u16 = 404;
 
 /// The kinds of change, in the order the propose form lists them.
-const KINDS: [&str; 22] = ["name", "bootnodes", "upgrade", "fork", "proofs", "attestations", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
+const KINDS: [&str; 23] = ["name", "bootnodes", "upgrade", "fork", "proofs", "attestations", "btc_path", "names", "consensus", "fees", "reward", "limits", "finality", "switch_finality", "collections", "token_functions", "federation", "directory", "governance", "evm_spec", "dex", "anchoring", "locks"];
 
 /// How tall the kinds' list opens: all of them on most phones, without a scroll to find.
 const KIND_LIST_HEIGHT: f32 = 620.0;
@@ -1204,7 +1204,7 @@ fn versions(value: &Value) -> Result<BTreeMap<ChangeKind, u64>, String> {
         .map(|kind| match versions.get(kind.name()).and_then(Value::as_u64) {
             Some(version) => Ok((kind, version)),
             // A node from before locks, engines, forks, proofs or attestations has none to change.
-            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines | ChangeKind::Fork | ChangeKind::Proofs | ChangeKind::Attestations) => Ok((kind, 0)),
+            None if matches!(kind, ChangeKind::Locks | ChangeKind::Engines | ChangeKind::Fork | ChangeKind::Proofs | ChangeKind::Attestations | ChangeKind::BtcPath) => Ok((kind, 0)),
             None => Err(format!("it says no version for {}", kind.name())),
         })
         .collect()
@@ -1434,6 +1434,7 @@ fn label(kind: &str) -> &str {
         "fork" => "Fork schedule",
         "proofs" => "Validity proofs",
         "attestations" => "Attestations for Ethereum",
+        "btc_path" => "Bitcoin peg-ins",
         "names" => "Names",
         "token_functions" => "Tokens",
         "evm_spec" => "EVM spec",
@@ -1588,6 +1589,14 @@ fn stated(change: &Change, coin: &Coin) -> String {
         ),
         Change::Attestations(true) => "Attestations for Ethereum: validators attest each link".to_string(),
         Change::Attestations(false) => "Attestations for Ethereum: off, so Ethereum's finality contract follows the chain no further".to_string(),
+        Change::BtcPath(path) => format!(
+            "Bitcoin peg-ins: {}",
+            match path {
+                chainv4::registry::federation::BtcPath::Federation => "the federation's deposit addresses",
+                chainv4::registry::federation::BtcPath::Bitvm => "BitVM's presigned graph",
+                chainv4::registry::federation::BtcPath::Both => "the federation or BitVM",
+            }
+        ),
         Change::Fork(change) => {
             let said = change.describe();
 
@@ -2242,6 +2251,7 @@ mod tests {
                 "Validity proofs: by sp1-groth16 or sp1-stark of the program ",
             ),
             (Change::Attestations(false), "Attestations for Ethereum: off"),
+            (Change::BtcPath(chainv4::registry::federation::BtcPath::Both), "Bitcoin peg-ins: the federation or BitVM"),
             (
                 Change::Governance(chainv4::governance::GovernanceConfig::Council { members: vec![Address::Ed25519([1; 32])], threshold: 1, approval_epochs: 8, quorum_permille: 500 }),
                 "Governance: a council of 1",

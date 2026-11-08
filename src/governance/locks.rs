@@ -12,7 +12,7 @@ use r#macro::document;
     category = "Governance",
     see_also = "path_problem, Change::Locks",
 )]
-pub const ROOTS: [&str; 23] = [
+pub const ROOTS: [&str; 24] = [
     "consensus",
     "bootnodes",
     "names",
@@ -31,7 +31,7 @@ pub const ROOTS: [&str; 23] = [
     "evm_spec",
     "dex",
     "anchoring",
-    "locks", "engines", "fork", "proofs", "attestations"];
+    "locks", "engines", "fork", "proofs", "attestations", "btc_path"];
 
 /// Fees' fields, each variant's and its host costs' among them.
 const FEES: [&str; 48] = [
@@ -161,7 +161,7 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
         "evm_spec" => &["spec", "from"],
         "dex" => &["tiers", "protocol_permille"],
         "anchoring" => &["bitcoin", "ethereum", "enforce", "relay", "btc_start.header", "btc_start.height", "btc_start.network", "eth_relay", "eth_start.root", "eth_start.network", "depth", "every", "reward"],
-        "bootnodes" | "name" | "token_functions" | "switch_finality" | "locks" | "engines" | "attestations" => &[],
+        "bootnodes" | "name" | "token_functions" | "switch_finality" | "locks" | "engines" | "attestations" | "btc_path" => &[],
         _ => return None,
     })
 }

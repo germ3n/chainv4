@@ -48,6 +48,47 @@ pub struct Federation {
 impl Hashable for Federation {}
 
 #[document(
+    summary = "Which way new Bitcoin peg-ins go, as governance decides it (Change::BtcPath): to the federation's m-of-n deposit addresses, as before; by BitVM, every signer presigning the graph a peg-in can only leave by; or either. Peg-ins already made keep the path they were made by.",
+    category = "Bridges",
+    see_also = "Change::BtcPath, Federation",
+)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[wincode(tag_encoding = "u8")]
+pub enum BtcPath {
+    #[document(summary = "The federation's deposit addresses alone, as before BitVM.")]
+    #[default]
+    #[wincode(tag = 0)]
+    Federation,
+    #[document(summary = "BitVM's alone: the federation's deposit addresses take no new deposit.")]
+    #[wincode(tag = 1)]
+    Bitvm,
+    #[document(summary = "Either.")]
+    #[wincode(tag = 2)]
+    Both,
+}
+
+impl Hashable for BtcPath {}
+
+impl BtcPath {
+    #[document(parent = "BtcPath", summary = "Every path.")]
+    pub const ALL: [BtcPath; 3] = [BtcPath::Federation, BtcPath::Bitvm, BtcPath::Both];
+
+    #[document(parent = "BtcPath", summary = "Its name, as JSON and the gateway write it: federation, bitvm or both.")]
+    pub fn name(self) -> &'static str {
+        match self {
+            BtcPath::Federation => "federation",
+            BtcPath::Bitvm => "bitvm",
+            BtcPath::Both => "both",
+        }
+    }
+
+    #[document(parent = "BtcPath", summary = "The path a name names.")]
+    pub fn parse(name: &str) -> Option<BtcPath> {
+        BtcPath::ALL.into_iter().find(|path| path.name() == name)
+    }
+}
+
+#[document(
     summary = "The federation's Bitcoin policy, which the Bitcoin gateway and its signers go by from the block a change of federation decides it: the most fee a release may pay, the least it pays a virtual byte, how long a retired federation's deposit addresses stay open, how long a release waits before its signers vote it down, the share of a withdrawal its fee may take unless the withdrawal says, when a release with all its signatures that Bitcoin has not mined is bumped, and how later releases repay what a child cost the backing.",
     category = "Bridges",
     see_also = "Federation::btc, Change::Federation",

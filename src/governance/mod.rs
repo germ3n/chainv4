@@ -344,6 +344,9 @@ pub enum Change {
     #[document(summary = "Whether validators attest links for Ethereum: on as genesis has it, or off. Off, from the block after the one that decides it, no validator attests, nodes drop attestations from the votes they take, and a block carrying one is invalid, so ChainV4Finality.sol on Ethereum follows the chain no further. Refused while the proofs' gateway mode is both, which would leave Gateway.sol waiting on proofs that can reach it no more. From the proofs fork on.")]
     #[wincode(tag = 22)]
     Attestations(bool),
+    #[document(summary = "Which way new Bitcoin peg-ins go: the federation's deposit addresses, BitVM's presigned graph, or either. From the block after the one that decides it, as the gateway reads it through federation.get(); peg-ins already made keep their path. From the proofs fork on.")]
+    #[wincode(tag = 23)]
+    BtcPath(crate::registry::federation::BtcPath),
 }
 
 #[document(
@@ -508,6 +511,9 @@ pub enum ChangeKind {
     #[document(summary = "Whether validators attest for Ethereum.")]
     #[wincode(tag = 20)]
     Attestations,
+    #[document(summary = "Which way new Bitcoin peg-ins go.")]
+    #[wincode(tag = 21)]
+    BtcPath,
 }
 
 impl Hashable for ChangeKind {
@@ -516,7 +522,7 @@ impl Hashable for ChangeKind {
 
 impl ChangeKind {
     #[document(parent = "ChangeKind", summary = "Every kind, in tag order.")]
-    pub const ALL: [ChangeKind; 21] = [
+    pub const ALL: [ChangeKind; 22] = [
         ChangeKind::Consensus,
         ChangeKind::Bootnodes,
         ChangeKind::Names,
@@ -538,9 +544,10 @@ impl ChangeKind {
         ChangeKind::Fork,
         ChangeKind::Proofs,
         ChangeKind::Attestations,
+        ChangeKind::BtcPath,
     ];
 
-    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork, proofs or attestations.")]
+    #[document(parent = "ChangeKind", summary = "Its name, as the API and the CLI write it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork, proofs, attestations or btc_path.")]
     pub fn name(self) -> &'static str {
         match self {
             ChangeKind::Consensus => "consensus",
@@ -564,6 +571,7 @@ impl ChangeKind {
             ChangeKind::Fork => "fork",
             ChangeKind::Proofs => "proofs",
             ChangeKind::Attestations => "attestations",
+            ChangeKind::BtcPath => "btc_path",
         }
     }
 }
@@ -608,10 +616,11 @@ impl Change {
             Change::Fork(_) => ChangeKind::Fork,
             Change::Proofs(_) => ChangeKind::Proofs,
             Change::Attestations(_) => ChangeKind::Attestations,
+            Change::BtcPath(_) => ChangeKind::BtcPath,
         }
     }
 
-    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork, proofs or attestations.")]
+    #[document(parent = "Change", summary = "What kind of change it is, as the API names it: consensus, bootnodes, names, collections, federation, directory, fees, reward, limits, finality, switch_finality, upgrade, name, governance, token_functions, evm_spec, dex, anchoring, locks, engines, fork, proofs, attestations or btc_path.")]
     pub fn name(&self) -> &'static str {
         match self {
             Change::Consensus(_) => "consensus",
@@ -637,6 +646,7 @@ impl Change {
             Change::Fork(_) => "fork",
             Change::Proofs(_) => "proofs",
             Change::Attestations(_) => "attestations",
+            Change::BtcPath(_) => "btc_path",
         }
     }
 }

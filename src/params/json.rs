@@ -1429,6 +1429,7 @@ pub fn change_json(change: &crate::governance::Change) -> Value {
         Change::Fork(change) => json!({ "fork": fork_change_json(change) }),
         Change::Proofs(settings) => json!({ "proofs": proof_settings_json(settings) }),
         Change::Attestations(on) => json!({ "attestations": on }),
+        Change::BtcPath(path) => json!({ "btc_path": path.name() }),
         Change::Name(name) => json!({ "name": name }),
         Change::Governance(config) => json!({ "governance": governance_json(config) }),
         Change::TokenFunctions(functions) => json!({ "token_functions": functions }),
@@ -1526,6 +1527,7 @@ pub fn change_from_json(value: &Value) -> Result<crate::governance::Change, Stri
         "fork" => Change::Fork(fork_change_from_json(value)?),
         "proofs" => Change::Proofs(proof_settings_from_json(value)?),
         "attestations" => Change::Attestations(value.as_bool().ok_or("attestations: true or false")?),
+        "btc_path" => Change::BtcPath(value.as_str().and_then(crate::registry::federation::BtcPath::parse).ok_or("btc_path: federation, bitvm or both")?),
         "upgrade" => {
             let mut fields = Fields::of(value, "upgrade")?;
             let least = fields.text("least")?.parse().map_err(|why| format!("upgrade.least: {why}"))?;

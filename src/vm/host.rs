@@ -392,6 +392,14 @@ impl Host {
 
     #[document(
         parent = "Host",
+        summary = "Which way new Bitcoin peg-ins go, as governance decided last: None while it decided nothing, when the federation's addresses alone take them.",
+    )]
+    pub fn btc_path(&self) -> Result<Option<crate::registry::federation::BtcPath>, VmError> {
+        crate::registry::changes::Changes::new(&self.state).btc_path().map_err(|err| self.fail(err))
+    }
+
+    #[document(
+        parent = "Host",
         summary = "The bridges' federation of a version, in force or past, as the chain keeps every one it decided: what it was, the block that decided it, and the block that decided the next, once one did. Version 0 is genesis's, which a VM given it directly knows without a record. None for a version never decided. Engines charge cost::FEDERATION, as for the one in force.",
         params = { version = "Its version: 0 for genesis's, and one more for each decided since." },
     )]

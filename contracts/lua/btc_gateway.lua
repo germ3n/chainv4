@@ -26,7 +26,8 @@
 -- spending its change (M.child); each is a proposal of its own, signed as a release is, and
 -- whichever Bitcoin mines is what is shown.
 --
--- Events: DepositedBtc(txid, vout, sats, recipient), WithdrawRequested(id, script, sats, sender),
+-- Events: DepositedBtc(txid, vout, sats, recipient), PeggedIn(txid, vout, sats, recipient) for BitVM,
+-- WithdrawFronted(id, txid, vout, operator), PegInTaken(outpoint, txid), WithdrawRequested(id, script, sats, sender),
 -- Proposed(proposal, txid), Replaced(proposal, replaced), Child(proposal, parent),
 -- SignedBtc(proposal, input, signer), Released(proposal, txid), CancelVoted(proposal, signer),
 -- Cancelled(proposal, txid).
@@ -505,6 +506,12 @@ end
 -- spent, 100 confirmations, as a release spending it could not be mined before.
 function M.deposit(block, raw, index, path, coinbase, coinbase_path, vout, recipient, version)
     local fed = in_force()
+
+    -- Governance's way for new peg-ins (Change::BtcPath): BitVM's alone takes no federation deposit.
+    if fed.btc_path == "bitvm" then
+        error("new peg-ins go by BitVM: bitvm_deposit")
+    end
+
     version = whole(version or fed.version, "the version")
     local threshold, keys, retired = fed_at(version)
 
@@ -1752,6 +1759,142 @@ end
 
 function M.proposal_count()
     return count("proposal_count")
+end
+
+-- BitVM's side (src/bitvm): peg-ins every signer of the federation in force presigned a graph on,
+-- each leaving by that graph alone, an operator reimbursed by it after paying a withdrawal on
+-- Bitcoin out of its own coins. Whether new peg-ins may go this way is governance's
+-- (Change::BtcPath), as federation.get() gives it: federation, bitvm or both, the federation's
+-- alone until it decides.
+local function btc_path()
+    return in_force().btc_path or "federation"
+end
+
+-- A confirmed BitVM peg-in's script for an address: its recipient, chain and gateway named and
+-- dropped, as deposit addresses name them, then every one of the federation's signers.
+function M.bitvm_script(recipient)
+    local fed = in_force()
+    local script = deposit_script(recipient:encode(), #fed.signers, fed.signers)
+
+    return script, p2wsh(script), fed.version
+end
+
+-- Shows a confirmed BitVM peg-in, bitcoin_depth deep, and mints its value as wBTC to its address.
+-- The signers confirm a peg-in only once every one of them presigned its graph, so the output
+-- leaves by the graph alone: the gateway holds it apart, as releases never spend it. raw and the
+-- rest are as deposit takes them.
+function M.bitvm_deposit(block, raw, index, path, coinbase, coinbase_path, vout, recipient)
+    if btc_path() == "federation" then
+        error("new peg-ins go by the federation's deposit addresses: deposit")
+    end
+
+    local fed = in_force()
+    local depth = fed.bitcoin_depth
+
+    if whole(index, "the place") == 0 then
+        depth = math.max(depth, COINBASE_MATURITY)
+    end
+
+    local txid = proven(block, raw, index, path, coinbase, coinbase_path, depth)
+    local confirmations = tonumber(tostring(contracts.call(relay(), "confirmations", block)))
+
+    if relay_height(relay()) - confirmations + 1 < tonumber(storage.get("first_height")) then
+        error("mined before this gateway was set up")
+    end
+
+    vout = whole(vout, "the output")
+    local output = parse(raw).outputs[vout + 1] or error("no such output")
+
+    if output.script ~= p2wsh(deposit_script(recipient:encode(), #fed.signers, fed.signers)) then
+        error("the output does not pay that address's BitVM peg-in")
+    end
+
+    if output.sats < least_deposit() then
+        error("a deposit mints at least " .. least_deposit() .. " satoshis")
+    end
+
+    local key = hex(txid) .. ":" .. vout
+
+    if utxos:get(key .. ":state") then
+        error("that peg-in was minted already")
+    end
+
+    hold(key, output.sats, fed.version, recipient:encode())
+    utxos:set(key .. ":state", "bitvm")
+    contracts.call(wbtc(), "mint", recipient, u256(output.sats))
+    events.emit("PeggedIn", txid, vout, u256(output.sats), recipient)
+    return output.sats
+end
+
+-- An operator shows it paid a queued withdrawal on Bitcoin out of its own coins, bitcoin_depth
+-- deep: an output to the withdrawal's script of at least its satoshis less the most fee it agreed
+-- to. The withdrawal is fronted, so no release pays it again, and the operator is reimbursed by a
+-- peg-in's graph, which watchers check against this record and the withdrawal's proof
+-- (proofs::prove_withdrawal). One payment fronts one withdrawal.
+function M.bitvm_front(id, block, raw, index, path, coinbase, coinbase_path, vout)
+    if btc_path() == "federation" then
+        error("withdrawals go by the federation alone")
+    end
+
+    id = whole(id, "the withdrawal")
+
+    if withdrawals:get(id .. ":state") ~= "queued" then
+        error("no queued withdrawal by that number")
+    end
+
+    local txid = proven(block, raw, index, path, coinbase, coinbase_path, in_force().bitcoin_depth)
+    vout = whole(vout, "the output")
+    local output = parse(raw).outputs[vout + 1] or error("no such output")
+    local least = tonumber(withdrawals:get(id .. ":sats")) - most_fee_of(id)
+
+    if output.script ~= withdrawals:get(id .. ":script") or output.sats < least then
+        error("the output pays the withdrawal's script less than " .. least .. " satoshis, or another script")
+    end
+
+    local payout = hex(txid) .. ":" .. vout
+
+    if storage.get("fronted:" .. payout) then
+        error("that payment fronted a withdrawal already")
+    end
+
+    storage.set("fronted:" .. payout, tostring(id))
+    withdrawals:set(id .. ":state", "fronted")
+    withdrawals:set(id .. ":operator", ctx.sender:text())
+    withdrawals:set(id .. ":payout", payout)
+    events.emit("WithdrawFronted", id, txid, vout, ctx.sender)
+    return payout
+end
+
+-- Who fronted a withdrawal, and its payment's outpoint: nil for one no operator fronted.
+function M.fronted(id)
+    id = whole(id, "the withdrawal")
+    local by = withdrawals:get(id .. ":operator")
+
+    return by and address.parse(by), withdrawals:get(id .. ":payout")
+end
+
+-- Shows a transaction of a graph that spent BitVM peg-ins, Take or take after a challenge,
+-- bitcoin_depth deep: each such peg-in is spent, its backing gone with the operator it reimbursed.
+-- Anyone may show it.
+function M.bitvm_taken(block, raw, index, path, coinbase, coinbase_path)
+    local txid = proven(block, raw, index, path, coinbase, coinbase_path, in_force().bitcoin_depth)
+    local taken = 0
+
+    for _, input in ipairs(parse(raw).inputs) do
+        local key = outpoint(input)
+
+        if utxos:get(key .. ":state") == "bitvm" then
+            utxos:set(key .. ":state", "spent")
+            taken = taken + 1
+            events.emit("PegInTaken", key, txid)
+        end
+    end
+
+    if taken == 0 then
+        error("it spends no BitVM peg-in")
+    end
+
+    return taken
 end
 
 -- The change script of the federation in force, or of an earlier one by its version: the bare

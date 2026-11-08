@@ -523,7 +523,7 @@ fn authorize(block: &Arc<State>, tx: &SignedTx, context: &BlockContext) -> Resul
 fn brought_by(tx: &Tx) -> Option<&'static crate::params::forks::Fork> {
     match tx {
         Tx::SetRestake { .. } => Some(&crate::params::forks::RESTAKING),
-        Tx::Prove { .. } | Tx::ProveHeaders { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_) | crate::governance::Change::Attestations(_), .. } => Some(&crate::params::forks::PROOFS),
+        Tx::Prove { .. } | Tx::ProveHeaders { .. } | Tx::VoteChange { change: crate::governance::Change::Proofs(_) | crate::governance::Change::Attestations(_) | crate::governance::Change::BtcPath(_), .. } => Some(&crate::params::forks::PROOFS),
         Tx::Multisig { tx, .. } => brought_by(tx),
         _ => None,
     }
@@ -1343,6 +1343,7 @@ fn run(
                 Change::Proofs(settings) => Changes::new(layer).attestations_at(height + 1).map(|on| {
                     settings.problem().or((!on && settings.gateway == crate::proofs::GatewayMode::Both).then_some("Gateway.sol cannot need proofs while attestations are off: name proof-or-federation or federation-only"))
                 }),
+                Change::BtcPath(_) => Ok(None),
                 Change::Attestations(on) => Changes::new(layer).proofs().map(|settings| {
                     (!on && settings.is_some_and(|settings| settings.gateway == crate::proofs::GatewayMode::Both)).then_some("attestations cannot go off while Gateway.sol needs proofs: set the proofs' gateway mode to proof-or-federation or federation-only first")
                 }),

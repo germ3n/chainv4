@@ -1788,3 +1788,92 @@ fn bitcoin_core_takes_a_replacement_of_a_stuck_release_and_a_child_for_a_pinned_
     btc.show(6, &repaying).unwrap();
     assert_eq!(btc.owed(), [4_800, 0]);
 }
+
+/// BitVM's side of the gateway: no peg-in its way until governance opens it; then a confirmed
+/// peg-in mints and is held apart from what releases spend; an operator fronts a withdrawal with a
+/// payment of its own, which no release then pays and no second withdrawal reuses; and a graph's
+/// Take shown spends the peg-in. With BitVM's way alone, the federation's addresses take nothing.
+#[cfg(feature = "bridge")]
+#[test]
+fn bitvm_peg_ins_mint_apart_operators_front_withdrawals_and_takes_spend_the_peg_in() {
+    use crate::registry::federation::BtcPath;
+
+    let mut btc = Btc::new();
+    let path = |btc: &Btc, path: BtcPath| btc.world.state.put_value(crate::db::Column::Validators, crate::registry::changes::Changes::btc_path_key().to_vec(), &path);
+    let output = match &btc.call("bitvm_script", &[address(ALICE)]).unwrap()[..] {
+        [_, TxCallArgumentType::Bytes(output), _] => output.clone(),
+        other => panic!("{other:?}"),
+    };
+    let peg_in = pays(&output, 50_000);
+    let (block, index, proof, first, first_path) = btc.mine(&peg_in);
+    btc.bury();
+    let shown = [bytes(&block), bytes(&peg_in), number(index), bytes(&proof), bytes(&first), bytes(&first_path), number(0), address(ALICE)];
+
+    // The federation's way alone, as before BitVM: no peg-in this way.
+    let refused = btc.call("bitvm_deposit", &shown).unwrap_err();
+    assert!(refused.contains("federation's deposit addresses"), "{refused}");
+
+    // Either way: it mints, held apart, as the graph alone spends it.
+    path(&btc, BtcPath::Both);
+    btc.call("bitvm_deposit", &shown).unwrap();
+    assert_eq!(btc.wbtc_of(ALICE), u256::new(50_000));
+    assert_eq!(btc.state_at(&sha256d(&peg_in), 0), Some(text("bitvm")));
+    assert!(btc.call("bitvm_deposit", &shown).unwrap_err().contains("minted already"));
+
+    // Alice withdraws; an operator pays Bob on Bitcoin and fronts it; the payment fronts it alone.
+    let withdrawal = btc.withdrawal(20_000);
+    let operator = Address::Ed25519([0x0b; 32]);
+    let payment = pays(&bob(), 19_000);
+    let (block, index, proof, first, first_path) = btc.mine(&payment);
+    btc.bury();
+    let front = |btc: &Btc, id: u64| btc.call_as(operator, "bitvm_front", &[number(id), bytes(&block), bytes(&payment), number(index), bytes(&proof), bytes(&first), bytes(&first_path), number(0)]);
+    front(&btc, withdrawal).unwrap();
+    assert_eq!(btc.state_of_withdrawal(withdrawal), text("fronted"));
+    assert_eq!(btc.call("fronted", &[number(withdrawal)]).unwrap()[0], address(operator));
+    assert!(front(&btc, withdrawal).unwrap_err().contains("no queued withdrawal"), "fronted once");
+    let another = btc.withdrawal(20_000);
+    assert!(front(&btc, another).unwrap_err().contains("fronted a withdrawal already"), "one payment, one withdrawal");
+
+    // Too little to the script, or to another script, fronts nothing.
+    let short = pays(&bob(), 1_000);
+    let (block, index, proof, first, first_path) = btc.mine(&short);
+    btc.bury();
+    let refused = btc.call_as(operator, "bitvm_front", &[number(another), bytes(&block), bytes(&short), number(index), bytes(&proof), bytes(&first), bytes(&first_path), number(0)]).unwrap_err();
+    assert!(refused.contains("less than"), "{refused}");
+
+    // The graph's Take, shown, spends the peg-in; showing what spends none is refused.
+    let take = spending(&[sha256d(&peg_in)], vec![pays_bob(49_000)]).base();
+    let (block, index, proof, first, first_path) = btc.mine(&take);
+    btc.bury();
+    let taken = btc.call("bitvm_taken", &[bytes(&block), bytes(&take), number(index), bytes(&proof), bytes(&first), bytes(&first_path)]).unwrap();
+    assert_eq!(taken[0], TxCallArgumentType::I64(1));
+    assert_eq!(btc.state_at(&sha256d(&peg_in), 0), Some(text("spent")));
+    assert!(btc.call("bitvm_taken", &[bytes(&block), bytes(&take), number(index), bytes(&proof), bytes(&first), bytes(&first_path)]).unwrap_err().contains("no BitVM peg-in"));
+
+    // BitVM's way alone: the federation's deposit addresses take nothing new.
+    path(&btc, BtcPath::Bitvm);
+    let deposit = pays(&btc.deposit_output(ALICE), 30_000);
+    let (block, index, proof, first, first_path) = btc.mine(&deposit);
+    btc.bury();
+    let refused = btc.call("deposit", &[bytes(&block), bytes(&deposit), number(index), bytes(&proof), bytes(&first), bytes(&first_path), number(0), address(ALICE), TxCallArgumentType::Nil]).unwrap_err();
+    assert!(refused.contains("go by BitVM"), "{refused}");
+}
+
+/// A withdrawal's event reads back as the range proof's leaf takes it: the id, Bob's script and the
+/// satoshis, whatever types Lua gave them; so what a range proof commits to is what anyone works
+/// out from the event.
+#[cfg(feature = "bridge")]
+#[test]
+fn a_withdrawals_event_reads_as_the_range_proofs_leaf_takes_it() {
+    let mut btc = Btc::new();
+    btc.deposited(50_000);
+    let called = btc.world.call_at(ALICE, btc.gateway, "withdraw", &[bytes(&bob()), number(20_000)], 0, NOW);
+    called.result.unwrap();
+    let event = called.events.iter().find(|event| event.name == "WithdrawRequested").expect("emitted");
+
+    assert_eq!(event.contract, btc.gateway);
+    assert_eq!(crate::proofs::btc_withdrawal_of(&event.data), Some((1, bob(), 20_000)));
+    let leaf = crate::proofs::btc_withdrawal_digest(&btc.gateway, 1, &bob(), 20_000);
+    assert_ne!(leaf, crate::proofs::btc_withdrawal_digest(&btc.gateway, 2, &bob(), 20_000), "another id");
+    assert_ne!(leaf, crate::proofs::btc_withdrawal_digest(&btc.gateway, 1, &bob(), 20_001), "other satoshis");
+}

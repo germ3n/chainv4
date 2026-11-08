@@ -1489,6 +1489,7 @@ pub(super) fn transaction(tx: TxArgs, sender: Address, agent: &Agent, node: &str
                 ),
                 crate::governance::Change::Attestations(true) => "validators attesting for Ethereum".to_string(),
                 crate::governance::Change::Attestations(false) => "no attestations for Ethereum: ChainV4Finality.sol follows the chain no further".to_string(),
+                crate::governance::Change::BtcPath(path) => format!("new Bitcoin peg-ins by {}", path.name()),
             };
             println!("voting {} on {what}, from version {version}", vote.name());
 

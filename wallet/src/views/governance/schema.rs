@@ -155,6 +155,7 @@ const VOTE_REWARD_SOURCES: Options = &[("mint", "Minted"), ("fees", "Reward pool
 const SWITCHES: Options = &[("ffg", "FFG, by stake"), ("authority", "Authority, by signers")];
 const GOVERNANCES: Options = &[("council", "A council"), ("electorate", "Finality's voters")];
 const PROOF_KINDS: Options = &[("sp1-groth16", "SP1 in Groth16"), ("sp1-plonk", "SP1 in PLONK"), ("sp1-stark", "SP1's STARK, chain only")];
+const BTC_PATHS: Options = &[("federation", "The federation's deposit addresses"), ("bitvm", "BitVM's presigned graph"), ("both", "Either")];
 const GATEWAY_MODES: Options = &[("proof-or-federation", "A proof, or the federation's signatures"), ("both", "A proof and the federation's signatures"), ("federation-only", "The federation's signatures alone")];
 const EVM_SPECS: Options = &[("shanghai", "Shanghai"), ("cancun", "Cancun"), ("prague", "Prague"), ("osaka", "Osaka")];
 
@@ -414,6 +415,7 @@ pub fn schema(kind: &str) -> Vec<Spec> {
             field("btc.repay_pct", "A release repays what children cost, up to this percent of its fee", "0 never repays.", Control::Whole).under("Bitcoin").when(WHEN_BTC).most(100),
             field("btc.repay_most", "The most one withdrawal repays of it, in sats", "Within what it agreed to lose.", Control::Whole).under("Bitcoin").when(WHEN_BTC),
         ],
+        "btc_path" => vec![field("", "New Bitcoin peg-ins go", "BitVM: every signer presigns the graph a peg-in can only leave by, and operators front withdrawals, reimbursed after a challenge window. Peg-ins already made keep their path.", Control::Choice(BTC_PATHS))],
         "attestations" => vec![field("", "Validators attest for Ethereum", "Off, no validator attests links any more and blocks carry no attestations, so ChainV4Finality.sol on Ethereum follows the chain no further. Not while the proofs' gateway mode is both.", Control::Flag { off: "Off", on: "On" })],
         "locks" => vec![field("", "Paths to lock", "Each a setting no vote may change from then on, such as reward or anchoring.enforce. Nothing unlocks one, and a lock on locks freezes the set.", Control::List(Line::Path))],
         "directory" => vec![
@@ -444,6 +446,7 @@ pub fn defaults(kind: &str) -> Value {
         "fork" => json!({ "type": "schedule", "name": "", "height": null, "epoch": null, "least": "", "blocks": null }),
         "proofs" => json!({ "kinds": ["sp1-groth16"], "program": "", "reward_per_block": "0", "gateway": "proof-or-federation", "finality_program": format!("0x{}", "00".repeat(32)), "headers_program": format!("0x{}", "00".repeat(32)), "reward_per_epoch": "0", "withdrawal_program": format!("0x{}", "00".repeat(32)) }),
         "attestations" => json!(true),
+        "btc_path" => json!("federation"),
         "consensus" => json!({ "type": "pow", "hash": "blake3", "target_block_ms": 2000, "initial_difficulty": "100000", "min_difficulty": "1000", "key": "", "slot_ms": 2000, "schedule": "draw" }),
         "fees" => json!({
             "block_gas_limit": 50_000_000,
