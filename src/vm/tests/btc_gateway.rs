@@ -1877,3 +1877,53 @@ fn a_withdrawals_event_reads_as_the_range_proofs_leaf_takes_it() {
     assert_ne!(leaf, crate::proofs::btc_withdrawal_digest(&btc.gateway, 2, &bob(), 20_000), "another id");
     assert_ne!(leaf, crate::proofs::btc_withdrawal_digest(&btc.gateway, 1, &bob(), 20_001), "other satoshis");
 }
+
+/// BitVM's ceremony through the gateway: a request; an operator's graph, by its key alone; each
+/// signer's presignatures and confirmation, by its key alone; and an operator's claim of withdrawals
+/// it fronted, each claimed once and only by the graph's operator.
+#[cfg(feature = "bitvm")]
+#[test]
+fn bitvm_s_ceremony_takes_each_post_from_its_own_key_alone() {
+    use crate::registry::federation::BtcPath;
+
+    let mut btc = Btc::new();
+    btc.world.state.put_value(crate::db::Column::Validators, crate::registry::changes::Changes::btc_path_key().to_vec(), &BtcPath::Both);
+    let key = |byte: u8| crate::crypto::secp256k1::public_key(&[byte; 32]).unwrap();
+    let signed = |byte: u8, domain: &str, id: u64, bytes: &[u8]| crate::bridge::sign_digest(&[byte; 32], &crate::bitvm::ceremony_digest(domain, HERE, &btc.gateway, id, bytes)).to_vec();
+
+    // A request, which anyone posts.
+    let request = btc.call("bitvm_request", &[text(&"ab".repeat(32)), number(0), number(1_000_000), address(ALICE), bytes(&key(31)), number(144)]).unwrap();
+    assert_eq!(request, [TxCallArgumentType::I64(1)]);
+
+    // An operator's graph, by its own key; another key's signature over it posts nothing.
+    let operator = Address::Ed25519([0x0b; 32]);
+    let terms = b"{\"terms\":1}".to_vec();
+    let refused = btc.call_as(operator, "bitvm_graph", &[number(1), bytes(&key(41)), bytes(&terms), bytes(&signed(42, "chainv4-bitvm-graph", 1, &terms))]).unwrap_err();
+    assert!(refused.contains("not the operator's"), "{refused}");
+    btc.call_as(operator, "bitvm_graph", &[number(1), bytes(&key(41)), bytes(&terms), bytes(&signed(41, "chainv4-bitvm-graph", 1, &terms))]).unwrap();
+    assert_eq!(btc.call("bitvm_graph_of", &[number(1)]).unwrap()[3], address(operator));
+
+    // A signer's presignatures and confirmation, by its own key, kept by it; a stranger's, or one
+    // signed under the other's domain, is refused.
+    let presigned = b"presignatures".to_vec();
+    btc.call("bitvm_presign", &[number(1), bytes(&presigned), bytes(&signed(21, "chainv4-bitvm-presign", 1, &presigned))]).unwrap();
+    assert_eq!(btc.call("bitvm_presigned", &[number(1), bytes(&key(21))]).unwrap(), [text("presignatures")]);
+    assert!(btc.call("bitvm_presign", &[number(1), bytes(&presigned), bytes(&signed(99, "chainv4-bitvm-presign", 1, &presigned))]).unwrap_err().contains("not a signer"));
+    let confirm = b"confirmation".to_vec();
+    assert!(btc.call("bitvm_confirm", &[number(1), bytes(&confirm), bytes(&signed(22, "chainv4-bitvm-presign", 1, &confirm))]).unwrap_err().contains("not a signer"), "another domain's");
+    btc.call("bitvm_confirm", &[number(1), bytes(&confirm), bytes(&signed(22, "chainv4-bitvm-confirm", 1, &confirm))]).unwrap();
+    assert_eq!(btc.call("bitvm_confirmed", &[number(1), bytes(&key(22))]).unwrap(), [text("confirmation")]);
+
+    // The operator claims a withdrawal it fronted, once; someone else, or one never fronted, no.
+    btc.deposited(50_000);
+    let withdrawal = btc.withdrawal(20_000);
+    assert!(btc.call_as(operator, "bitvm_claim", &[number(1), number(withdrawal)]).unwrap_err().contains("not one this operator fronted"));
+    let payment = pays(&bob(), 19_500);
+    let (block, index, proof, first, first_path) = btc.mine(&payment);
+    btc.bury();
+    btc.call_as(operator, "bitvm_front", &[number(withdrawal), bytes(&block), bytes(&payment), number(index), bytes(&proof), bytes(&first), bytes(&first_path), number(0)]).unwrap();
+    assert!(btc.call_as(ALICE, "bitvm_claim", &[number(1), number(withdrawal)]).unwrap_err().contains("only the graph's operator"));
+    btc.call_as(operator, "bitvm_claim", &[number(1), number(withdrawal)]).unwrap();
+    assert_eq!(btc.call("bitvm_claim_of", &[number(1)]).unwrap(), [text(&withdrawal.to_string())]);
+    assert!(btc.call_as(operator, "bitvm_claim", &[number(1), number(withdrawal)]).unwrap_err().contains("claimed already"));
+}

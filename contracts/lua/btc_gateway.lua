@@ -1897,6 +1897,173 @@ function M.bitvm_taken(block, raw, index, path, coinbase, coinbase_path)
     return taken
 end
 
+-- BitVM's ceremony, through the gateway as releases go: a depositor's request, each operator's
+-- graph on it, every signer's presignatures of each graph and its signature confirming the request
+-- into the peg-in, and each operator's claim of what a kickoff is reimbursed for. Whoever relays
+-- them posts them; each signer's and operator's is its own, by a signature of its Bitcoin key over
+-- what it posts, under a domain of its own. The gateway keeps them for everyone to fetch; the
+-- signers and watchers check the transactions themselves (src/bitvm).
+local bitvm = storage.namespace("bitvm")
+
+local function bitvm_digest(domain, id, bytes)
+    return crypto.sha256d(domain .. le(chain.id(), 8) .. ctx.contract:encode() .. le(id, 8) .. crypto.sha256d(bytes))
+end
+
+-- A depositor's request, paid to its request address (src/bitvm request_script): the output, its
+-- satoshis, the chainv4 address it is for, the depositor's key and the blocks before it may take it
+-- back. Anyone may post it; the signers check it on Bitcoin before they confirm it.
+function M.bitvm_request(txid, vout, sats, recipient, depositor, refund_after)
+    if btc_path() == "federation" then
+        error("new peg-ins go by the federation's deposit addresses")
+    end
+
+    local id = count("bitvm_request_count") + 1
+    storage.set("bitvm_request_count", tostring(id))
+    bitvm:set("request:" .. id .. ":outpoint", txid .. ":" .. whole(vout, "the output"))
+    bitvm:set("request:" .. id .. ":sats", tostring(whole(sats, "the satoshis")))
+    bitvm:set("request:" .. id .. ":recipient", recipient:text())
+    bitvm:set("request:" .. id .. ":depositor", depositor)
+    bitvm:set("request:" .. id .. ":refund_after", tostring(whole(refund_after, "the refund's blocks")))
+    events.emit("PegInRequested", id, txid, vout, recipient)
+    return id
+end
+
+function M.bitvm_request_of(id)
+    id = whole(id, "the request")
+    local at = "request:" .. id .. ":"
+
+    return bitvm:get(at .. "outpoint"), tonumber(bitvm:get(at .. "sats") or ""), bitvm:get(at .. "recipient"), bitvm:get(at .. "depositor"), tonumber(bitvm:get(at .. "refund_after") or "")
+end
+
+function M.bitvm_request_count()
+    return count("bitvm_request_count")
+end
+
+-- An operator's graph on a request: its terms, as chainv4 bridge … btc bitvm graph writes them,
+-- under its Bitcoin key's signature; the account posting it is the one it fronts withdrawals from,
+-- which watchers hold it to.
+function M.bitvm_graph(request, operator, terms, signature)
+    request = whole(request, "the request")
+
+    if not bitvm:get("request:" .. request .. ":outpoint") then
+        error("no such request")
+    end
+
+    local id = count("bitvm_graph_count") + 1
+
+    if crypto.recover(bitvm_digest("chainv4-bitvm-graph", id, terms), signature) ~= operator then
+        error("not the operator's signature over the terms")
+    end
+
+    storage.set("bitvm_graph_count", tostring(id))
+    bitvm:set("graph:" .. id .. ":request", tostring(request))
+    bitvm:set("graph:" .. id .. ":operator", operator)
+    bitvm:set("graph:" .. id .. ":terms", terms)
+    bitvm:set("graph:" .. id .. ":account", ctx.sender:text())
+    events.emit("GraphPosted", id, request, ctx.sender)
+    return id
+end
+
+function M.bitvm_graph_of(id)
+    id = whole(id, "the graph")
+    local at = "graph:" .. id .. ":"
+    local account = bitvm:get(at .. "account")
+
+    return tonumber(bitvm:get(at .. "request") or ""), bitvm:get(at .. "operator"), bitvm:get(at .. "terms"), account and address.parse(account)
+end
+
+function M.bitvm_graph_count()
+    return count("bitvm_graph_count")
+end
+
+-- A signer's presignatures of a graph, under its key's signature over them: kept by its key.
+function M.bitvm_presign(graph, presigned, signature)
+    graph = whole(graph, "the graph")
+
+    if not bitvm:get("graph:" .. graph .. ":terms") then
+        error("no such graph")
+    end
+
+    local key = crypto.recover(bitvm_digest("chainv4-bitvm-presign", graph, presigned), signature)
+
+    if not signer_of(in_force(), key) then
+        error("not a signer of the federation in force")
+    end
+
+    bitvm:set("graph:" .. graph .. ":presigned:" .. hex(key), presigned)
+    events.emit("GraphPresigned", graph, key)
+end
+
+function M.bitvm_presigned(graph, key)
+    return bitvm:get("graph:" .. whole(graph, "the graph") .. ":presigned:" .. hex(key))
+end
+
+-- A signer's signature confirming a request into the peg-in, under its key's signature over it.
+function M.bitvm_confirm(request, confirm, signature)
+    request = whole(request, "the request")
+
+    if not bitvm:get("request:" .. request .. ":outpoint") then
+        error("no such request")
+    end
+
+    local key = crypto.recover(bitvm_digest("chainv4-bitvm-confirm", request, confirm), signature)
+
+    if not signer_of(in_force(), key) then
+        error("not a signer of the federation in force")
+    end
+
+    bitvm:set("request:" .. request .. ":confirm:" .. hex(key), confirm)
+    events.emit("PegInConfirmed", request, key)
+end
+
+function M.bitvm_confirmed(request, key)
+    return bitvm:get("request:" .. whole(request, "the request") .. ":confirm:" .. hex(key))
+end
+
+-- An operator's claim of the withdrawals a graph's kickoff is reimbursed for: each fronted by the
+-- graph's account, none claimed before. Watchers challenge a kickoff whose claim falls short.
+function M.bitvm_claim(graph, ...)
+    graph = whole(graph, "the graph")
+    local account = bitvm:get("graph:" .. graph .. ":account")
+
+    if account == nil or account ~= ctx.sender:text() then
+        error("only the graph's operator claims for it")
+    end
+
+    if bitvm:get("graph:" .. graph .. ":claim") then
+        error("that graph claimed already")
+    end
+
+    local ids = {}
+
+    for _, id in ipairs({ ... }) do
+        id = whole(id, "a withdrawal")
+
+        if withdrawals:get(id .. ":state") ~= "fronted" or withdrawals:get(id .. ":operator") ~= account then
+            error("withdrawal " .. id .. " is not one this operator fronted")
+        end
+
+        if withdrawals:get(id .. ":claimed") then
+            error("withdrawal " .. id .. " is claimed already")
+        end
+
+        withdrawals:set(id .. ":claimed", tostring(graph))
+        table.insert(ids, tostring(id))
+    end
+
+    if #ids == 0 then
+        error("a claim names a withdrawal at least")
+    end
+
+    bitvm:set("graph:" .. graph .. ":claim", table.concat(ids, ","))
+    events.emit("GraphClaimed", graph, table.concat(ids, ","))
+end
+
+-- What a graph's operator claimed, as withdrawal ids joined by commas, nil before it claimed.
+function M.bitvm_claim_of(graph)
+    return bitvm:get("graph:" .. whole(graph, "the graph") .. ":claim")
+end
+
 -- The change script of the federation in force, or of an earlier one by its version: the bare
 -- multisig its change goes to.
 function M.change_script(version)

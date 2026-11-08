@@ -821,6 +821,30 @@ claim. It can never send a peg-in anywhere but to an operator through the graph.
 4. After the window, the operator finishes Take (`bitvm finish --step take`), and anyone shows it to
    the gateway (`bitvm taken`, `bitvm_taken`), which marks the peg-in spent.
 
+**The ceremony, through the gateway** as releases go. Whoever relays a post sends it, and each
+signer's and operator's is its own: a signature by its Bitcoin key over what it posts, under a
+domain of its own (`bitvm::ceremony_digest`), which the gateway checks against the federation in
+force or the operator's key.
+
+```sh
+chainv4 bridge … btc bitvm request <txid> <vout> <sats> <recipient> --depositor 0x…        # the depositor's request, once paid
+chainv4 bridge … --evm-key operator.key --key account.key btc bitvm post-graph <request> --funding <txid:vout> --funding-value N
+chainv4 bridge … --evm-key signer.key btc bitvm pass                                       # each signer, in a loop
+chainv4 bridge … --key account.key btc bitvm claim <graph> <withdrawal>…                   # the operator, before its kickoff
+chainv4 bridge … --evm-key watcher.key btc bitvm watch --every 60                          # anyone
+```
+
+- **A signer's pass** presigns each graph that checks out: built on its request's confirm
+  transaction (`bitvm::confirm_tx`), by the federation in force, with windows long enough to
+  watch. Once one of a request's graphs has every signer's presignatures, each checked, it signs
+  the confirm. When every signer has, it broadcasts the confirm, and once that's mined it shows it
+  to the gateway to mint.
+- **An operator's claim** names the withdrawals a graph's kickoff is reimbursed for: each one it
+  fronted, none claimed before (`bitvm_claim`).
+- **A watcher** checks each graph's kickoff once it's mined and its challenge connector is unspent.
+  It challenges, paying the fee from its own P2WPKH coins, when the operator claimed nothing,
+  claimed a withdrawal it didn't front, or claimed less than the peg-in pays it.
+
 **What to keep in mind:**
 
 - **Everything is P2WSH, CHECKMULTISIG and CHECKSEQUENCEVERIFY,** as the repo's Bitcoin code
@@ -829,8 +853,8 @@ claim. It can never send a peg-in anywhere but to an operator through the graph.
   `cargo test --lib -- --ignored bitcoin_core_runs_every_path_of_the_graph`.
 - **A peg-in reimburses its whole value.** Phase 1 leaves matching withdrawals to peg-ins to the
   watchers, who refuse a take that isn't covered; fixed denominations would make it exact.
-- **Graphs are files** the signers and the operator hand each other. The gateway keeps only the
-  peg-in and what was fronted.
+- **Graphs and presignatures are kept on the gateway,** so a signer, operator or watcher joining
+  later finds them all there.
 
 ## Endpoints
 

@@ -8,7 +8,7 @@ use {
     super::{Bridge, Proof},
     crate::bitvm::{Graph, GraphTerms, request_script},
     crate::cli::CliResult,
-    crate::crypto::bitcoin::tx::{Transaction, p2wsh},
+    crate::crypto::bitcoin::tx::{Transaction, TxIn, TxOut, p2wsh},
     crate::structs::address::Address,
     crate::structs::hex::{from_hex, to_hex},
     crate::structs::tx::TxCallArgumentType,
@@ -105,6 +105,60 @@ pub enum BitvmAction {
     Front { withdrawal: u64, txid: String, vout: u32 },
     /// Shows the gateway a graph's transaction that spent peg-ins.
     Taken { txid: String },
+    /// Posts a depositor's request to the gateway, once its payment to the request address is
+    /// made: what the signers' pass works from.
+    Request {
+        txid: String,
+        vout: u32,
+        sats: u64,
+        recipient: Address,
+        /// The depositor's compressed key, as its request address names it.
+        #[arg(long)]
+        depositor: String,
+        #[arg(long, default_value_t = 1_008)]
+        refund_after: u16,
+    },
+    /// An operator, with --evm-key as its Bitcoin key and --key as the account it fronts from,
+    /// posts its graph on a request: built on the request's confirm transaction, by the federation
+    /// in force.
+    PostGraph {
+        request: u64,
+        /// Its funding output for the kickoff, a P2WPKH of its key, txid:vout.
+        #[arg(long)]
+        funding: String,
+        #[arg(long)]
+        funding_value: u64,
+        #[arg(long, default_value_t = 100_000)]
+        stake: u64,
+        /// Each transaction's fee, the confirm's too.
+        #[arg(long, default_value_t = 2_000)]
+        fee: u64,
+        #[arg(long, default_value_t = 144)]
+        challenge_window: u16,
+        #[arg(long, default_value_t = 144)]
+        dispute_window: u16,
+    },
+    /// A signer's pass, with --evm-key as its federation key: presigns every graph on every request
+    /// that checks out, confirms a request once one of its graphs is presigned by every signer,
+    /// broadcasts a confirm every signer signed, and shows a mined one to mint. Each step stands
+    /// alone, as the release pass's do.
+    Pass,
+    /// An operator, with --key, claims the withdrawals it fronted that a graph's kickoff is
+    /// reimbursed for: before its kickoff, or watchers challenge it.
+    Claim {
+        graph: u64,
+        #[arg(num_args = 1..)]
+        withdrawals: Vec<u64>,
+    },
+    /// A watcher, with --evm-key paying for challenges from its own P2WPKH coins: checks every
+    /// graph's kickoff on Bitcoin against its operator's claim on the gateway, and challenges one
+    /// whose claim falls short, again after a pause, until stopped; --once for one pass.
+    Watch {
+        #[arg(long, default_value_t = 60)]
+        every: u64,
+        #[arg(long)]
+        once: bool,
+    },
     /// A watcher's check of an operator's kickoff: whether the withdrawal it fronted is proven, by
     /// the withdrawal proof given, under the program governance names, and the gateway's record of
     /// it. Says challenge or not; with --challenge-with, prints nothing else to do.
@@ -191,7 +245,298 @@ fn graph_of(path: &Path) -> CliResult<Graph> {
     Ok(Graph::build(terms)?)
 }
 
+/// A request as the gateway keeps it, with what it confirms into.
+struct Request {
+    outpoint: ([u8; 32], u32),
+    sats: u64,
+    recipient: Address,
+    script: Vec<u8>,
+    peg_in_script: Vec<u8>,
+}
+
+/// A graph as the gateway keeps it.
+struct Posted {
+    request: u64,
+    graph: Graph,
+    account: String,
+}
+
 impl Bridge {
+    fn chain_id(&self) -> CliResult<u64> {
+        Ok(self.status()?["chain_id"].as_u64().ok_or("the node names no chain id")?)
+    }
+
+    fn bitvm_count(&self, function: &str) -> CliResult<u64> {
+        Ok(self.read(&self.btc_gateway()?, function, json!([]))?.first().and_then(|value| value["value"].as_str()?.parse().ok()).unwrap_or(0))
+    }
+
+    /// A request from the gateway: its output, satoshis, recipient, its request script under the
+    /// federation in force, and the peg-in script it confirms into.
+    fn bitvm_request(&self, id: u64) -> CliResult<Request> {
+        let gateway = self.btc_gateway()?;
+        let found = self.read(&gateway, "bitvm_request_of", json!([{ "type": "u64", "value": id.to_string() }]))?;
+        let text = |at: usize| found.get(at).and_then(|value| value["value"].as_str()).map(str::to_string);
+        let outpoint = outpoint(&text(0).ok_or("no such request")?)?;
+        let sats = text(1).and_then(|sats| sats.parse().ok()).ok_or("a request of no satoshis")?;
+        let recipient: Address = text(2).ok_or("a request for no address")?.parse()?;
+        let depositor = found.get(3).map(super::raw).and_then(|bytes| <[u8; 33]>::try_from(bytes).ok()).ok_or("a request of no depositor's key")?;
+        let refund_after = text(4).and_then(|blocks| blocks.parse().ok()).ok_or("a request of no refund")?;
+        let (signers, _) = self.bitvm_federation()?;
+
+        Ok(Request {
+            outpoint,
+            sats,
+            recipient,
+            script: request_script(&signers, &depositor, refund_after),
+            peg_in_script: crate::bitvm::peg_in_script(&recipient, self.chain_id()?, &gateway, &signers),
+        })
+    }
+
+    /// A graph from the gateway, rebuilt from its terms.
+    fn bitvm_posted(&self, id: u64) -> CliResult<Posted> {
+        let found = self.read(&self.btc_gateway()?, "bitvm_graph_of", json!([{ "type": "u64", "value": id.to_string() }]))?;
+        let request = found.first().and_then(|value| value["value"].as_str()?.parse().ok()).ok_or("no such graph")?;
+        let terms = found.get(2).map(super::raw).ok_or("a graph of no terms")?;
+        let account = found.get(3).and_then(|value| value["value"].as_str()).ok_or("a graph of no account")?.to_string();
+        let path = std::env::temp_dir().join(format!("chainv4-bitvm-{}-{id}.json", std::process::id()));
+        std::fs::write(&path, &terms).map_err(|err| err.to_string())?;
+        let graph = graph_of(&path);
+        let _ = std::fs::remove_file(&path);
+
+        Ok(Posted { request, graph: graph?, account })
+    }
+
+    /// Whether a graph is one this signer may presign: on its request's confirm, by the federation
+    /// in force, every signer presigning.
+    fn bitvm_sound(&self, posted: &Posted, request: &Request) -> CliResult<()> {
+        let (signers, threshold) = self.bitvm_federation()?;
+        let terms = &posted.graph.terms;
+        let confirm = crate::bitvm::confirm_tx(request.outpoint, request.sats, &request.peg_in_script, terms.fee);
+
+        if terms.peg_in != (confirm.txid(), 0) || terms.peg_in_value != confirm.outputs[0].value || terms.peg_in_script != request.peg_in_script {
+            return Err("a graph on another peg-in than its request's".into());
+        }
+
+        if terms.signers != signers || terms.federation != signers || terms.threshold != threshold {
+            return Err("a graph under another federation than the one in force".into());
+        }
+
+        if terms.challenge_window < 6 || terms.dispute_window < 6 {
+            return Err("windows too short to watch".into());
+        }
+
+        Ok(())
+    }
+
+    /// Every signer's presignatures of a graph that the gateway holds and that check out, by the
+    /// signers' order: None while any is missing.
+    fn bitvm_all_presigned(&self, graph_id: u64, graph: &Graph) -> CliResult<Option<Vec<Vec<Vec<u8>>>>> {
+        let gateway = self.btc_gateway()?;
+        let mut all = Vec::new();
+
+        for signer in &graph.terms.signers {
+            let found = self.read(&gateway, "bitvm_presigned", json!([{ "type": "u64", "value": graph_id.to_string() }, { "type": "bytes", "value": to_hex(signer) }]))?;
+            let Some(posted) = found.first().map(super::raw).filter(|bytes| !bytes.is_empty()) else {
+                return Ok(None);
+            };
+            let theirs = hexes(&serde_json::from_slice::<Value>(&posted).unwrap_or_default()["presigned"]);
+
+            if !graph.check_presigned(signer, &theirs) {
+                return Ok(None);
+            }
+
+            all.push(theirs);
+        }
+
+        Ok(Some(all))
+    }
+
+    fn bitvm_pass(&self) -> CliResult<()> {
+        let gateway = self.btc_gateway()?;
+        let secret = self.evm_secret()?;
+        let mine = crate::crypto::secp256k1::public_key(&secret).ok_or("--evm-key is no secp256k1 key")?;
+        let chain_id = self.chain_id()?;
+        let (signers, _) = self.bitvm_federation()?;
+
+        if !signers.contains(&mine) {
+            return Err("--evm-key is no signer of the federation in force".into());
+        }
+
+        let graphs: Vec<(u64, CliResult<Posted>)> = (1..=self.bitvm_count("bitvm_graph_count")?).map(|id| (id, self.bitvm_posted(id))).collect();
+
+        for request_id in 1..=self.bitvm_count("bitvm_request_count")? {
+            let request = match self.bitvm_request(request_id) {
+                Ok(request) => request,
+                Err(why) => {
+                    eprintln!("request {request_id}: {why}");
+                    continue;
+                }
+            };
+            let mut complete = None;
+
+            // Presign each sound graph on it, once.
+            for (graph_id, posted) in graphs.iter().filter_map(|(id, posted)| posted.as_ref().ok().filter(|posted| posted.request == request_id).map(|posted| (*id, posted))) {
+                if let Err(why) = self.bitvm_sound(posted, &request) {
+                    eprintln!("graph {graph_id}: not presigned: {why}");
+                    continue;
+                }
+
+                let had = self.read(&gateway, "bitvm_presigned", json!([{ "type": "u64", "value": graph_id.to_string() }, { "type": "bytes", "value": to_hex(&mine) }]))?;
+
+                if had.first().map(super::raw).is_none_or(|bytes| bytes.is_empty()) {
+                    let presigned = serde_json::to_vec(&json!({ "signer": to_hex(&mine), "presigned": posted.graph.presign(&secret).iter().map(|signature| to_hex(signature)).collect::<Vec<_>>() }))?;
+                    let signature = crate::bridge::sign_digest(&secret, &crate::bitvm::ceremony_digest("chainv4-bitvm-presign", chain_id, &gateway, graph_id, &presigned));
+                    self.call(gateway, "bitvm_presign", u256::ZERO, vec![TxCallArgumentType::U64(graph_id), TxCallArgumentType::Bytes(presigned), TxCallArgumentType::Bytes(signature.to_vec())])?;
+                    println!("presigned graph {graph_id} on request {request_id}");
+                }
+
+                if complete.is_none() && self.bitvm_all_presigned(graph_id, &posted.graph)?.is_some() {
+                    complete = Some(posted.graph.terms.fee);
+                }
+            }
+
+            // Once one of its graphs is presigned by every signer: confirm it, broadcast it once every
+            // signer confirmed, and show it mined.
+            let Some(fee) = complete else {
+                continue;
+            };
+            let confirm = crate::bitvm::confirm_tx(request.outpoint, request.sats, &request.peg_in_script, fee);
+            let confirmed = |key: &[u8; 33]| -> CliResult<Option<Vec<u8>>> {
+                let found = self.read(&gateway, "bitvm_confirmed", json!([{ "type": "u64", "value": request_id.to_string() }, { "type": "bytes", "value": to_hex(key) }]))?;
+                Ok(found.first().map(super::raw).filter(|bytes| crate::bitvm::check_confirm(&confirm, &request.script, request.sats, key, bytes)))
+            };
+
+            if confirmed(&mine)?.is_none() {
+                let signature = crate::bitvm::confirm_signature(&confirm, &request.script, request.sats, &secret);
+                let posted = crate::bridge::sign_digest(&secret, &crate::bitvm::ceremony_digest("chainv4-bitvm-confirm", chain_id, &gateway, request_id, &signature));
+                self.call(gateway, "bitvm_confirm", u256::ZERO, vec![TxCallArgumentType::U64(request_id), TxCallArgumentType::Bytes(signature), TxCallArgumentType::Bytes(posted.to_vec())])?;
+                println!("confirmed request {request_id}");
+            }
+
+            let all: Option<Vec<Vec<u8>>> = signers.iter().map(|key| confirmed(key).ok().flatten()).collect();
+            let Some(all) = all else {
+                continue;
+            };
+            let txid = {
+                let mut shown = confirm.txid();
+                shown.reverse();
+                to_hex(&shown).trim_start_matches("0x").to_string()
+            };
+            let bitcoin = self.btc_api()?;
+
+            match bitcoin.tx_status(&txid) {
+                Ok(status) if status.confirmed => {
+                    let state = self.read(&gateway, "utxo_of", json!([{ "type": "string", "value": format!("{txid}:0") }]))?;
+
+                    if state.get(3).is_none_or(|value| value["value"].is_null()) {
+                        let mut args = vec![];
+                        let Proof { tx, block, index, path, coinbase, coinbase_path } = self.proof(&txid)?;
+                        args.extend([TxCallArgumentType::Bytes(block.to_vec()), TxCallArgumentType::Bytes(tx), TxCallArgumentType::U64(index), TxCallArgumentType::Bytes(path), TxCallArgumentType::Bytes(coinbase), TxCallArgumentType::Bytes(coinbase_path), TxCallArgumentType::U64(0), TxCallArgumentType::Address(request.recipient)]);
+                        match self.call(gateway, "bitvm_deposit", u256::ZERO, args) {
+                            Ok(()) => println!("request {request_id}'s peg-in minted"),
+                            Err(why) => eprintln!("request {request_id}'s peg-in: {why}"),
+                        }
+                    }
+                }
+                _ => {
+                    let signed = crate::bitvm::signed_confirm(&confirm, &request.script, all);
+                    match bitcoin.broadcast(to_hex(&signed.encode()).trim_start_matches("0x")) {
+                        Ok(_) => println!("broadcast request {request_id}'s confirm {txid}"),
+                        Err(why) => eprintln!("request {request_id}'s confirm: {why}"),
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// One watcher pass: each graph's kickoff, once mined with its challenge connector unspent,
+    /// against its operator's claim; one that falls short challenged from this watcher's coins.
+    fn bitvm_watch(&self) -> CliResult<()> {
+        let gateway = self.btc_gateway()?;
+        let (network, _) = self.followed(&gateway, None)?;
+        let bitcoin = self.btc_api()?;
+        let secret = self.evm_secret()?;
+        let watcher = crate::crypto::secp256k1::public_key(&secret).ok_or("--evm-key is no secp256k1 key")?;
+        let watcher_script = crate::crypto::bitcoin::tx::p2wpkh(&crate::crypto::bitcoin::hash160(&watcher));
+
+        for graph_id in 1..=self.bitvm_count("bitvm_graph_count")? {
+            let Ok(posted) = self.bitvm_posted(graph_id) else {
+                continue;
+            };
+            let graph = &posted.graph;
+            let kickoff = {
+                let mut shown = graph.kickoff.txid();
+                shown.reverse();
+                to_hex(&shown).trim_start_matches("0x").to_string()
+            };
+
+            if !bitcoin.tx_status(&kickoff).is_ok_and(|status| status.confirmed) {
+                continue;
+            }
+
+            // Challenged already, or taken: the connector is gone.
+            let connector = network.address(&graph.kickoff.outputs[1].script);
+            if !bitcoin.coins(&connector)?.iter().any(|coin| coin.txid == kickoff && coin.vout == 1) {
+                continue;
+            }
+
+            let why = match self.bitvm_claim_short(graph_id, &posted) {
+                Ok(None) => continue,
+                Ok(Some(why)) => why,
+                Err(why) => format!("its claim could not be read: {why}"),
+            };
+            println!("graph {graph_id}'s kickoff {kickoff}: challenging, as {why}");
+            let Some(signatures) = self.bitvm_all_presigned(graph_id, graph)? else {
+                eprintln!("graph {graph_id}: its presignatures are not all on the gateway");
+                continue;
+            };
+            let coin = bitcoin.coins(&network.address(&watcher_script))?.into_iter().max_by_key(|coin| coin.value).ok_or("no coins of the watcher's to pay a challenge with")?;
+            let fee = graph.terms.fee;
+            let spent = outpoint(&format!("{}:{}", coin.txid, coin.vout))?;
+            let mut challenge = graph.challenge_with(
+                &signatures,
+                vec![TxIn { txid: spent.0, vout: spent.1, script_sig: Vec::new(), sequence: 0xffff_fffd, witness: Vec::new() }],
+                vec![TxOut { value: coin.value.saturating_sub(fee), script: watcher_script.clone() }],
+            );
+            let preimage = challenge.preimage(1, &crate::crypto::bitcoin::hash160(&watcher), coin.value);
+            let signature = crate::crypto::secp256k1::sign_hash(&secret, &crate::crypto::bitcoin::sha256d(&preimage));
+            challenge.inputs[1].witness = vec![[crate::crypto::bitcoin::tx::der(&signature), vec![1]].concat(), watcher.to_vec()];
+
+            match bitcoin.broadcast(to_hex(&challenge.encode()).trim_start_matches("0x")) {
+                Ok(txid) => println!("challenged graph {graph_id}: {txid}"),
+                Err(why) => eprintln!("graph {graph_id}'s challenge: {why}"),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Why a graph's claim falls short, or None for one that holds: every withdrawal it names
+    /// fronted by the graph's operator, together at least what the peg-in reimburses it.
+    fn bitvm_claim_short(&self, graph_id: u64, posted: &Posted) -> CliResult<Option<String>> {
+        let gateway = self.btc_gateway()?;
+        let claim = self.read(&gateway, "bitvm_claim_of", json!([{ "type": "u64", "value": graph_id.to_string() }]))?;
+        let Some(ids) = claim.first().and_then(|value| value["value"].as_str()).map(str::to_string) else {
+            return Ok(Some("its operator claimed nothing".to_string()));
+        };
+        let mut covered = 0u64;
+
+        for id in ids.split(',').filter_map(|id| id.parse::<u64>().ok()) {
+            let fronted = self.read(&gateway, "fronted", json!([{ "type": "u64", "value": id.to_string() }]))?;
+
+            if fronted.first().and_then(|value| value["value"].as_str()) != Some(posted.account.as_str()) {
+                return Ok(Some(format!("withdrawal {id} was not fronted by its operator")));
+            }
+
+            let record = self.read(&gateway, "withdrawal", json!([{ "type": "u64", "value": id.to_string() }]))?;
+            covered = covered.saturating_add(record.get(1).and_then(|value| value["value"].as_str()?.parse().ok()).unwrap_or(0));
+        }
+
+        Ok((covered < posted.graph.terms.peg_in_value).then(|| format!("its withdrawals cover {covered} of the {} satoshis it takes", posted.graph.terms.peg_in_value)))
+    }
+
     /// The federation in force, as the node says it: its keys, all of which presign, and threshold.
     fn bitvm_federation(&self) -> CliResult<(Vec<[u8; 33]>, usize)> {
         let status = self.status()?;
@@ -326,6 +671,61 @@ impl Bridge {
 
                 Ok(())
             }
+            BitvmAction::Request { txid, vout, sats, recipient, depositor, refund_after } => {
+                key(depositor, "--depositor")?;
+                let args = vec![TxCallArgumentType::String(txid.clone()), number(u64::from(*vout)), number(*sats), TxCallArgumentType::Address(*recipient), bytes(from_hex(depositor).unwrap_or_default()), number(u64::from(*refund_after))];
+
+                self.call(self.btc_gateway()?, "bitvm_request", u256::ZERO, args)
+            }
+            BitvmAction::PostGraph { request, funding, funding_value, stake, fee, challenge_window, dispute_window } => {
+                let gateway = self.btc_gateway()?;
+                let found = self.bitvm_request(*request)?;
+                let (signers, threshold) = self.bitvm_federation()?;
+                let secret = self.evm_secret()?;
+                let operator = crate::crypto::secp256k1::public_key(&secret).ok_or("--evm-key is no secp256k1 key")?;
+                let confirm = crate::bitvm::confirm_tx(found.outpoint, found.sats, &found.peg_in_script, *fee);
+                let terms = GraphTerms {
+                    federation: signers.clone(),
+                    signers,
+                    threshold,
+                    operator,
+                    funding: outpoint(funding)?,
+                    funding_value: *funding_value,
+                    peg_in: (confirm.txid(), 0),
+                    peg_in_value: confirm.outputs[0].value,
+                    peg_in_script: found.peg_in_script.clone(),
+                    stake: *stake,
+                    fee: *fee,
+                    challenge_window: *challenge_window,
+                    dispute_window: *dispute_window,
+                };
+                Graph::build(terms.clone())?;
+                let mut file = terms_json(&terms);
+                file["request"] = json!(request);
+                let posted = serde_json::to_vec(&file)?;
+                let id = self.bitvm_count("bitvm_graph_count")? + 1;
+                let signature = crate::bridge::sign_digest(&secret, &crate::bitvm::ceremony_digest("chainv4-bitvm-graph", self.chain_id()?, &gateway, id, &posted));
+
+                self.call(gateway, "bitvm_graph", u256::ZERO, vec![number(*request), bytes(operator.to_vec()), bytes(posted), bytes(signature.to_vec())])
+            }
+            BitvmAction::Pass => self.bitvm_pass(),
+            BitvmAction::Claim { graph, withdrawals } => {
+                let mut args = vec![number(*graph)];
+                args.extend(withdrawals.iter().map(|id| number(*id)));
+
+                self.call(self.btc_gateway()?, "bitvm_claim", u256::ZERO, args)
+            }
+            BitvmAction::Watch { every, once } => loop {
+                if let Err(why) = self.bitvm_watch() {
+                    eprintln!("watch: {why}");
+                }
+
+                if *once {
+                    return Ok(());
+                }
+
+                std::thread::sleep(std::time::Duration::from_secs(*every));
+            },
             BitvmAction::Front { withdrawal, txid, vout } => {
                 let mut args = vec![number(*withdrawal)];
                 args.extend(proof_args(self.proof(txid)?));

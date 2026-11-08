@@ -186,9 +186,13 @@ fn pegged_in(node: &Regtest) -> Graph {
     let request = request_script(&keys, &key(31), 20);
     let requested = node.pay(&p2wsh(&request), 10_010_000);
     let base = terms(([0; 32], 0), ([0; 32], 0));
-    let mut confirm = transaction(vec![input(requested.0, requested.1, NO_LOCK)], vec![TxOut { value: 10_000_000, script: p2wsh(&base.peg_in_script) }]);
-    let hash = crate::crypto::bitcoin::sha256d(&confirm.sighash_preimage(0, &request, 10_010_000, SIGHASH_ALL));
-    confirm.inputs[0].witness = multisig_witness(signers.iter().map(|byte| sign(&secret(*byte), &hash, SIGHASH_ALL)).collect(), &request, Some(true));
+    let unsigned = confirm_tx(requested, 10_010_000, &base.peg_in_script, 10_000);
+    let confirmations: Vec<Vec<u8>> = signers.iter().map(|byte| confirm_signature(&unsigned, &request, 10_010_000, &secret(*byte))).collect();
+    for (byte, signature) in signers.iter().zip(&confirmations) {
+        assert!(check_confirm(&unsigned, &request, 10_010_000, &key(*byte), signature));
+    }
+    assert!(!check_confirm(&unsigned, &request, 10_010_000, &key(12), &confirmations[0]), "another's");
+    let confirm = signed_confirm(&unsigned, &request, confirmations);
     node.send(&confirm).unwrap();
     node.mine(1);
     let funding = node.pay(&p2wpkh(&hash160(&key(21))), 1_000_000);

@@ -457,6 +457,57 @@ impl Graph {
     }
 }
 
+#[document(
+    summary = "What an operator or signer signs to post to the gateway's BitVM ceremony: double SHA-256 of a domain, the chain's id, the gateway, the request or graph it is for and its bytes' own double SHA-256, as the gateway makes it. chainv4-bitvm-graph for an operator's graph, chainv4-bitvm-presign for a signer's presignatures, chainv4-bitvm-confirm for its confirmation, so none passes for another.",
+    category = "Bridges",
+    params = { domain = "The domain.", chain_id = "The chain's id.", gateway = "The gateway.", id = "The request or graph.", bytes = "What is posted." },
+)]
+pub fn ceremony_digest(domain: &str, chain_id: u64, gateway: &crate::structs::address::Address, id: u64, bytes: &[u8]) -> [u8; 32] {
+    crate::crypto::bitcoin::sha256d(&[domain.as_bytes(), &chain_id.to_le_bytes(), &gateway.to_abi(), &id.to_le_bytes(), &crate::crypto::bitcoin::sha256d(bytes)].concat())
+}
+
+#[document(
+    summary = "The transaction that confirms a peg-in request into the peg-in: the request's output, all of it less the fee, to the peg-in script. The same for every signer and operator, so each graph is built on its id before any signer signs it.",
+    category = "Bridges",
+    params = { request = "The request's output: its transaction's id and index.", sats = "What it holds.", peg_in_script = "The peg-in's script.", fee = "The fee." },
+)]
+pub fn confirm_tx(request: ([u8; 32], u32), sats: u64, peg_in_script: &[u8], fee: u64) -> Transaction {
+    transaction(vec![input(request.0, request.1, NO_LOCK)], vec![TxOut { value: sats.saturating_sub(fee), script: p2wsh(peg_in_script) }])
+}
+
+#[document(
+    summary = "One signer's signature confirming a request, as its witness takes it, under SIGHASH_ALL.",
+    category = "Bridges",
+    params = { confirm = "The confirm transaction.", request_script = "The request's script.", sats = "What the request holds.", secret = "The signer's secret key." },
+)]
+pub fn confirm_signature(confirm: &Transaction, request_script: &[u8], sats: u64, secret: &[u8; 32]) -> Vec<u8> {
+    sign(secret, &crate::crypto::bitcoin::sha256d(&confirm.sighash_preimage(0, request_script, sats, SIGHASH_ALL)), SIGHASH_ALL)
+}
+
+#[document(
+    summary = "Whether a signer's confirming signature is its own over the confirm transaction.",
+    category = "Bridges",
+)]
+pub fn check_confirm(confirm: &Transaction, request_script: &[u8], sats: u64, key: &[u8; 33], signature: &[u8]) -> bool {
+    let Some((kind, body)) = signature.split_last() else {
+        return false;
+    };
+    let hash = crate::crypto::bitcoin::sha256d(&confirm.sighash_preimage(0, request_script, sats, SIGHASH_ALL));
+
+    u32::from(*kind) == SIGHASH_ALL && crate::crypto::bitcoin::tx::from_der(body).is_some_and(|signature| crate::crypto::secp256k1::verify_hash(key, &hash, &signature))
+}
+
+#[document(
+    summary = "The confirm transaction, whole: every signer's confirming signature, in the signers' order, on the request's first branch.",
+    category = "Bridges",
+)]
+pub fn signed_confirm(confirm: &Transaction, request_script: &[u8], signatures: Vec<Vec<u8>>) -> Transaction {
+    let mut confirm = confirm.clone();
+    confirm.inputs[0].witness = multisig_witness(signatures, request_script, Some(true));
+
+    confirm
+}
+
 /// A CHECKMULTISIG witness: the empty item its off-by-one pops, the signatures, the branch an IF
 /// takes when the script has one, and the script.
 fn multisig_witness(signatures: Vec<Vec<u8>>, script: &[u8], branch: Option<bool>) -> Vec<Vec<u8>> {
