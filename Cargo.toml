@@ -155,7 +155,7 @@ node = ["chain", "dep:rayon", "dep:signal-hook", "dep:libp2p", "dep:tokio", "dep
 ens-normalize = { version = "=0.1.1", optional = true }
 rocksdb = { version = "0.25.0", optional = true }
 sp1-verifier = { version = "=6.10.0", default-features = false, optional = true }
-sp1-sdk = { version = "=6.10.0", features = ["blocking"], optional = true }
+sp1-sdk = { version = "=6.10.0", features = ["blocking", "native-gnark"], optional = true }
 # A RocksDB snapshot owned with the database it reads, for the API's point-in-time reads.
 self_cell = { version = "1.2.0", optional = true }
 blake3 = { version = "1.8.7", optional = true }
