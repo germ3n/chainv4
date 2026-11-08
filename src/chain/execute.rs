@@ -1350,6 +1350,9 @@ fn run(
                 Change::Fork(change) => Changes::new(layer).forks().map(|schedule| change.problem(&schedule, height, Some(governance.checkpoint_interval), rules.target_block_ms)),
                 Change::Name(name) => Ok(crate::governance::chain_name_problem(name)),
                 Change::Governance(config) => Ok(governance.config.change_problem(config)),
+                // The threshold itself comes with the proofs fork, and so does a lock on it: a release
+                // before it knows no such path.
+                Change::Locks(paths) if !rules.vm.forks.has(&crate::params::forks::PROOFS) && paths.iter().any(|path| path.as_str() == "finality.justify_permille") => Ok(Some("a lock on the justification threshold comes with the proofs fork")),
                 Change::Locks(paths) => match Changes::new(layer).locks() {
                     Ok(standing) => match crate::governance::locks::adding_problem(&standing, paths) {
                         Some(problem) => return (Err(Failure::Registry(RegistryError::BadLocks(problem))), Contracted::default()),

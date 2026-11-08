@@ -1952,6 +1952,9 @@ mod voting {
         // A threshold of its own, before the proofs fork this chain never scheduled.
         let threshold = crate::params::finality::FfgLater { justify_permille: Some(800), ..genesis.later };
         refused(&mut chain, Change::Finality(FinalityConfig::Ffg(FfgConfig { later: threshold, ..genesis.clone() })), "comes with the proofs fork");
+        // And so does a lock on it, though every other finality field may be locked.
+        refused(&mut chain, Change::Locks(vec!["finality.justify_permille".to_string()]), "comes with the proofs fork");
+        assert!(crate::governance::locks::path_problem("finality.justify_permille").is_none(), "a path the proofs fork knows");
 
         for (member, effect) in [(dev(), Effect::Done), (key(70), Effect::Decided { decision: 1, kind: crate::governance::ChangeKind::Consensus, version: 1 })] {
             assert_eq!(send_as(&mut chain, &member, Tx::VoteChange { vote: crate::governance::ChangeVote::Yes, version: 0, change: Change::Finality(tuned.clone()) }).result, Ok(effect));

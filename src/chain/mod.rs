@@ -2334,7 +2334,22 @@ impl Chain {
         });
         // History begins at the pivot: nothing below it was run here.
         state.put_value(Column::Meta, HISTORY_FROM_KEY.to_vec(), &HistoryFrom { height: pivot.header.height });
+        // So do the indexes: each holds from the block after the pivot, as no receipt below it is
+        // here to index or to take out. The versions index, kept from the start, is one of them.
+        let indexed: Vec<(IndexKind, IndexWindow)> = IndexKind::ALL
+            .into_iter()
+            .filter_map(|kind| self.index_window(kind).map(|window| (kind, IndexWindow { from: pivot.header.height + 1, ..window })))
+            .collect();
+
+        for (kind, window) in &indexed {
+            state.put_value(Column::Meta, kind.low_end_key().to_vec(), &index::IndexedFrom { height: window.from });
+        }
+
         self.db.commit(state.take_changes())?;
+
+        for (kind, window) in indexed {
+            self.set_window(kind, Some(window));
+        }
         log::info!("[chain] installed a snapshot at height {} {id}", pivot.header.height);
 
         // The member index follows the registry, which the snapshot's state replaced whole.

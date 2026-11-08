@@ -145,6 +145,8 @@ pub fn fields(root: &str) -> Option<&'static [&'static str]> {
             "slash_permille",
             "leak.after_epochs",
             "leak.permille",
+            // From the proofs fork on: refused in a vote before it.
+            "justify_permille",
             "max_signers",
             "signers",
             "threshold",
