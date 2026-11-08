@@ -770,6 +770,68 @@ longer while fees run past what it agreed to lose, or the gateway holds too litt
   the release waits for signatures. The others sign it only while their Esplora says it is stuck.
 - **`--bump-after`** takes a time, 1 hour unless told, which `btc.bump_after_ms` overrides.
 
+### BitVM, beside the federation
+
+BitVM is a second way for Bitcoin peg-ins, beside the federation's addresses (`src/bitvm`, the
+`bitvm` feature). A peg-in's coins can only leave by a transaction graph that **every** signer
+presigned before the peg-in counted. So one honest signer who forgets its key afterwards is enough
+to keep the coins on the graph for good. Withdrawals are paid by **operators** out of their own
+coins, then reimbursed from a peg-in after a challenge window. This is phase 1: challenges are
+judged by the federation, off Bitcoin. Phase 2 has Bitcoin's own script check the proof.
+
+Governance picks the way new peg-ins go, `federation`, `bitvm` or `both` (`Change::BtcPath`, from
+the `proofs` fork on). The gateway reads it as `federation.get().btc_path`. Peg-ins already made
+keep the way they were made.
+
+**A peg-in, in two steps, so a depositor is never stuck:**
+
+1. The depositor pays a **request address**: the signers together, or the depositor alone after
+   `refund_after` blocks (`bitvm request-address`).
+2. The signers build the peg-in's graph for each operator, every signer presigns it (`bitvm graph`,
+   `bitvm presign`), and only then do they confirm the request into the **peg-in** output. That
+   output's script names its chainv4 recipient as deposit addresses do, under every signer.
+3. Anyone shows the confirmed peg-in to the gateway (`bitvm deposit`, `bitvm_deposit`), which mints
+   its wBTC and holds the output apart: federation releases never spend it.
+
+**The graph, for one peg-in and one operator:**
+
+| Transaction | Spends | When |
+| --- | --- | --- |
+| Kickoff | the operator's funding output | when the operator wants reimbursing; it makes the claim connector, the challenge connector and the verdict connector, which holds the operator's stake |
+| Take | the peg-in, the claim connector, the challenge connector | `challenge_window` blocks after the kickoff, if nobody challenged |
+| Challenge | the challenge connector, presigned `SIGHASH_SINGLE\|ANYONECANPAY` | any time before Take; the challenger adds inputs to pay the fee, and it pays the operator the connector |
+| Take after a challenge | the peg-in, the verdict connector | once the federation's threshold signs its verdict for the operator |
+| Default | the verdict connector | `challenge_window + dispute_window` blocks after the kickoff: the stake back, the peg-in where it is |
+
+Against an operator, the federation spends the verdict connector, the stake, as it rules, and the
+peg-in stays for another operator's graph. A dishonest federation can at worst reimburse a false
+claim. It can never send a peg-in anywhere but to an operator through the graph.
+
+**An operator's reimbursement:**
+
+1. It pays a queued withdrawal on Bitcoin from its own coins, at least its satoshis less the most
+   fee it agreed to, then shows the payment to the gateway (`bitvm front`, `bitvm_front`). The
+   withdrawal is now *fronted*: no release pays it, and that payment fronts no other.
+2. It proves the withdrawal (`chainv4 prove run --of withdrawal`, see
+   [Validity proofs](proofs.md#withdrawals-to-bitcoin)) and posts its kickoff (`bitvm finish --step
+   kickoff`).
+3. Watchers check its claim (`bitvm check`): the proof holds under governance's
+   `withdrawal_program`, it is of the withdrawal the gateway records, and the graph's operator
+   fronted it. A false claim is challenged. The federation checks the same before it rules.
+4. After the window, the operator finishes Take (`bitvm finish --step take`), and anyone shows it to
+   the gateway (`bitvm taken`, `bitvm_taken`), which marks the peg-in spent.
+
+**What to keep in mind:**
+
+- **Everything is P2WSH, CHECKMULTISIG and CHECKSEQUENCEVERIFY,** as the repo's Bitcoin code
+  signs BIP143. Taproot, Schnorr and the split script verifier come with phase 2.
+- **Every path runs through Bitcoin Core** on regtest in a test, run by hand:
+  `cargo test --lib -- --ignored bitcoin_core_runs_every_path_of_the_graph`.
+- **A peg-in reimburses its whole value.** Phase 1 leaves matching withdrawals to peg-ins to the
+  watchers, who refuse a take that isn't covered; fixed denominations would make it exact.
+- **Graphs are files** the signers and the operator hand each other. The gateway keeps only the
+  peg-in and what was fronted.
+
 ## Endpoints
 
 Every outside service the bridge, the anchorer, the swap CLI and the relay feeders use is a list of

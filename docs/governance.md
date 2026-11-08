@@ -480,6 +480,17 @@ chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kinds
 To switch proof systems, vote the new one in beside the old (`["sp1-groth16","sp1-stark"]`), then
 the old one out, so a prover halfway through a range isn't left with a proof the chain refuses.
 
+## Bitcoin peg-ins
+
+`Change::BtcPath`, from the `proofs` fork on, says which way new Bitcoin peg-ins go: `federation`,
+the federation's deposit addresses as before; `bitvm`, BitVM's presigned graph alone; or `both`.
+The gateway reads it as `federation.get().btc_path`, nil until decided. Peg-ins already made keep
+their way. See [Bridges](bridges.md#bitvm-beside-the-federation).
+
+```sh
+chainv4 send --key member.key vote-change --vote yes --change '{"btc_path":"both"}'
+```
+
 ## Attestations
 
 `Change::Attestations`, from the `proofs` fork on, says whether validators attest links for

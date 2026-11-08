@@ -2312,7 +2312,12 @@ contract computes, so they wait for the next regenesis (see the todo).
   so a range in which any contract scans its storage takes the whole state as its witness.
 - **Proofs need history.** A range's input is built from history back to its start: an archive,
   or a `--state-history` window that reaches it.
-- **Three programs.** Ranges, finality links and the header chain are separate ELFs from one crate
+- **A BitVM peg-in needs every signer.** Its graph is presigned by all of them, n of n, so one who
+  is offline holds up new peg-ins, never existing ones. The federation's threshold rules only on
+  challenges.
+- **Bitcoin withdrawals ride in every range proof.** The twelfth word is zeros for a range that
+  queued none, and ChainV4Finality.sol reads past it.
+- **Four programs.** Ranges, finality links, the header chain and withdrawals are separate ELFs from one crate
   (`proofs/sp1/program`, its `src/bin`), each with its own id that governance names. Any change to
   code they share moves all three ids.
 - **A header-chain proof only follows its own program.** One by a new program can't go on from one

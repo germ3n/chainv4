@@ -119,8 +119,8 @@ From the `proofs` fork ([Forks](governance.md#forks)):
   chainv4 send --key member.key vote-change --vote yes --change '{"proofs":{"kinds":["sp1-groth16"],"program":"0x…","reward_per_block":"1000000000000000","gateway":"proof-or-federation","finality_program":"0x…","headers_program":"0x…","reward_per_epoch":"0"}}'
   ```
 
-  `finality_program`, `headers_program` and `reward_per_epoch` may be left out, as zeros: no
-  finality or header-chain proofs, paying nothing.
+  `finality_program`, `headers_program`, `reward_per_epoch` and `withdrawal_program` may be left
+  out, as zeros: no finality, header-chain or withdrawal proofs, paying nothing.
 
   `kinds` is a set: the chain takes a proof of any kind listed (see [Proof kinds](#proof-kinds)).
   Until governance decides one, the chain takes no proofs. The settings are lockable like any other.
@@ -206,6 +206,32 @@ The chain takes a header-chain proof only up to a checkpoint among the blocks it
 (`RECORDED_BLOCKS`, from the `proofs` fork on). A chain older than one proof covers is caught up
 off chain: each proof goes on from the last with `--previous headers.json`
 (`GET /validity/headers-input?from=`), and only the one that reaches a recent checkpoint is sent.
+
+## Withdrawals to Bitcoin
+
+A range proof also commits to the Bitcoin gateway's withdrawals: a twelfth word, the keccak256
+Merkle root of each `WithdrawRequested` the directory's Bitcoin gateway emitted in the range, in
+order. Each leaf is the keccak256 of `chainv4 btc withdrawal`, the gateway, the withdrawal's id, its
+script's length and script, and its satoshis (`btc_withdrawal_digest`). Anyone works a leaf out
+from the event, whatever types Lua gave its fields (`btc_withdrawal_of`).
+
+A **withdrawal proof** (`chainv4-withdrawal-program`, governance's `withdrawal_program`) proves
+that a withdrawal was queued, with nothing taken on anyone's word:
+
+- **a header-chain proof** finalizes a checkpoint from genesis;
+- **a range proof** ends exactly there, so its blocks are that checkpoint's real ancestors;
+- **the withdrawal's path** is in that range's Bitcoin withdrawals.
+
+Both inner proofs are checked inside, by their kinds' verifiers under their programs. It's what a
+BitVM operator shows for its reimbursement, and what watchers check (see
+[Bridges](bridges.md#bitvm-beside-the-federation)).
+
+```sh
+chainv4 prove run --of withdrawal --headers-proof headers.json --range-proof range.json --withdrawal 7 --out w.json
+```
+
+`GET /validity/btc-withdrawals?from=&to=` lists a range's withdrawals with their leaves, which the
+path is worked out from.
 
 ## Turning Ethereum's side off
 

@@ -414,7 +414,8 @@ justified after it yet, on a chain whose finality does not vote, and in a build 
 (`kind`, `program`, `reward_per_block`, `gateway`), or null; `tip`, the proven tip's `height`,
 `block` and `state_root`, null before the `proofs` fork; and `proof`, the latest proof the chain
 took, its `kind`, `public_values` and `proof` in hex, null before the first; and `headers`, the
-latest header-chain proof the chain took, likewise. A light client checks
+latest header-chain proof the chain took, likewise. `GET /validity/btc-withdrawals?from=&to=` lists
+the Bitcoin gateway's withdrawals in a range, each with its id, height, script, satoshis and leaf. A light client checks
 the proof itself, so whoever serves it adds nothing. `GET /status` carries all three as
 `validity`.
 

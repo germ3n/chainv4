@@ -428,8 +428,18 @@ offline; these would make that hold up as a treasury.
     (owner's OK, 2026-11-08).
   - [ ] SP1's precompile patches for sha2, k256, curve25519 and bn, which make proving faster but
     change nothing it proves; and a BLAKE3 one, as SP1 has none.
-  - [ ] BitVM-style fraud proofs, for Bitcoin's side. **Queued next (owner, 2026-11-08),** after the
-    finality and header-chain proofs; ask its design questions first.
+  - [x] **BitVM, phase 1 (owner, 2026-11-08):** withdrawal proofs (header chain + a range ending
+    where it finalized + the withdrawal's path in the range's new Bitcoin withdrawals root); the
+    presigned graph in P2WSH (request, peg-in, kickoff, Take, challenge, take after a challenge,
+    default), every path run through Bitcoin Core on regtest; `Change::BtcPath` (federation, bitvm
+    or both); the gateway's BitVM peg-ins, fronting and takes; `bridge … btc bitvm`. Owner's picks:
+    phase 1 now, header chain + inclusion, alongside the federation by governance, regtest in tests
+    and signet on the devnet.
+  - [ ] **BitVM, phase 2:** Bitcoin's own script checks the withdrawal proof (BitVM's split Groth16
+    verifier, taproot and Schnorr, which the repo's Bitcoin code lacks), taking the federation out
+    of challenges; fixed denominations so a peg-in matches its withdrawals exactly; graphs kept on
+    chain rather than handed round as files; a watcher that runs by itself; and the devnet on a
+    signet of its own (ask: own signet with free coins, recommended).
   - [ ] **The whole chain, or only some layers? (owner, 2026-11-08):** decide whether proofs should
     keep covering the whole state transition, as now (every block, every engine, Luau included), or
     only the layers where a proof pays for itself, if splitting makes sense. Measure before
